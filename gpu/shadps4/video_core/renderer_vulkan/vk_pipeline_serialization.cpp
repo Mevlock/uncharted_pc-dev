@@ -25,7 +25,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 13u; // bbport: ultrawide UI squeeze (HwVertexRuntimeInfo)
+static constexpr u32 ShaderBinaryVersion = 14u; // bbport: motion shaders hold address stand-ins
 static constexpr u32 ShaderMetaVersion = 11u; // bbport: HwVertexRuntimeInfo::ui_squeeze_bits
 static constexpr u32 PipelineKeyVersion = 6u; // bbport: GraphicsPipelineKey::ui_squeeze
 } // namespace Serialization
@@ -134,11 +134,6 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     spec.Deserialize(ar);
     info.Deserialize(ar);
 
-    // Motion vertex shaders embed session-local buffer device addresses. They must be
-    // recompiled for the current allocation, never loaded from a previous process.
-    if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
-        return false;
-    }
     // bbport: BB_VS_CHECK instruments every vertex shader: none comes from the cache.
     if (info.hw_stage == Shader::HwStage::Vertex && Shader::VertexCheck::address) {
         return false;
@@ -413,7 +408,14 @@ void PipelineCache::WarmUpThread() {
             return;
         }
         stage.parsed = true;
+        // Motion shaders need the session's buffer addresses: without them the slot is only
+        // reserved, so a later permutation cannot take its index.
         const auto& info = stage.program->info;
+        if (info.hw_stage == Shader::HwStage::Vertex &&
+            stage.spec.runtime_info.hw.vs.motion_vectors &&
+            Shader::MotionVectors::positions_address == 0) {
+            return;
+        }
         std::vector<u32> spv{};
         db.Load(Storage::BlobType::ShaderBinary,
                 fmt::format("{:#018x}_{}", info.pgm_hash, stage.perm_idx), spv);
