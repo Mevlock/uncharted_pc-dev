@@ -36,41 +36,6 @@ extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_
 #include <windows.h>
 #endif
 
-// bbport: pages holding a merge shadow (ShadowGpuData), one bit each over the GPU's guest range:
-// U3's heap free (any thread, no lock) tells from it whether a freed block lies in such a page.
-namespace {
-constexpr VAddr ShadowBitsLow = 0x1000000000ull, ShadowBitsHigh = 0x1200000000ull;
-std::unique_ptr<std::atomic<u64>[]> shadow_bits{
-    new std::atomic<u64>[(ShadowBitsHigh - ShadowBitsLow) >> 18]{}};
-void SetShadowBit(VAddr page, bool on) {
-    if (page < ShadowBitsLow || page >= ShadowBitsHigh) {
-        return;
-    }
-    const u64 index = (page - ShadowBitsLow) >> 12;
-    const u64 bit = u64{1} << (index & 63);
-    if (on) {
-        shadow_bits[index >> 6].fetch_or(bit, std::memory_order_release);
-    } else {
-        shadow_bits[index >> 6].fetch_and(~bit, std::memory_order_release);
-    }
-}
-bool AnyShadowBit(VAddr start, VAddr end) {
-    start = std::max(start, ShadowBitsLow);
-    end = std::min(end, ShadowBitsHigh);
-    for (VAddr page = start & ~VAddr{0xfff}; page < end; page += 0x1000) {
-        const u64 index = (page - ShadowBitsLow) >> 12;
-        if (shadow_bits[index >> 6].load(std::memory_order_acquire) & (u64{1} << (index & 63))) {
-            return true;
-        }
-    }
-    return false;
-}
-} // namespace
-
-namespace {
-bool RecentlyFreed(VAddr page, u64 length);
-} // namespace
-
 namespace Vulkan {
 extern void (*g_gpu_crash_context)();
 }
@@ -221,17 +186,16 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
     boost::container::small_vector<VAddr, 16> pages;
     u64 write_tick = 0;
     {
-        std::scoped_lock lk{shadow_mutex};
         for (VAddr at = window_start; at < window_end; at += TRACKER_BYTES_PER_PAGE) {
             const bool faulting = at >= page && at < page + length;
             if (!memory_tracker->IsRegionGpuModified(at, TRACKER_BYTES_PER_PAGE)) {
                 continue;
             }
             const u64 tick = memory_tracker->LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE);
-            // A page merged before keeps its guest bytes apart (DownloadMemory handles those);
-            // a page the guest is writing is not ours to fill.
-            const bool usable = !shadows.contains(at) && scheduler.IsFree(tick) &&
-                                (faulting || !memory_tracker->IsRegionCpuModified(
+            // The faulting pages are read back whatever their GPU work's state (the side queue
+            // waits for it); neighbours only when complete, and not while the guest writes them.
+            const bool usable = faulting || (scheduler.IsFree(tick) &&
+                                             !memory_tracker->IsRegionCpuModified(
                                                  at, TRACKER_BYTES_PER_PAGE));
             if (!usable) {
                 if (faulting) {
@@ -268,6 +232,15 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
         return false;
     }
     if (total != 0) {
+        // The side queue waits on the timeline for the writing work, which must be submitted
+        // to signal it: a write is marked for the command buffer being recorded or the next one
+        // (g_gpu_write_done_tick), so up to two flushes. Nothing waits for the main queue.
+        for (int flushes = 0; scheduler.CurrentTick() <= write_tick; ++flushes) {
+            if (flushes == 2) {
+                return false; // not a tick of this scheduler: the read-back path waits instead
+            }
+            scheduler.Flush();
+        }
         std::scoped_lock lk{side.mutex};
         Vulkan::Check(side.device.resetCommandPool(*side.pool));
         Vulkan::Check(side.cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
@@ -280,8 +253,7 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
         };
         side.cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
         Vulkan::Check(side.cmdbuf.end());
-        // The writing work signalled the timeline already; waiting on it orders its writes
-        // before the copy.
+        // Waiting on the timeline orders the writing work's writes before the copy.
         const vk::Semaphore timeline = scheduler.GetWorkSemaphore()->Handle();
         const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
         const vk::TimelineSemaphoreSubmitInfo timeline_info = {
@@ -353,7 +325,7 @@ struct FaultEvent {
     u32 frame;
     u32 gpu_write;
     u32 gpu_use;
-    u32 kind; // 1 dropped, 2 merged, 3 read back
+    u32 kind; // 1 dropped, 3 read back, 4 read back on the side queue (2: merged, removed)
 };
 constexpr u64 FaultHistorySize = 1u << 16;
 std::unique_ptr<FaultEvent[]> fault_history;
@@ -387,8 +359,10 @@ u32 LastGpuUse(VAddr address, u64 size) {
 // bbport: U3 frees a cloth simulation's buffers right after its last dispatch and its heap reuses
 // the memory at once, keeping its free list in the freed block. The buffers' GPU data stayed
 // recorded (a writable binding marks the whole bound range), and a later fault on the page read
-// it back over the list where the guest's new bytes equalled the old ones (the merge keeps the
-// GPU's bytes there): the next allocation crashed (image+0x4944cb). Frees are noted in a
+// it back over the list where the guest's new bytes equalled the old ones (the merge, since
+// removed, kept the GPU's bytes there): the next allocation crashed (image+0x4944cb). With exact
+// read-backs before a page opens this should not happen any more; the guard stays as a safety
+// net (BB_U3_FREE_HOOK=0: off). Frees are noted in a
 // lock-free ring (a level change frees thousands of blocks; a lock per free stalled the game
 // thread and characters fell through the floor); read-backs walk the noted blocks and leave out
 // the header and list links of those still free. The rest of a freed block keeps the GPU's
@@ -417,46 +391,7 @@ extern "C" void bbgpu_note_guest_free(uintptr_t address, uint64_t size) {
     note.frame = frame;
     note.sequence.store(index + 1, std::memory_order_release);
     freed_last_frame.store(frame, std::memory_order_relaxed);
-    // A merged page (written by the guest while it held GPU data) is writable: the heap's and the
-    // next objects' writes there go unseen, and the merge's next upload keeps the GPU's stale
-    // bytes wherever they equal the old ones (characters floating after a teardown). Such blocks
-    // get their GPU data into guest memory before the free goes on; they are few (a fault per
-    // free stalled the game thread at level changes).
-    static const bool materialize = [] { // BB_FREE_MATERIALIZE=0: off (A/B tests)
-        const char* env = std::getenv("BB_FREE_MATERIALIZE");
-        return !(env && env[0] == '0');
-    }();
-    if (materialize && AnyShadowBit(address - 0x10, address + size)) {
-        if (auto* rasterizer = Core::Memory::Instance()->GetRasterizer()) {
-            rasterizer->MaterializeFreed(address, size);
-        }
-    }
 }
-
-namespace {
-/// True when [page, +length) overlaps a block U3 freed in the last FreedNoteFrames frames.
-bool RecentlyFreed(VAddr page, u64 length) {
-    const u32 frame = VideoCore::g_guest_frames.load(std::memory_order_relaxed);
-    const u64 head = freed_head.load(std::memory_order_acquire);
-    if (head == 0 || frame - freed_last_frame.load(std::memory_order_relaxed) > FreedNoteFrames) {
-        return false;
-    }
-    const VAddr end = page + length;
-    for (u64 index = head > FreedNoteCount ? head - FreedNoteCount : 0; index < head; ++index) {
-        const auto& note = freed_notes[index % FreedNoteCount];
-        if (note.sequence.load(std::memory_order_acquire) != index + 1) {
-            continue;
-        }
-        const VAddr note_start = note.start - 0x10, note_end = note.end + 0x10;
-        const u32 note_frame = note.frame;
-        if (note.sequence.load(std::memory_order_acquire) == index + 1 &&
-            frame - note_frame <= FreedNoteFrames && note_start < end && note_end > page) {
-            return true;
-        }
-    }
-    return false;
-}
-} // namespace
 
 namespace VideoCore {
 
@@ -520,162 +455,24 @@ void BufferCache::WriteBackGpuData(u8* dst, const u8* data, u64 size) {
     }
 }
 
-// bbport: waits up to 4 ms, without blocking, for GPU work that is already submitted. The GPU
-// thread must never block on the GPU here: the recording thread that submits the work can be
-// waiting for it (a deadlock at U3's cloth teardown and while loading). False: not done.
-static bool WaitGpuBriefly(Vulkan::Scheduler& scheduler, u64 tick) {
-    if (scheduler.IsFree(tick)) {
-        return true;
-    }
-    if (tick >= scheduler.CurrentTick()) {
-        return false;
-    }
-    // BB_SETTLE_WAIT_MS (diagnosis): the longest wait, default 4.
-    static const int wait_ms = [] {
-        const char* env = std::getenv("BB_SETTLE_WAIT_MS");
-        return env ? std::atoi(env) : 4;
-    }();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::yield();
-        if (scheduler.IsFree(tick)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// bbport: a block U3's heap is freeing in a merged page (bbgpu_note_guest_free): its GPU data
-// goes into guest memory (waiting only for the GPU work that wrote it, which ended before the game
-// freed the block) and stops being tracked; the bytes the guest changed since the merge stay.
-void BufferCache::MaterializeFreed(VAddr device_addr, u64 size) {
-    const u64 first_block = device_addr >> block_shift;
-    const u64 last_block = (device_addr + size - 1) >> block_shift;
-    const Buffer* arena = GetArena(first_block, last_block);
-    if (device_addr < arena->cpu_addr || device_addr + size > arena->cpu_addr + arena->size_bytes) {
-        return;
-    }
-    boost::container::small_vector<vk::BufferCopy, 16> copies;
-    u64 total = 0;
-    gpu_modified_ranges.ForEachInRange(device_addr, size, [&](VAddr start, VAddr end) {
-        total = Common::AlignUp(total, 64);
-        copies.push_back(vk::BufferCopy{
-            .srcOffset = start - arena->cpu_addr,
-            .dstOffset = total,
-            .size = end - start,
-        });
-        total += end - start;
-    });
-    if (copies.empty()) {
-        return;
-    }
-    // Not done within the short wait (or too large for the side queue): the block stays GPU
-    // data; the read-backs still leave the heap's own bytes in it alone.
-    if (!side_queue || total > SideQueue::StagingSize) {
-        return;
-    }
-    const VAddr page = Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE);
-    const u64 length = Common::AlignUp(device_addr + size, TRACKER_BYTES_PER_PAGE) - page;
-    if (!WaitGpuBriefly(scheduler, memory_tracker->LatestGpuWriteTick(page, length))) {
-        return;
-    }
-    auto& side = *side_queue;
-    {
-        std::scoped_lock lk{side.mutex};
-        Vulkan::Check(side.device.resetCommandPool(*side.pool));
-        Vulkan::Check(side.cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
-        side.cmdbuf.copyBuffer(arena->Handle(), side.staging.Handle(), copies);
-        const vk::MemoryBarrier2 to_host = {
-            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-            .dstStageMask = vk::PipelineStageFlagBits2::eHost,
-            .dstAccessMask = vk::AccessFlagBits2::eHostRead,
-        };
-        side.cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
-        Vulkan::Check(side.cmdbuf.end());
-        const vk::SubmitInfo submit = {
-            .commandBufferCount = 1,
-            .pCommandBuffers = &side.cmdbuf,
-        };
-        Vulkan::Check(side.queue.submit(submit, *side.fence));
-        Vulkan::Check(side.device.waitForFences(*side.fence, true, UINT64_MAX));
-        Vulkan::Check(side.device.resetFences(*side.fence));
-        side.staging.Invalidate(0, total);
-        std::vector<std::pair<VAddr, u8>> guest_bytes;
-        {
-            std::scoped_lock shadow_lk{shadow_mutex};
-            const VAddr end = device_addr + size;
-            for (VAddr at = page; at < page + length; at += TRACKER_BYTES_PER_PAGE) {
-                const auto it = shadows.find(at);
-                if (it == shadows.end()) {
-                    continue;
-                }
-                std::vector<ShadowRange> kept;
-                for (auto& shadow : it->second) {
-                    const VAddr shadow_end = shadow.start + shadow.bytes.size();
-                    if (shadow_end <= device_addr || shadow.start >= end) {
-                        kept.push_back(std::move(shadow));
-                        continue;
-                    }
-                    const auto* guest = reinterpret_cast<const u8*>(shadow.start);
-                    for (VAddr b = std::max(shadow.start, device_addr); b < std::min(shadow_end, end);
-                         ++b) {
-                        if (guest[b - shadow.start] != shadow.bytes[b - shadow.start]) {
-                            guest_bytes.emplace_back(b, guest[b - shadow.start]);
-                        }
-                    }
-                    if (shadow.start < device_addr) {
-                        kept.push_back({shadow.start,
-                                        std::vector<u8>(shadow.bytes.begin(),
-                                                        shadow.bytes.begin() +
-                                                            (device_addr - shadow.start))});
-                    }
-                    if (shadow_end > end) {
-                        kept.push_back({end, std::vector<u8>(shadow.bytes.begin() +
-                                                                 (end - shadow.start),
-                                                             shadow.bytes.end())});
-                    }
-                }
-                if (kept.empty()) {
-                    shadows.erase(it);
-                    shadow_pages.fetch_sub(1, std::memory_order_relaxed);
-                    SetShadowBit(at, false);
-                } else {
-                    it->second = std::move(kept);
-                }
-            }
-        }
-        for (const auto& copy : copies) {
-            memory->TryWriteBacking(std::bit_cast<u8*>(arena->cpu_addr + copy.srcOffset),
-                                    side.staging.mapped_data.data() + copy.dstOffset, copy.size);
-        }
-        for (const auto& [address, value] : guest_bytes) {
-            memory->TryWriteBacking(reinterpret_cast<void*>(address), &value, 1);
-        }
-    }
-    gpu_modified_ranges.Subtract(device_addr, size);
-}
-
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         // bbport: a guest write to a page holding GPU data read that data back first, which
         // waits for the whole GPU queue (U3's Cartagena square: ~70 times a second, 5-20 ms each,
-        // the writing game thread stopped; its cloth bones came out exploded). Now data from
-        // GPU work that has completed is read back on a second queue, which waits for nothing
-        // queued since (DownloadOnSideQueue, BB_SIDE_DOWNLOAD=0: off). Data the GPU is still
-        // writing shares the page with the guest's new data (the same rings hand out
-        // neighbouring blocks): the page becomes writable at once and the next upload merges
-        // (ShadowGpuData, SynchronizeMemory). BB_GPU_MERGE=0: read back instead.
+        // the writing game thread stopped). Now the GPU's
+        // data is read back on a second queue, which waits on the GPU for the work that
+        // wrote the page only (DownloadOnSideQueue, BB_SIDE_DOWNLOAD=0: off). The page becomes
+        // accessible only with the GPU's data in it: the guest may read that data next (the same
+        // rings hand out neighbouring blocks, and its fences are written when the commands are
+        // recorded, before the GPU ran them). Making the page writable at once and merging at
+        // the next upload left those bytes stale until then (U3's London bar fight crashed on
+        // one) and dropped guest writes of a byte's old value.
         // BB_DEAD_GPU_FRAMES=N (diagnosis): GPU data written and not bound for N guest frames is
         // dropped as dead. Wrong for state a solver keeps between runs and idles over a few
         // frames (U3's cloth at ~80 FPS: the GPU hung in its solver, device lost).
         static const u32 dead_frames = [] {
             const char* env = std::getenv("BB_DEAD_GPU_FRAMES");
             return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 0u;
-        }();
-        static const bool merge = [] {
-            const char* env = std::getenv("BB_GPU_MERGE");
-            return !(env && env[0] == '0');
         }();
         const VAddr page = Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE);
         const u64 length = Common::AlignUp(device_addr + size, TRACKER_BYTES_PER_PAGE) - page;
@@ -690,45 +487,6 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                 NoteFault(page, length, frames, gpu_write, gpu_use, 4);
                 return;
             }
-            // A guest write into memory U3 freed moments ago (a cloth simulation's buffers, at a
-            // teardown): the heap and the objects it places there next write it at once, and the
-            // merge below would keep stale GPU bytes wherever their new bytes equal the old ones
-            // (characters floating after such a moment). The GPU work that wrote the page ended
-            // before the game freed it, so waiting for it is safe here: the page is read back
-            // exactly before the write goes on (BB_FREE_SETTLE=0: off).
-            static const bool settle = [] {
-                const char* env = std::getenv("BB_FREE_SETTLE");
-                return !(env && env[0] == '0');
-            }();
-            // Every page the merge would take is read back exactly when the GPU work that wrote it
-            // ends within a short wait. The merge's guess (bytes the guest left as they were keep
-            // the GPU's data) put stale GPU bytes into new level data when a New Game followed a
-            // loaded save: characters fell through the floor (also before the crash fix), and
-            // after U3's cloth teardown they floated (BB_MERGE_SETTLE=0: freed blocks only).
-            static const bool settle_all = [] {
-                const char* env = std::getenv("BB_MERGE_SETTLE");
-                return !(env && env[0] == '0');
-            }();
-            if (settle && side_queue && (settle_all || RecentlyFreed(page, length))) {
-                const bool shadowed = [&] {
-                    std::scoped_lock lk{shadow_mutex};
-                    return shadows.contains(page);
-                }();
-                bool settled = false;
-                if (!shadowed) {
-                    // Only when the GPU work ends within a short, non-blocking wait (a blocking
-                    // one deadlocked); otherwise the merge takes the page.
-                    if (WaitGpuBriefly(scheduler, memory_tracker->LatestGpuWriteTick(page, length))) {
-                        settled = DownloadOnSideQueue(page, length);
-                    }
-                }
-                if (settled) {
-                    memory_tracker->MarkRegionAsCpuModified(device_addr, size);
-                    BbStats::gpu_side_downloads.fetch_add(1, std::memory_order_relaxed);
-                    NoteFault(page, length, frames, gpu_write, gpu_use, 4);
-                    return;
-                }
-            }
             if (dead_frames && frames >= dead_frames && gpu_write <= frames - dead_frames &&
                 gpu_use <= frames - dead_frames) {
                 gpu_modified_ranges.Subtract(page, length);
@@ -736,33 +494,6 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
                 BbStats::dead_gpu_drops.fetch_add(1, std::memory_order_relaxed);
                 NoteFault(page, length, frames, gpu_write, gpu_use, 1);
-                return;
-            }
-            // BB_RESOLVE_STATS=1 (diagnosis): how guest writes to GPU data were resolved.
-            static const bool resolve_stats = [] {
-                const char* env = std::getenv("BB_RESOLVE_STATS");
-                return env && env[0] == '1';
-            }();
-            if (resolve_stats) {
-                static auto window = std::chrono::steady_clock::now();
-                static u64 last_side = 0, last_merge = 0;
-                const auto now = std::chrono::steady_clock::now();
-                if (now - window >= std::chrono::seconds(5)) {
-                    const u64 side_count = BbStats::gpu_side_downloads.load();
-                    const u64 merge_count = BbStats::gpu_merges.load();
-                    std::printf("Resolve: %llu exact read-backs, %llu merges (5 s)\n",
-                                static_cast<unsigned long long>(side_count - last_side),
-                                static_cast<unsigned long long>(merge_count - last_merge));
-                    last_side = side_count;
-                    last_merge = merge_count;
-                    window = now;
-                }
-            }
-            if (merge) {
-                ShadowGpuData(page, length);
-                memory_tracker->MarkRegionAsCpuModified(device_addr, size);
-                BbStats::gpu_merges.fetch_add(1, std::memory_order_relaxed);
-                NoteFault(page, length, frames, gpu_write, gpu_use, 2);
                 return;
             }
             ReadMemory(device_addr, size, true, true);
@@ -802,25 +533,6 @@ void PrintFaultHistory(VAddr address, u64 size) {
                         static_cast<unsigned long long>(e.page), e.length, kinds[std::min<u32>(e.kind, 4)],
                         now - e.frame, e.gpu_write, e.gpu_use, e.frame);
             ++printed;
-        }
-    }
-}
-
-void BufferCache::ShadowGpuData(VAddr page, u64 length) {
-    std::scoped_lock lk{shadow_mutex};
-    for (VAddr at = page; at < page + length; at += TRACKER_BYTES_PER_PAGE) {
-        if (shadows.contains(at)) {
-            continue;
-        }
-        std::vector<ShadowRange> list;
-        gpu_modified_ranges.ForEachInRange(at, TRACKER_BYTES_PER_PAGE, [&](VAddr start, VAddr end) {
-            const auto* bytes = reinterpret_cast<const u8*>(start);
-            list.push_back({start, std::vector<u8>(bytes, bytes + (end - start))});
-        });
-        if (!list.empty()) {
-            shadows.emplace(at, std::move(list));
-            shadow_pages.fetch_add(1, std::memory_order_relaxed);
-            SetShadowBit(at, true);
         }
     }
 }
@@ -925,30 +637,6 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         const char* env = std::getenv("BB_DOWNLOAD_CHECK");
         return env && env[0] == '1';
     }();
-    // Shadowed pages (ShadowGpuData) in the range: the bytes the guest changed since stay, and
-    // the pages need no shadow afterwards (their GPU data is in guest memory).
-    std::vector<std::pair<VAddr, u8>> guest_bytes;
-    if (shadow_pages.load(std::memory_order_relaxed)) {
-        std::scoped_lock lk{shadow_mutex};
-        for (VAddr page = Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE);
-             page < device_addr + size; page += TRACKER_BYTES_PER_PAGE) {
-            const auto it = shadows.find(page);
-            if (it == shadows.end()) {
-                continue;
-            }
-            for (const auto& shadow : it->second) {
-                const auto* guest = reinterpret_cast<const u8*>(shadow.start);
-                for (size_t i = 0; i < shadow.bytes.size(); ++i) {
-                    if (guest[i] != shadow.bytes[i]) {
-                        guest_bytes.emplace_back(shadow.start + i, guest[i]);
-                    }
-                }
-            }
-            shadows.erase(it);
-            shadow_pages.fetch_sub(1, std::memory_order_relaxed);
-            SetShadowBit(page, false);
-        }
-    }
     for (const auto& copy : copies) {
         auto* dst_addr = std::bit_cast<u8*>(arena_base + copy.srcOffset);
         const u8* data = download.mapped + (copy.dstOffset - download.offset);
@@ -967,9 +655,6 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
             }
         }
         WriteBackGpuData(dst_addr, data, copy.size);
-    }
-    for (const auto& [address, value] : guest_bytes) {
-        memory->TryWriteBacking(reinterpret_cast<void*>(address), &value, 1);
     }
     memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
 }
@@ -1490,50 +1175,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
     memory_tracker->ForEachUploadRange(
         device_addr, size, is_written,
         [&](u64 addr, u64 size) {
-            if (shadow_pages.load(std::memory_order_relaxed) == 0) {
-                add_upload(addr, size);
-                return;
-            }
-            // Shadowed pages (ShadowGpuData): bytes of GPU-written ranges the guest left as they
-            // were keep the GPU's data; the bytes it changed are its data now.
-            std::scoped_lock lk{shadow_mutex};
-            const VAddr end = addr + size;
-            VAddr cursor = addr;
-            for (VAddr page = addr; page < end; page += TRACKER_BYTES_PER_PAGE) {
-                const auto it = shadows.find(page);
-                if (it == shadows.end()) {
-                    continue;
-                }
-                for (const auto& shadow : it->second) {
-                    const auto* guest = reinterpret_cast<const u8*>(shadow.start);
-                    const size_t count = shadow.bytes.size();
-                    for (size_t i = 0; i < count;) {
-                        size_t j = i;
-                        if (guest[i] == shadow.bytes[i]) {
-                            while (j < count && guest[j] == shadow.bytes[j]) {
-                                ++j;
-                            }
-                            const VAddr skip = shadow.start + i;
-                            if (skip > cursor) {
-                                add_upload(cursor, skip - cursor);
-                            }
-                            cursor = shadow.start + j;
-                        } else {
-                            while (j < count && guest[j] != shadow.bytes[j]) {
-                                ++j;
-                            }
-                            gpu_modified_ranges.Subtract(shadow.start + i, j - i);
-                        }
-                        i = j;
-                    }
-                }
-                shadows.erase(it);
-                shadow_pages.fetch_sub(1, std::memory_order_relaxed);
-                SetShadowBit(page, false);
-            }
-            if (end > cursor) {
-                add_upload(cursor, end - cursor);
-            }
+            add_upload(addr, size);
         },
         [&] { src_buffer = UploadCopies(arena, copies, total_size_bytes); });
 

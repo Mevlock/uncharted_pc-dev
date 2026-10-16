@@ -144,9 +144,6 @@ public:
     bool IsGpuSideThreadId(u32 tid) const;
     /// A guest write hit a protected page.
     bool OnWriteFault(VAddr addr, bool assume_locks);
-    /// bbport: a block U3's heap frees in a merged page: its GPU data goes into guest memory
-    /// before the free goes on (BufferCache::MaterializeFreed; waits for the GPU thread).
-    void MaterializeFreed(VAddr addr, u64 size);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
     void ProcessDownloadImages();
     /// bbport diagnosis (BB_OUTPUT_CHECK=N with BB_STALE_CHECK): at every Nth end-of-pipe

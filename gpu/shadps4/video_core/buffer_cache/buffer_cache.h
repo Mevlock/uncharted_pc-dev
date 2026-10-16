@@ -86,10 +86,6 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
 
-    /// bbport: a block U3's heap frees in a merged page: its GPU data goes into guest memory now
-    /// and stops being tracked (GPU thread, before the free goes on).
-    void MaterializeFreed(VAddr device_addr, u64 size);
-
     /// bbport diagnosis (BB_FORCE_VB_UPLOAD): the next ObtainBuffer copies this range from guest
     /// memory again (regions the GPU did not write).
     void ForceUpload(VAddr device_addr, u64 size);
@@ -193,25 +189,14 @@ private:
     StreamBuffer stream_buffer;
     Buffer gds_buffer;
     RangeSet gpu_modified_ranges;
-    /// bbport: pages the guest writes while they hold recent GPU data (InvalidateMemory): the
-    /// guest bytes of their GPU-written ranges as the write began. An upload sends only the bytes
-    /// the guest changed since (the rest keeps the GPU's data); a read-back keeps those bytes.
-    struct ShadowRange {
-        VAddr start;
-        std::vector<u8> bytes;
-    };
-    std::mutex shadow_mutex;
-    std::unordered_map<VAddr, std::vector<ShadowRange>> shadows;
-    std::atomic<u32> shadow_pages{0};
-    void ShadowGpuData(VAddr page, u64 length);
-
     /// bbport: GPU data into guest memory (the read-backs), leaving out the heap's own bytes of
     /// blocks U3 freed recently and that are still free (bbgpu_note_guest_free).
     void WriteBackGpuData(u8* dst, const u8* data, u64 size);
 
-    /// bbport: GPU data a guest write lands on, written by GPU work that has completed: read
-    /// back on a second queue of the graphics family, which waits for nothing queued since
-    /// (Finish waits for the whole queue). False when unavailable.
+    /// bbport: GPU data a guest write lands on, read back on a second queue of the graphics
+    /// family before the page becomes accessible. That queue waits on the GPU for the work that
+    /// wrote the faulting pages only (Finish waits for the whole queue and the read-back after
+    /// it); neighbouring pages come along when their data is complete. False when unavailable.
     struct SideQueue;
     std::unique_ptr<SideQueue> side_queue;
     bool DownloadOnSideQueue(VAddr page, u64 length);
