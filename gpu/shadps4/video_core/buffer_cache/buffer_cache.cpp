@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <thread>
 #include <array>
 #include <map>
 #include <unordered_map>
@@ -665,14 +666,37 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                 const char* env = std::getenv("BB_FREE_SETTLE");
                 return !(env && env[0] == '0');
             }();
-            if (settle && side_queue && RecentlyFreed(page, length)) {
+            // Every page the merge would take is read back exactly when the GPU work that wrote it
+            // ends within a short wait. The merge's guess (bytes the guest left as they were keep
+            // the GPU's data) put stale GPU bytes into new level data when a New Game followed a
+            // loaded save: characters fell through the floor (also before the crash fix), and
+            // after U3's cloth teardown they floated (BB_MERGE_SETTLE=0: freed blocks only).
+            static const bool settle_all = [] {
+                const char* env = std::getenv("BB_MERGE_SETTLE");
+                return !(env && env[0] == '0');
+            }();
+            if (settle && side_queue && (settle_all || RecentlyFreed(page, length))) {
                 const bool shadowed = [&] {
                     std::scoped_lock lk{shadow_mutex};
                     return shadows.contains(page);
                 }();
                 bool settled = false;
                 if (!shadowed) {
-                    scheduler.Wait(memory_tracker->LatestGpuWriteTick(page, length));
+                    const u64 tick = memory_tracker->LatestGpuWriteTick(page, length);
+                    if (RecentlyFreed(page, length)) {
+                        // The game freed it after its GPU work ended: that work is submitted.
+                        scheduler.Wait(tick);
+                    } else if (tick < scheduler.CurrentTick()) {
+                        // Any other page: a short, non-blocking wait for work already submitted.
+                        // Blocking here deadlocked (the recording thread waits for this one), so
+                        // the merge takes the page when the GPU is not done within 4 ms.
+                        const auto deadline =
+                            std::chrono::steady_clock::now() + std::chrono::milliseconds(4);
+                        while (!scheduler.IsFree(tick) &&
+                               std::chrono::steady_clock::now() < deadline) {
+                            std::this_thread::yield();
+                        }
+                    }
                     settled = DownloadOnSideQueue(page, length);
                 }
                 if (settled) {
