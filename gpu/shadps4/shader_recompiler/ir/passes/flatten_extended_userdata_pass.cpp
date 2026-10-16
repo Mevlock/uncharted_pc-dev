@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+
+#include <mutex>
 #include <unordered_map>
 #ifdef _WIN32
 #include <windows.h>
@@ -33,6 +35,8 @@
 using namespace Xbyak::util;
 
 static Xbyak::CodeGenerator g_srt_codegen(32_MB);
+// bbport: shaders are translated on several threads; the walker code buffer is shared.
+static std::mutex g_srt_mutex;
 static const u8* g_srt_codegen_start = nullptr;
 
 namespace {
@@ -46,6 +50,8 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     // in the tables); without the handler that used to be installed only on generation, the
     // fault ended the game.
     InstallSrtFaultHandler();
+
+    std::scoped_lock lock{g_srt_mutex};
     const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
     g_srt_codegen.db(ptr, size);
     g_srt_codegen.ready();
@@ -787,6 +793,7 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
 
 static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     Xbyak::CodeGenerator& c = g_srt_codegen;
+    std::scoped_lock srt_lock{g_srt_mutex};
 
     if (pass_info.srt_roots.empty()) {
         return;
