@@ -26,6 +26,9 @@
 
 #include <vk_mem_alloc.h>
 #include <cstdio>
+#include <cstring>
+// src/runtime_memory.c: guest memory through the backing mapping (no protection faults).
+extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -255,8 +258,8 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
         Vulkan::Check(side.device.resetFences(*side.fence));
         side.staging.Invalidate(0, total);
         for (const auto& copy : copies) {
-            memory->TryWriteBacking(std::bit_cast<u8*>(arena->cpu_addr + copy.srcOffset),
-                                    side.staging.mapped_data.data() + copy.dstOffset, copy.size);
+            WriteBackGpuData(std::bit_cast<u8*>(arena->cpu_addr + copy.srcOffset),
+                             side.staging.mapped_data.data() + copy.dstOffset, copy.size);
         }
     }
     for (const VAddr at : pages) {
@@ -335,6 +338,105 @@ u32 LastGpuUse(VAddr address, u64 size) {
     return latest;
 }
 } // namespace
+
+} // namespace VideoCore
+
+// bbport: U3 frees a cloth simulation's buffers right after its last dispatch and its heap reuses
+// the memory at once, keeping its free list in the freed block. The buffers' GPU data stayed
+// recorded (a writable binding marks the whole bound range), and a later fault on the page read
+// it back over the list where the guest's new bytes equalled the old ones (the merge keeps the
+// GPU's bytes there): the next allocation crashed (image+0x4944cb). Frees are noted in a
+// lock-free ring (a level change frees thousands of blocks; a lock per free stalled the game
+// thread and characters fell through the floor); read-backs walk the noted blocks and leave out
+// the header and list links of those still free. The rest of a freed block keeps the GPU's
+// data, as on the console: U3 still reads some freed buffers on the GPU.
+namespace {
+struct FreedNote {
+    std::atomic<u64> sequence{0}; // index + 1 once written
+    VAddr start = 0, end = 0;
+    u32 frame = 0;
+};
+constexpr u64 FreedNoteCount = 4096;
+constexpr u32 FreedNoteFrames = 8;
+std::array<FreedNote, FreedNoteCount> freed_notes;
+std::atomic<u64> freed_head{0};
+std::atomic<u32> freed_last_frame{0};
+} // namespace
+
+extern "C" void bbgpu_note_guest_free(uintptr_t address, uint64_t size) {
+    const u64 index = freed_head.fetch_add(1, std::memory_order_relaxed);
+    auto& note = freed_notes[index % FreedNoteCount];
+    const u32 frame = VideoCore::g_guest_frames.load(std::memory_order_relaxed);
+    note.sequence.store(0, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    note.start = address;
+    note.end = address + size;
+    note.frame = frame;
+    note.sequence.store(index + 1, std::memory_order_release);
+    freed_last_frame.store(frame, std::memory_order_relaxed);
+}
+
+namespace VideoCore {
+
+void BufferCache::WriteBackGpuData(u8* dst, const u8* data, u64 size) {
+    const u32 frame = g_guest_frames.load(std::memory_order_relaxed);
+    const u64 head = freed_head.load(std::memory_order_acquire);
+    if (head == 0 || frame - freed_last_frame.load(std::memory_order_relaxed) > FreedNoteFrames) {
+        memory->TryWriteBacking(dst, data, size);
+        return;
+    }
+    const VAddr start = reinterpret_cast<VAddr>(dst);
+    const VAddr end = start + size;
+    boost::container::small_vector<std::pair<VAddr, VAddr>, 4> skip;
+    // U3's heap blocks: a 16-byte header with the block's size at +4 (header included;
+    // positive while free, negative while allocated), the next block right after. A noted
+    // range is walked block by block (a freed block may have been split or merged since); the
+    // header and list links (next, previous) of the free blocks in it are the heap's.
+    constexpr s32 MaxBlock = 64 << 20;
+    for (u64 index = head > FreedNoteCount ? head - FreedNoteCount : 0; index < head; ++index) {
+        const auto& note = freed_notes[index % FreedNoteCount];
+        if (note.sequence.load(std::memory_order_acquire) != index + 1) {
+            continue;
+        }
+        const VAddr note_start = note.start, note_end = note.end;
+        const u32 note_frame = note.frame;
+        if (note.sequence.load(std::memory_order_acquire) != index + 1 ||
+            frame - note_frame > FreedNoteFrames || note_start - 0x10 >= end ||
+            note_end + 0x10 <= start) {
+            continue;
+        }
+        for (VAddr at = note_start - 0x10; at <= note_end && at < end;) {
+            s32 block_size;
+            if (!runtime_memory_read_backing(at + 4, &block_size, 4)) {
+                break;
+            }
+            const s32 length = block_size < 0 ? -block_size : block_size;
+            if (length < 0x20 || length > MaxBlock || (length & 0xf) != 0) {
+                break;
+            }
+            if (block_size > 0 && at + 0x20 > start && at < end) {
+                skip.emplace_back(std::max(at, start), std::min<VAddr>(at + 0x20, end));
+            }
+            at += length;
+        }
+    }
+    if (skip.empty()) {
+        memory->TryWriteBacking(dst, data, size);
+        return;
+    }
+    std::sort(skip.begin(), skip.end());
+    VAddr cursor = start;
+    for (const auto& [skip_start, skip_end] : skip) {
+        if (skip_start > cursor) {
+            memory->TryWriteBacking(reinterpret_cast<void*>(cursor), data + (cursor - start),
+                                    skip_start - cursor);
+        }
+        cursor = std::max(cursor, skip_end);
+    }
+    if (end > cursor) {
+        memory->TryWriteBacking(reinterpret_cast<void*>(cursor), data + (cursor - start), end - cursor);
+    }
+}
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
@@ -585,7 +687,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
                             static_cast<unsigned long long>(size));
             }
         }
-        memory->TryWriteBacking(dst_addr, data, copy.size);
+        WriteBackGpuData(dst_addr, data, copy.size);
     }
     for (const auto& [address, value] : guest_bytes) {
         memory->TryWriteBacking(reinterpret_cast<void*>(address), &value, 1);

@@ -17,6 +17,9 @@ Starting
   Drake's Fortune, Among Thieves or Drake's Deception on the Play page and press PLAY.
 - Play Uncharted.exe starts the game straight away with the settings saved in the
   launcher, without opening it (for shortcuts and Steam). Uncharted.exe --play does the same.
+  Add u1, u2 or u3 to start that game instead of the one selected in the launcher, for
+  example "Play Uncharted.exe" u2 (one entry per game in Playnite or another front end).
+  u1 starts at Drake's Fortune's own title, without the collection menu.
 - Play page -> "Add to Steam" adds the collection to your Steam library, with its cover
   from your game folder. "Desktop shortcut" puts it on the desktop.
 - Your own covers: put u1.jpg, u2.jpg and u3.jpg (and a wide collection_banner.jpg for the

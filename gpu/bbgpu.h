@@ -26,6 +26,9 @@ uintptr_t bbgpu_resolve(const char *scoped_nid);
 int bbgpu_handle_fault(void *ucontext, void *address);
 /* BB_WRITE_LOG=1: prints the logged GPU-side writes to guest memory near the fault. */
 void bbgpu_dump_guest_writes(void *ucontext);
+/* U3's heap frees the block whose data this is (header at address-0x10): noted for the GPU's
+ * read-backs, which leave the heap's own bytes in free blocks alone. Lock-free, any thread. */
+void bbgpu_note_guest_free(uintptr_t address, uint64_t size);
 /* Keyboard text entry through the game window (IME dialog). begin returns 0 when
  * no window exists; poll returns 0 typing, 1 confirmed, 2 cancelled (UTF-8 text). */
 int bbgpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);

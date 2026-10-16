@@ -772,6 +772,21 @@ void runtime_memory_set_gpu_hooks(GpuRange map, GpuRange unmap, GpuRange invalid
     flush_hooks();
 }
 /* Writes through the backing view; 0 when part of the range has no backing. */
+/* Reads guest memory through the backing mapping: pages protected for GPU tracking do not fault
+ * (the GPU threads snapshot guest data there, BufferCache baselines). 0 outside mapped memory. */
+int runtime_memory_read_backing(uintptr_t address, void *out, uint64_t size) {
+    read_lock();
+    int ok=1;
+    for (uintptr_t at=address, end=address+size; at<end && ok;) {
+        size_t i=vma_index(at);
+        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { ok=0; break; }
+        uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
+        memcpy((unsigned char *)out+(at-address),backing_base+vmas[i].phys+(at-vmas[i].start),n);
+        at+=n;
+    }
+    read_unlock();
+    return ok;
+}
 int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t size) {
     read_lock();
     int ok=1;

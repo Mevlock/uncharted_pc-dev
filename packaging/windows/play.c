@@ -1,6 +1,7 @@
 /* Play Uncharted.exe: starts the game with the settings saved by the launcher, without opening
  * the launcher (it runs `Uncharted.exe --play` from its own folder and waits for it, so Steam
- * and other front ends see the game running). Extra arguments are passed on. */
+ * and other front ends see the game running). Extra arguments are passed on: `u1`, `u2` or `u3`
+ * starts that game instead of the one selected in the launcher. */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <wchar.h>

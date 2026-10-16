@@ -201,6 +201,10 @@ private:
     std::atomic<u32> shadow_pages{0};
     void ShadowGpuData(VAddr page, u64 length);
 
+    /// bbport: GPU data into guest memory (the read-backs), leaving out the heap's own bytes of
+    /// blocks U3 freed recently and that are still free (bbgpu_note_guest_free).
+    void WriteBackGpuData(u8* dst, const u8* data, u64 size);
+
     /// bbport: GPU data a guest write lands on, written by GPU work that has completed: read
     /// back on a second queue of the graphics family, which waits for nothing queued since
     /// (Finish waits for the whole queue). False when unavailable.

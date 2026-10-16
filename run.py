@@ -5,6 +5,7 @@
 BB_GAME_DIR   the game folder (CUSA02343, CUSA02320, ...; the one with eboot.bin)
 BB_EXE        u1 / u2 / u3 or an executable name (default u1: eboot.bin, the collection menu)
 BB_USER_DIR   saves and shader caches (default user/ beside this script)
+BB_SKIP_COLLECTION_MENU=1  u1 starts at Drake's Fortune's title, not the collection menu
 Extra arguments go to bb-probe. When the game starts another executable of the collection
 (sceSystemServiceLoadExec), that one is prepared and started in its place.
 The in-game "Apply and restart" runs this script again through BB_RESTART_COMMAND;
@@ -146,6 +147,8 @@ def main():
             fail('The game asked for another executable without a name.')
         print(f'Switching to {target}')
         exe = target
+        # Back from U2/U3 the collection menu shows again (the skip is for the first start).
+        env.pop('BB_SKIP_COLLECTION_MENU', None)
         guest_argv = out_root / 'guest-argv.txt'
         guest_argv.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 

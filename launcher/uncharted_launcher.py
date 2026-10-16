@@ -295,6 +295,10 @@ def game_environment(s, start=None):
         pass
     env['BB_GAME_DIR'] = s['game_dir']
     env['BB_EXE'] = start or s['start']
+    # Drake's Fortune shares eboot.bin with the collection menu: start at its own title instead
+    # (extra_env BB_SKIP_COLLECTION_MENU=0 keeps the menu).
+    if env['BB_EXE'] == 'u1':
+        env['BB_SKIP_COLLECTION_MENU'] = '1'
     if s['user_dir']:
         env['BB_USER_DIR'] = s['user_dir']
     env['BB_LANGUAGE'] = s['language']
@@ -1573,8 +1577,8 @@ def install_update(target, wait_pid):
 
 
 def play_without_window(settings):
-    """--play: the game with the saved settings (shortcuts, Steam); output to the console when
-    there is one and to <saves folder>/last_run.log."""
+    """--play [u1|u2|u3]: the game with the saved settings (shortcuts, Steam); output to the console
+    when there is one and to <saves folder>/last_run.log."""
     attach_stdio()
     log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -1602,6 +1606,12 @@ def main():
         shutil.rmtree(UPDATE_DIR, ignore_errors=True)  # what a finished update left behind
     settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
     if '--play' in args and (Path(settings['game_dir'] or '.') / 'eboot.bin').is_file():
+        # --play u1|u2|u3 (front ends such as Playnite: one entry per game) for this start only;
+        # /u2, -u2 and --u2 work as well.
+        chosen = [arg.lstrip('/-').lower() for arg in args[args.index('--play') + 1:]]
+        game = next((arg for arg in chosen if arg in (key for key, *_rest in GAMES)), None)
+        if game:
+            settings['start'] = game
         sys.exit(play_without_window(settings))
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)

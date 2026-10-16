@@ -481,7 +481,27 @@ static const unsigned char u2_focus_reset[]={
     0xcd,0x41,                                    /* trap: int 0x41 */
 };
 _Static_assert(sizeof(u2_focus_reset)==sizeof(u2_focus_assert_code),"same size");
+/* U3's heap free (corelib memory-new-malloc, image+0x494a70: rdi the heap, rsi the block's data;
+ * its size, header included, at data-0xc). The game frees a cloth simulation's buffers right
+ * after its last dispatch and reuses the memory at once (its free list goes into the block):
+ * the free is noted (a few stores, no lock: a level change frees thousands of blocks) and the
+ * GPU's read-backs leave the heap's own bytes in free blocks alone (BufferCache, FreedNotes). */
+static const unsigned char u3_heap_free_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x28,0x49,0x89,0xf6,
+    0x49,0x89,0xfc,0x48,0x8d,0x05,0xaa,0x3d,0xf6,0x00,
+};
+static void __attribute__((ms_abi)) u3_heap_free(uint64_t heap, uint64_t data, uint64_t image, uint64_t r14) {
+    (void)heap; (void)image; (void)r14;
+    static int hook=-1; /* BB_U3_FREE_HOOK=0: off (A/B tests) */
+    if (hook<0) { const char *e=getenv("BB_U3_FREE_HOOK"); hook=!(e && e[0]=='0'); }
+    if (!hook || !data) return;
+    int32_t size;
+    memcpy(&size,(const void *)(uintptr_t)(data-0xc),4);
+    if (size<0) size=-size;
+    if (size>0x10 && size<(64<<20)) bbgpu_note_guest_free((uintptr_t)data,(uint64_t)size-0x10);
+}
 static const RuntimeGuestCallback guest_callbacks[]={
+    {"U3 heap free (GPU data)",0x494a70,u3_heap_free_code,sizeof(u3_heap_free_code),6,u3_heap_free,NULL},
     {"U1 follow camera (mouse)",0xaecf0,u1_follow_camera_code,sizeof(u1_follow_camera_code),6,u1_follow_camera,NULL},
     {"U1 pad update (mouse)",0x117200,u1_pad_update_code,sizeof(u1_pad_update_code),6,u1_pad_update,NULL},
     {"U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},

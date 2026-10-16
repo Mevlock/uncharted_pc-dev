@@ -656,6 +656,44 @@ static void patch_eop_tick_wait(uint64_t image_size) {
     }
     if (!patched) printf("Frame pacing: EOP tick check not found\n");
 }
+/* U1 without the collection menu (BB_SKIP_COLLECTION_MENU=1, the launcher's Drake's Fortune card).
+ * eboot.bin holds the collection's front end and U1 in one menu host (menuhost.cpp). After the
+ * logos a menu callback (image+0x65d540) opens the collection's front end (host mode 0, its title
+ * page: image+0x14b0b0); the carousel's U1 card later opens U1's (mode 1: image+0x14ae00). Its
+ * final jump goes through a thunk that takes U1's front end the first time, so the collection's
+ * title never shows; later calls open the collection as before. */
+static void patch_collection_skip(uint64_t image_size) {
+    const char *skip=getenv("BB_SKIP_COLLECTION_MENU");
+    if (!skip || skip[0]!='1') return;
+    static const unsigned char decide[]={ /* image+0x65d540 */
+        0x55,0x48,0x89,0xe5,0x48,0x8d,0x05,0x3d,0x6c,0x33,0x00,0x80,0xb8,0xc0,0x39,0x00,0x00,0x00,0x74,0x0a,
+        0x48,0x8b,0x07,0x5d,0xff,0xa0,0x90,0x00,0x00,0x00,0xe8,0x4d,0x54,0xae,0xff,0x48,0x89,0xc7,0x5d,
+        0xe9,0x44,0xdb,0xae,0xff,                       /* jmp image+0x14b0b0 (the collection) */
+    };
+    static const unsigned char open_u1[]={ /* image+0x14ae00 */
+        0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x78,0x49,0x89,0xfd,
+    };
+    const uint64_t at=0x65d540, jump=at+sizeof(decide)-5, collection=0x14b0b0, u1=0x14ae00;
+    if (at+sizeof(decide)>image_size || memcmp(image+at,decide,sizeof(decide)) ||
+        memcmp(image+u1,open_u1,sizeof(open_u1))) {
+        printf("Collection menu: not found, the menu stays\n");
+        return;
+    }
+    unsigned char *t=near_image_memory(64);
+    if (!t) { printf("Collection menu: no thunk memory, the menu stays\n"); return; }
+    unsigned char *flag=t+32;
+    size_t k=0;
+    int32_t rel;
+    t[k++]=0x80; t[k++]=0x3d; rel=(int32_t)(flag-(t+k+5)); memcpy(t+k,&rel,4); k+=4; t[k++]=0x00; /* cmp byte [flag], 0 */
+    t[k++]=0x74; t[k++]=12;                                                                         /* je collection */
+    t[k++]=0xc6; t[k++]=0x05; rel=(int32_t)(flag-(t+k+5)); memcpy(t+k,&rel,4); k+=4; t[k++]=0x00; /* mov byte [flag], 0 */
+    t[k++]=0xe9; rel=(int32_t)((int64_t)(uintptr_t)(image+u1)-(int64_t)(uintptr_t)(t+k+4)); memcpy(t+k,&rel,4); k+=4;
+    t[k++]=0xe9; rel=(int32_t)((int64_t)(uintptr_t)(image+collection)-(int64_t)(uintptr_t)(t+k+4)); memcpy(t+k,&rel,4); k+=4;
+    *flag=1;
+    rel=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(image+jump+5));
+    memcpy(image+jump+1,&rel,4);
+    printf("Collection menu: skipped once, U1's front end opens first\n");
+}
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
  * released before the new process opens its own. */
@@ -937,6 +975,7 @@ int main(int argc, char **argv) {
         for (uint64_t s=0;s<ns;++s) if (segments[s].address+segments[s].size>image_end) image_end=segments[s].address+segments[s].size;
         install_game_callbacks(segments, ns, image_end);
         patch_eop_tick_wait(image_end);
+        patch_collection_skip(image_end);
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
