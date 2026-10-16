@@ -86,6 +86,10 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
 
+    /// bbport: a block U3's heap frees in a merged page: its GPU data goes into guest memory now
+    /// and stops being tracked (GPU thread, before the free goes on).
+    void MaterializeFreed(VAddr device_addr, u64 size);
+
     /// bbport diagnosis (BB_FORCE_VB_UPLOAD): the next ObtainBuffer copies this range from guest
     /// memory again (regions the GPU did not write).
     void ForceUpload(VAddr device_addr, u64 size);

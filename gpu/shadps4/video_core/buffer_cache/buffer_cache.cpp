@@ -22,6 +22,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 #include <vk_mem_alloc.h>
@@ -32,6 +33,41 @@ extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_
 #ifdef _WIN32
 #include <windows.h>
 #endif
+
+// bbport: pages holding a merge shadow (ShadowGpuData), one bit each over the GPU's guest range:
+// U3's heap free (any thread, no lock) tells from it whether a freed block lies in such a page.
+namespace {
+constexpr VAddr ShadowBitsLow = 0x1000000000ull, ShadowBitsHigh = 0x1200000000ull;
+std::unique_ptr<std::atomic<u64>[]> shadow_bits{
+    new std::atomic<u64>[(ShadowBitsHigh - ShadowBitsLow) >> 18]{}};
+void SetShadowBit(VAddr page, bool on) {
+    if (page < ShadowBitsLow || page >= ShadowBitsHigh) {
+        return;
+    }
+    const u64 index = (page - ShadowBitsLow) >> 12;
+    const u64 bit = u64{1} << (index & 63);
+    if (on) {
+        shadow_bits[index >> 6].fetch_or(bit, std::memory_order_release);
+    } else {
+        shadow_bits[index >> 6].fetch_and(~bit, std::memory_order_release);
+    }
+}
+bool AnyShadowBit(VAddr start, VAddr end) {
+    start = std::max(start, ShadowBitsLow);
+    end = std::min(end, ShadowBitsHigh);
+    for (VAddr page = start & ~VAddr{0xfff}; page < end; page += 0x1000) {
+        const u64 index = (page - ShadowBitsLow) >> 12;
+        if (shadow_bits[index >> 6].load(std::memory_order_acquire) & (u64{1} << (index & 63))) {
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
+
+namespace {
+bool RecentlyFreed(VAddr page, u64 length);
+} // namespace
 
 namespace Vulkan {
 extern void (*g_gpu_crash_context)();
@@ -374,7 +410,46 @@ extern "C" void bbgpu_note_guest_free(uintptr_t address, uint64_t size) {
     note.frame = frame;
     note.sequence.store(index + 1, std::memory_order_release);
     freed_last_frame.store(frame, std::memory_order_relaxed);
+    // A merged page (written by the guest while it held GPU data) is writable: the heap's and the
+    // next objects' writes there go unseen, and the merge's next upload keeps the GPU's stale
+    // bytes wherever they equal the old ones (characters floating after a teardown). Such blocks
+    // get their GPU data into guest memory before the free goes on; they are few (a fault per
+    // free stalled the game thread at level changes).
+    static const bool materialize = [] { // BB_FREE_MATERIALIZE=0: off (A/B tests)
+        const char* env = std::getenv("BB_FREE_MATERIALIZE");
+        return !(env && env[0] == '0');
+    }();
+    if (materialize && AnyShadowBit(address - 0x10, address + size)) {
+        if (auto* rasterizer = Core::Memory::Instance()->GetRasterizer()) {
+            rasterizer->MaterializeFreed(address, size);
+        }
+    }
 }
+
+namespace {
+/// True when [page, +length) overlaps a block U3 freed in the last FreedNoteFrames frames.
+bool RecentlyFreed(VAddr page, u64 length) {
+    const u32 frame = VideoCore::g_guest_frames.load(std::memory_order_relaxed);
+    const u64 head = freed_head.load(std::memory_order_acquire);
+    if (head == 0 || frame - freed_last_frame.load(std::memory_order_relaxed) > FreedNoteFrames) {
+        return false;
+    }
+    const VAddr end = page + length;
+    for (u64 index = head > FreedNoteCount ? head - FreedNoteCount : 0; index < head; ++index) {
+        const auto& note = freed_notes[index % FreedNoteCount];
+        if (note.sequence.load(std::memory_order_acquire) != index + 1) {
+            continue;
+        }
+        const VAddr note_start = note.start - 0x10, note_end = note.end + 0x10;
+        const u32 note_frame = note.frame;
+        if (note.sequence.load(std::memory_order_acquire) == index + 1 &&
+            frame - note_frame <= FreedNoteFrames && note_start < end && note_end > page) {
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
 
 namespace VideoCore {
 
@@ -438,6 +513,114 @@ void BufferCache::WriteBackGpuData(u8* dst, const u8* data, u64 size) {
     }
 }
 
+// bbport: a block U3's heap is freeing in a merged page (bbgpu_note_guest_free): its GPU data
+// goes into guest memory (waiting only for the GPU work that wrote it, which ended before the game
+// freed the block) and stops being tracked; the bytes the guest changed since the merge stay.
+void BufferCache::MaterializeFreed(VAddr device_addr, u64 size) {
+    const u64 first_block = device_addr >> block_shift;
+    const u64 last_block = (device_addr + size - 1) >> block_shift;
+    const Buffer* arena = GetArena(first_block, last_block);
+    if (device_addr < arena->cpu_addr || device_addr + size > arena->cpu_addr + arena->size_bytes) {
+        return;
+    }
+    boost::container::small_vector<vk::BufferCopy, 16> copies;
+    u64 total = 0;
+    gpu_modified_ranges.ForEachInRange(device_addr, size, [&](VAddr start, VAddr end) {
+        total = Common::AlignUp(total, 64);
+        copies.push_back(vk::BufferCopy{
+            .srcOffset = start - arena->cpu_addr,
+            .dstOffset = total,
+            .size = end - start,
+        });
+        total += end - start;
+    });
+    if (copies.empty()) {
+        return;
+    }
+    if (!side_queue || total > SideQueue::StagingSize) {
+        DownloadMemory(arena, device_addr, size); // waits for the whole queue
+        return;
+    }
+    const VAddr page = Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE);
+    const u64 length = Common::AlignUp(device_addr + size, TRACKER_BYTES_PER_PAGE) - page;
+    scheduler.Wait(memory_tracker->LatestGpuWriteTick(page, length));
+    auto& side = *side_queue;
+    {
+        std::scoped_lock lk{side.mutex};
+        Vulkan::Check(side.device.resetCommandPool(*side.pool));
+        Vulkan::Check(side.cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
+        side.cmdbuf.copyBuffer(arena->Handle(), side.staging.Handle(), copies);
+        const vk::MemoryBarrier2 to_host = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+            .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+        };
+        side.cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
+        Vulkan::Check(side.cmdbuf.end());
+        const vk::SubmitInfo submit = {
+            .commandBufferCount = 1,
+            .pCommandBuffers = &side.cmdbuf,
+        };
+        Vulkan::Check(side.queue.submit(submit, *side.fence));
+        Vulkan::Check(side.device.waitForFences(*side.fence, true, UINT64_MAX));
+        Vulkan::Check(side.device.resetFences(*side.fence));
+        side.staging.Invalidate(0, total);
+        std::vector<std::pair<VAddr, u8>> guest_bytes;
+        {
+            std::scoped_lock shadow_lk{shadow_mutex};
+            const VAddr end = device_addr + size;
+            for (VAddr at = page; at < page + length; at += TRACKER_BYTES_PER_PAGE) {
+                const auto it = shadows.find(at);
+                if (it == shadows.end()) {
+                    continue;
+                }
+                std::vector<ShadowRange> kept;
+                for (auto& shadow : it->second) {
+                    const VAddr shadow_end = shadow.start + shadow.bytes.size();
+                    if (shadow_end <= device_addr || shadow.start >= end) {
+                        kept.push_back(std::move(shadow));
+                        continue;
+                    }
+                    const auto* guest = reinterpret_cast<const u8*>(shadow.start);
+                    for (VAddr b = std::max(shadow.start, device_addr); b < std::min(shadow_end, end);
+                         ++b) {
+                        if (guest[b - shadow.start] != shadow.bytes[b - shadow.start]) {
+                            guest_bytes.emplace_back(b, guest[b - shadow.start]);
+                        }
+                    }
+                    if (shadow.start < device_addr) {
+                        kept.push_back({shadow.start,
+                                        std::vector<u8>(shadow.bytes.begin(),
+                                                        shadow.bytes.begin() +
+                                                            (device_addr - shadow.start))});
+                    }
+                    if (shadow_end > end) {
+                        kept.push_back({end, std::vector<u8>(shadow.bytes.begin() +
+                                                                 (end - shadow.start),
+                                                             shadow.bytes.end())});
+                    }
+                }
+                if (kept.empty()) {
+                    shadows.erase(it);
+                    shadow_pages.fetch_sub(1, std::memory_order_relaxed);
+                    SetShadowBit(at, false);
+                } else {
+                    it->second = std::move(kept);
+                }
+            }
+        }
+        for (const auto& copy : copies) {
+            memory->TryWriteBacking(std::bit_cast<u8*>(arena->cpu_addr + copy.srcOffset),
+                                    side.staging.mapped_data.data() + copy.dstOffset, copy.size);
+        }
+        for (const auto& [address, value] : guest_bytes) {
+            memory->TryWriteBacking(reinterpret_cast<void*>(address), &value, 1);
+        }
+    }
+    gpu_modified_ranges.Subtract(device_addr, size);
+}
+
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         // bbport: a guest write to a page holding GPU data read that data back first, which
@@ -471,6 +654,33 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                 BbStats::gpu_side_downloads.fetch_add(1, std::memory_order_relaxed);
                 NoteFault(page, length, frames, gpu_write, gpu_use, 4);
                 return;
+            }
+            // A guest write into memory U3 freed moments ago (a cloth simulation's buffers, at a
+            // teardown): the heap and the objects it places there next write it at once, and the
+            // merge below would keep stale GPU bytes wherever their new bytes equal the old ones
+            // (characters floating after such a moment). The GPU work that wrote the page ended
+            // before the game freed it, so waiting for it is safe here: the page is read back
+            // exactly before the write goes on (BB_FREE_SETTLE=0: off).
+            static const bool settle = [] {
+                const char* env = std::getenv("BB_FREE_SETTLE");
+                return !(env && env[0] == '0');
+            }();
+            if (settle && side_queue && RecentlyFreed(page, length)) {
+                const bool shadowed = [&] {
+                    std::scoped_lock lk{shadow_mutex};
+                    return shadows.contains(page);
+                }();
+                bool settled = false;
+                if (!shadowed) {
+                    scheduler.Wait(memory_tracker->LatestGpuWriteTick(page, length));
+                    settled = DownloadOnSideQueue(page, length);
+                }
+                if (settled) {
+                    memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                    BbStats::gpu_side_downloads.fetch_add(1, std::memory_order_relaxed);
+                    NoteFault(page, length, frames, gpu_write, gpu_use, 4);
+                    return;
+                }
             }
             if (dead_frames && frames >= dead_frames && gpu_write <= frames - dead_frames &&
                 gpu_use <= frames - dead_frames) {
@@ -543,6 +753,7 @@ void BufferCache::ShadowGpuData(VAddr page, u64 length) {
         if (!list.empty()) {
             shadows.emplace(at, std::move(list));
             shadow_pages.fetch_add(1, std::memory_order_relaxed);
+            SetShadowBit(at, true);
         }
     }
 }
@@ -668,6 +879,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
             }
             shadows.erase(it);
             shadow_pages.fetch_sub(1, std::memory_order_relaxed);
+            SetShadowBit(page, false);
         }
     }
     for (const auto& copy : copies) {
@@ -1190,6 +1402,7 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
                 }
                 shadows.erase(it);
                 shadow_pages.fetch_sub(1, std::memory_order_relaxed);
+                SetShadowBit(page, false);
             }
             if (end > cursor) {
                 add_upload(cursor, end - cursor);
