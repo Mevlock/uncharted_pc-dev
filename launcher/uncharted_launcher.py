@@ -33,6 +33,8 @@ PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).r
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import trophies  # noqa: E402  (scripts/trophies.py: the games' trophy lists)
+import uncharted_i18n
+
 DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
 # expanduser, not Path.home(): started without USERPROFILE or HOME, the launcher still opens.
 CONFIG_DIR = Path(os.environ.get('APPDATA') or os.path.expanduser('~')) / 'uncharted-launcher'
@@ -206,7 +208,7 @@ MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (the game
 RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
-APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
+APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
                 'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0',
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
@@ -219,9 +221,12 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 **{f'{game}_devmode': False for game, _t, _s, _e in GAMES}}
 
 
+UI_LANGUAGE = 'en'
+
+
 def _(text):
-    """Translations come later; every text goes through here."""
-    return text
+    """Translate launcher text, keeping English as the fallback."""
+    return uncharted_i18n.translate(UI_LANGUAGE, text)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -804,9 +809,11 @@ RUST, RUST_HI = GOLD, GOLD_HI
 
 class Launcher:
     def __init__(self, root, tk, ttk, filedialog, messagebox):
+        global UI_LANGUAGE
         self.tk, self.ttk, self.filedialog, self.messagebox = tk, ttk, filedialog, messagebox
         self.root = root
         self.app = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+        UI_LANGUAGE = uncharted_i18n.language_code(self.app.get('ui_language', ''))
         self.vars = {}
         self.process = self.job = None
         self.preparing = False
@@ -979,7 +986,7 @@ class Launcher:
             self.vars[key] = v
         return self.vars[key]
 
-    def choice(self, parent, key, options, width=36):
+    def choice(self, parent, key, options, width=36, on_change=None):
         var = self.var(key)
         values = [v for v, _t in options]
         box = self.ttk.Combobox(parent, values=[_(t) for _v, t in options], state='readonly', width=width)
@@ -989,7 +996,11 @@ class Launcher:
         def show(*_args):
             box.current(values.index(var.get()) if var.get() in values else 0)
         show()
-        box.bind('<<ComboboxSelected>>', lambda _e: var.set(values[box.current()]))
+        def selected(_event):
+            var.set(values[box.current()])
+            if on_change:
+                on_change()
+        box.bind('<<ComboboxSelected>>', selected)
         var.trace_add('write', show)
         return box
 
@@ -2065,6 +2076,10 @@ class Launcher:
 
     def build_advanced(self):
         f = self.page('advanced', _('Advanced'), _('Maintenance and options for testing.'))
+        self.section(f, _('Launcher language'), top=2)
+        self.row(f, _('Interface language'),
+                 self.choice(f, 'ui_language', uncharted_i18n.LANGUAGES, 24, self.change_ui_language),
+                 _('This changes only the launcher. The game language is selected on the Game page.'))
         self.check(f, 'close_on_play', _('Close the launcher when the game starts'))
         extra = self.ttk.Entry(f, textvariable=self.var('extra_env'), width=60)
         self.row(f, _('Environment'), extra, _('Extra variables for the game, NAME=value separated by spaces.'))
@@ -2183,6 +2198,22 @@ class Launcher:
         self.draw_hero()
 
     # ---- actions -----------------------------------------------------------------------------
+    def change_ui_language(self):
+        """Save and rebuild every label as soon as the interface language changes."""
+        global UI_LANGUAGE
+        page = self.current_page or 'advanced'
+        self.collect()
+        UI_LANGUAGE = uncharted_i18n.language_code(self.app['ui_language'])
+        for child in self.root.winfo_children():
+            child.destroy()
+        self.vars = {}
+        self.build()
+        self.show(page)
+        self.refresh()
+        if self.process:
+            self.play_button.configure(state='disabled')
+            self.stop_button.configure(state='normal')
+
     def collect(self):
         for key, v in self.vars.items():
             self.app[key] = v.get()
