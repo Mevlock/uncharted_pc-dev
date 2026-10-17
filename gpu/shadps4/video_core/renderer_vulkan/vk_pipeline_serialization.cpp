@@ -13,7 +13,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 10u; // bbport: LDS bounds checks
+static constexpr u32 ShaderBinaryVersion = 11u; // bbport: LDS bounds checks (16-bit loads zeroed)
 static constexpr u32 ShaderMetaVersion = 10u; // bbport: SRT walkers log their reads
 static constexpr u32 PipelineKeyVersion = 5u; // bbport: Info layout (ImageResource::needs_native)
 } // namespace Serialization
