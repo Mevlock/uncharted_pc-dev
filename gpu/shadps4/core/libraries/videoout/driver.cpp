@@ -39,7 +39,50 @@ extern std::atomic<u32> g_bb_compiles;
 
 extern "C" double runtime_time_scale_now(void);
 
+namespace Vulkan {
+extern std::atomic<u64> g_flips;
+}
+
 namespace Libraries::VideoOut {
+
+// bbport diagnosis: BB_FLIP_TIMING=1 — presented flips that come less than one vblank or less
+// than 8 ms after the previous one (a guest timing its frames by vblank or flip timestamps then
+// sees a zero step), with the VS check's flip number, and every 600 flips a histogram and how
+// often the guest read the flip and vblank status.
+std::atomic<u64> flip_status_reads{0}, vblank_status_reads{0};
+static void NoteFlipTiming(u64 process_time, u64 vblank_count) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_FLIP_TIMING");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static u64 prev_time = 0, prev_vblank = 0, flips = 0, reports = 0;
+    static std::array<u64, 4> hist{};
+    const u64 dv = vblank_count - prev_vblank;
+    const u64 dt = process_time - prev_time;
+    ++flips;
+    if (flips > 1) {
+        ++hist[std::min<u64>(dv, 3)];
+        if ((dv == 0 || dt < 8000) && reports++ < 2000) {
+            std::printf("Flip timing: VS flip %llu presented %llu vblanks / %llu us after the last\n",
+                        static_cast<unsigned long long>(Vulkan::g_flips.load()),
+                        static_cast<unsigned long long>(dv), static_cast<unsigned long long>(dt));
+        }
+    }
+    prev_time = process_time;
+    prev_vblank = vblank_count;
+    if (flips % 600 == 0) {
+        std::printf("Flip timing: %llu flips; vblanks between flips 0:%llu 1:%llu 2:%llu 3+:%llu; "
+                    "guest read flip status %llu, vblank status %llu times\n",
+                    static_cast<unsigned long long>(flips), static_cast<unsigned long long>(hist[0]),
+                    static_cast<unsigned long long>(hist[1]), static_cast<unsigned long long>(hist[2]),
+                    static_cast<unsigned long long>(hist[3]),
+                    static_cast<unsigned long long>(flip_status_reads.load()),
+                    static_cast<unsigned long long>(vblank_status_reads.load()));
+    }
+}
 
 constexpr static bool Is32BppPixelFormat(PixelFormat format) {
     switch (format) {
@@ -509,6 +552,7 @@ void VideoOutDriver::Flip(const Request& req) {
             --flip_status.gc_queue_num;
         }
         --flip_status.flip_pending_num;
+        NoteFlipTiming(flip_status.process_time, main_port.vblank_status.count);
     }
 
     // Trigger flip events for the port.
@@ -576,6 +620,13 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
             static s64 window = now;
             const s64 ms = gap / 1'000'000;
             ++buckets[ms < 4 ? 0 : ms < 10 ? 1 : ms < 15 ? 2 : ms < 20 ? 3 : ms < 40 ? 4 : 5];
+            // Frames well off the 60 Hz cadence, with the VS check's flip number.
+            static u32 odd_reports = 0;
+            if ((gap < 10'000'000 || gap > 25'000'000) && odd_reports++ < 3000) {
+                std::printf("Flip gap: VS flip %llu after %.1f ms\n",
+                            static_cast<unsigned long long>(Vulkan::g_flips.load()),
+                            static_cast<double>(gap) / 1e6);
+            }
             if (now - window >= 5'000'000'000) {
                 std::printf("Flip gaps: <4 ms %u, 4-10 %u, 10-15 %u, 15-20 %u, 20-40 %u, 40+ %u\n",
                             buckets[0], buckets[1], buckets[2], buckets[3], buckets[4],

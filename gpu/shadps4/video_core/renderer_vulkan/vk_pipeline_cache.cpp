@@ -53,7 +53,7 @@ void SetupVertexCheck(const Instance& instance) {
     }
     const VkBufferCreateInfo buffer_ci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = 16 + Shader::VertexCheck::Slots * 4,
+        .size = 16 + Shader::VertexCheck::Slots * Shader::VertexCheck::RecordWords * 4,
         .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
     };
     const VmaAllocationCreateInfo alloc_ci{
@@ -71,7 +71,7 @@ void SetupVertexCheck(const Instance& instance) {
         return;
     }
     vertex_check_mapped = static_cast<u32*>(info.pMappedData);
-    std::memset(vertex_check_mapped, 0, 16 + Shader::VertexCheck::Slots * 4);
+    std::memset(vertex_check_mapped, 0, 16 + Shader::VertexCheck::Slots * Shader::VertexCheck::RecordWords * 4);
     Shader::VertexCheck::address = instance.GetDevice().getBufferAddress({.buffer = buffer});
     std::printf("VS check: on (vertex shaders compiled now, none from the shader cache)\n");
 }
@@ -84,24 +84,57 @@ void VertexCheckPoll() {
     static u64 frame = 0, total = 0;
     ++frame;
     const u32 count = __atomic_load_n(&vertex_check_mapped[0], __ATOMIC_ACQUIRE);
-    if (count == 0) {
-        return;
-    }
+    // Per shader this flip. Only the first Slots records are kept: past that, the counts are
+    // shares of a sample (the total stays exact).
     std::map<u32, u32> per_shader;
+    std::map<u32, std::vector<const u32*>> samples;
     for (u32 i = 0; i < std::min(count, Shader::VertexCheck::Slots); ++i) {
-        ++per_shader[vertex_check_mapped[4 + i]];
+        const u32* record = &vertex_check_mapped[4 + i * Shader::VertexCheck::RecordWords];
+        ++per_shader[record[0]];
+        auto& list = samples[record[0]];
+        if (list.size() < 4) {
+            list.push_back(record);
+        }
     }
-    __atomic_store_n(&vertex_check_mapped[0], 0u, __ATOMIC_RELEASE);
+    if (count) {
+        __atomic_store_n(&vertex_check_mapped[0], 0u, __ATOMIC_RELEASE);
+    }
     total += count;
+    // Constant output (shaders culling vertices with a NaN position every frame) is printed
+    // once; a flip whose shaders or counts differ from the previous one is printed (a glitch
+    // for one frame shows as two such lines), and a summary every 600 flips.
+    static std::map<u32, u32> previous;
     static u32 reports = 0;
-    if (reports++ < 400) {
+    const auto list_of = [](const std::map<u32, u32>& m) {
         std::string list;
-        for (const auto& [hash, n] : per_shader) {
+        for (const auto& [hash, n] : m) {
             list += fmt::format(" {:08x}x{}", hash, n);
         }
-        std::printf("VS check: flip %llu: %u bad vertex positions:%s (%llu so far)\n",
-                    static_cast<unsigned long long>(frame), count, list.c_str(),
-                    static_cast<unsigned long long>(total));
+        return list.empty() ? std::string{" none"} : list;
+    };
+    if (per_shader != previous && reports++ < 3000) {
+        std::printf("VS check: flip %llu: %u bad vertex positions:%s\n",
+                    static_cast<unsigned long long>(frame), count, list_of(per_shader).c_str());
+        // Samples of the shaders that changed: vertex, instance, clip position.
+        for (const auto& [hash, n] : per_shader) {
+            const auto it = previous.find(hash);
+            if (it != previous.end() && it->second == n) {
+                continue;
+            }
+            std::string text;
+            for (const u32* r : samples[hash]) {
+                float pos[4];
+                std::memcpy(pos, &r[3], sizeof(pos));
+                text += fmt::format(" v{} i{} ({:g} {:g} {:g} {:g})", r[1], r[2], pos[0], pos[1],
+                                    pos[2], pos[3]);
+            }
+            std::printf("VS check:   %08x:%s\n", hash, text.c_str());
+        }
+    }
+    previous = std::move(per_shader);
+    if (frame % 600 == 0) {
+        std::printf("VS check: %llu bad vertex positions in %llu flips\n",
+                    static_cast<unsigned long long>(total), static_cast<unsigned long long>(frame));
     }
 }
 

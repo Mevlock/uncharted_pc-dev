@@ -16,6 +16,7 @@
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 
 namespace Libraries::VideoOut {
+extern std::atomic<u64> flip_status_reads, vblank_status_reads;
 
 static std::unique_ptr<VideoOutDriver> driver;
 
@@ -257,6 +258,7 @@ s32 PS4_SYSV_ABI sceVideoOutGetFlipStatus(s32 handle, FlipStatus* status) {
         std::unique_lock lock{port->port_mutex};
         *status = port->flip_status;
     }
+    ++flip_status_reads;
 
     LOG_TRACE(Lib_VideoOut,
               "count = {}, processTime = {}, tsc = {}, submitTsc = {}, flipArg = {}, gcQueueNum = "
@@ -281,6 +283,7 @@ s32 PS4_SYSV_ABI sceVideoOutGetVblankStatus(int handle, SceVideoOutVblankStatus*
 
     std::unique_lock lock{port->vo_mutex};
     *status = port->vblank_status;
+    ++vblank_status_reads;
     return ORBIS_OK;
 }
 

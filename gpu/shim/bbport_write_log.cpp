@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 #ifdef _WIN32
 #include <windows.h>
 #undef near
@@ -14,6 +15,10 @@
 #include <unistd.h>
 #endif
 #include <x86intrin.h>
+
+namespace Vulkan {
+extern std::atomic<unsigned long long> g_flips;
+}
 
 namespace BbWriteLog {
 namespace {
@@ -54,7 +59,54 @@ void NoteIntent(std::uint64_t address, const void* data, std::uint64_t size, Sou
     }
 }
 
+// BB_WATCH_WRITES=<hex address>:<hex size>: every write the GPU emulation makes into that range
+// is printed at once (source, range, thread, VS check flip number, first bytes).
+static void Watch(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
+    static const std::pair<std::uint64_t, std::uint64_t> range = [] {
+        std::pair<std::uint64_t, std::uint64_t> r{};
+        if (const char* env = std::getenv("BB_WATCH_WRITES")) {
+            char* end;
+            r.first = std::strtoull(env, &end, 16);
+            if (*end == ':') {
+                r.second = std::strtoull(end + 1, nullptr, 16);
+            }
+        }
+        return r;
+    }();
+    if (!range.second || address + size <= range.first || address >= range.first + range.second) {
+        return;
+    }
+    static std::atomic<std::uint32_t> reports{0};
+    if (reports.fetch_add(1, std::memory_order_relaxed) >= 4000) {
+        return;
+    }
+    std::uint64_t first = 0;
+    std::memcpy(&first, data, size < 8 ? size : 8);
+    static const char* names[] = {"backing", "WriteData", "fence", "fence intent", "WriteData intent",
+                                  "EOS intent"};
+    // The callers as offsets into the executable (llvm-symbolizer --obj=out/bb-probe.exe
+    // 0x140000000+offset).
+    char stack[160] = "";
+#ifdef _WIN32
+    void* frames[8]{};
+    const USHORT n = CaptureStackBackTrace(1, 8, frames, nullptr);
+    const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
+    std::size_t at = 0;
+    for (USHORT i = 0; i < n && at + 12 < sizeof(stack); ++i) {
+        at += std::snprintf(stack + at, sizeof(stack) - at, " %llx",
+                            static_cast<unsigned long long>(
+                                reinterpret_cast<std::uintptr_t>(frames[i]) - base));
+    }
+#endif
+    std::printf("Watched write: VS flip %llu %s %#llx+%#llx (thread %u) first %016llx at%s\n",
+                static_cast<unsigned long long>(Vulkan::g_flips.load(std::memory_order_relaxed)),
+                source < 6 ? names[source] : "?", static_cast<unsigned long long>(address),
+                static_cast<unsigned long long>(size), static_cast<unsigned>(gettid()),
+                static_cast<unsigned long long>(first), stack);
+}
+
 void Note(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
+    Watch(address, data, size, source);
     if (Enabled()) {
         Record(address, data, size, source);
     }

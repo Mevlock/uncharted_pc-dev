@@ -98,6 +98,8 @@ struct MotionVectors {
 struct VertexCheck {
     static inline u64 address = 0;
     static constexpr u32 Slots = 1024;
+    /// Per record: hash, vertex index, instance index, position x, y, z, w (bits), unused.
+    static constexpr u32 RecordWords = 8;
 };
 
 struct HwLocalRuntimeInfo {

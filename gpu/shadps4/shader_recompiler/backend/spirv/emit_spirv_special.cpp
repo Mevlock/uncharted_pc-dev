@@ -215,9 +215,21 @@ static void EmitVertexCheck(EmitContext& ctx) {
     const Id slot = ctx.OpBitwiseAnd(u32_type, index, ctx.ConstU32(VertexCheck::Slots - 1));
     const Id slot_address = ctx.OpIAdd(
         ctx.U64, ctx.Constant(ctx.U64, VertexCheck::address + 16),
-        ctx.OpIMul(ctx.U64, ctx.OpUConvert(ctx.U64, slot), ctx.Constant(ctx.U64, u64(4))));
-    ctx.OpAtomicExchange(u32_type, ctx.OpConvertUToPtr(scalar_ptr, slot_address), scope,
-                         ctx.u32_zero_value, ctx.ConstU32(static_cast<u32>(ctx.info.pgm_hash)));
+        ctx.OpIMul(ctx.U64, ctx.OpUConvert(ctx.U64, slot),
+                   ctx.Constant(ctx.U64, u64(4 * VertexCheck::RecordWords))));
+    const auto store = [&](u32 word, Id value) {
+        const Id address = ctx.OpIAdd(ctx.U64, slot_address, ctx.Constant(ctx.U64, u64(word * 4)));
+        ctx.OpAtomicExchange(u32_type, ctx.OpConvertUToPtr(scalar_ptr, address), scope,
+                             ctx.u32_zero_value, value);
+    };
+    store(0, ctx.ConstU32(static_cast<u32>(ctx.info.pgm_hash)));
+    store(1, Sirit::ValidId(ctx.vertex_index) ? ctx.OpLoad(u32_type, ctx.vertex_index)
+                                              : ctx.ConstU32(0xffffffffu));
+    store(2, Sirit::ValidId(ctx.instance_id) ? ctx.OpLoad(u32_type, ctx.instance_id)
+                                             : ctx.ConstU32(0xffffffffu));
+    for (u32 i = 0; i < 4; ++i) {
+        store(3 + i, ctx.OpBitcast(u32_type, ctx.OpCompositeExtract(f32_type, position, i)));
+    }
     ctx.OpBranch(merge_label);
     ctx.AddLabel(merge_label);
 }

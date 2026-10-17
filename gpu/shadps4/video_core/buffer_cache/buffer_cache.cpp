@@ -205,7 +205,12 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
     const auto start_time = std::chrono::steady_clock::now();
     // The pages around the fault whose GPU data is complete come along: the guest fills its
     // rings page after page, and each would fault and wait for a round trip of its own.
-    constexpr u64 Window = 64_KB;
+    // BB_SIDE_WINDOW_KB (diagnosis): the window size, 4 = the faulting page only.
+    static const u64 Window = [] {
+        const char* env = std::getenv("BB_SIDE_WINDOW_KB");
+        const u64 kb = env ? std::strtoull(env, nullptr, 10) : 64;
+        return std::max<u64>(kb, 4) * 1_KB;
+    }();
     const u64 first_block = page >> block_shift;
     const u64 last_block = (page + length - 1) >> block_shift;
     const Buffer* arena = GetArena(first_block, last_block);

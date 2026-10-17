@@ -168,6 +168,121 @@ static void SubmitCheckRead(VAddr address, u64 size) {
     }
 }
 
+// bbport diagnosis: BB_DEFORM_CHECK=<vs hash>,...: the deformed-vertex bindings (guest
+// 0x1100000000-0x1104000000) of those vertex shaders are read back from the GPU right where the
+// draw reads them and scanned for impossible floats (non-finite or beyond 1e5), per vertex at the
+// binding's stride. Tells data that is already garbage when drawn from a vertex shader that
+// computes garbage (BB_VS_CHECK). Flip numbers as in the VS check.
+std::atomic<u64> g_flips{0};
+namespace DeformCheck {
+struct Pending {
+    VAddr address;
+    u64 size;
+    u32 stride;
+    u32 vs;
+    u64 flip;
+    StagingBufferRef ref;
+    u64 tick;
+};
+std::mutex mutex;
+std::vector<Pending> pending;
+u64 last_flip = ~0ull;
+u32 copies_this_flip = 0;
+u64 checked = 0, bad_bindings = 0;
+
+const std::vector<u32>& Shaders() {
+    static const std::vector<u32> list = [] {
+        std::vector<u32> v;
+        if (const char* env = std::getenv("BB_DEFORM_CHECK")) {
+            for (const char* p = env; *p;) {
+                char* end;
+                const u32 h = static_cast<u32>(std::strtoul(p, &end, 16));
+                if (end == p) {
+                    break;
+                }
+                v.push_back(h);
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+        return v;
+    }();
+    return list;
+}
+
+bool Wanted(u64 hash, VAddr address) {
+    const auto& list = Shaders();
+    return !list.empty() && address >= 0x1100000000ull && address < 0x1104000000ull &&
+           std::find(list.begin(), list.end(), u32(hash)) != list.end();
+}
+
+void Process(Scheduler& scheduler, StagingBufferPool& staging) {
+    for (auto it = pending.begin(); it != pending.end();) {
+        if (!scheduler.IsFree(it->tick)) {
+            ++it;
+            continue;
+        }
+        it->ref.buffer->Invalidate(it->ref.offset, it->size);
+        const u8* data = it->ref.mapped;
+        const u32 stride = it->stride ? it->stride : 12;
+        u32 bad = 0, first = ~0u, count = 0;
+        float sample[3]{};
+        for (u64 off = 0; off + 12 <= it->size; off += stride, ++count) {
+            float f[3];
+            std::memcpy(f, data + off, sizeof(f));
+            const bool wrong = !(std::fabs(f[0]) < 1e5f && std::fabs(f[1]) < 1e5f &&
+                                 std::fabs(f[2]) < 1e5f);
+            if (wrong && first == ~0u) {
+                first = count;
+                std::memcpy(sample, f, sizeof(sample));
+            }
+            bad += wrong;
+        }
+        ++checked;
+        if (bad) {
+            ++bad_bindings;
+            static u32 reports = 0;
+            if (reports++ < 500) {
+                std::printf("Deform check: flip %llu vs %08x binding %#llx (%llu bytes, stride %u): "
+                            "%u of %u vertices impossible, first v%u (%g %g %g)\n",
+                            static_cast<unsigned long long>(it->flip), it->vs,
+                            static_cast<unsigned long long>(it->address),
+                            static_cast<unsigned long long>(it->size), stride, bad, count, first,
+                            sample[0], sample[1], sample[2]);
+            }
+        }
+        staging.FreeDeferred(it->ref);
+        it = pending.erase(it);
+    }
+}
+
+void Record(Runtime& runtime, Scheduler& scheduler, VAddr address, u64 size, u32 stride, u64 vs,
+            const VideoCore::Buffer* buffer, u64 offset) {
+    std::scoped_lock lk{mutex};
+    auto& staging = runtime.GetStagingPool();
+    Process(scheduler, staging);
+    const u64 flip = g_flips.load(std::memory_order_relaxed);
+    if (flip != last_flip) {
+        last_flip = flip;
+        copies_this_flip = 0;
+        if (flip % 600 == 0) {
+            std::printf("Deform check: %llu bindings checked, %llu with impossible vertices\n",
+                        static_cast<unsigned long long>(checked),
+                        static_cast<unsigned long long>(bad_bindings));
+        }
+    }
+    if (copies_this_flip >= 96 || size > 8_MB) {
+        return;
+    }
+    ++copies_this_flip;
+    Pending p{.address = address, .size = size, .stride = stride, .vs = u32(vs), .flip = flip + 1};
+    p.ref = staging.Request(size, VideoCore::MemoryType::HostCached, 0, true);
+    const vk::BufferCopy copy{.srcOffset = offset, .dstOffset = p.ref.offset, .size = size};
+    runtime.CopyBuffer(buffer, p.ref.buffer, std::span{&copy, 1});
+    p.tick = scheduler.CurrentTick();
+    pending.push_back(std::move(p));
+}
+} // namespace DeformCheck
+
 // bbport diagnosis: BB_POOL_CHECK_TRIGGER=<file>: when the file exists it is removed and for the
 // next BB_POOL_CHECK_FRAMES (60) guest frames, the first use per frame of each read-only vertex
 // shader buffer of 16 KiB to 4 MiB is read back from the GPU right where the draw reads it and
@@ -376,7 +491,7 @@ void Dispatch(u64 cs, u32 x, u32 y, u32 z) {
     pending.clear();
 }
 
-void Flip() {
+void Flip(u64 flip) {
     static const char* trigger = std::getenv("BB_DRAWLOG_TRIGGER");
     if (!trigger) {
         return;
@@ -393,7 +508,9 @@ void Flip() {
         pending.clear();
         frame = draw = 0;
         frames_left = env ? std::atoi(env) : 20;
-        std::printf("Draw log: recording %d frames\n", frames_left.load());
+        // Frame f<k> of the log is reported by the VS check (BB_VS_CHECK) as flip <flip+1+k>.
+        std::printf("Draw log: recording %d frames from flip %llu\n", frames_left.load(),
+                    static_cast<unsigned long long>(flip + 1));
         return;
     }
     std::scoped_lock lk{mutex};
@@ -3427,6 +3544,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 if (!desc.is_written && stage.sw_stage == Shader::SwStage::Vertex) {
                     SubmitCheckRead(vsharp.base_address, size);
                 }
+                if (!desc.is_written && DeformCheck::Wanted(stage.pgm_hash, vsharp.base_address)) {
+                    DeformCheck::Record(runtime, scheduler, vsharp.base_address, size,
+                                        vsharp.GetStride(), stage.pgm_hash, buffer, offset);
+                }
                 if (PoolCheck::frames_left.load(std::memory_order_relaxed) > 0 &&
                     !desc.is_written && stage.sw_stage == Shader::SwStage::Vertex &&
                     size > 16_KB && size <= 4_MB) {
@@ -4542,8 +4663,11 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
 }
 
 void Rasterizer::OnGuestFlip() {
+    static u64 flips = 0;
+    ++flips;
+    g_flips.store(flips, std::memory_order_relaxed);
     VertexCheckPoll();
-    DrawLog::Flip();
+    DrawLog::Flip(flips);
     PoolCheck::Flip();
     // The age of GPU data in the buffer cache's pages (BufferCache::InvalidateMemory).
     VideoCore::g_guest_frames.fetch_add(1, std::memory_order_relaxed);
