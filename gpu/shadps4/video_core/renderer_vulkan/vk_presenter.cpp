@@ -448,9 +448,14 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             noted = true;
             std::printf("Ultrawide: gameplay frames fill the window (menus and movies stay 16:9)\n");
         }
+        // BB_ULTRAWIDE_STATS=1 (diagnosis): the share of filled frames.
+        static const bool stats = [] {
+            const char* env = std::getenv("BB_ULTRAWIDE_STATS");
+            return env && env[0] == '1';
+        }();
         static u32 frames = 0, filled = 0;
         filled += scene;
-        if (++frames == 600) {
+        if (stats && ++frames == 600) {
             std::printf("Ultrawide: %u of the last 600 frames filled the window\n", filled);
             frames = filled = 0;
         }

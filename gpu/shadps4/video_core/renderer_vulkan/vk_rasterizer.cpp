@@ -4715,9 +4715,13 @@ bool Rasterizer::TakeSceneFrame() noexcept {
     const u32 scene_draws = g_frame_scene_draws.exchange(0, std::memory_order_relaxed);
     const u32 menu_draws = g_frame_menu_draws.exchange(0, std::memory_order_relaxed);
     const bool raw = scene_draws >= SceneFrameDraws() && menu_draws == 0;
-    // Statistics for choosing the threshold: every 120 frames, the lowest, middle and highest
-    // scene draw counts and the frames with a menu backdrop.
-    if (runtime_ultrawide_fill) {
+    // BB_ULTRAWIDE_STATS=1 (diagnosis): every 120 frames, the lowest, middle and highest scene
+    // draw counts and the frames with a menu backdrop (to tune the threshold).
+    static const bool stats = [] {
+        const char* env = std::getenv("BB_ULTRAWIDE_STATS");
+        return env && env[0] == '1';
+    }();
+    if (runtime_ultrawide_fill && stats) {
         static std::array<u32, 120> counts{};
         static u32 n = 0, backdrops = 0;
         counts[n++] = scene_draws;
