@@ -179,6 +179,9 @@ void Liverpool::Process(std::stop_token stoken) {
             if (task.done()) {
                 task.destroy();
 
+                if (curr_qid == GfxQueueId) {
+                    Vulkan::SubmitCheckPop();
+                }
                 std::scoped_lock lock{queue.m_access};
                 queue.submits.pop();
                 if (!queue.submit_times.empty()) {
@@ -1737,6 +1740,7 @@ Liverpool::CmdBuffer Liverpool::CopyCmdBuffers(std::span<const u32> dcb, std::sp
 
 void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
     auto& queue = mapped_queues[GfxQueueId];
+    Vulkan::SubmitCheckPush();
 
     if (EmulatorSettings.IsCopyGpuBuffers()) {
         std::tie(dcb, ccb) = CopyCmdBuffers(dcb, ccb);

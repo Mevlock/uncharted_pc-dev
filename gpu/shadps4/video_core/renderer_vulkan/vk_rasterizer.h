@@ -33,6 +33,10 @@ namespace Vulkan {
 class GraphicsPipeline;
 class Runtime;
 
+/// bbport diagnosis (BB_SUBMIT_CHECK): a graphics submission was handed over / finished.
+void SubmitCheckPush();
+void SubmitCheckPop();
+
 class Rasterizer {
 public:
     explicit Rasterizer(const Instance& instance, Scheduler& scheduler, Runtime& runtime,

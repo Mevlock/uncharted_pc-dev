@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <chrono>
+#include <map>
+#include <string>
+#include <unordered_map>
 #include <boost/container/small_vector.hpp>
 #include "bbport_toggles.h"
 #include "common/assert.h"
@@ -14,6 +19,8 @@
 #include "core/signals.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+
+extern "C" void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
 
 #ifndef _WIN64
 #include <sys/mman.h>
@@ -107,6 +114,110 @@ struct PageManager::Impl {
 
     virtual void Protect(VAddr address, size_t size, Core::MemoryPermission perms) = 0;
 
+    // bbport diagnosis: BB_READ_PROBE=1 (with BB_READBACKS=2, which denies reads of GPU-written
+    // pages): a read is not served with GPU data (that waited for the GPU thread and froze at
+    // load) but recorded, and the page made readable (writes stay tracked); the guest reads
+    // what its memory holds, as without BB_READBACKS. Every 5 s the most read pages and the
+    // code reading them are printed.
+    static bool ReadProbe() {
+        static const bool enabled = [] {
+            const char* env = std::getenv("BB_READ_PROBE");
+            return env && env[0] == '1';
+        }();
+        return enabled;
+    }
+
+    static void NoteProbedRead(void* context, VAddr addr, bool port_thread) {
+        const VAddr page = addr & ~VAddr{4095};
+        // Writes stay as the tracker keeps them: allowed on pages it holds CPU-modified (it
+        // expects no fault there), trapped on the others.
+        const bool writable = rasterizer->GetBufferCache().IsRegionCpuModified(page, 4096);
+        runtime_memory_gpu_protect(page, 4096, 1, writable ? 1 : 0);
+        const VAddr rip = reinterpret_cast<VAddr>(Common::GetRip(context));
+#ifdef _WIN32
+        // The caller of a library copy (memcpy is a leaf: its return address is at rsp), and
+        // the thread's name, read once per thread.
+        const VAddr caller =
+            *reinterpret_cast<const VAddr*>(reinterpret_cast<EXCEPTION_POINTERS*>(context)
+                                                ->ContextRecord->Rsp);
+        static thread_local std::string thread_name = [] {
+            std::string name = "?";
+            PWSTR description = nullptr;
+            if (SUCCEEDED(GetThreadDescription(GetCurrentThread(), &description)) && description) {
+                char buffer[64];
+                WideCharToMultiByte(CP_UTF8, 0, description, -1, buffer, sizeof(buffer), nullptr,
+                                    nullptr);
+                name = buffer;
+                LocalFree(description);
+            }
+            return name;
+        }();
+#else
+        const VAddr caller = 0;
+        static thread_local std::string thread_name = "?";
+#endif
+        static std::mutex mutex;
+        static std::unordered_map<VAddr, u32> pages, code;
+        static std::map<std::pair<std::string, VAddr>, u32> callers;
+        static u64 reads = 0, port_reads = 0;
+        static auto window = std::chrono::steady_clock::now();
+        // Never waits: a thread holding the runtime's region lock may fault here as well.
+        std::unique_lock lk{mutex, std::try_to_lock};
+        if (!lk.owns_lock()) {
+            return;
+        }
+        ++reads;
+        port_reads += port_thread;
+        ++pages[page];
+        ++code[rip];
+        ++callers[{thread_name, caller}];
+        const auto now = std::chrono::steady_clock::now();
+        if (now - window < std::chrono::seconds(5)) {
+            return;
+        }
+        window = now;
+        const auto top = [](const std::unordered_map<VAddr, u32>& map, size_t n) {
+            std::vector<std::pair<VAddr, u32>> v(map.begin(), map.end());
+            std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second > b.second; });
+            v.resize(std::min(v.size(), n));
+            return v;
+        };
+        std::printf("Read probe: %llu reads of GPU-written pages (%llu by port threads), %zu "
+                    "pages, %zu code sites (5 s)\n",
+                    static_cast<unsigned long long>(reads),
+                    static_cast<unsigned long long>(port_reads), pages.size(), code.size());
+        for (const auto& [where, n] : top(code, 12)) {
+            std::printf("Read probe:   code %#llx: %u\n", static_cast<unsigned long long>(where), n);
+        }
+        for (const auto& [where, n] : top(pages, 12)) {
+            std::printf("Read probe:   page %#llx: %u\n", static_cast<unsigned long long>(where), n);
+        }
+        std::vector<std::pair<std::pair<std::string, VAddr>, u32>> by_caller(callers.begin(),
+                                                                             callers.end());
+        std::sort(by_caller.begin(), by_caller.end(),
+                  [](auto& a, auto& b) { return a.second > b.second; });
+        for (size_t i = 0; i < std::min<size_t>(by_caller.size(), 12); ++i) {
+            const auto& [key, n] = by_caller[i];
+            char module[MAX_PATH] = "?";
+#ifdef _WIN32
+            HMODULE handle{};
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCSTR>(key.second), &handle)) {
+                GetModuleFileNameA(handle, module, sizeof(module));
+            } else {
+                std::snprintf(module, sizeof(module), "guest or JIT");
+            }
+#endif
+            std::printf("Read probe:   caller %#llx [%s] thread '%s': %u\n",
+                        static_cast<unsigned long long>(key.second), module, key.first.c_str(), n);
+        }
+        callers.clear();
+        pages.clear();
+        code.clear();
+        reads = port_reads = 0;
+    }
+
     static bool GuestFaultSignalHandler(void* context, void* fault_address) {
         const auto addr = reinterpret_cast<VAddr>(fault_address);
         // bbport: the draw recording thread handles its faults inline too (vk_draw_pipe.h).
@@ -119,6 +230,15 @@ struct PageManager::Impl {
             return rasterizer->OnWriteFault(addr, is_gpu_thread);
         } else {
             BbStats::read_faults.fetch_add(1, std::memory_order_relaxed);
+            if (ReadProbe()) {
+                // Reads outside GPU-mapped memory are not ours (speculative reads of the draw
+                // preparation, SRT walkers): they go on to their own handlers.
+                if (!rasterizer->IsMapped(addr, 8)) {
+                    return false;
+                }
+                NoteProbedRead(context, addr, is_gpu_thread);
+                return true;
+            }
             BbStats::Timer timer{BbStats::t_read_faults};
             return rasterizer->ReadMemory(addr, 8, is_gpu_thread);
         }
@@ -424,8 +544,12 @@ struct SignalImpl : public PageManager::Impl {
         RENDERER_TRACE;
         auto* memory = Core::Memory::Instance();
         auto& impl = memory->GetAddressSpace();
-        ASSERT_MSG(perms != Core::MemoryPermission::Write,
-                   "Attempted to protect region as write-only which is not a valid permission");
+        // bbport: with read tracking (BB_READBACKS=2) a page both GPU- and CPU-modified (the
+        // merge path) asks for write-only, which hosts cannot map: it stays fully accessible
+        // (its reads go untracked, as without read tracking).
+        if (perms == Core::MemoryPermission::Write) {
+            perms = Core::MemoryPermission::ReadWrite;
+        }
         impl.Protect(address, size, perms);
     }
 

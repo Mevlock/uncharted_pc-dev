@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <map>
+#include <deque>
 #include <set>
 #include <cmath>
 #include <ctime>
@@ -65,6 +66,107 @@ void EnableFaultHistory();
 void PrintFaultHistory(VAddr address, u64 size);
 } // namespace VideoCore
 namespace Vulkan {
+
+// bbport diagnosis: BB_SUBMIT_CHECK=<hex address>:<hex size> (U3's bone pool:
+// 11a1c0ab00:ffff0). Each graphics submission fingerprints the range's pages as the guest hands
+// the commands over; vertex shader reads of the range while that submission is processed compare
+// each page once with its fingerprint. Pages the guest changed in between mean it reused data
+// the GPU had yet to read (needs BB_DRAW_PIPE=0: draws then run with their submission).
+namespace SubmitCheck {
+struct Snapshot {
+    std::vector<u64> hashes;
+    std::vector<bool> compared;
+};
+std::mutex mutex;
+std::deque<Snapshot> snapshots;
+u64 compared = 0, changed = 0, submits = 0;
+auto window = std::chrono::steady_clock::now();
+
+std::pair<VAddr, u64> Range() {
+    static const std::pair<VAddr, u64> range = [] {
+        std::pair<VAddr, u64> r{};
+        if (const char* env = std::getenv("BB_SUBMIT_CHECK")) {
+            char* end;
+            r.first = std::strtoull(env, &end, 16) & ~VAddr{4095};
+            if (*end == ':') {
+                r.second = Common::AlignUp(std::strtoull(end + 1, nullptr, 16), 4_KB);
+            }
+        }
+        return r;
+    }();
+    return range;
+}
+
+u64 PageHash(VAddr page) {
+    return XXH3_64bits(reinterpret_cast<const void*>(page), 4_KB);
+}
+} // namespace SubmitCheck
+
+void SubmitCheckPush() {
+    const auto [base, size] = SubmitCheck::Range();
+    if (!size) {
+        return;
+    }
+    SubmitCheck::Snapshot s;
+    for (VAddr page = base; page < base + size; page += 4_KB) {
+        s.hashes.push_back(SubmitCheck::PageHash(page));
+    }
+    s.compared.assign(s.hashes.size(), false);
+    std::scoped_lock lk{SubmitCheck::mutex};
+    SubmitCheck::snapshots.push_back(std::move(s));
+    ++SubmitCheck::submits;
+}
+
+void SubmitCheckPop() {
+    if (!SubmitCheck::Range().second) {
+        return;
+    }
+    std::scoped_lock lk{SubmitCheck::mutex};
+    if (!SubmitCheck::snapshots.empty()) {
+        SubmitCheck::snapshots.pop_front();
+    }
+}
+
+static void SubmitCheckRead(VAddr address, u64 size) {
+    const auto [base, range_size] = SubmitCheck::Range();
+    if (!range_size || address + size <= base || address >= base + range_size) {
+        return;
+    }
+    using namespace SubmitCheck;
+    std::scoped_lock lk{mutex};
+    if (snapshots.empty()) {
+        return;
+    }
+    auto& s = snapshots.front();
+    const VAddr first = std::max(Common::AlignDown(address, 4_KB), base);
+    const VAddr last = std::min(address + size, base + range_size);
+    for (VAddr page = first; page < last; page += 4_KB) {
+        const size_t i = (page - base) / 4_KB;
+        if (s.compared[i]) {
+            continue;
+        }
+        s.compared[i] = true;
+        ++compared;
+        if (PageHash(page) != s.hashes[i]) {
+            if (changed++ < 40) {
+                std::printf("Submit check: page %#llx (+%#llx) changed after its submission "
+                            "(%zu submissions queued)\n",
+                            static_cast<unsigned long long>(page),
+                            static_cast<unsigned long long>(page - base), snapshots.size());
+            }
+        }
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window >= std::chrono::seconds(5)) {
+        std::printf("Submit check: %llu of %llu pages changed after submission, %llu submissions "
+                    "(5 s)\n",
+                    static_cast<unsigned long long>(changed),
+                    static_cast<unsigned long long>(compared),
+                    static_cast<unsigned long long>(submits));
+        compared = changed = submits = 0;
+        window = now;
+    }
+}
 
 // bbport diagnosis: BB_POOL_CHECK_TRIGGER=<file>: when the file exists it is removed and for the
 // next BB_POOL_CHECK_FRAMES (60) guest frames, the first use per frame of each read-only vertex
@@ -223,6 +325,34 @@ void Buffer(char kind, u32 slot, VAddr address, u64 size, u32 stride, bool writt
     if (bad) {
         pending += fmt::format("!{}", bad);
     }
+}
+
+// BB_DRAWLOG_VS=<hash>: that vertex shader's draws also log their constants (the flattened
+// resource-table data and the first floats of its buffers up to 1 KiB).
+bool LogValues(u64 hash) {
+    static const u64 vs = [] {
+        const char* env = std::getenv("BB_DRAWLOG_VS");
+        return env ? std::strtoull(env, nullptr, 16) : 0ull;
+    }();
+    return vs && u32(hash) == u32(vs);
+}
+
+void Values(const char* name, const u32* words, size_t count) {
+    if (!Active()) {
+        return;
+    }
+    std::string out = fmt::format(" {}[", name);
+    for (size_t i = 0; i < count; ++i) {
+        float f;
+        std::memcpy(&f, &words[i], 4);
+        if (i) {
+            out += ' ';
+        }
+        out += fmt::format("{:.4g}", f);
+    }
+    out += "]";
+    std::scoped_lock lk{mutex};
+    pending += out;
 }
 
 void Draw(u64 vs, u64 ps, u32 indices, u32 instances, u32 vertex_offset, u32 instance_offset) {
@@ -1968,6 +2098,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     if (DrawLog::Active()) {
+        if (DrawLog::LogValues(vs_info.pgm_hash)) {
+            const auto& flat = vs_info.flattened_ud_buf;
+            DrawLog::Values("U", flat.data(), std::min<size_t>(flat.size(), 96));
+        }
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         DrawLog::Draw(vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices, num_instances,
                       vertex_offset, instance_offset);
@@ -3259,6 +3393,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                                                                 : 'O';
                 DrawLog::Buffer(kind, binding.buffer, vsharp.base_address, vsharp.GetSize(),
                                 vsharp.GetStride(), desc.is_written);
+                if (DrawLog::LogValues(stage.pgm_hash) && vsharp.base_address &&
+                    vsharp.GetSize() <= 1_KB &&
+                    memory->IsValidGpuMapping(vsharp.base_address, vsharp.GetSize())) {
+                    const char name[3] = {kind, char('0' + binding.buffer % 10), 0};
+                    DrawLog::Values(name, reinterpret_cast<const u32*>(vsharp.base_address),
+                                    std::min<size_t>(vsharp.GetSize() / 4, 64));
+                }
             }
             if (FrameCapture::Active() && vsharp.base_address != 0 && vsharp.GetSize() != 0 &&
                 memory->IsValidGpuMapping(vsharp.base_address, 0)) {
@@ -3283,6 +3424,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                if (!desc.is_written && stage.sw_stage == Shader::SwStage::Vertex) {
+                    SubmitCheckRead(vsharp.base_address, size);
+                }
                 if (PoolCheck::frames_left.load(std::memory_order_relaxed) > 0 &&
                     !desc.is_written && stage.sw_stage == Shader::SwStage::Vertex &&
                     size > 16_KB && size <= 4_MB) {
@@ -4459,6 +4603,49 @@ void Rasterizer::CheckComputeOutputs() {
                         static_cast<unsigned long long>(t.frames), cs_hash,
                         static_cast<unsigned long long>(start), count, stride, bad, zero, first,
                         sample[0], sample[1], sample[2], static_cast<unsigned long long>(checked));
+        }
+        // bbport: vertices far outside their own mesh (an exploded triangle stays below the
+        // limits above): distance from the median position over 20 times the median distance.
+        if (count < 16 || bad) {
+            continue;
+        }
+        std::array<std::vector<float>, 3> axis;
+        for (VAddr a = start; a + stride <= end; a += stride) {
+            const auto* f = reinterpret_cast<const float*>(a);
+            for (u32 k = 0; k < 3; ++k) {
+                axis[k].push_back(f[k]);
+            }
+        }
+        float center[3];
+        for (u32 k = 0; k < 3; ++k) {
+            auto v = axis[k];
+            std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+            center[k] = v[v.size() / 2];
+        }
+        std::vector<float> dist(count);
+        for (u32 i = 0; i < count; ++i) {
+            const float dx = axis[0][i] - center[0], dy = axis[1][i] - center[1],
+                        dz = axis[2][i] - center[2];
+            dist[i] = std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        auto sorted = dist;
+        std::nth_element(sorted.begin(), sorted.begin() + count / 2, sorted.end());
+        const float median = std::max(sorted[count / 2], 1e-3f);
+        u32 outliers = 0, worst = 0;
+        for (u32 i = 0; i < count; ++i) {
+            if (dist[i] > 20.0f * median) {
+                ++outliers;
+                worst = dist[i] > dist[worst] ? i : worst;
+            }
+        }
+        static u64 outlier_reports = 0;
+        if (outliers && outlier_reports++ < 300) {
+            std::printf("Output check: frame %llu cs %08x slot %#llx (%u vertices): %u far outside "
+                        "the mesh, worst %u at %.1f x the median distance %.3f (%g %g %g)\n",
+                        static_cast<unsigned long long>(t.frames), cs_hash,
+                        static_cast<unsigned long long>(start), count, outliers, worst,
+                        dist[worst] / median, median, axis[0][worst], axis[1][worst],
+                        axis[2][worst]);
         }
     }
 }
