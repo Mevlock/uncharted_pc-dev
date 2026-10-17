@@ -4681,24 +4681,24 @@ std::atomic<bool> g_last_frame_scene{false};
 
 std::atomic<u32> g_frame_menu_draws{0};
 
-/// bbport: depth-tested draws that make a frame show a 3D scene (loading screens and movies have
-/// none). BB_ULTRAWIDE_SCENE_DRAWS overrides 64.
+/// bbport: depth-tested draws that make a frame gameplay: U2's title screen has 50-130 (provisional,
+/// see the scene draw statistics). BB_ULTRAWIDE_SCENE_DRAWS overrides 140.
 u32 SceneFrameDraws() {
     static const u32 draws = [] {
         const char* env = std::getenv("BB_ULTRAWIDE_SCENE_DRAWS");
-        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 64u;
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 140u;
     }();
     return draws;
 }
 
-/// bbport: the pixel shader of the backdrop the menus draw over a 3D scene (a blurred or dimmed
-/// copy of it, into the display buffer): U2's title and main menu, U1's pause menu. Such a frame
-/// is a menu, not gameplay. BB_MENU_PS=<hash,...> overrides 749bbec9.
+/// bbport (experiment): BB_MENU_PS=<hash,...>: pixel shaders of a menu backdrop drawn into the
+/// display buffer; a frame with one is a menu. Off by default: 749bbec9 (U2's title, U1's pause
+/// menu) is drawn in U3's gameplay too.
 bool MenuBackdropShader(u64 ps_hash) {
     static const std::vector<u32> hashes = [] {
         std::vector<u32> list;
         const char* env = std::getenv("BB_MENU_PS");
-        for (const char* p = env ? env : "749bbec9"; *p;) {
+        for (const char* p = env ? env : ""; *p;) {
             char* end;
             const u32 h = static_cast<u32>(std::strtoul(p, &end, 16));
             if (end == p) break;
@@ -4714,6 +4714,21 @@ bool Rasterizer::TakeSceneFrame() noexcept {
     const u32 scene_draws = g_frame_scene_draws.exchange(0, std::memory_order_relaxed);
     const u32 menu_draws = g_frame_menu_draws.exchange(0, std::memory_order_relaxed);
     const bool raw = scene_draws >= SceneFrameDraws() && menu_draws == 0;
+    // Statistics for choosing the threshold: every 120 frames, the lowest, middle and highest
+    // scene draw counts and the frames with a menu backdrop.
+    if (runtime_ultrawide_fill) {
+        static std::array<u32, 120> counts{};
+        static u32 n = 0, backdrops = 0;
+        counts[n++] = scene_draws;
+        backdrops += menu_draws != 0;
+        if (n == counts.size()) {
+            std::sort(counts.begin(), counts.end());
+            std::printf("Ultrawide: scene draws over 120 frames: lowest %u, middle %u, highest %u; "
+                        "%u with a menu backdrop\n",
+                        counts.front(), counts[60], counts.back(), backdrops);
+            n = backdrops = 0;
+        }
+    }
     // Gameplay starts after 3 such frames in a row and ends after 30 without (half a second):
     // sparse gameplay frames (close-ups in U3's scripted scenes) do not flip it to a menu, while
     // menus, title screens and loading last much longer. BB_ULTRAWIDE_EXIT_FRAMES overrides 30.
