@@ -37,6 +37,8 @@ extern std::atomic<u64> g_bb_compile_ns;
 extern std::atomic<u32> g_bb_compiles;
 } // namespace Vulkan
 
+extern "C" double runtime_time_scale_now(void);
+
 namespace Libraries::VideoOut {
 
 constexpr static bool Is32BppPixelFormat(PixelFormat format) {
@@ -712,6 +714,20 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             DrawLastFrame();
             timer.End();
             continue;
+        }
+        // bbport diagnosis (BB_TIME_SCALE, runtime_kernel.c): at a scale below 1 only that share
+        // of the vblank ticks reach the guest, matching its slowed clocks.
+        {
+            static double share = 0.0;
+            const double scale = runtime_time_scale_now();
+            if (scale < 1.0) {
+                share += scale;
+                if (share < 1.0) {
+                    timer.End();
+                    continue;
+                }
+                share -= 1.0;
+            }
         }
 
         // Check if it's time to take a request.

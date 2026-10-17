@@ -44,6 +44,73 @@ static int32_t fail_posix(int e) { *runtime_errno()=runtime_guest_errno(e); retu
 /* ---- clocks and sleeping ---- */
 static struct timespec process_start;
 __attribute__((constructor)) static void remember_start(void) { clock_gettime(CLOCK_MONOTONIC,&process_start); }
+/* BB_TIME_SCALE=<factor> (diagnosis): the guest's clocks (kernel clocks, process time, TSC;
+ * probe.c patches U3's own rdtsc instructions) run at that rate, and the vblank thread drops
+ * vblanks alike: the game believes it runs faster than it does (0.5 at a real 30 FPS looks
+ * like 60 FPS to it). BB_TIME_SCALE_FILE=<path>: the factor is read from that file every
+ * 250 ms and may change while the game runs (load a save at 1, then slow down); the clocks
+ * stay continuous. Each clock maps as guest = guest_base + (host - host_base) * scale. */
+typedef struct { int64_t host, guest; } TimeBase;
+static struct {
+    uint32_t seq; /* odd while a change is written */
+    double scale;
+    int changed;  /* the mapping is no longer the identity */
+    TimeBase mono, real, tsc;
+} clocks={0,1.0,0,{0,0},{0,0},{0,0}};
+static int64_t ts_ns(const struct timespec *t) { return (int64_t)t->tv_sec*1000000000+t->tv_nsec; }
+static int64_t map_clock(int which,int64_t host) {
+    for (;;) {
+        uint32_t s1=__atomic_load_n(&clocks.seq,__ATOMIC_ACQUIRE);
+        if (s1&1) continue;
+        const int changed=clocks.changed;
+        const double scale=clocks.scale;
+        const TimeBase b=which==0 ? clocks.mono : which==1 ? clocks.real : clocks.tsc;
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&clocks.seq,__ATOMIC_RELAXED)!=s1) continue;
+        return changed ? b.guest+(int64_t)((double)(host-b.host)*scale) : host;
+    }
+}
+static void set_time_scale(double scale) {
+    struct timespec a,b; clock_gettime(CLOCK_MONOTONIC,&a); clock_gettime(CLOCK_REALTIME,&b);
+    const int64_t mono=ts_ns(&a), real=ts_ns(&b), tsc=(int64_t)__rdtsc();
+    const TimeBase m={mono,map_clock(0,mono)}, r={real,map_clock(1,real)}, t={tsc,map_clock(2,tsc)};
+    __atomic_add_fetch(&clocks.seq,1,__ATOMIC_ACQ_REL);
+    clocks.mono=m; clocks.real=r; clocks.tsc=t; clocks.scale=scale; clocks.changed=1;
+    __atomic_add_fetch(&clocks.seq,1,__ATOMIC_RELEASE);
+    printf("Time scale: %g\n",scale);
+}
+static void *time_scale_watcher(void *path) {
+    for (double last=1.0;;) {
+        FILE *f=fopen((const char *)path,"r");
+        double value=1.0;
+        if (f) { if (fscanf(f,"%lf",&value)!=1 || value<=0) value=1.0; fclose(f); }
+        if (value!=last) { set_time_scale(value); last=value; }
+#ifdef _WIN32
+        compat_sleep_ns(250000000);
+#else
+        struct timespec nap={0,250000000}; nanosleep(&nap,NULL);
+#endif
+    }
+    return NULL;
+}
+static int time_scale_state;
+static void time_scale_init(void) {
+    const char *v=getenv("BB_TIME_SCALE"), *file=getenv("BB_TIME_SCALE_FILE");
+    const double scale=v && atof(v)>0 ? atof(v) : 1.0;
+    time_scale_state=scale!=1.0 || (file && *file);
+    if (scale!=1.0) set_time_scale(scale);
+    if (file && *file) { static pthread_t watcher; pthread_create(&watcher,NULL,time_scale_watcher,(void *)file); }
+}
+static int time_scale_setup(void) { /* 1 when the guest's clocks may be scaled */
+    static pthread_once_t once=PTHREAD_ONCE_INIT;
+    pthread_once(&once,time_scale_init);
+    return time_scale_state;
+}
+static void scale_clock(struct timespec *t,int which) {
+    if (!time_scale_setup()) return;
+    const int64_t ns=map_clock(which,ts_ns(t));
+    t->tv_sec=ns/1000000000; t->tv_nsec=ns%1000000000;
+}
 static int host_clock(uint32_t id,clockid_t *out) {
     switch (id) {
     case 0: case 9: case 10: *out=CLOCK_REALTIME; return 1;            /* REALTIME(_PRECISE/_FAST) */
@@ -60,6 +127,8 @@ static int clock_read(uint32_t id,GuestTimespec *ts) {
     if (!ts || !host_clock(id,&host)) return EINVAL;
     struct timespec t;
     if (clock_gettime(host,&t)) return errno;
+    if (host==CLOCK_MONOTONIC) scale_clock(&t,0);
+    else if (host==CLOCK_REALTIME || host==CLOCK_REALTIME_COARSE) scale_clock(&t,1);
     if (id==13) t.tv_nsec=0;
     ts->sec=t.tv_sec; ts->nsec=t.tv_nsec; return 0;
 }
@@ -77,15 +146,18 @@ static ABI int32_t posix_clock_getres(uint32_t id,GuestTimespec *ts) {
     return 0;
 }
 static ABI uint64_t process_time(void) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); scale_clock(&t,0);
     return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000+(uint64_t)((t.tv_nsec-process_start.tv_nsec)/1000);
 }
 static ABI uint64_t process_time_counter(void) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); scale_clock(&t,0);
     return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000000+(uint64_t)(t.tv_nsec-process_start.tv_nsec);
 }
 static ABI uint64_t process_time_frequency(void) { return 1000000000; }
-static ABI uint64_t read_tsc(void) { return __rdtsc(); }
+static ABI uint64_t read_tsc(void) {
+    const uint64_t now=__rdtsc();
+    return time_scale_setup() ? (uint64_t)map_clock(2,(int64_t)now) : now;
+}
 static uint64_t tsc_hz;
 static ABI uint64_t tsc_frequency(void) {
     if (!tsc_hz) {
@@ -102,6 +174,10 @@ static ABI uint64_t tsc_frequency(void) {
     }
     return tsc_hz;
 }
+/* The guest's TSC as rdtsc instructions patched for BB_TIME_SCALE get it (probe.c). */
+uint64_t runtime_guest_tsc(void) { return read_tsc(); }
+int runtime_time_scaled(void) { return time_scale_setup(); }
+double runtime_time_scale_now(void) { return time_scale_setup() ? clocks.scale : 1.0; }
 /* Shared with the GPU library so flip/label timestamps use the guest's clock. */
 uint64_t runtime_process_time_us(void) { return process_time(); }
 uint64_t runtime_process_time_counter(void) { return process_time_counter(); }
