@@ -262,6 +262,9 @@ public:
         return sw_stage == SwStage::Vertex && hw_stage == HwStage::Vertex &&
                runtime_info.hw.vs.motion_vectors && MotionVectors::positions_address != 0;
     }
+    [[nodiscard]] bool VertexCheck() const {
+        return hw_stage == HwStage::Vertex && Shader::VertexCheck::address != 0;
+    }
     [[nodiscard]] bool FragmentMotion() const {
         return sw_stage == SwStage::Fragment && runtime_info.hw.fs.motion_vectors;
     }

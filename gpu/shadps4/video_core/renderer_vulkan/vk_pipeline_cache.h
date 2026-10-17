@@ -37,6 +37,9 @@ struct Info;
 
 namespace Vulkan {
 
+/// bbport diagnosis (BB_VS_CHECK): prints the vertex shaders that output bad positions.
+void VertexCheckPoll();
+
 class Instance;
 class Scheduler;
 class ShaderCache;

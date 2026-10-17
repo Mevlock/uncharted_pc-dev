@@ -93,6 +93,13 @@ struct MotionVectors {
     static constexpr u32 FlagLoad = 2;
 };
 
+/// bbport diagnosis (BB_VS_CHECK=1): vertex shaders record their program hash at this buffer
+/// device address when they output a non-finite or huge position (u32 count, then hashes).
+struct VertexCheck {
+    static inline u64 address = 0;
+    static constexpr u32 Slots = 1024;
+};
+
 struct HwLocalRuntimeInfo {
     u32 ls_stride;
 

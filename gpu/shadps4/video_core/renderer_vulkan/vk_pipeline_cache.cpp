@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <map>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -32,8 +33,77 @@
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include <vk_mem_alloc.h>
 
 namespace Vulkan {
+
+// bbport diagnosis: BB_VS_CHECK=1 — every vertex shader records its hash when it outputs a
+// non-finite or huge position (Shader::VertexCheck); VertexCheckPoll prints them per frame.
+namespace {
+u32* vertex_check_mapped = nullptr;
+
+void SetupVertexCheck(const Instance& instance) {
+    const char* env = std::getenv("BB_VS_CHECK");
+    if (!env || env[0] != '1' || Shader::VertexCheck::address) {
+        return;
+    }
+    if (!instance.GetPhysicalDevice().getFeatures().vertexPipelineStoresAndAtomics) {
+        std::printf("VS check: vertexPipelineStoresAndAtomics unsupported, off\n");
+        return;
+    }
+    const VkBufferCreateInfo buffer_ci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = 16 + Shader::VertexCheck::Slots * 4,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+    };
+    const VmaAllocationCreateInfo alloc_ci{
+        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                 VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    };
+    VkBuffer buffer{};
+    VmaAllocation allocation{};
+    VmaAllocationInfo info{};
+    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer, &allocation,
+                        &info) != VK_SUCCESS || !info.pMappedData) {
+        std::printf("VS check: buffer creation failed, off\n");
+        return;
+    }
+    vertex_check_mapped = static_cast<u32*>(info.pMappedData);
+    std::memset(vertex_check_mapped, 0, 16 + Shader::VertexCheck::Slots * 4);
+    Shader::VertexCheck::address = instance.GetDevice().getBufferAddress({.buffer = buffer});
+    std::printf("VS check: on (vertex shaders compiled now, none from the shader cache)\n");
+}
+} // namespace
+
+void VertexCheckPoll() {
+    if (!vertex_check_mapped) {
+        return;
+    }
+    static u64 frame = 0, total = 0;
+    ++frame;
+    const u32 count = __atomic_load_n(&vertex_check_mapped[0], __ATOMIC_ACQUIRE);
+    if (count == 0) {
+        return;
+    }
+    std::map<u32, u32> per_shader;
+    for (u32 i = 0; i < std::min(count, Shader::VertexCheck::Slots); ++i) {
+        ++per_shader[vertex_check_mapped[4 + i]];
+    }
+    __atomic_store_n(&vertex_check_mapped[0], 0u, __ATOMIC_RELEASE);
+    total += count;
+    static u32 reports = 0;
+    if (reports++ < 400) {
+        std::string list;
+        for (const auto& [hash, n] : per_shader) {
+            list += fmt::format(" {:08x}x{}", hash, n);
+        }
+        std::printf("VS check: flip %llu: %u bad vertex positions:%s (%llu so far)\n",
+                    static_cast<unsigned long long>(frame), count, list.c_str(),
+                    static_cast<unsigned long long>(total));
+    }
+}
 
 /// bbport: a graphics pipeline being built on a compiler thread, from copies of what the GPU
 /// thread selected (the live stage infos change with every draw).
@@ -298,6 +368,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                              AmdGpu::Liverpool* liverpool_, u32 sparse_page_shift)
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
+    SetupVertexCheck(instance);
     sel.regs = &liverpool->regs;
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
@@ -919,7 +990,8 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    if (!Shader::Backend::SPIRV::IsForcedShader(info.pgm_hash)) {
+    if (!Shader::Backend::SPIRV::IsForcedShader(info.pgm_hash) &&
+        !(Shader::VertexCheck::address && info.hw_stage == Shader::HwStage::Vertex)) {
         RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
     }
 

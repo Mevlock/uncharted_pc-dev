@@ -65,6 +65,10 @@ void RegisterShaderMeta(const Shader::Info& info,
     if (!Storage::DataBase::Instance().IsOpened()) {
         return;
     }
+    // bbport: vertex shaders with the BB_VS_CHECK instrumentation embed a session-local address.
+    if (Shader::VertexCheck::address && info.hw_stage == Shader::HwStage::Vertex) {
+        return;
+    }
 
     Serialization::Archive ar;
     Serialization::Writer meta{ar};
@@ -119,6 +123,10 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     // Motion vertex shaders embed session-local buffer device addresses. They must be
     // recompiled for the current allocation, never loaded from a previous process.
     if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
+        return false;
+    }
+    // bbport: BB_VS_CHECK instruments every vertex shader: none comes from the cache.
+    if (info.hw_stage == Shader::HwStage::Vertex && Shader::VertexCheck::address) {
         return false;
     }
 

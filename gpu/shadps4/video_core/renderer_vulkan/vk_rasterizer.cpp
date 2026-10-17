@@ -4542,6 +4542,7 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
 }
 
 void Rasterizer::OnGuestFlip() {
+    VertexCheckPoll();
     DrawLog::Flip();
     PoolCheck::Flip();
     // The age of GPU data in the buffer cache's pages (BufferCache::InvalidateMemory).

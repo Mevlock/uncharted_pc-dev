@@ -186,7 +186,46 @@ static void EmitFragmentMotion(EmitContext& ctx) {
                     ctx.OpSelect(f32_type, front, dy, zero), valid, depth}));
 }
 
+// bbport diagnosis (BB_VS_CHECK, runtime_info.h VertexCheck): a non-finite or huge output
+// position records this shader's hash: an atomic counter at the address, then the slots.
+static void EmitVertexCheck(EmitContext& ctx) {
+    const Id f32_type = ctx.F32[1];
+    const Id u32_type = ctx.U32[1];
+    const Id bool_type = ctx.U1[1];
+    const Id position = ctx.OpLoad(ctx.F32[4], ctx.output_position);
+    Id bad = ctx.false_value;
+    for (u32 i = 0; i < 4; ++i) {
+        const Id c = ctx.OpCompositeExtract(f32_type, position, i);
+        const Id huge = ctx.OpFOrdGreaterThan(bool_type, ctx.OpFAbs(f32_type, c),
+                                              ctx.Constant(f32_type, 1.0e7f));
+        bad = ctx.OpLogicalOr(bool_type, bad,
+                              ctx.OpLogicalOr(bool_type, huge,
+                                              ctx.OpLogicalOr(bool_type, ctx.OpIsNan(bool_type, c),
+                                                              ctx.OpIsInf(bool_type, c))));
+    }
+    const Id record_label = ctx.OpLabel();
+    const Id merge_label = ctx.OpLabel();
+    ctx.OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(bad, record_label, merge_label);
+    ctx.AddLabel(record_label);
+    const Id scalar_ptr = ctx.TypePointer(spv::StorageClass::PhysicalStorageBuffer, u32_type);
+    const Id scope = ctx.ConstU32(static_cast<u32>(spv::Scope::Device));
+    const Id counter = ctx.OpConvertUToPtr(scalar_ptr, ctx.Constant(ctx.U64, VertexCheck::address));
+    const Id index = ctx.OpAtomicIAdd(u32_type, counter, scope, ctx.u32_zero_value, ctx.ConstU32(1u));
+    const Id slot = ctx.OpBitwiseAnd(u32_type, index, ctx.ConstU32(VertexCheck::Slots - 1));
+    const Id slot_address = ctx.OpIAdd(
+        ctx.U64, ctx.Constant(ctx.U64, VertexCheck::address + 16),
+        ctx.OpIMul(ctx.U64, ctx.OpUConvert(ctx.U64, slot), ctx.Constant(ctx.U64, u64(4))));
+    ctx.OpAtomicExchange(u32_type, ctx.OpConvertUToPtr(scalar_ptr, slot_address), scope,
+                         ctx.u32_zero_value, ctx.ConstU32(static_cast<u32>(ctx.info.pgm_hash)));
+    ctx.OpBranch(merge_label);
+    ctx.AddLabel(merge_label);
+}
+
 void EmitEpilogue(EmitContext& ctx) {
+    if (ctx.VertexCheck() && Sirit::ValidId(ctx.output_position)) {
+        EmitVertexCheck(ctx);
+    }
     if (Sirit::ValidId(ctx.motion_out_cur)) {
         EmitVertexMotion(ctx);
     }
