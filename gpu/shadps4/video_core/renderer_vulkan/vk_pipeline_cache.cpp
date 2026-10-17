@@ -45,25 +45,49 @@ extern "C" int runtime_ultrawide_fill;
 namespace Vulkan {
 
 extern std::atomic<u32> g_frame_scene_draws;
+extern std::atomic<bool> g_last_frame_scene;
 
 /// bbport: a draw of the UI over a widened frame: into the display buffer after the finished
 /// picture (BB_HUDLESS_PS), in a frame with the 3D scene (it fills the window). Its vertex
 /// shader squeezes the UI back to 16:9 in the middle (HwVertexRuntimeInfo::ui_squeeze_bits).
 /// Menus, loading screens and movies have no scene: their frames stay 16:9, the UI as it is.
 static bool UiSqueezeDraw(const AmdGpu::Regs& regs, const PipelineSelection& sel) {
-    if (!runtime_ultrawide_fill || g_frame_scene_draws.load(std::memory_order_relaxed) < 64) {
-        return false;
-    }
-    if (!regs.color_buffers[0] || !FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
+    if (!runtime_ultrawide_fill) {
         return false;
     }
     static const u32 hudless = [] {
         const char* env = std::getenv("BB_HUDLESS_PS");
         return env ? static_cast<u32>(std::strtoul(env, nullptr, 16)) : 0u;
     }();
+    const u32 scene = g_frame_scene_draws.load(std::memory_order_relaxed);
+    const bool scene_frame = g_last_frame_scene.load(std::memory_order_relaxed) || scene >= 64;
+    const VAddr target = regs.color_buffers[0] ? regs.color_buffers[0].Address() : 0;
+    const bool display = target && FrameCapture::IsDisplayBuffer(target);
     const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
     const auto* ps = sel.infos[static_cast<u32>(Shader::SwStage::Fragment)];
-    return vs && !(ps && static_cast<u32>(ps->pgm_hash) == hudless);
+    const bool is_hudless = ps && static_cast<u32>(ps->pgm_hash) == hudless;
+    const bool squeeze = scene_frame && display && vs && !is_hudless;
+    // BB_UI_LOG=1 (diagnosis): each kind of draw in a scene frame once, with the decision.
+    static const bool log = [] {
+        const char* env = std::getenv("BB_UI_LOG");
+        return env && env[0] == '1';
+    }();
+    if (log && scene_frame && !regs.depth_control.depth_enable) {
+        static std::mutex log_mutex;
+        static std::unordered_set<u64> seen;
+        const u64 vs_hash = vs ? vs->pgm_hash : 0, ps_hash = ps ? ps->pgm_hash : 0;
+        const u64 id = (vs_hash * 0x9E3779B97F4A7C15ull) ^ (ps_hash << 1) ^ target;
+        std::scoped_lock lock{log_mutex};
+        if (seen.size() < 400 && seen.insert(id).second) {
+            std::printf("UI log: target %#llx%s %ux%u vs %08x ps %08x scene %u%s -> %s\n",
+                        static_cast<unsigned long long>(target), display ? " (display)" : "",
+                        regs.color_buffers[0] ? regs.color_buffers[0].Pitch() : 0,
+                        regs.color_buffers[0] ? regs.color_buffers[0].Height() : 0,
+                        static_cast<u32>(vs_hash), static_cast<u32>(ps_hash), scene,
+                        is_hudless ? " (hudless)" : "", squeeze ? "squeezed" : "as is");
+        }
+    }
+    return squeeze;
 }
 
 // bbport diagnosis: BB_VS_CHECK=1 — every vertex shader records its hash when it outputs a

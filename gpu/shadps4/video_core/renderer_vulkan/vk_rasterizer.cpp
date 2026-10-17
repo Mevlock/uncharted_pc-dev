@@ -4657,9 +4657,15 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
 /// bbport: depth-tested draws on a full-size depth buffer since the last frame was prepared (the
 /// presenter's TakeSceneFrame; the pipeline cache's ultrawide UI test reads it too).
 std::atomic<u32> g_frame_scene_draws{0};
+/// bbport: the previous frame showed the 3D scene. The draw-preparation workers select pipelines
+/// ahead of the GPU thread, before this frame's scene draws are counted: the ultrawide UI test
+/// uses this (wrong for one frame when gameplay starts or stops).
+std::atomic<bool> g_last_frame_scene{false};
 
 bool Rasterizer::TakeSceneFrame() noexcept {
-    return g_frame_scene_draws.exchange(0, std::memory_order_relaxed) >= 64;
+    const bool scene = g_frame_scene_draws.exchange(0, std::memory_order_relaxed) >= 64;
+    g_last_frame_scene.store(scene, std::memory_order_relaxed);
+    return scene;
 }
 
 void Rasterizer::OnGuestFlip() {
