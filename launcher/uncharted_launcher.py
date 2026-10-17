@@ -298,6 +298,34 @@ def write_input_ini(s):
     return path
 
 
+def game_environment_frame_rate(s):
+    """The rate the games run at (BB_VBLANK_HZ)."""
+    try:
+        return max(1, int(s.get('frame_rate') or 60))
+    except ValueError:
+        return 60
+
+
+def game_frame_cap(s):
+    """BB_FPS_LIMIT for the Frame rate limit, or 0 to leave it unset. The port's limit counts the
+    game's own frames and lets them through as soon as they are ready, apart from the vblank: the
+    option counts the frames shown, generated ones included, and only ever lowers the rate."""
+    try:
+        limit = int(s.get('fps_limit') or 0)
+    except ValueError:
+        return 0
+    if limit <= 0:
+        return 0
+    multiplier = 1
+    if str(s.get('frame_generation') or 'off') != 'off':
+        try:
+            multiplier = max(1, int(s.get('frame_gen_multiplier') or 2))
+        except ValueError:
+            multiplier = 2
+    cap = max(1, round(limit / multiplier))
+    return cap if cap < game_environment_frame_rate(s) else 0
+
+
 def game_environment(s, start=None):
     env = dict(os.environ)
     try:
@@ -318,8 +346,9 @@ def game_environment(s, start=None):
     env['BB_FULLSCREEN'] = '1' if s['fullscreen'] else '0'
     env['BB_PRESENT_MODE'] = s['present_mode']
     env['BB_VBLANK_HZ'] = str(s.get('frame_rate') or '60')
-    if str(s.get('fps_limit') or '0') != '0':
-        env['BB_FPS_LIMIT'] = str(s['fps_limit'])
+    cap = game_frame_cap(s)
+    if cap:
+        env['BB_FPS_LIMIT'] = str(cap)
     env['BB_WINDOW_SIZE'] = str(s.get('window_size') or '1920x1080')
     env['BB_ULTRAWIDE'] = str(s.get('ultrawide') or 'auto')
     env['BB_FOV'] = str(s.get('fov') or '100')
@@ -987,8 +1016,9 @@ class Launcher:
             hint += ' ' + _('Your display runs at {} Hz.').format(refresh)
         self.row(f, _('Frame rate'), self.choice(f, 'frame_rate', FRAME_RATES, 34), hint)
         self.row(f, _('Frame rate limit'), self.choice(f, 'fps_limit', FPS_LIMITS, 34),
-                 _('Shows at most this many frames per second, whatever the frame rate above. Lower it '
-                   'for a steadier picture on a slower PC or to save power; Off keeps the normal behaviour.'))
+                 _('Shows at most this many frames per second, generated frames included. It only '
+                   'lowers the rate: a limit at or above what the frame rate (and frame generation) give '
+                   'changes nothing. Lower it for a steadier picture on a slower PC or to save power.'))
         self.section(f, _('Resolution'))
         self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
                  _('The games render at 1920 × 1080. A larger window, or fullscreen on a 1440p or 4K '
