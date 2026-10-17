@@ -343,14 +343,8 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
             }
             if ((!src_written || sync) && memory->IsValidGpuMapping(src.base_address, size) &&
                 memory->IsValidGpuMapping(dst.base_address, size)) {
-                if (memory->TryWriteBacking(reinterpret_cast<void*>(dst.base_address),
-                                            reinterpret_cast<const void*>(src.base_address),
-                                            size) &&
-                    !dst_gpu) {
-                    // Written past the page protection: textures there would keep their old
-                    // contents (see below). A GPU-data destination's images are the GPU's.
-                    rasterizer.GetTextureCache().InvalidateMemory(dst.base_address, size);
-                }
+                memory->TryWriteBacking(reinterpret_cast<void*>(dst.base_address),
+                                        reinterpret_cast<const void*>(src.base_address), size);
             }
         }
         static std::atomic<u32> total{0}, written{0};
@@ -365,6 +359,9 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
                         both && size < 1_MB ? " and in guest memory" : "", count, written_count);
         }
         if (!small_sync || size >= 1_MB) {
+            // The dispatch only flags an image starting at the destination; textures the
+            // engine moves this way can sit anywhere in it (#38: blue/white until re-uploaded).
+            rasterizer.GetTextureCache().InvalidateMemoryFromGPU(dst.base_address, size, true);
             return false;
         }
     }
@@ -374,12 +371,11 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
                                  reinterpret_cast<const void*>(src.base_address), size)) {
         return false;
     }
-    // The GPU's copy of the destination is refreshed from guest memory when next used, and so
-    // are textures there: the write went past the page protection that tells the texture cache.
-    // U3 streams texture data with this shader into memory another texture held; without it the
-    // old texture stayed (wrong textures in random places until a restart).
+    // The GPU's copy of the destination is refreshed from guest memory when next used; so are
+    // the textures in it (the backing write raises no fault that would tell the texture cache).
     buffer_cache.InvalidateMemory(dst.base_address, size, true);
-    rasterizer.GetTextureCache().InvalidateMemory(dst.base_address, size);
+    // Only the images overlapping the exact range: the uploads read guest memory here.
+    rasterizer.GetTextureCache().InvalidateMemoryFromGPU(dst.base_address, size, true);
     return true;
 }
 
