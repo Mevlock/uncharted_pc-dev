@@ -985,8 +985,9 @@ class Launcher:
                  _('The games render at 1920 × 1080. A larger window, or fullscreen on a 1440p or 4K '
                    'screen, gets the image upscaled to fit.'))
         self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
-                 _('On a screen or window wider than 16:9 (21:9, 32:9) the games show more at the sides '
-                   'and fill it, with no black bars. Menus, the HUD and cutscene videos are stretched.'))
+                 _('On a screen or window wider than 16:9 (21:9, 32:9) gameplay shows more at the sides '
+                   'and fills it. Menus, loading screens and cutscene videos stay 16:9; the in-game HUD '
+                   'is stretched for now.'))
         self.row(f, _('Field of view'), self.choice(f, 'fov', FIELDS_OF_VIEW, 34),
                  _('Shows more of the scene in every direction, also when aiming and in cutscenes.'))
         self.row(f, _('Upscaling'), self.choice(f, 'scaler', SCALERS, 34),

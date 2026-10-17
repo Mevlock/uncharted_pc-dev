@@ -98,12 +98,12 @@ bool CanBlitToSwapchain(const vk::PhysicalDevice physical_device, vk::Format for
 }
 
 // bbport: set by the loader when the game's view was widened to the window (runtime_ultrawide.c):
-// the frame then fills the window instead of being letterboxed.
+// gameplay frames then fill the window; menus, loading screens and movies stay 16:9.
 extern "C" int runtime_ultrawide_fill;
 
 static vk::Rect2D FitImage(s32 frame_width, s32 frame_height, s32 swapchain_width,
-                           s32 swapchain_height) {
-    if (runtime_ultrawide_fill) {
+                           s32 swapchain_height, bool fill = false) {
+    if (fill) {
         return vk::Rect2D{{0, 0}, {static_cast<u32>(swapchain_width), static_cast<u32>(swapchain_height)}};
     }
     float frame_aspect = static_cast<float>(frame_width) / frame_height;
@@ -125,8 +125,8 @@ static vk::Rect2D FitImage(s32 frame_width, s32 frame_height, s32 swapchain_widt
 }
 
 [[nodiscard]] vk::ImageBlit MakeImageBlitFit(s32 frame_width, s32 frame_height, s32 swapchain_width,
-                                             s32 swapchain_height) {
-    const auto& dst_rect = FitImage(frame_width, frame_height, swapchain_width, swapchain_height);
+                                             s32 swapchain_height, bool fill = false) {
+    const auto& dst_rect = FitImage(frame_width, frame_height, swapchain_width, swapchain_height, fill);
 
     return MakeImageBlit(frame_width, frame_height, dst_rect.extent.width, dst_rect.extent.height,
                          dst_rect.offset.x, dst_rect.offset.y);
@@ -440,7 +440,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         texture_cache.UpdateImage(image_id);
     }
 
-    Frame* frame = GetRenderFrame();
+    // bbport: a widened gameplay frame fills the window (runtime_ultrawide.c).
+    const bool scene = rasterizer->TakeSceneFrame();
+    Frame* frame = GetRenderFrame(runtime_ultrawide_fill && scene);
 
     const auto frame_subresources = vk::ImageSubresourceRange{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -860,7 +862,8 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
                                vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
         cmdbuf.blitImage(image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
                          vk::ImageLayout::eTransferDstOptimal,
-                         MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
+                         MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height,
+                                          frame->fill),
                          vk::Filter::eLinear);
         // bbport: the settings menu / FPS counter over the frame, at display resolution.
         BbOverlay::NotePresent();
@@ -936,7 +939,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
     return true;
 }
 
-Frame* Presenter::GetRenderFrame() {
+Frame* Presenter::GetRenderFrame(bool fill) {
     // Wait for free presentation frames
     Frame* frame;
     {
@@ -967,10 +970,13 @@ Frame* Presenter::GetRenderFrame() {
         }
     }
 
-    if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
+    const u32 want_width = fill ? window_frame_width : expected_frame_width;
+    const u32 want_height = fill ? window_frame_height : expected_frame_height;
+    if (frame->width != want_width || frame->height != want_height ||
         frame->is_hdr != swapchain.GetHDR()) {
-        RecreateFrame(frame, expected_frame_width, expected_frame_height);
+        RecreateFrame(frame, want_width, want_height);
     }
+    frame->fill = fill;
 
     return frame;
 }
@@ -981,11 +987,11 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
     }
     const float ratio = (float)width / (float)height;
 
+    // A frame that fills the window is scaled to its whole size (FSR 1 scales each axis).
+    window_frame_width = width;
+    window_frame_height = height;
     expected_frame_height = height;
     expected_frame_width = width;
-    if (runtime_ultrawide_fill) {
-        return; // widened view: the frame is scaled to the whole window (FSR 1 scales each axis)
-    }
     if (ratio > expected_ratio) {
         expected_frame_width = static_cast<s32>(height * expected_ratio);
     } else {

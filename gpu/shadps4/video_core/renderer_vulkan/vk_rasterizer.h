@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "shader_recompiler/ir/passes/srt.h"
@@ -51,6 +53,11 @@ public:
         return buffer_cache;
     }
 
+    /// bbport: whether the game drew its 3D scene (the G-buffer pass) since the last call: menus,
+    /// loading screens and movies have none. Read when a frame is prepared for display.
+    [[nodiscard]] bool TakeSceneFrame() noexcept {
+        return scene_frame.exchange(false, std::memory_order_relaxed);
+    }
     [[nodiscard]] TemporalUpscaler& GetUpscaler() noexcept {
         return *upscaler;
     }
@@ -349,6 +356,7 @@ private:
     std::unique_ptr<CameraMotion> camera_motion; // bbport: motion vectors (docs/upscaler.md)
     std::unique_ptr<SceneTargets> scene_targets;
     bool scene_started = false;
+    std::atomic<bool> scene_frame{false}; ///< TakeSceneFrame
     std::unique_ptr<ObjectMotion> object_motion;
     bool motion_draw = false;
     u64 motion_geometry{};    ///< vertex-stream identity of the current direct draw

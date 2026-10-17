@@ -41,6 +41,8 @@ struct Frame {
     vk::Semaphore ready_semaphore;
     u64 ready_tick;
     bool is_hdr{false};
+    /// bbport: fills the window instead of being letterboxed (a widened gameplay frame).
+    bool fill{false};
     u8 id{};
 
     /// bbport: frame generation: frames between the previous game frame and this one,
@@ -116,7 +118,7 @@ public:
     Frame* PrepareLastFrame();
 
 private:
-    Frame* GetRenderFrame();
+    Frame* GetRenderFrame(bool fill = false);
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
     /// bbport: the images frame generation writes for `frame` (its size, made once).
@@ -131,6 +133,8 @@ private:
 
 private:
     float expected_ratio{1920.0 / 1080.0f};
+    /// bbport: the window's size, for frames that fill it (widened gameplay frames).
+    u32 window_frame_width{1920}, window_frame_height{1080};
     u32 expected_frame_width{1920};
     u32 expected_frame_height{1080};
 
