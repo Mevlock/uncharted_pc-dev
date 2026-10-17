@@ -36,8 +36,10 @@ code runs directly on your PC and the graphics are translated to Vulkan. Unpack 
   the game could freeze and close with "GPU crash: the graphics device was lost". It came from
   the speed fix for that area and is fixed in 0.3. If it still happens to you, set Frame rate to
   60 on the Display page and open an issue with your `user\last_run.log`.
-- **Uncharted 3:** green or black shapes flash for a single frame on some characters (Sully's
-  shirt in Cartagena). It happens in shadPS4 too, so it's a shader translation problem. Not fixed yet.
+- **Uncharted 3:** green or black shapes flashed on some characters (Sully's shirt in Cartagena),
+  mostly on NVIDIA and Intel graphics. The cloth shader reads past its shared memory, which the PS4
+  answers with zeros and the translated shader did not. Fixed after 0.3.3. If you still see it,
+  open an issue with your `user\last_run.log`.
 - **Crash with "ASSERTION: GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick"**
   (mostly U1 after the first cutscene): the game expected the GPU side to be done with a frame it
   wanted to reuse, and stopped when it wasn't yet (shaders building on a first run). Fixed in
