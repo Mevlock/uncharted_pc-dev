@@ -333,3 +333,106 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size) {
     printf("Ultrawide: %d camera reads widened for %ux%u (field %#x), field of view %u%%%s\n", ns,
            width, height, field, fov_pct, switch_constants ? ", gameplay only" : "");
 }
+
+/* Render resolution (BB_RENDER_RES=WIDTHxHEIGHT, U3 for now): the engine's display mode table
+ * (one setter per mode: 1280x720, 1920x1080, 1024x600, 1168x657) fills a global display config:
+ * the render size three times (+0x08, +0x18, +0x24, with the 16:9 aspect at +0x20/+0x2c), the
+ * output size (+0x38), an eighth/quarter size (+0x40/+0x44), and passes the size as floats to the
+ * view setup. The 1920x1080 mode and the config's constructors get the new size; the aspect
+ * stays 16:9, so the image is widened by the ultrawide camera patch like the 1080p one was and
+ * the menus and the UI keep their layout. */
+static int match_mode_block(const uint8_t *p, uint8_t m) {
+    static const uint8_t fields[12] = {0x08, 0x0c, 0x14, 0x18, 0x1c, 0x20, 0x24, 0x28, 0x2c, 0x10, 0x40, 0x44};
+    static const uint32_t values[12] = {1920, 1080, 0, 1920, 1080, 0x3fe38e39, 1920, 1080, 0x3fe38e39,
+                                        0x3f800000, 0xf0, 0x10e};
+    for (int i = 0; i < 12; ++i) {
+        const uint8_t *q = p + 7 * i;
+        if (q[0] != 0xc7 || q[1] != m || q[2] != fields[i] || memcmp(q + 3, &values[i], 4)) return 0;
+    }
+    return 1;
+}
+
+void runtime_patch_resolution(uint8_t *code, uint64_t size) {
+    const char *env = getenv("BB_RENDER_RES");
+    unsigned width, height;
+    if (!env || !parse_size(env, &width, &height)) return;
+    if (width < 640 || height < 360 || width > 7680 || height > 4320) return;
+    width &= ~7u;
+    height &= ~3u;
+    float *floats = NULL;
+    int blocks = 0, sizes = 0, loads = 0, limits = 0;
+    for (uint64_t i = 0; i + 200 < size; ++i) {
+        if (code[i] != 0xc7 || code[i + 2] != 0x08) continue;
+        const uint8_t m = code[i + 1];
+        if ((m != 0x47 && m != 0x40) || !match_mode_block(code + i, m)) continue;
+        uint8_t *p = code + i;
+        const uint32_t w8 = width / 8, h4 = height / 4;
+        memcpy(p + 7 * 0 + 3, &width, 4);
+        memcpy(p + 7 * 1 + 3, &height, 4);
+        memcpy(p + 7 * 3 + 3, &width, 4);
+        memcpy(p + 7 * 4 + 3, &height, 4);
+        memcpy(p + 7 * 6 + 3, &width, 4);
+        memcpy(p + 7 * 7 + 3, &height, 4);
+        memcpy(p + 7 * 10 + 3, &w8, 4);
+        memcpy(p + 7 * 11 + 3, &h4, 4);
+        ++blocks;
+        /* The output size after it: movabs rax, (1080 << 32) | 1920, or two dword stores. */
+        static const uint8_t movabs[10] = {0x48, 0xb8, 0x80, 0x07, 0, 0, 0x38, 0x04, 0, 0};
+        const uint64_t packed = ((uint64_t)height << 32) | width;
+        for (int j = 84; j < 140; ++j) {
+            uint8_t *q = p + j;
+            if (!memcmp(q, movabs, 10)) {
+                memcpy(q + 2, &packed, 8);
+                ++sizes;
+                break;
+            }
+            if (q[0] == 0xc7 && q[1] == m && q[2] == 0x38 && q[7] == 0xc7 && q[8] == m && q[9] == 0x3c) {
+                uint32_t a, b;
+                memcpy(&a, q + 3, 4);
+                memcpy(&b, q + 10, 4);
+                if (a == 1920 && b == 1080) {
+                    memcpy(q + 3, &width, 4);
+                    memcpy(q + 10, &height, 4);
+                    ++sizes;
+                    break;
+                }
+            }
+        }
+        /* The view setup's float arguments: vmovss xmm0/xmm1/xmm2, [rip + ...] then jmp. */
+        for (int j = 84; j < 200; ++j) {
+            uint8_t *q = p + j;
+            if (q[0] == 0xc5 && q[1] == 0xfa && q[2] == 0x10 && q[3] == 0x05 && !memcmp(q + 8, "\xc5\xfa\x10\x0d", 4) &&
+                !memcmp(q + 16, "\xc5\xfa\x10\x15", 4) && q[24] == 0xe9) {
+                int32_t d;
+                memcpy(&d, q + 4, 4);
+                const float *was_w = (const float *)(q + 8 + d);
+                memcpy(&d, q + 12, 4);
+                const float *was_h = (const float *)(q + 16 + d);
+                if (*was_w != 1920.0f || *was_h != 1080.0f) break;
+                if (!floats && !(floats = alloc_near(code, size))) break;
+                floats[0] = (float)width;
+                floats[1] = (float)height;
+                int32_t rel = (int32_t)((intptr_t)&floats[0] - (intptr_t)(q + 8));
+                memcpy(q + 4, &rel, 4);
+                rel = (int32_t)((intptr_t)&floats[1] - (intptr_t)(q + 16));
+                memcpy(q + 12, &rel, 4);
+                ++loads;
+                break;
+            }
+        }
+    }
+    /* A size limit set next to it (2560x1216): raised if the new size is larger. */
+    for (uint64_t i = 0; i + 14 < size; ++i) {
+        uint8_t *q = code + i;
+        if (q[0] != 0xc7 || q[2] != 0x30 || q[7] != 0xc7 || q[8] != q[1] || q[9] != 0x34) continue;
+        uint32_t a, b;
+        memcpy(&a, q + 3, 4);
+        memcpy(&b, q + 10, 4);
+        if (a != 2560 || b != 1216) continue;
+        if (width > a) memcpy(q + 3, &width, 4);
+        if (height > b) memcpy(q + 10, &height, 4);
+        ++limits;
+    }
+    printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched)\n",
+           width, height, blocks, sizes, loads, limits);
+}
