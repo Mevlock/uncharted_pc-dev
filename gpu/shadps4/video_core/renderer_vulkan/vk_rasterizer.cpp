@@ -4198,10 +4198,16 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     std::pair<vk::ImageView, vk::ImageLayout> original_color{};
     const auto& regs = Regs();
     const auto& key = pipeline->GetGraphicsKey();
-    if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
-        scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) {
-        scene_started = true;
-        scene_frame.store(true, std::memory_order_relaxed);
+    if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first) {
+        const auto& depth = texture_cache.GetImage(db_desc.first);
+        // The G-buffer pass: this frame shows the 3D scene (TakeSceneFrame), whatever the
+        // upscaler settings (EligibleScene needs a scene size, set only with an upscaler).
+        if (depth.info.size.width >= 1280 && depth.info.size.height >= 720) {
+            scene_frame.store(true, std::memory_order_relaxed);
+        }
+        if (scene_targets->EligibleScene(depth)) {
+            scene_started = true;
+        }
     }
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
     // same image through the guest's native descriptor during this draw.

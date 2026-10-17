@@ -442,6 +442,13 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     // bbport: a widened gameplay frame fills the window (runtime_ultrawide.c).
     const bool scene = rasterizer->TakeSceneFrame();
+    if (runtime_ultrawide_fill && scene) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::printf("Ultrawide: gameplay frames fill the window (menus and movies stay 16:9)\n");
+        }
+    }
     Frame* frame = GetRenderFrame(runtime_ultrawide_fill && scene);
 
     const auto frame_subresources = vk::ImageSubresourceRange{
