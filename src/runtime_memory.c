@@ -805,11 +805,10 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
 typedef struct { uint64_t generation; uintptr_t start, end; int kind; } CachedRegion;
 static __thread CachedRegion region_cache[8];
 static __thread unsigned region_cache_next;
-/* bbport: off by default (BB_REGION_CACHE=1: on). With it (a timing change on the GPU thread)
- * the Uncharted 3 Cartagena glitches (screen-size triangles) were frequent; the cause is open. */
+/* BB_REGION_CACHE=0 turns it off. */
 static int region_cache_enabled(void) {
     static int value=-1;
-    if (value<0) { const char *v=getenv("BB_REGION_CACHE"); value=v && v[0]=='1'; }
+    if (value<0) { const char *v=getenv("BB_REGION_CACHE"); value=!(v && v[0]=='0'); }
     return value;
 }
 static const CachedRegion *cached_region(uintptr_t address) {
