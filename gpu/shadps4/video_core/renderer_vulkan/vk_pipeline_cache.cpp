@@ -12,6 +12,7 @@
 #include <string>
 #include <algorithm>
 #include <thread>
+#include <bit>
 #include <unordered_set>
 
 #include "common/hash.h"
@@ -29,13 +30,41 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/motion_history.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
+#include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include <vk_mem_alloc.h>
 
+// bbport: ultrawide (runtime_ultrawide.c): the horizontal widening factor, and whether frames
+// with the 3D scene fill the window.
+extern "C" float runtime_ultrawide_scale;
+extern "C" int runtime_ultrawide_fill;
+
 namespace Vulkan {
+
+extern std::atomic<u32> g_frame_scene_draws;
+
+/// bbport: a draw of the UI over a widened frame: into the display buffer after the finished
+/// picture (BB_HUDLESS_PS), in a frame with the 3D scene (it fills the window). Its vertex
+/// shader squeezes the UI back to 16:9 in the middle (HwVertexRuntimeInfo::ui_squeeze_bits).
+/// Menus, loading screens and movies have no scene: their frames stay 16:9, the UI as it is.
+static bool UiSqueezeDraw(const AmdGpu::Regs& regs, const PipelineSelection& sel) {
+    if (!runtime_ultrawide_fill || g_frame_scene_draws.load(std::memory_order_relaxed) < 64) {
+        return false;
+    }
+    if (!regs.color_buffers[0] || !FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
+        return false;
+    }
+    static const u32 hudless = [] {
+        const char* env = std::getenv("BB_HUDLESS_PS");
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 16)) : 0u;
+    }();
+    const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
+    const auto* ps = sel.infos[static_cast<u32>(Shader::SwStage::Fragment)];
+    return vs && !(ps && static_cast<u32>(ps->pgm_hash) == hudless);
+}
 
 // bbport diagnosis: BB_VS_CHECK=1 — every vertex shader records its hash when it outputs a
 // non-finite or huge position (Shader::VertexCheck); VertexCheckPoll prints them per frame.
@@ -292,6 +321,8 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
             regs.clipper_control.clip_space == AmdGpu::ClipSpace::MinusWToW;
         info.hw.vs.clip_disable = regs.IsClipDisabled();
         info.hw.vs.motion_vectors = sel.motion;
+        info.hw.vs.ui_squeeze_bits =
+            sel.ui_squeeze ? std::bit_cast<u32>(runtime_ultrawide_scale) : 0u;
         break;
     }
     case HwStage::Fragment: {
@@ -729,6 +760,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
                           regs.stage_enable.raw == AmdGpu::ShaderStageEnable::VgtStages::Vs;
     }
     sel.motion = false;
+    sel.ui_squeeze = false;
 
     // First pass to fill render target information needed by shader recompiler
     for (s32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS && !skip_cb_binding; ++cb) {
@@ -808,6 +840,13 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         if (sel.motion && !RefreshGraphicsStages(sel)) {
             return false;
         }
+    }
+    if (UiSqueezeDraw(regs, sel)) {
+        sel.ui_squeeze = true;
+        if (!RefreshGraphicsStages(sel)) {
+            return false;
+        }
+        key.ui_squeeze = 1;
     }
 
     // Second pass to mask out render targets not written by shader and fill remaining info

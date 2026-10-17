@@ -67,6 +67,8 @@ void PrintFaultHistory(VAddr address, u64 size);
 } // namespace VideoCore
 namespace Vulkan {
 
+extern std::atomic<u32> g_frame_scene_draws; // bbport: TakeSceneFrame
+
 // bbport diagnosis: BB_SUBMIT_CHECK=<hex address>:<hex size> (U3's bone pool:
 // 11a1c0ab00:ffff0). Each graphics submission fingerprints the range's pages as the guest hands
 // the commands over; vertex shader reads of the range while that submission is processed compare
@@ -905,7 +907,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // bbport: depth-tested draws on a full-size depth buffer: the 3D scene (TakeSceneFrame).
     if (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid() &&
         regs.depth_buffer.Pitch() >= 1280 && regs.depth_buffer.Height() >= 720) {
-        scene_frame.fetch_add(1, std::memory_order_relaxed);
+        g_frame_scene_draws.fetch_add(1, std::memory_order_relaxed);
     }
     if ((regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
         (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid())) {
@@ -4650,6 +4652,14 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
     }
     buffer_cache.ReadMemory(addr, size, false, assume_locks);
     return true;
+}
+
+/// bbport: depth-tested draws on a full-size depth buffer since the last frame was prepared (the
+/// presenter's TakeSceneFrame; the pipeline cache's ultrawide UI test reads it too).
+std::atomic<u32> g_frame_scene_draws{0};
+
+bool Rasterizer::TakeSceneFrame() noexcept {
+    return g_frame_scene_draws.exchange(0, std::memory_order_relaxed) >= 64;
 }
 
 void Rasterizer::OnGuestFlip() {

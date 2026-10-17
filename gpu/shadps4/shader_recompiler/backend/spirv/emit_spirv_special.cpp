@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
+
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/debug_print.h"
@@ -234,6 +236,22 @@ static void EmitVertexCheck(EmitContext& ctx) {
     ctx.AddLabel(merge_label);
 }
 
+// bbport: ultrawide UI (HwVertexRuntimeInfo::ui_squeeze_bits): x *= k inside the screen, so the
+// UI of a widened frame keeps its 16:9 layout in the middle; vertices on the left or right edge
+// (full-screen quads, bars) stay there.
+static void EmitUiSqueeze(EmitContext& ctx) {
+    const Id f32_type = ctx.F32[1];
+    const float k = std::bit_cast<float>(ctx.runtime_info.hw.vs.ui_squeeze_bits);
+    const Id position = ctx.OpLoad(ctx.F32[4], ctx.output_position);
+    const Id x = ctx.OpCompositeExtract(f32_type, position, 0);
+    const Id w = ctx.OpCompositeExtract(f32_type, position, 3);
+    const Id edge = ctx.OpFMul(f32_type, ctx.OpFAbs(f32_type, w), ctx.Constant(f32_type, 0.999f));
+    const Id inside = ctx.OpFOrdLessThan(ctx.U1[1], ctx.OpFAbs(f32_type, x), edge);
+    const Id squeezed = ctx.OpSelect(f32_type, inside,
+                                     ctx.OpFMul(f32_type, x, ctx.Constant(f32_type, k)), x);
+    ctx.OpStore(ctx.output_position, ctx.OpCompositeInsert(ctx.F32[4], squeezed, position, 0));
+}
+
 void EmitEpilogue(EmitContext& ctx) {
     if (ctx.VertexCheck() && Sirit::ValidId(ctx.output_position)) {
         EmitVertexCheck(ctx);
@@ -250,6 +268,10 @@ void EmitEpilogue(EmitContext& ctx) {
     }
     if (ctx.hw_stage == HwStage::Vertex && ctx.runtime_info.hw.vs.clip_disable) {
         ConvertPositionToClipSpace(ctx);
+    }
+    if (ctx.hw_stage == HwStage::Vertex && ctx.runtime_info.hw.vs.ui_squeeze_bits &&
+        Sirit::ValidId(ctx.output_position)) {
+        EmitUiSqueeze(ctx);
     }
 }
 

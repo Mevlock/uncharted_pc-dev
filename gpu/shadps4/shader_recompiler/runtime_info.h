@@ -122,6 +122,10 @@ struct HwVertexRuntimeInfo {
     u32 user_clip_plane_mask{};
     /// bbport: object motion vectors (G-buffer draws), see MotionVectors below.
     bool motion_vectors{};
+    /// bbport: ultrawide UI (runtime_ultrawide.c): the horizontal clip position is multiplied by
+    /// this factor (float bits; 0 = off), except at the screen edges, so the UI drawn over a
+    /// widened frame keeps its 16:9 layout in the middle.
+    u32 ui_squeeze_bits{};
 
     bool operator==(const HwVertexRuntimeInfo& other) const noexcept = default;
 };

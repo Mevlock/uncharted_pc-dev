@@ -24,6 +24,9 @@
 
 /* Read by the presenter: stretch the frame over the whole window instead of letterboxing it. */
 int runtime_ultrawide_fill;
+/* The horizontal factor k (<= 1): the UI drawn over a widened frame is squeezed by it back to
+ * its 16:9 layout (the pipeline cache's ultrawide UI vertex shaders). */
+float runtime_ultrawide_scale = 1.0f;
 
 typedef struct {
     uint8_t op;  /* 0x10 vmovss, 0x59 vmulss, 0x5e vdivss */
@@ -274,6 +277,7 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size) {
         memcpy(site + 5, nops[len - 5], len - 5u);
     }
     runtime_ultrawide_fill = wide;
+    runtime_ultrawide_scale = k;
     printf("Ultrawide: %d camera reads widened for %ux%u (field %#x), field of view %u%%\n", ns, width,
            height, field, fov_pct);
 }
