@@ -4680,8 +4680,24 @@ u32 SceneFrameDraws() {
 }
 
 bool Rasterizer::TakeSceneFrame() noexcept {
-    const bool scene =
+    const bool raw =
         g_frame_scene_draws.exchange(0, std::memory_order_relaxed) >= SceneFrameDraws();
+    // Gameplay starts after 3 such frames in a row and ends after 30 without (half a second):
+    // sparse gameplay frames (close-ups in U3's scripted scenes) do not flip it to a menu, while
+    // menus, title screens and loading last much longer. BB_ULTRAWIDE_EXIT_FRAMES overrides 30.
+    static const u32 exit_frames = [] {
+        const char* env = std::getenv("BB_ULTRAWIDE_EXIT_FRAMES");
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 30u;
+    }();
+    static bool gameplay = false;
+    static u32 run = 0;
+    if (raw == gameplay) {
+        run = 0;
+    } else if (++run >= (gameplay ? exit_frames : 3u)) {
+        gameplay = raw;
+        run = 0;
+    }
+    const bool scene = gameplay;
     g_last_frame_scene.store(scene, std::memory_order_relaxed);
     // The game's camera: widened for gameplay, its own for menus and title screens.
     runtime_ultrawide_select(scene ? 1 : 0);
