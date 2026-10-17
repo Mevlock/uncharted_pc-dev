@@ -4662,8 +4662,19 @@ std::atomic<u32> g_frame_scene_draws{0};
 /// uses this (wrong for one frame when gameplay starts or stops).
 std::atomic<bool> g_last_frame_scene{false};
 
+/// bbport: depth-tested draws that make a frame gameplay. Gameplay has hundreds to thousands
+/// (shadow maps included); U2's title screen has 50-130. BB_ULTRAWIDE_SCENE_DRAWS overrides it.
+u32 SceneFrameDraws() {
+    static const u32 draws = [] {
+        const char* env = std::getenv("BB_ULTRAWIDE_SCENE_DRAWS");
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 256u;
+    }();
+    return draws;
+}
+
 bool Rasterizer::TakeSceneFrame() noexcept {
-    const bool scene = g_frame_scene_draws.exchange(0, std::memory_order_relaxed) >= 64;
+    const bool scene =
+        g_frame_scene_draws.exchange(0, std::memory_order_relaxed) >= SceneFrameDraws();
     g_last_frame_scene.store(scene, std::memory_order_relaxed);
     return scene;
 }

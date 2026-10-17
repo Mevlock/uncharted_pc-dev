@@ -46,6 +46,7 @@ namespace Vulkan {
 
 extern std::atomic<u32> g_frame_scene_draws;
 extern std::atomic<bool> g_last_frame_scene;
+u32 SceneFrameDraws();
 
 /// bbport: a draw of the UI over a widened frame: into the display buffer after the finished
 /// picture (BB_HUDLESS_PS), in a frame with the 3D scene (it fills the window). Its vertex
@@ -60,7 +61,8 @@ static bool UiSqueezeDraw(const AmdGpu::Regs& regs, const PipelineSelection& sel
         return env ? static_cast<u32>(std::strtoul(env, nullptr, 16)) : 0u;
     }();
     const u32 scene = g_frame_scene_draws.load(std::memory_order_relaxed);
-    const bool scene_frame = g_last_frame_scene.load(std::memory_order_relaxed) || scene >= 64;
+    const bool scene_frame =
+        g_last_frame_scene.load(std::memory_order_relaxed) || scene >= SceneFrameDraws();
     const VAddr target = regs.color_buffers[0] ? regs.color_buffers[0].Address() : 0;
     const bool display = target && FrameCapture::IsDisplayBuffer(target);
     const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
