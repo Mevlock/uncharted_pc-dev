@@ -4,7 +4,6 @@
 #pragma once
 
 #include <unordered_map>
-#include <unordered_set>
 #include <shared_mutex>
 #include <variant>
 #include <boost/container/static_vector.hpp>
@@ -99,8 +98,6 @@ struct PipelineSelection {
     GraphicsPipelineKey graphics_key{};
     bool motion = false;
     bool ui_squeeze = false; ///< bbport: ultrawide UI draw (UiSqueezeDraw)
-    /// bbport: a stage's shader is being translated on a compiler thread: the draw skips.
-    bool module_pending = false;
     DrawIndirectParams draw_indirect_params{};
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
 };
@@ -180,8 +177,7 @@ private:
     vk::ShaderModule CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                    const std::span<const u32>& code, size_t perm_idx,
                                    Shader::Backend::Bindings& binding);
-    /// bbport: CompileModule for any thread: own pools, the SPIR-V returned instead of saved
-    /// (the permutation index is known only when the GPU thread publishes it).
+    /// bbport: CompileModule without saving: the SPIR-V is returned (CompileModule saves it).
     vk::ShaderModule TranslateModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                      const std::span<const u32>& code, size_t perm_idx,
                                      Shader::Backend::Bindings& binding, Shader::Pools& pools,
@@ -217,13 +213,6 @@ private:
         pending_graphics;
     bool AsyncCompilation() const;
     void PublishGraphics();
-    /// bbport: graphics shaders translated on the compiler threads (BB_ASYNC_SHADER_MODULES=0:
-    /// on the GPU thread); the draws that need one skip until it is published. By shader hash.
-    tsl::robin_map<u64, std::vector<std::shared_ptr<struct AsyncModuleBuild>>> pending_modules;
-    /// Shaders whose background translation failed: translated on the GPU thread from then on.
-    std::unordered_set<u64> sync_modules;
-    bool AsyncModules(const PipelineSelection& sel, Shader::HwStage stage) const;
-    void PublishModules();
     PipelineSelection sel{}; ///< GPU thread selection state
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
