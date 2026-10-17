@@ -4681,12 +4681,13 @@ std::atomic<bool> g_last_frame_scene{false};
 
 std::atomic<u32> g_frame_menu_draws{0};
 
-/// bbport: depth-tested draws that make a frame gameplay: U2's title screen has 50-130 (provisional,
-/// see the scene draw statistics). BB_ULTRAWIDE_SCENE_DRAWS overrides 140.
+/// bbport: depth-tested draws that make a frame gameplay. Measured: U2's title screen 118-129 and
+/// main menu up to 151; U3's opening (scripted scenes) at least 216, gameplay hundreds to
+/// thousands. BB_ULTRAWIDE_SCENE_DRAWS overrides 190.
 u32 SceneFrameDraws() {
     static const u32 draws = [] {
         const char* env = std::getenv("BB_ULTRAWIDE_SCENE_DRAWS");
-        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 140u;
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 190u;
     }();
     return draws;
 }
