@@ -295,6 +295,12 @@ s32 PS4_SYSV_ABI sceVideoOutGetResolutionStatus(s32 handle, SceVideoOutResolutio
     }
 
     *status = port->resolution;
+    // bbport: whether and when the game asks for its output size (BB_INTERNAL_WIDTH/HEIGHT).
+    static std::atomic<u32> asked{0};
+    if (asked.fetch_add(1, std::memory_order_relaxed) < 3) {
+        std::printf("VideoOut: the game asked for the output resolution: %dx%d reported\n",
+                    status->full_width, status->full_height);
+    }
     return ORBIS_OK;
 }
 

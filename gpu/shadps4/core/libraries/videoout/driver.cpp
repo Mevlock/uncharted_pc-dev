@@ -214,6 +214,11 @@ VideoOutPort* VideoOutDriver::GetPort(int handle) {
 
 int VideoOutDriver::RegisterBuffers(VideoOutPort* port, s32 startIndex, void* const* addresses,
                                     s32 bufferNum, const BufferAttribute* attribute) {
+    // bbport: the display buffers the game registers (their size follows the game's own render
+    // resolution, not necessarily the one VideoOut reports).
+    std::printf("VideoOut: the game registered %d display buffers of %ux%u (pitch %u, format %#x)\n",
+                bufferNum, attribute->width, attribute->height, attribute->pitch_in_pixel,
+                static_cast<u32>(attribute->pixel_format));
     const s32 group_index = port->FindFreeGroup();
     if (group_index >= MaxDisplayBufferGroups) {
         return ORBIS_VIDEO_OUT_ERROR_NO_EMPTY_SLOT;
