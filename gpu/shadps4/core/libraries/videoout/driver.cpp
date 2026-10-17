@@ -35,6 +35,9 @@ extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
 namespace Vulkan {
 extern std::atomic<u64> g_bb_compile_ns;
 extern std::atomic<u32> g_bb_compiles;
+extern std::atomic<u64> g_bb_translate_ns, g_bb_emit_ns, g_bb_module_ns, g_bb_cs_pipeline_ns,
+    g_bb_gfx_pipeline_ns;
+extern std::atomic<u32> g_bb_translations, g_bb_cs_pipelines, g_bb_gfx_pipelines;
 } // namespace Vulkan
 
 extern "C" double runtime_time_scale_now(void);
@@ -512,6 +515,20 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
+            // Where the compile time went (shader translation, SPIR-V, modules, pipelines).
+            if (compiles) {
+                std::printf("Compile time: %u shaders translated %.1f ms, SPIR-V %.1f ms, modules "
+                            "%.1f ms; %u compute pipelines %.1f ms; %u graphics pipelines on the "
+                            "GPU thread %.1f ms\n",
+                            Vulkan::g_bb_translations.exchange(0),
+                            Vulkan::g_bb_translate_ns.exchange(0) / 1e6,
+                            Vulkan::g_bb_emit_ns.exchange(0) / 1e6,
+                            Vulkan::g_bb_module_ns.exchange(0) / 1e6,
+                            Vulkan::g_bb_cs_pipelines.exchange(0),
+                            Vulkan::g_bb_cs_pipeline_ns.exchange(0) / 1e6,
+                            Vulkan::g_bb_gfx_pipelines.exchange(0),
+                            Vulkan::g_bb_gfx_pipeline_ns.exchange(0) / 1e6);
+            }
             // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
             if (intervals.size() > 2) {
                 std::vector<double> sorted = intervals;

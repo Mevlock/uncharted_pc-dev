@@ -588,7 +588,22 @@ void PipelineCache::PublishGraphics() {
 // bbport: shader/pipeline compile time on the GPU thread, reported by BB_FRAME_STATS.
 std::atomic<u64> g_bb_compile_ns;
 std::atomic<u32> g_bb_compiles;
+/// bbport (BB_FRAME_STATS): where the compile time goes: GCN translation, SPIR-V emission,
+/// shader module creation, compute pipelines and graphics pipelines built on the GPU thread.
+std::atomic<u64> g_bb_translate_ns, g_bb_emit_ns, g_bb_module_ns, g_bb_cs_pipeline_ns,
+    g_bb_gfx_pipeline_ns;
+std::atomic<u32> g_bb_translations, g_bb_cs_pipelines, g_bb_gfx_pipelines;
 namespace {
+struct SpanTimer {
+    std::atomic<u64>& total;
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    explicit SpanTimer(std::atomic<u64>& total_) : total{total_} {}
+    ~SpanTimer() {
+        total += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now() - start)
+                         .count());
+    }
+};
 struct CompileTimer {
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     ~CompileTimer() {
@@ -700,6 +715,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(sel.graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
         CompileTimer timer;
+        SpanTimer gfx_timer{g_bb_gfx_pipeline_ns};
+        ++g_bb_gfx_pipelines;
 
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
@@ -731,6 +748,8 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
         LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
         CompileTimer timer;
+        SpanTimer cs_timer{g_bb_cs_pipeline_ns};
+        ++g_bb_cs_pipelines;
 
         ComputePipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
@@ -1089,12 +1108,19 @@ vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
 
+    ++g_bb_translations;
+    auto translate_timer = std::make_optional<SpanTimer>(g_bb_translate_ns);
     const auto ir_program =
         Shader::TranslateProgram(code, translate_pools, info, runtime_info, profile);
-    spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    translate_timer.reset();
+    {
+        SpanTimer emit_timer{g_bb_emit_ns};
+        spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    }
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
     vk::ShaderModule module;
+    SpanTimer module_timer{g_bb_module_ns};
 
     auto patch = GetShaderPatch(info.pgm_hash, info.hw_stage, perm_idx, "spv");
     const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
@@ -1153,8 +1179,11 @@ struct AsyncModuleBuild {
 
 bool PipelineCache::AsyncModules(const PipelineSelection& selection, Shader::HwStage stage) const {
     static const bool enabled = [] {
+        // Off by default: translation runs the SRT walker over the draw's resource tables,
+        // which the game has reused by the time a compiler thread gets to it (garbage sharps,
+        // an assertion in U3's men's room). BB_ASYNC_SHADER_MODULES=1: on (experiment).
         const char* env = std::getenv("BB_ASYNC_SHADER_MODULES");
-        return !(env && env[0] == '0');
+        return env && env[0] == '1';
     }();
     return enabled && compiler && stage != Shader::HwStage::Compute && selection.regs &&
            !selection.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect();
