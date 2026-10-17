@@ -555,6 +555,7 @@ PipelineCache::~PipelineCache() {
         compiler->Stop();
     }
     pending_graphics.clear();
+    pending_modules.clear();
 }
 
 bool PipelineCache::AsyncCompilation() const {
@@ -644,6 +645,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                                                            const PreparedDraw* prepared) {
     if (!pending_graphics.empty()) {
         PublishGraphics();
+    }
+    if (!pending_modules.empty()) {
+        PublishModules();
     }
     used_prepared = nullptr;
     if (prepared) {
@@ -959,6 +963,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         std::tie(sel.infos[stage_out_idx], sel.modules[stage_out_idx], fetch_shader_,
                  key.stage_hashes[stage_out_idx]) =
             GetProgram(sel, stage_in, stage_out, params, binding);
+        if (sel.module_pending) {
+            return false; // translated on a compiler thread: the draw skips
+        }
         if (fetch_shader_) {
             sel.fetch_shader = fetch_shader_;
         }
@@ -967,8 +974,12 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
 
     sel.infos.fill(nullptr);
     sel.modules.fill(nullptr);
+    sel.module_pending = false;
 
     bind_stage(HwStage::Fragment, SwStage::Fragment);
+    if (sel.module_pending) {
+        return false;
+    }
 
     const auto* fs_info = sel.infos[static_cast<u32>(SwStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
@@ -1032,6 +1043,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         break;
     case AmdGpu::ShaderStageEnable::VgtStages::Vs:
         bind_stage(HwStage::Vertex, SwStage::Vertex);
+        if (sel.module_pending) {
+            return false;
+        }
         break;
     default:
         LOG_WARNING(Render_Vulkan, "unimplemented shader stage {}", (u32)regs.stage_enable.raw);
@@ -1065,16 +1079,19 @@ bool PipelineCache::RefreshComputeKey() {
     return true;
 }
 
-vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
-                                              const std::span<const u32>& code, size_t perm_idx,
-                                              Shader::Backend::Bindings& binding) {
+vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
+                                                Shader::RuntimeInfo& runtime_info,
+                                                const std::span<const u32>& code, size_t perm_idx,
+                                                Shader::Backend::Bindings& binding,
+                                                Shader::Pools& translate_pools,
+                                                std::vector<u32>& spv) {
     LOG_INFO(Render_Vulkan, "Compiling {} shader {:#x} {}", info.hw_stage, info.pgm_hash,
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
-    CompileTimer timer;
 
-    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
-    auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    const auto ir_program =
+        Shader::TranslateProgram(code, translate_pools, info, runtime_info, profile);
+    spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
     vk::ShaderModule module;
@@ -1088,11 +1105,6 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
-    if (!Shader::Backend::SPIRV::IsForcedShader(info.pgm_hash) &&
-        !(Shader::VertexCheck::address && info.hw_stage == Shader::HwStage::Vertex)) {
-        RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
-    }
-
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
     Vulkan::SetObjectName(instance.GetDevice(), module, name);
     if (EmulatorSettings.IsShaderCollect()) {
@@ -1100,6 +1112,121 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
                                  patch ? *patch : std::span<const u32>{}, is_patched);
     }
     return module;
+}
+
+/// bbport: whether a shader is saved to the shader cache.
+static bool SaveShaderBinary(u64 pgm_hash, Shader::HwStage stage) {
+    return !Shader::Backend::SPIRV::IsForcedShader(pgm_hash) &&
+           !(Shader::VertexCheck::address && stage == Shader::HwStage::Vertex);
+}
+
+vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
+                                              const std::span<const u32>& code, size_t perm_idx,
+                                              Shader::Backend::Bindings& binding) {
+    CompileTimer timer;
+    std::vector<u32> spv;
+    const auto module = TranslateModule(info, runtime_info, code, perm_idx, binding, pools, spv);
+    if (SaveShaderBinary(info.pgm_hash, info.hw_stage)) {
+        RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
+    }
+    return module;
+}
+
+/// bbport: a graphics shader (new, or a new permutation) translated on a compiler thread.
+struct AsyncModuleBuild {
+    AsyncJob<std::shared_ptr<AsyncModuleBuild>> job;
+    bool new_program = false;
+    Shader::HwStage hw_stage{};
+    Shader::SwStage sw_stage{};
+    /// The draw's user data, copied: the registers change while the shader is translated.
+    std::array<u32, Shader::ShaderParams::NumShaderUserData> user_data{};
+    std::optional<Shader::ShaderParams> params;
+    Shader::RuntimeInfo runtime_info{};
+    Shader::Backend::Bindings binding{};
+    Shader::StageSpecialization spec{}; ///< permutations: from the GPU thread; new: translated
+    size_t perm_idx = 0;                 ///< provisional (dumps, patches)
+    std::unique_ptr<Program> program;   ///< a new program, translated
+    vk::ShaderModule module{};
+    std::vector<u32> spv;
+    bool fault = false; ///< guest memory was gone: translated on the GPU thread instead
+};
+
+bool PipelineCache::AsyncModules(const PipelineSelection& selection, Shader::HwStage stage) const {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_ASYNC_SHADER_MODULES");
+        return !(env && env[0] == '0');
+    }();
+    return enabled && compiler && stage != Shader::HwStage::Compute && selection.regs &&
+           !selection.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect();
+}
+
+void PipelineCache::PublishModules() {
+    const auto device = instance.GetDevice();
+    for (auto it = pending_modules.begin(); it != pending_modules.end();) {
+        const u64 hash = it->first;
+        auto& list = it.value();
+        for (auto b = list.begin(); b != list.end();) {
+            auto& build = **b;
+            const auto result = build.job.Poll();
+            if (!result) {
+                if (build.job.Failed()) {
+                    std::printf("Pipelines: shader %#llx failed to translate in the background: %s\n",
+                                static_cast<unsigned long long>(hash), build.job.Error().c_str());
+                    sync_modules.insert(hash);
+                    b = list.erase(b);
+                } else {
+                    ++b;
+                }
+                continue;
+            }
+            if (build.fault || !build.module) {
+                sync_modules.insert(hash);
+                b = list.erase(b);
+                continue;
+            }
+            const bool save = SaveShaderBinary(hash, build.hw_stage);
+            if (build.new_program) {
+                if (program_cache.contains(hash)) {
+                    device.destroyShaderModule(build.module);
+                } else {
+                    auto& program = build.program;
+                    const u64 perm_hash = HashCombine(hash, 0);
+                    RegisterShaderMeta(program->info, build.spec.fetch_shader_data, build.spec,
+                                       perm_hash, 0);
+                    if (save) {
+                        RegisterShaderBinary(std::move(build.spv), hash, 0);
+                    }
+                    program->AddPermut(build.module, std::move(build.spec));
+                    program->info_template = std::make_unique<Shader::Info>(program->info);
+                    std::unique_lock lk{programs_mutex};
+                    program_cache.emplace(hash, std::move(program));
+                }
+            } else {
+                const auto found = program_cache.find(hash);
+                Program* program = found != program_cache.end() ? found->second.get() : nullptr;
+                if (!program || std::ranges::find(program->modules, build.spec,
+                                                  &Program::Module::spec) != program->modules.end()) {
+                    device.destroyShaderModule(build.module);
+                } else {
+                    const size_t perm_idx = program->modules.size();
+                    const u64 perm_hash = HashCombine(hash, perm_idx);
+                    RegisterShaderMeta(program->info, build.spec.fetch_shader_data, build.spec,
+                                       perm_hash, perm_idx);
+                    if (save) {
+                        RegisterShaderBinary(std::move(build.spv), hash, perm_idx);
+                    }
+                    std::unique_lock lk{programs_mutex};
+                    program->AddPermut(build.module, std::move(build.spec));
+                }
+            }
+            b = list.erase(b);
+        }
+        if (list.empty()) {
+            it = pending_modules.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage hw_stage,
@@ -1147,8 +1274,77 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                HashCombine(params.hash, perm_idx));
     }
 
+    // bbport: a missing graphics shader is translated on a compiler thread; the draw skips
+    // (sel.module_pending) until PublishModules adds it. `spec`: the permutation (null: new).
+    const auto translate_async = [&](const Shader::StageSpecialization* spec,
+                                     size_t perm_idx) -> bool {
+        if (!AsyncModules(sel, hw_stage) || sync_modules.contains(params.hash)) {
+            return false;
+        }
+        sel.module_pending = true;
+        auto& list = pending_modules[params.hash];
+        const bool queued = std::ranges::any_of(list, [&](const auto& build) {
+            return spec ? !build->new_program && build->spec == *spec : build->new_program;
+        });
+        if (!queued && compiler->HasCapacity()) {
+            auto build = std::make_shared<AsyncModuleBuild>();
+            build->new_program = spec == nullptr;
+            build->hw_stage = hw_stage;
+            build->sw_stage = sw_stage;
+            std::ranges::copy(params.user_data, build->user_data.begin());
+            build->params.emplace(Shader::ShaderParams{
+                .user_data = std::span<const u32, Shader::ShaderParams::NumShaderUserData>{
+                    build->user_data},
+                .code = params.code,
+                .hash = params.hash});
+            build->runtime_info = runtime_info;
+            build->binding = binding;
+            if (spec) {
+                build->spec = *spec;
+            }
+            build->perm_idx = perm_idx + list.size();
+            const bool started = build->job.Start(*compiler, [this, build] {
+                auto& b = *build;
+                thread_local Shader::Pools worker_pools;
+                // A guest memory read that faults (a fetch shader freed since the draw) comes
+                // back here; the shader is then translated on the GPU thread.
+                sigjmp_buf recover;
+                if (sigsetjmp(recover, 0)) {
+                    runtime_fault_recover = nullptr;
+                    b.fault = true;
+                    return build;
+                }
+                runtime_fault_recover = &recover;
+                if (b.new_program) {
+                    b.program = std::make_unique<Program>(b.hw_stage, b.sw_stage, *b.params);
+                    const auto start = b.binding;
+                    b.module = TranslateModule(b.program->info, b.runtime_info, b.params->code, 0,
+                                               b.binding, worker_pools, b.spv);
+                    b.spec = Shader::StageSpecialization(b.program->info, b.runtime_info, profile,
+                                                         start);
+                } else {
+                    Shader::Info info(b.hw_stage, b.sw_stage, *b.params);
+                    b.module = TranslateModule(info, b.runtime_info, b.params->code, b.perm_idx,
+                                               b.binding, worker_pools, b.spv);
+                }
+                runtime_fault_recover = nullptr;
+                return build;
+            });
+            if (started) {
+                list.push_back(std::move(build));
+            }
+        }
+        if (list.empty()) {
+            pending_modules.erase(params.hash);
+        }
+        return true;
+    };
+
     auto it_pgm = program_cache.find(params.hash); // this thread is the only writer
     if (it_pgm == program_cache.end()) {
+        if (translate_async(nullptr, 0)) {
+            return {};
+        }
         auto new_program = std::make_unique<Program>(hw_stage, sw_stage, params);
         auto start = binding;
         const auto module =
@@ -1192,6 +1388,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                   : std::ranges::find(program->modules, spec, &Program::Module::spec);
     if (it != program->modules.end()) {
         program->last_used = std::distance(program->modules.begin(), it);
+    }
+    if (it == program->modules.end() && translate_async(&spec, program->modules.size())) {
+        return {};
     }
     if (it == program->modules.end()) {
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
