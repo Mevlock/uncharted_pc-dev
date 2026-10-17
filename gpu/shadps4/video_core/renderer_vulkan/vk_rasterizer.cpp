@@ -68,6 +68,8 @@ void PrintFaultHistory(VAddr address, u64 size);
 namespace Vulkan {
 
 extern std::atomic<u32> g_frame_scene_draws; // bbport: TakeSceneFrame
+extern std::atomic<u32> g_frame_menu_draws;
+bool MenuBackdropShader(u64 ps_hash);
 
 // bbport diagnosis: BB_SUBMIT_CHECK=<hex address>:<hex size> (U3's bone pool:
 // 11a1c0ab00:ffff0). Each graphics submission fingerprints the range's pages as the guest hands
@@ -904,10 +906,17 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image.binding.is_target = 1u;
     }
 
-    // bbport: depth-tested draws on a full-size depth buffer: the 3D scene (TakeSceneFrame).
+    // bbport: depth-tested draws on a full-size depth buffer: the 3D scene; a menu's backdrop
+    // into the display buffer: a menu over it (TakeSceneFrame).
     if (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid() &&
         regs.depth_buffer.Pitch() >= 1280 && regs.depth_buffer.Height() >= 720) {
         g_frame_scene_draws.fetch_add(1, std::memory_order_relaxed);
+    } else if (regs.color_buffers[0] &&
+               FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
+        const auto* ps = pipeline->GetStages()[static_cast<u32>(Shader::SwStage::Fragment)];
+        if (ps && MenuBackdropShader(ps->pgm_hash)) {
+            g_frame_menu_draws.fetch_add(1, std::memory_order_relaxed);
+        }
     }
     if ((regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
         (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid())) {
@@ -4658,6 +4667,7 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
 
 // src/runtime_ultrawide.c: the camera widening of gameplay frames on or off.
 extern "C" void runtime_ultrawide_select(int wide);
+extern "C" int runtime_ultrawide_fill;
 
 namespace Vulkan {
 
@@ -4669,19 +4679,41 @@ std::atomic<u32> g_frame_scene_draws{0};
 /// uses this (wrong for one frame when gameplay starts or stops).
 std::atomic<bool> g_last_frame_scene{false};
 
-/// bbport: depth-tested draws that make a frame gameplay. Gameplay has hundreds to thousands
-/// (shadow maps included); U2's title screen has 50-130. BB_ULTRAWIDE_SCENE_DRAWS overrides it.
+std::atomic<u32> g_frame_menu_draws{0};
+
+/// bbport: depth-tested draws that make a frame show a 3D scene (loading screens and movies have
+/// none). BB_ULTRAWIDE_SCENE_DRAWS overrides 64.
 u32 SceneFrameDraws() {
     static const u32 draws = [] {
         const char* env = std::getenv("BB_ULTRAWIDE_SCENE_DRAWS");
-        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 256u;
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 64u;
     }();
     return draws;
 }
 
+/// bbport: the pixel shader of the backdrop the menus draw over a 3D scene (a blurred or dimmed
+/// copy of it, into the display buffer): U2's title and main menu, U1's pause menu. Such a frame
+/// is a menu, not gameplay. BB_MENU_PS=<hash,...> overrides 749bbec9.
+bool MenuBackdropShader(u64 ps_hash) {
+    static const std::vector<u32> hashes = [] {
+        std::vector<u32> list;
+        const char* env = std::getenv("BB_MENU_PS");
+        for (const char* p = env ? env : "749bbec9"; *p;) {
+            char* end;
+            const u32 h = static_cast<u32>(std::strtoul(p, &end, 16));
+            if (end == p) break;
+            list.push_back(h);
+            p = *end == ',' ? end + 1 : end;
+        }
+        return list;
+    }();
+    return std::find(hashes.begin(), hashes.end(), static_cast<u32>(ps_hash)) != hashes.end();
+}
+
 bool Rasterizer::TakeSceneFrame() noexcept {
-    const bool raw =
-        g_frame_scene_draws.exchange(0, std::memory_order_relaxed) >= SceneFrameDraws();
+    const u32 scene_draws = g_frame_scene_draws.exchange(0, std::memory_order_relaxed);
+    const u32 menu_draws = g_frame_menu_draws.exchange(0, std::memory_order_relaxed);
+    const bool raw = scene_draws >= SceneFrameDraws() && menu_draws == 0;
     // Gameplay starts after 3 such frames in a row and ends after 30 without (half a second):
     // sparse gameplay frames (close-ups in U3's scripted scenes) do not flip it to a menu, while
     // menus, title screens and loading last much longer. BB_ULTRAWIDE_EXIT_FRAMES overrides 30.
@@ -4696,6 +4728,11 @@ bool Rasterizer::TakeSceneFrame() noexcept {
     } else if (++run >= (gameplay ? exit_frames : 3u)) {
         gameplay = raw;
         run = 0;
+        if (runtime_ultrawide_fill) {
+            std::printf("Ultrawide: %s (last frame: %u scene draws, %u menu backdrop draws)\n",
+                        gameplay ? "gameplay, wide" : "menu or loading, 16:9", scene_draws,
+                        menu_draws);
+        }
     }
     const bool scene = gameplay;
     g_last_frame_scene.store(scene, std::memory_order_relaxed);
