@@ -53,10 +53,11 @@ public:
         return buffer_cache;
     }
 
-    /// bbport: whether the game drew its 3D scene (the G-buffer pass) since the last call: menus,
-    /// loading screens and movies have none. Read when a frame is prepared for display.
+    /// bbport: whether the game drew a 3D scene since the last call (dozens of depth-tested
+    /// draws on a full-size depth buffer): menus, loading screens and movies have none or few.
+    /// Read when a frame is prepared for display.
     [[nodiscard]] bool TakeSceneFrame() noexcept {
-        return scene_frame.exchange(false, std::memory_order_relaxed);
+        return scene_frame.exchange(0, std::memory_order_relaxed) >= 64;
     }
     [[nodiscard]] TemporalUpscaler& GetUpscaler() noexcept {
         return *upscaler;
@@ -356,7 +357,7 @@ private:
     std::unique_ptr<CameraMotion> camera_motion; // bbport: motion vectors (docs/upscaler.md)
     std::unique_ptr<SceneTargets> scene_targets;
     bool scene_started = false;
-    std::atomic<bool> scene_frame{false}; ///< TakeSceneFrame
+    std::atomic<u32> scene_frame{0}; ///< depth-tested scene draws since TakeSceneFrame
     std::unique_ptr<ObjectMotion> object_motion;
     bool motion_draw = false;
     u64 motion_geometry{};    ///< vertex-stream identity of the current direct draw

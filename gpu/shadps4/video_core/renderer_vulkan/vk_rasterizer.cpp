@@ -902,6 +902,11 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image.binding.is_target = 1u;
     }
 
+    // bbport: depth-tested draws on a full-size depth buffer: the 3D scene (TakeSceneFrame).
+    if (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid() &&
+        regs.depth_buffer.Pitch() >= 1280 && regs.depth_buffer.Height() >= 720) {
+        scene_frame.fetch_add(1, std::memory_order_relaxed);
+    }
     if ((regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
         (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid())) {
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
@@ -4198,17 +4203,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     std::pair<vk::ImageView, vk::ImageLayout> original_color{};
     const auto& regs = Regs();
     const auto& key = pipeline->GetGraphicsKey();
-    if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first) {
-        const auto& depth = texture_cache.GetImage(db_desc.first);
-        // The G-buffer pass: this frame shows the 3D scene (TakeSceneFrame), whatever the
-        // upscaler settings (EligibleScene needs a scene size, set only with an upscaler).
-        if (depth.info.size.width >= 1280 && depth.info.size.height >= 720) {
-            scene_frame.store(true, std::memory_order_relaxed);
-        }
-        if (scene_targets->EligibleScene(depth)) {
-            scene_started = true;
-        }
-    }
+    if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
+        scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
     // same image through the guest's native descriptor during this draw.
     bool reduced = scene_started && upscaler->RasterScaling() && key.num_samples == 1;
