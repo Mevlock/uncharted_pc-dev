@@ -4628,6 +4628,21 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
     return true;
 }
 
+void Rasterizer::MaterializeFreed(VAddr addr, u64 size) {
+    if (size == 0 || !IsMapped(addr, size) || !buffer_cache.IsRegionGpuModified(addr, size)) {
+        return;
+    }
+    DrainDrawPipe();
+    if (AmdGpu::Liverpool::OnProcessorThread()) {
+        buffer_cache.MaterializeFreed(addr, size);
+        return;
+    }
+    liverpool->SendCommand<true>([this, addr, size] {
+        DrainDrawPipe();
+        buffer_cache.MaterializeFreed(addr, size);
+    });
+}
+
 bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
     DrainDrawPipe();
     if (!InvalidateMemory(addr, 8, assume_locks)) {
