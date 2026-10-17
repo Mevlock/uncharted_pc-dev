@@ -5,6 +5,7 @@
 #include <source_location>
 #include <boost/container/small_vector.hpp>
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "shader_recompiler/ir/debug_print.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/opcodes.h"
@@ -1009,7 +1010,10 @@ U32 IREmitter::Pack2_10_10_10(const AmdGpu::NumberFormat number_format, const Va
     case AmdGpu::NumberFormat::Sint:
         return Inst<U32>(Opcode::PackSint2_10_10_10, vector);
     default:
-        UNREACHABLE_MSG("Unsupported 2_10_10_10 number format: {}", number_format);
+        // bbport: as Unpack2_10_10_10.
+        LOG_WARNING(Render_Recompiler, "Unsupported 2_10_10_10 number format {}, written as unorm",
+                    number_format);
+        return Inst<U32>(Opcode::PackUnorm2_10_10_10, vector);
     }
 }
 
@@ -1024,7 +1028,11 @@ Value IREmitter::Unpack2_10_10_10(const AmdGpu::NumberFormat number_format, cons
     case AmdGpu::NumberFormat::Sint:
         return Inst(Opcode::UnpackSint2_10_10_10, value);
     default:
-        UNREACHABLE_MSG("Unsupported 2_10_10_10 number format: {}", number_format);
+        // bbport: garbage buffer descriptors (stale resource tables) reach here; read as unorm
+        // instead of ending the game.
+        LOG_WARNING(Render_Recompiler, "Unsupported 2_10_10_10 number format {}, read as unorm",
+                    number_format);
+        return Inst(Opcode::UnpackUnorm2_10_10_10, value);
     }
 }
 

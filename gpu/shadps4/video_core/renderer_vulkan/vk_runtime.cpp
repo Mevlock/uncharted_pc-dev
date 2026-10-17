@@ -141,6 +141,25 @@ void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* 
     if (needs_flush) {
         FlushBarriers();
     }
+    // bbport diagnosis: BB_COPY_BARRIER=1 — every buffer copy waits for all earlier commands
+    // (a read the barrier tracker missed before a copy overwrites it shows as gone).
+    static const bool copy_barrier = [] {
+        const char* env = std::getenv("BB_COPY_BARRIER");
+        return env && env[0] == '1';
+    }();
+    if (copy_barrier) {
+        scheduler.Record([](vk::CommandBuffer cmdbuf) {
+            const vk::MemoryBarrier2 barrier = {
+                .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask =
+                    vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eMemoryRead,
+                .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                .dstAccessMask =
+                    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            };
+            cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
+        });
+    }
 
     scheduler.Record([src_handle = src->Handle(), dst_handle = dst->Handle(),
                       regions = scheduler.RecordData(copies)](vk::CommandBuffer cmdbuf) {

@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <map>
+#include <set>
+#include <cmath>
+#include <ctime>
+#include <filesystem>
 #include "core/libraries/videoout/driver.h"
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
@@ -61,6 +65,228 @@ void EnableFaultHistory();
 void PrintFaultHistory(VAddr address, u64 size);
 } // namespace VideoCore
 namespace Vulkan {
+
+// bbport diagnosis: BB_POOL_CHECK_TRIGGER=<file>: when the file exists it is removed and for the
+// next BB_POOL_CHECK_FRAMES (60) guest frames, the first use per frame of each read-only vertex
+// shader buffer of 16 KiB to 4 MiB is read back from the GPU right where the draw reads it and
+// compared with the guest bytes at that moment, on the pages the tracker holds clean (neither
+// CPU- nor GPU-modified: there both must match). Differences are printed.
+namespace PoolCheck {
+struct Pending {
+    VAddr address;
+    u64 size;
+    StagingBufferRef ref;
+    u64 tick;
+    u32 frame;
+    std::vector<u8> guest;
+    std::vector<u8> clean; ///< per 4 KiB page from the page of `address`
+};
+std::mutex mutex;
+std::atomic<int> frames_left{0};
+std::atomic<u32> frame{0};
+std::vector<Pending> pending;
+std::set<std::pair<u32, VAddr>> seen;
+u64 checked = 0, differing = 0;
+
+void Flip() {
+    static const char* trigger = std::getenv("BB_POOL_CHECK_TRIGGER");
+    if (!trigger) {
+        return;
+    }
+    if (frames_left.load() > 0) {
+        frame.fetch_add(1);
+        if (frames_left.fetch_sub(1) == 1) {
+            std::printf("Pool check: done, %llu buffers checked, %llu differ\n",
+                        static_cast<unsigned long long>(checked),
+                        static_cast<unsigned long long>(differing));
+        }
+        return;
+    }
+    if (std::filesystem::exists(trigger)) {
+        std::error_code ec;
+        std::filesystem::remove(trigger, ec);
+        const char* env = std::getenv("BB_POOL_CHECK_FRAMES");
+        frames_left = env ? std::atoi(env) : 60;
+        std::printf("Pool check: recording %d frames\n", frames_left.load());
+    }
+}
+
+void Process(Scheduler& scheduler, StagingBufferPool& staging) {
+    for (auto it = pending.begin(); it != pending.end();) {
+        if (!scheduler.IsFree(it->tick)) {
+            ++it;
+            continue;
+        }
+        it->ref.buffer->Invalidate(it->ref.offset, it->size);
+        const u8* gpu = it->ref.mapped;
+        const VAddr first_page = Common::AlignDown(it->address, 4_KB);
+        u32 pages = 0, bad_pages = 0;
+        u64 first_bad = ~0ull, bad_bytes = 0;
+        for (u64 i = 0; i < it->size;) {
+            const VAddr at = it->address + i;
+            const u64 page = (at - first_page) / 4_KB;
+            const u64 page_end = std::min<u64>(first_page + (page + 1) * 4_KB - it->address, it->size);
+            if (it->clean[page]) {
+                ++pages;
+                bool bad = false;
+                for (u64 j = i; j < page_end; ++j) {
+                    if (gpu[j] != it->guest[j]) {
+                        bad = true;
+                        ++bad_bytes;
+                        first_bad = std::min(first_bad, j);
+                    }
+                }
+                bad_pages += bad;
+            }
+            i = page_end;
+        }
+        ++checked;
+        if (bad_pages) {
+            ++differing;
+            const u64 o = first_bad & ~u64(15);
+            const auto word = [](const u8* p, u64 k) {
+                u32 w;
+                std::memcpy(&w, p + k, 4);
+                return w;
+            };
+            std::printf("Pool check: f%u %#llx (%llu bytes): %u of %u clean pages differ (%llu "
+                        "bytes), first at +%#llx: guest %08x %08x %08x %08x gpu %08x %08x %08x "
+                        "%08x\n",
+                        it->frame, static_cast<unsigned long long>(it->address),
+                        static_cast<unsigned long long>(it->size), bad_pages, pages,
+                        static_cast<unsigned long long>(bad_bytes),
+                        static_cast<unsigned long long>(first_bad), word(it->guest.data(), o),
+                        word(it->guest.data(), o + 4), word(it->guest.data(), o + 8),
+                        word(it->guest.data(), o + 12), word(gpu, o), word(gpu, o + 4),
+                        word(gpu, o + 8), word(gpu, o + 12));
+        }
+        staging.FreeDeferred(it->ref);
+        it = pending.erase(it);
+    }
+}
+
+void Record(Runtime& runtime, Scheduler& scheduler, VideoCore::BufferCache& buffer_cache,
+            VAddr address, u64 size, const VideoCore::Buffer* buffer, u64 offset) {
+    std::scoped_lock lk{mutex};
+    auto& staging = runtime.GetStagingPool();
+    Process(scheduler, staging);
+    if (frames_left.load() <= 0 || !seen.emplace(frame.load(), address).second) {
+        return;
+    }
+    Pending p{.address = address, .size = size, .frame = frame.load()};
+    p.guest.resize(size);
+    std::memcpy(p.guest.data(), reinterpret_cast<const void*>(address), size);
+    for (VAddr page = Common::AlignDown(address, 4_KB); page < address + size; page += 4_KB) {
+        p.clean.push_back(!buffer_cache.IsRegionCpuModified(page, 4_KB) &&
+                          !buffer_cache.IsRegionGpuModified(page, 4_KB));
+    }
+    p.ref = staging.Request(size, VideoCore::MemoryType::HostCached, 0, true);
+    const vk::BufferCopy copy{.srcOffset = offset, .dstOffset = p.ref.offset, .size = size};
+    runtime.CopyBuffer(buffer, p.ref.buffer, std::span{&copy, 1});
+    p.tick = scheduler.CurrentTick();
+    pending.push_back(std::move(p));
+}
+} // namespace PoolCheck
+
+// bbport diagnosis: BB_DRAWLOG_TRIGGER=<file>: when the file exists it is removed and the next
+// BB_DRAWLOG_FRAMES (20) guest frames are logged draw by draw (shaders, counts, offsets, every
+// buffer binding with its address, size and impossible floats in its first 64 KiB) to
+// BB_CAPTURE_DIR (default .) as drawlog_<time>.txt. Single-frame glitches show as a draw whose
+// bindings differ from the same draw in the frames around it.
+namespace DrawLog {
+std::mutex mutex;
+std::atomic<int> frames_left{0};
+std::vector<std::string> lines;
+std::string pending;
+u32 frame = 0, draw = 0;
+
+bool Active() {
+    return frames_left.load(std::memory_order_relaxed) > 0;
+}
+
+void Buffer(char kind, u32 slot, VAddr address, u64 size, u32 stride, bool written) {
+    if (!Active()) {
+        return;
+    }
+    u32 bad = 0;
+    auto* memory = Core::Memory::Instance();
+    const u64 bytes = std::min<u64>(size, 64_KB) & ~u64(3);
+    if (address && bytes && memory->IsValidGpuMapping(address, bytes)) {
+        const auto* f = reinterpret_cast<const float*>(address);
+        for (u64 i = 0; i < bytes / 4; ++i) {
+            bad += !(std::fabs(f[i]) < 1e6f); // NaN fails the comparison too
+        }
+    }
+    std::scoped_lock lk{mutex};
+    pending += fmt::format(" {}{}:{:x}+{:x}/{}{}", kind, slot, address, size, stride,
+                           written ? "w" : "");
+    if (bad) {
+        pending += fmt::format("!{}", bad);
+    }
+}
+
+void Draw(u64 vs, u64 ps, u32 indices, u32 instances, u32 vertex_offset, u32 instance_offset) {
+    if (!Active()) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    lines.push_back(fmt::format("f{} d{} vs {:08x} ps {:08x} n {} i {} vo {} io {} |{}", frame,
+                                draw++, u32(vs), u32(ps), indices, instances, vertex_offset,
+                                instance_offset, pending));
+    pending.clear();
+}
+
+void Dispatch(u64 cs, u32 x, u32 y, u32 z) {
+    if (!Active()) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    lines.push_back(fmt::format("f{} d{} cs {:08x} groups {}x{}x{} |{}", frame, draw++, u32(cs), x,
+                                y, z, pending));
+    pending.clear();
+}
+
+void Flip() {
+    static const char* trigger = std::getenv("BB_DRAWLOG_TRIGGER");
+    if (!trigger) {
+        return;
+    }
+    if (!Active()) {
+        if (!std::filesystem::exists(trigger)) {
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::remove(trigger, ec);
+        const char* env = std::getenv("BB_DRAWLOG_FRAMES");
+        std::scoped_lock lk{mutex};
+        lines.clear();
+        pending.clear();
+        frame = draw = 0;
+        frames_left = env ? std::atoi(env) : 20;
+        std::printf("Draw log: recording %d frames\n", frames_left.load());
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    ++frame;
+    draw = 0;
+    if (--frames_left > 0) {
+        return;
+    }
+    const char* dir = std::getenv("BB_CAPTURE_DIR");
+    const std::string path = fmt::format("{}/drawlog_{}.txt", dir ? dir : ".",
+                                         static_cast<long long>(std::time(nullptr)));
+    if (FILE* f = std::fopen(path.c_str(), "w")) {
+        for (const auto& line : lines) {
+            std::fputs(line.c_str(), f);
+            std::fputc('\n', f);
+        }
+        std::fclose(f);
+        std::printf("Draw log: %zu lines written to %s\n", lines.size(), path.c_str());
+    }
+    lines.clear();
+}
+} // namespace DrawLog
+
 
 // bbport diagnosis: BB_GPU_CHECKPOINTS=1 — a checkpoint (VK_NV_device_diagnostic_checkpoints)
 // before every draw and dispatch; a GPU crash prints the last one each pipeline stage reached,
@@ -205,6 +431,59 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     static Rasterizer* busy_check;
     busy_check = this;
     g_draw_pipe_busy = [] { return busy_check->OnStageA() && !busy_check->DrawPipeIdle(); };
+    Shader::g_srt_read_check = [](const Shader::SrtReadLog& log) {
+        return busy_check->SyncSrtReads(log);
+    };
+}
+
+bool Rasterizer::SyncSrtReads(const Shader::SrtReadLog& log) {
+    // Only the GPU thread reads back: the walks ahead of it (prepared draws) are walked again
+    // there before they are used.
+    if (!OnStageA()) {
+        return false;
+    }
+    const u32 count = std::min(log.count, Shader::SrtReadLogCapacity);
+    // Stale pointers in the tables log addresses outside guest memory: the range set check
+    // below is safe for any address (the page tracker is not).
+    u32 written = 0;
+    for (u32 i = 0; i < count; ++i) {
+        const auto& read = log.reads[i];
+        if (read.address && buffer_cache.IsRangeGpuWritten(read.address, read.bytes)) {
+            ++written;
+        }
+    }
+    if (!written) {
+        return false;
+    }
+    static const bool sync = [] {
+        const char* env = std::getenv("BB_SRT_SYNC");
+        return !(env && env[0] == '0');
+    }();
+    static u32 reports = 0;
+    if (++reports <= 8 || (reports & 1023) == 0) {
+        for (u32 i = 0; i < count; ++i) {
+            const auto& read = log.reads[i];
+            if (read.address && buffer_cache.IsRangeGpuWritten(read.address, read.bytes)) {
+                std::printf("Resource tables: %#llx (%llu bytes) read by a shader holds GPU data%s "
+                            "(%u so far)\n",
+                            static_cast<unsigned long long>(read.address),
+                            static_cast<unsigned long long>(read.bytes),
+                            sync ? ": read back" : "", reports);
+                break;
+            }
+        }
+    }
+    if (!sync) {
+        return false;
+    }
+    DrainDrawPipe();
+    for (u32 i = 0; i < count; ++i) {
+        const auto& read = log.reads[i];
+        if (read.address && buffer_cache.IsRangeGpuWritten(read.address, read.bytes)) {
+            buffer_cache.ReadMemory(read.address, read.bytes, false, true);
+        }
+    }
+    return true;
 }
 
 Rasterizer::~Rasterizer() = default;
@@ -1238,6 +1517,68 @@ void Rasterizer::CheckConstants() {
     }
 }
 
+// bbport diagnosis: BB_DRAW_BARRIER=1 — every draw starts a new render pass after a barrier
+// from all commands to all commands (a missing draw -> later draw dependency shows as gone).
+static void FullBarrierBeforeDraw(Scheduler& scheduler) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_DRAW_BARRIER");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    scheduler.EndRendering();
+    scheduler.Record([](vk::CommandBuffer cmdbuf) {
+        const vk::MemoryBarrier2 barrier = {
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eMemoryRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        };
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
+    });
+}
+
+// bbport diagnosis: BB_FORCE_VB_UPLOAD=1 (or letters: v vertex streams, i index data, b
+// read-only shader buffers): every draw uploads that data from guest memory again.
+static bool ForceUploadKind(char kind) {
+    const char* env = std::getenv("BB_FORCE_VB_UPLOAD");
+    if (!env || !env[0]) {
+        return false;
+    }
+    return std::strcmp(env, "1") == 0 || std::strchr(env, kind) != nullptr;
+}
+
+// bbport diagnosis: BB_FORCE_FILTER=<letters> narrows the forced uploads of read-only shader
+// buffers (BB_FORCE_VB_UPLOAD=b): c compute, g graphics, v vertex, f fragment stages; S up to
+// 16 KiB, L larger, X 16 KiB to 4 MiB, M over 4 MiB. Letters of one group combine with or, the
+// groups with and.
+static bool ForceUploadFilter(Shader::SwStage sw_stage, u64 size) {
+    static const std::string filter = [] {
+        const char* env = std::getenv("BB_FORCE_FILTER");
+        return std::string{env ? env : ""};
+    }();
+    const auto has = [&](char c) { return filter.find(c) != std::string::npos; };
+    if (has('c') || has('g') || has('v') || has('f')) {
+        const bool compute = sw_stage == Shader::SwStage::Compute;
+        const bool ok = (has('c') && compute) || (has('g') && !compute) ||
+                        (has('v') && sw_stage == Shader::SwStage::Vertex) ||
+                        (has('f') && sw_stage == Shader::SwStage::Fragment);
+        if (!ok) {
+            return false;
+        }
+    }
+    if (has('S') || has('L') || has('M') || has('X')) {
+        const bool small = size <= 16_KB;
+        const bool huge = size > 4_MB;
+        if (!((has('S') && small) || (has('L') && !small) || (has('M') && huge) ||
+              (has('X') && !small && !huge))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // bbport diagnosis: BB_FORCE_UPLOAD_VS=<vertex shader hash>[:index|:buffers]: that shader's
 // draws upload their index data and/or read-only buffers from guest memory again (as
 // BB_FORCE_VB_UPLOAD does for every draw).
@@ -1570,6 +1911,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
+    FullBarrierBeforeDraw(scheduler);
     scheduler.BeginRendering(state);
 
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
@@ -1624,6 +1966,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     reinterpret_cast<const float*>(sharp.base_address), bytes / sizeof(float));
             }
         }
+    }
+    if (DrawLog::Active()) {
+        const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        DrawLog::Draw(vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices, num_instances,
+                      vertex_offset, instance_offset);
     }
     if (FrameCapture::Active()) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
@@ -1733,6 +2080,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
+    FullBarrierBeforeDraw(scheduler);
     scheduler.BeginRendering(state);
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
@@ -1991,6 +2339,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
     }
+    DrawLog::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
     // bbport diagnosis: BB_FULL_BARRIER=1 — every dispatch is followed by a barrier from all
     // commands to all commands (a missing compute -> later read dependency shows as gone);
     // BB_FULL_BARRIER=2 also precedes it with one (earlier reads -> its writes).
@@ -2499,7 +2848,7 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
     }
 
     // Map buffers for merged ranges
-    static const bool force_vb_upload = std::getenv("BB_FORCE_VB_UPLOAD") != nullptr;
+    static const bool force_vb_upload = ForceUploadKind('v');
     const bool force_this_draw =
         force_vb_upload || (ForceUploadVs(false) && ForceUploadVs(false) == current_vs_hash);
     for (auto& range : ranges_merged) {
@@ -2518,6 +2867,12 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
     auto& host_sizes = v.host_sizes;
     auto& host_strides = v.host_strides;
     u32 stream_with_memory = 0;
+    if (DrawLog::Active()) {
+        for (u32 i = 0; i < guest_buffers.size(); ++i) {
+            DrawLog::Buffer('F', i, guest_buffers[i].base_address, guest_buffers[i].GetSize(),
+                            guest_buffers[i].GetStride(), false);
+        }
+    }
     for (const auto& buffer : guest_buffers) {
         if (buffer.base_address != 0 && buffer.GetSize() > 0) {
             const auto host_buffer_info =
@@ -2565,7 +2920,8 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
 
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
-    static const bool force_ib_upload = std::getenv("BB_FORCE_VB_UPLOAD") != nullptr;
+    DrawLog::Buffer('I', 0, index_address, index_buffer_size, index_size, false);
+    static const bool force_ib_upload = ForceUploadKind('i');
     if (force_ib_upload || (ForceUploadVs(true) && ForceUploadVs(true) == current_vs_hash)) {
         buffer_cache.ForceUpload(index_address, index_buffer_size);
     }
@@ -2896,6 +3252,14 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                               u32(vsharp.GetStride()), f[0], f[1], f[2], f[3]);
                 FrameCapture::Note(note);
             }
+            if (DrawLog::Active()) {
+                const char kind = stage.sw_stage == Shader::SwStage::Vertex     ? 'V'
+                                  : stage.sw_stage == Shader::SwStage::Fragment ? 'P'
+                                  : stage.sw_stage == Shader::SwStage::Compute  ? 'C'
+                                                                                : 'O';
+                DrawLog::Buffer(kind, binding.buffer, vsharp.base_address, vsharp.GetSize(),
+                                vsharp.GetStride(), desc.is_written);
+            }
             if (FrameCapture::Active() && vsharp.base_address != 0 && vsharp.GetSize() != 0 &&
                 memory->IsValidGpuMapping(vsharp.base_address, 0)) {
                 FrameCapture::Buffer(stage.pgm_hash, binding.buffer, vsharp.base_address,
@@ -2910,14 +3274,21 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
                 }
-                static const bool force_upload = std::getenv("BB_FORCE_VB_UPLOAD") != nullptr;
-                if ((force_upload || (ForceUploadVs(false) &&
-                                      ForceUploadVs(false) == u32(stage.pgm_hash))) &&
+                static const bool force_upload = ForceUploadKind('b');
+                const bool force_vs =
+                    ForceUploadVs(false) && ForceUploadVs(false) == u32(stage.pgm_hash);
+                if (((force_upload && ForceUploadFilter(stage.sw_stage, size)) || force_vs) &&
                     !desc.is_written) {
                     buffer_cache.ForceUpload(vsharp.base_address, size);
                 }
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                if (PoolCheck::frames_left.load(std::memory_order_relaxed) > 0 &&
+                    !desc.is_written && stage.sw_stage == Shader::SwStage::Vertex &&
+                    size > 16_KB && size <= 4_MB) {
+                    PoolCheck::Record(runtime, scheduler, buffer_cache, vsharp.base_address, size,
+                                      buffer, offset);
+                }
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
                 const u64 adjust = offset - offset_aligned;
                 if (adjust % 4 != 0) {
@@ -4027,6 +4398,8 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
 }
 
 void Rasterizer::OnGuestFlip() {
+    DrawLog::Flip();
+    PoolCheck::Flip();
     // The age of GPU data in the buffer cache's pages (BufferCache::InvalidateMemory).
     VideoCore::g_guest_frames.fetch_add(1, std::memory_order_relaxed);
     if (StaleCheckEnabled()) {

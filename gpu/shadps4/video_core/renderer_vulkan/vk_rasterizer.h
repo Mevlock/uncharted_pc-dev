@@ -5,6 +5,7 @@
 
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
+#include "shader_recompiler/ir/passes/srt.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_bind_helper.h"
@@ -129,6 +130,11 @@ public:
     void SignalAfterHostCopies(std::function<void()> signal) {
         scheduler.SignalAfterHostCopies(std::move(signal));
     }
+    /// bbport diagnosis (BB_GPU_FENCES=1): runs `signal` once the GPU has finished the work
+    /// recorded so far.
+    void SignalAfterGpu(std::function<void()> signal) {
+        scheduler.DeferPriorityOperation([signal = std::move(signal)] { signal(); });
+    }
     /// The GPU command thread or the draw recording thread (fault handling runs inline there).
     bool IsGpuSideThread() const;
     bool IsGpuSideThreadId(u32 tid) const;
@@ -225,6 +231,9 @@ private:
     static bool DrawPipeWanted();
     bool UseDrawPipe() const;
     bool OnStageA() const;
+    /// bbport: tables an SRT walker read in guest memory that hold GPU-written data are read
+    /// back (true: walk again). BB_SRT_SYNC=0: only counted.
+    bool SyncSrtReads(const Shader::SrtReadLog& log);
     /// Arguments of an indirect draw: `args` holds `max_count` commands `stride` apart.
     struct IndirectDraw {
         VAddr args;

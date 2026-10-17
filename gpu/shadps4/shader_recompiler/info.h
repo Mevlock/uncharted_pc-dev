@@ -241,7 +241,21 @@ struct Info : InfoPersistent {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
-        if (srt_info.walker_func) {
+        if (!srt_info.walker_func) {
+            return;
+        }
+        if (!g_srt_read_check) {
+            srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
+            return;
+        }
+        // bbport: the tables it read, for the GPU-written data check (SrtReadLog). The log
+        // stays valid if a fault jumps out of the walker.
+        static thread_local SrtReadLog log;
+        log.count = 0;
+        SrtReadLog* previous = SwapSrtReadLog(&log);
+        srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
+        SwapSrtReadLog(previous);
+        if (log.count && g_srt_read_check(log)) {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
         }
     }

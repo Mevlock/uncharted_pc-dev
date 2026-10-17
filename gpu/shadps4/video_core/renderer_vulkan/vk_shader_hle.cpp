@@ -159,6 +159,22 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
     static_assert(sizeof(CopyShaderControl) == 12);
     ASSERT(ctl_buf_sharp.GetStride() == sizeof(CopyShaderControl));
     const auto ctl_buf = reinterpret_cast<const CopyShaderControl*>(ctl_buf_sharp.base_address);
+    // bbport diagnosis: the copy list is read in guest memory, stale where the GPU wrote it.
+    {
+        static std::atomic<u32> total{0}, gpu_written{0};
+        const u64 ctl_size = u64(cs_program.dim_x) * sizeof(CopyShaderControl);
+        const bool written = buffer_cache.IsRangeGpuWritten(ctl_buf_sharp.base_address, ctl_size);
+        const u32 n = total.fetch_add(1, std::memory_order_relaxed) + 1;
+        const u32 w = gpu_written.fetch_add(written, std::memory_order_relaxed) + written;
+        if (n <= 4 || (n & 1023) == 0 || (written && w <= 8)) {
+            std::printf("Copy shader: list %#llx (%u entries)%s, src %#llx dst %#llx (%u so far, "
+                        "%u lists GPU-written)\n",
+                        static_cast<unsigned long long>(ctl_buf_sharp.base_address),
+                        cs_program.dim_x, written ? " GPU-written" : "",
+                        static_cast<unsigned long long>(src_buf_sharp.base_address),
+                        static_cast<unsigned long long>(dst_buf_sharp.base_address), n, w);
+        }
+    }
 
     static std::vector<vk::BufferCopy> copies;
     copies.clear();
@@ -364,8 +380,14 @@ bool IsGuestMemoryShaderHLE(unsigned long long pgm_hash) {
 bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
                       const AmdGpu::ComputeProgram& cs_program, Rasterizer& rasterizer) {
     switch (info.pgm_hash) {
-    case COPY_SHADER_HASH:
-        return ExecuteCopyShaderHLE(info, cs_program, rasterizer);
+    case COPY_SHADER_HASH: {
+        // BB_COPY_HLE=0 (diagnosis): the game's copy shader runs on the GPU instead.
+        static const bool copy_hle = [] {
+            const char* env = std::getenv("BB_COPY_HLE");
+            return !(env && env[0] == '0');
+        }();
+        return copy_hle && ExecuteCopyShaderHLE(info, cs_program, rasterizer);
+    }
     case SCALAR_COPY_SHADER_HASH:
         return ExecuteScalarCopyHLE(info, cs_program, rasterizer, 1);
     case SCALAR_COPY64_SHADER_HASH:

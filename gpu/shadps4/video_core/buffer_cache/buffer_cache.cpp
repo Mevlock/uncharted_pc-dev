@@ -11,6 +11,7 @@
 #include <bit>
 #include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
+#include <xxhash.h>
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
 #include "common/alignment.h"
@@ -514,6 +515,31 @@ void BufferCache::WriteBackGpuData(u8* dst, const u8* data, u64 size) {
     }
 }
 
+// bbport: waits up to 4 ms, without blocking, for GPU work that is already submitted. The GPU
+// thread must never block on the GPU here: the recording thread that submits the work can be
+// waiting for it (a deadlock at U3's cloth teardown and while loading). False: not done.
+static bool WaitGpuBriefly(Vulkan::Scheduler& scheduler, u64 tick) {
+    if (scheduler.IsFree(tick)) {
+        return true;
+    }
+    if (tick >= scheduler.CurrentTick()) {
+        return false;
+    }
+    // BB_SETTLE_WAIT_MS (diagnosis): the longest wait, default 4.
+    static const int wait_ms = [] {
+        const char* env = std::getenv("BB_SETTLE_WAIT_MS");
+        return env ? std::atoi(env) : 4;
+    }();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+        if (scheduler.IsFree(tick)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // bbport: a block U3's heap is freeing in a merged page (bbgpu_note_guest_free): its GPU data
 // goes into guest memory (waiting only for the GPU work that wrote it, which ended before the game
 // freed the block) and stops being tracked; the bytes the guest changed since the merge stay.
@@ -538,13 +564,16 @@ void BufferCache::MaterializeFreed(VAddr device_addr, u64 size) {
     if (copies.empty()) {
         return;
     }
+    // Not done within the short wait (or too large for the side queue): the block stays GPU
+    // data; the read-backs still leave the heap's own bytes in it alone.
     if (!side_queue || total > SideQueue::StagingSize) {
-        DownloadMemory(arena, device_addr, size); // waits for the whole queue
         return;
     }
     const VAddr page = Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE);
     const u64 length = Common::AlignUp(device_addr + size, TRACKER_BYTES_PER_PAGE) - page;
-    scheduler.Wait(memory_tracker->LatestGpuWriteTick(page, length));
+    if (!WaitGpuBriefly(scheduler, memory_tracker->LatestGpuWriteTick(page, length))) {
+        return;
+    }
     auto& side = *side_queue;
     {
         std::scoped_lock lk{side.mutex};
@@ -682,22 +711,11 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                 }();
                 bool settled = false;
                 if (!shadowed) {
-                    const u64 tick = memory_tracker->LatestGpuWriteTick(page, length);
-                    if (RecentlyFreed(page, length)) {
-                        // The game freed it after its GPU work ended: that work is submitted.
-                        scheduler.Wait(tick);
-                    } else if (tick < scheduler.CurrentTick()) {
-                        // Any other page: a short, non-blocking wait for work already submitted.
-                        // Blocking here deadlocked (the recording thread waits for this one), so
-                        // the merge takes the page when the GPU is not done within 4 ms.
-                        const auto deadline =
-                            std::chrono::steady_clock::now() + std::chrono::milliseconds(4);
-                        while (!scheduler.IsFree(tick) &&
-                               std::chrono::steady_clock::now() < deadline) {
-                            std::this_thread::yield();
-                        }
+                    // Only when the GPU work ends within a short, non-blocking wait (a blocking
+                    // one deadlocked); otherwise the merge takes the page.
+                    if (WaitGpuBriefly(scheduler, memory_tracker->LatestGpuWriteTick(page, length))) {
+                        settled = DownloadOnSideQueue(page, length);
                     }
-                    settled = DownloadOnSideQueue(page, length);
                 }
                 if (settled) {
                     memory_tracker->MarkRegionAsCpuModified(device_addr, size);
@@ -714,6 +732,26 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                 BbStats::dead_gpu_drops.fetch_add(1, std::memory_order_relaxed);
                 NoteFault(page, length, frames, gpu_write, gpu_use, 1);
                 return;
+            }
+            // BB_RESOLVE_STATS=1 (diagnosis): how guest writes to GPU data were resolved.
+            static const bool resolve_stats = [] {
+                const char* env = std::getenv("BB_RESOLVE_STATS");
+                return env && env[0] == '1';
+            }();
+            if (resolve_stats) {
+                static auto window = std::chrono::steady_clock::now();
+                static u64 last_side = 0, last_merge = 0;
+                const auto now = std::chrono::steady_clock::now();
+                if (now - window >= std::chrono::seconds(5)) {
+                    const u64 side_count = BbStats::gpu_side_downloads.load();
+                    const u64 merge_count = BbStats::gpu_merges.load();
+                    std::printf("Resolve: %llu exact read-backs, %llu merges (5 s)\n",
+                                static_cast<unsigned long long>(side_count - last_side),
+                                static_cast<unsigned long long>(merge_count - last_merge));
+                    last_side = side_count;
+                    last_merge = merge_count;
+                    window = now;
+                }
             }
             if (merge) {
                 ShadowGpuData(page, length);
@@ -1156,7 +1194,67 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     }
     EnsureResident(arena, first_block, last_block);
     const u64 uploaded_before = BbStats::buffer_upload_bytes.load(std::memory_order_relaxed);
+    // bbport diagnosis: BB_MISSED_WRITE_CHECK=1 — read-only buffers whose guest bytes changed
+    // since their last use while the page tracker saw no CPU write (the GPU keeps old data).
+    static const bool missed_write_check = [] {
+        const char* env = std::getenv("BB_MISSED_WRITE_CHECK");
+        return env && env[0] == '1';
+    }();
+    // Per 4 KiB page, the part inside the binding (edge pages too): pages the tracker holds
+    // CPU-modified are uploaded now, the others must still match their bytes at the last check.
+    const bool check_missed = missed_write_check && !is_written && size <= 4_MB &&
+                              memory->IsValidGpuMapping(device_addr, size) &&
+                              !IsRegionGpuModified(device_addr, size);
+    const VAddr check_begin = Common::AlignDown(device_addr, TRACKER_BYTES_PER_PAGE);
+    const VAddr check_end = Common::AlignUp(device_addr + size, TRACKER_BYTES_PER_PAGE);
+    std::vector<bool> clean_pages;
+    if (check_missed) {
+        for (VAddr page = check_begin; page < check_end; page += TRACKER_BYTES_PER_PAGE) {
+            clean_pages.push_back(!memory_tracker->IsRegionCpuModified(page, TRACKER_BYTES_PER_PAGE));
+        }
+    }
     SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
+    if (check_missed) {
+        static std::mutex missed_mutex;
+        static std::unordered_map<VAddr, std::pair<u64, u64>> part_hash; // start -> (length, hash)
+        static u64 checked = 0, missed = 0, missed_window = 0, missed_edge = 0;
+        static auto window = std::chrono::steady_clock::now();
+        std::scoped_lock lk{missed_mutex};
+        size_t index = 0;
+        for (VAddr page = check_begin; page < check_end; page += TRACKER_BYTES_PER_PAGE, ++index) {
+            const VAddr part_start = std::max<VAddr>(page, device_addr);
+            const VAddr part_end = std::min<VAddr>(page + TRACKER_BYTES_PER_PAGE, device_addr + size);
+            const u64 length = part_end - part_start;
+            const u64 hash = XXH3_64bits(reinterpret_cast<const void*>(part_start), length);
+            ++checked;
+            auto [it, inserted] = part_hash.try_emplace(part_start, length, hash);
+            if (!inserted && it->second.first == length && it->second.second != hash &&
+                clean_pages[index]) {
+                const bool edge = length != TRACKER_BYTES_PER_PAGE;
+                ++missed_window;
+                missed_edge += edge;
+                if (missed++ < 300) {
+                    std::printf("Missed write: %#llx (%llu bytes, %s page, offset %llu) of "
+                                "read-only buffer %#llx (%u bytes) changed with no CPU write "
+                                "tracked\n",
+                                static_cast<unsigned long long>(part_start),
+                                static_cast<unsigned long long>(length), edge ? "edge" : "whole",
+                                static_cast<unsigned long long>(part_start - device_addr),
+                                static_cast<unsigned long long>(device_addr), size);
+                }
+            }
+            it->second = {length, hash};
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - window >= std::chrono::seconds(5)) {
+            std::printf("Missed write: %llu of %llu page checks, %llu on edge pages so far (5 s)\n",
+                        static_cast<unsigned long long>(missed_window),
+                        static_cast<unsigned long long>(checked),
+                        static_cast<unsigned long long>(missed_edge));
+            checked = missed_window = 0;
+            window = now;
+        }
+    }
     if (stats) {
         auto& region = Stats().regions[RegionKey(device_addr)];
         ++region.arena_count;

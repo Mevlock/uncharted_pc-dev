@@ -312,7 +312,20 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
         const char* env = std::getenv("BB_ASYNC_FENCES");
         return env && env[0] == '1';
     }();
-    if (async_fences && !BbToggle::Disabled(BbToggle::AsyncFences)) {
+    // BB_GPU_FENCES=1 (diagnosis): the fence is written once the GPU has finished the work
+    // before it, as on the console, instead of when that work is recorded.
+    static const bool gpu_fences = [] {
+        const char* env = std::getenv("BB_GPU_FENCES");
+        return env && env[0] == '1';
+    }();
+    if (gpu_fences) {
+        rasterizer.WaitHostCopies();
+        rasterizer.WaitDeferredSignals();
+        rasterizer.SignalAfterGpu([eop] { SignalEop(eop); });
+        // The work goes to the GPU now: the guest may wait for this fence before it submits
+        // more (it froze at launch otherwise).
+        rasterizer.Flush();
+    } else if (async_fences && !BbToggle::Disabled(BbToggle::AsyncFences)) {
         BbCopy::AfterCopies([eop] { SignalEop(eop); });
     } else if (Vulkan::DrawPipe::OnStageB() && !BbToggle::Disabled(BbToggle::RecorderFences)) {
         // The draw recording thread does not wait: the Vulkan recording thread signals the

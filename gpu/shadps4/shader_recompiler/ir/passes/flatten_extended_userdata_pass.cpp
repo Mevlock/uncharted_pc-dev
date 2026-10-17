@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
 #include <unordered_map>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <boost/container/flat_map.hpp>
 #include <queue>
 #include <xbyak/xbyak.h>
@@ -30,9 +34,17 @@ using namespace Xbyak::util;
 static Xbyak::CodeGenerator g_srt_codegen(32_MB);
 static const u8* g_srt_codegen_start = nullptr;
 
+namespace {
+void InstallSrtFaultHandler();
+}
+
 namespace Shader {
 
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
+    // bbport: walkers loaded from the pipeline cache fault like generated ones (stale pointers
+    // in the tables); without the handler that used to be installed only on generation, the
+    // fault ended the game.
+    InstallSrtFaultHandler();
     const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
     g_srt_codegen.db(ptr, size);
     g_srt_codegen.ready();
@@ -88,6 +100,31 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
            operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY);
 
     size_t len = instruction.length;
+#ifdef _WIN32
+    // bbport: this read only yields zero: the walker is left as it is (patched, it read zero for
+    // every later draw of the shader too, whose pointers are fine).
+    {
+        auto* record = reinterpret_cast<EXCEPTION_POINTERS*>(context)->ContextRecord;
+        switch (operands[0].reg.value) {
+        case ZYDIS_REGISTER_RDI:
+            record->Rdi = 0;
+            break;
+        case ZYDIS_REGISTER_R10D:
+            record->R10 = 0;
+            break;
+        default:
+            UNREACHABLE_MSG("Unsupported register for SRT walker fault");
+            return false;
+        }
+        record->Rip += len;
+        static std::atomic<u32> reports{0};
+        if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
+            LOG_WARNING(Render_Recompiler, "SRT walker read at {} skipped, fault address {}", code,
+                        fault_address);
+        }
+        return true;
+    }
+#endif
     const size_t patch_size = 3;
     u8* code_patch = const_cast<u8*>(reinterpret_cast<const u8*>(code));
 
@@ -118,6 +155,17 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
                 fault_address);
 
     return true;
+}
+
+void InstallSrtFaultHandler() {
+    if (g_srt_codegen_start != nullptr) {
+        return;
+    }
+    // The whole code buffer, walkers loaded from the cache included.
+    g_srt_codegen_start = g_srt_codegen.getCode();
+    // Call after the memory invalidation handler
+    constexpr u32 priority = 1;
+    Core::Signals::Instance()->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
 }
 
 using namespace Shader;
@@ -602,7 +650,8 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     }
 }
 
-static inline bool PushPtr(Xbyak::CodeGenerator& c, PassInfo& pass_info, const IR::Value& off_dw) {
+static inline bool PushPtr(Xbyak::CodeGenerator& c, PassInfo& pass_info, const IR::Value& off_dw,
+                           u32 read_bytes) {
     c.push(rdi);
     if (off_dw.IsImmediate()) {
         c.mov(rdi, ptr[rdi + (off_dw.U32() << 2)]);
@@ -614,6 +663,26 @@ static inline bool PushPtr(Xbyak::CodeGenerator& c, PassInfo& pass_info, const I
     }
     c.mov(r10, 0xFFFFFFFFFFFFULL);
     c.and_(rdi, r10);
+#ifdef _WIN32
+    // bbport: the table and the bytes read there into the thread's SrtReadLog, if one is set.
+    Xbyak::Label no_log, full;
+    for (const u8 byte : {0x65, 0x4C, 0x8B, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00}) {
+        c.db(byte); // mov r10, gs:[0x28]
+    }
+    c.test(r10, r10);
+    c.jz(no_log);
+    c.push(rax);
+    c.mov(eax, dword[r10]);
+    c.cmp(eax, SrtReadLogCapacity);
+    c.jae(full);
+    c.inc(dword[r10]);
+    c.shl(eax, 4);
+    c.mov(qword[r10 + rax + 8], rdi);
+    c.mov(qword[r10 + rax + 16], read_bytes);
+    c.L(full);
+    c.pop(rax);
+    c.L(no_log);
+#endif
     return true;
 }
 
@@ -629,12 +698,22 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         return;
     }
 
-    if (!PushPtr(c, pass_info, off_dw)) {
+    PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
+    ASSERT(use_list);
+    // The bytes of this table the walk reads: pointers are two dwords, offsets that are not
+    // immediates read within the window.
+    u32 read_dw = 0;
+    for (const auto& [src_off_dw, use] : *use_list) {
+        if (src_off_dw.IsImmediate()) {
+            read_dw = std::max(read_dw, src_off_dw.U32() + (pass_info.GetUsesAsPointer(use) ? 2 : 1));
+        } else {
+            read_dw = std::max(read_dw, ReadConstWindowDwords);
+        }
+    }
+    if (!PushPtr(c, pass_info, off_dw, read_dw * 4)) {
         LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
         return;
     }
-    PassInfo::PtrUserList* use_list = pass_info.GetUsesAsPointer(subtree);
-    ASSERT(use_list);
 
     // First copy all the src data from this tree level
     // That way, all data that was contiguous in the guest SRT is also contiguous in the
@@ -699,13 +778,7 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     }
 
     // Register the signal handler for SRT walker, if not already registered
-    if (g_srt_codegen_start == nullptr) {
-        g_srt_codegen_start = c.getCurr();
-        auto* signals = Core::Signals::Instance();
-        // Call after the memory invalidation handler
-        constexpr u32 priority = 1;
-        signals->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
-    }
+    InstallSrtFaultHandler();
 
     info.srt_info.walker_func = c.getCurr<PFN_SrtWalker>();
     pass_info.dst_off_dw = NUM_USER_DATA_REGS;
