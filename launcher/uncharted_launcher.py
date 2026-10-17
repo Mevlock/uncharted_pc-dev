@@ -69,7 +69,14 @@ FRAME_RATES = [('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FP
 # is sharper).
 WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
                 ('1920x1080', "1920 × 1080 (the games' own)"), ('2560x1440', '2560 × 1440'),
-                ('3840x2160', '3840 × 2160 (4K)')]
+                ('3840x2160', '3840 × 2160 (4K)'), ('2560x1080', '2560 × 1080 (21:9)'),
+                ('3440x1440', '3440 × 1440 (21:9)'), ('3840x1600', '3840 × 1600 (21:9)'),
+                ('5120x1440', '5120 × 1440 (32:9)')]
+# Wider than 16:9 (BB_ULTRAWIDE): the games' view is widened to the window, or the screen in
+# fullscreen, and the picture fills it; in memory, the game files are not changed.
+ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'), ('0', "16:9 with black bars (the games' own)")]
+# The games' field of view in percent (BB_FOV), on every screen.
+FIELDS_OF_VIEW = [('100', "100% (the games' own)"), ('110', '110%'), ('120', '120%'), ('130', '130%')]
 SCALERS = [('fsr1', 'FSR 1 (AMD FidelityFX, sharp)'), ('bilinear', 'Smooth (bilinear)')]
 SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'), ('0', 'Maximum')]
 # Temporal anti-aliasing at the games' 1920x1080 (BB_UPSCALER): it takes the scene before the
@@ -134,7 +141,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
 
 APP_DEFAULTS = {'game_dir': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
                 'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'show_fps': False,
-                'window_size': '1920x1080', 'scaler': 'fsr1', 'sharpening': '500',
+                'window_size': '1920x1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
@@ -308,6 +315,8 @@ def game_environment(s, start=None):
     env['BB_PRESENT_MODE'] = s['present_mode']
     env['BB_VBLANK_HZ'] = str(s.get('frame_rate') or '60')
     env['BB_WINDOW_SIZE'] = str(s.get('window_size') or '1920x1080')
+    env['BB_ULTRAWIDE'] = str(s.get('ultrawide') or 'auto')
+    env['BB_FOV'] = str(s.get('fov') or '100')
     env['BB_FSR1'] = '1' if s.get('scaler', 'fsr1') == 'fsr1' else '0'
     sharpening = str(s.get('sharpening') or 'off')
     env['BB_RCAS'] = '0' if sharpening == 'off' else '1'
@@ -975,6 +984,11 @@ class Launcher:
         self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
                  _('The games render at 1920 × 1080. A larger window, or fullscreen on a 1440p or 4K '
                    'screen, gets the image upscaled to fit.'))
+        self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
+                 _('On a screen or window wider than 16:9 (21:9, 32:9) the games show more at the sides '
+                   'and fill it, with no black bars. Menus, the HUD and cutscene videos are stretched.'))
+        self.row(f, _('Field of view'), self.choice(f, 'fov', FIELDS_OF_VIEW, 34),
+                 _('Shows more of the scene in every direction, also when aiming and in cutscenes.'))
         self.row(f, _('Upscaling'), self.choice(f, 'scaler', SCALERS, 34),
                  _('FSR 1 keeps edges sharp when the image is enlarged; bilinear is softer.'))
         self.row(f, _('Sharpening'), self.choice(f, 'sharpening', SHARPENING, 34),

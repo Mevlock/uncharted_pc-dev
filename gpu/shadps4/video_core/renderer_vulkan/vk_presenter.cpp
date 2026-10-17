@@ -97,8 +97,15 @@ bool CanBlitToSwapchain(const vk::PhysicalDevice physical_device, vk::Format for
     return MakeImageBlit(frame_width, frame_height, swapchain_width, swapchain_height, 0, 0);
 }
 
+// bbport: set by the loader when the game's view was widened to the window (runtime_ultrawide.c):
+// the frame then fills the window instead of being letterboxed.
+extern "C" int runtime_ultrawide_fill;
+
 static vk::Rect2D FitImage(s32 frame_width, s32 frame_height, s32 swapchain_width,
                            s32 swapchain_height) {
+    if (runtime_ultrawide_fill) {
+        return vk::Rect2D{{0, 0}, {static_cast<u32>(swapchain_width), static_cast<u32>(swapchain_height)}};
+    }
     float frame_aspect = static_cast<float>(frame_width) / frame_height;
     float swapchain_aspect = static_cast<float>(swapchain_width) / swapchain_height;
 
@@ -976,6 +983,9 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
 
     expected_frame_height = height;
     expected_frame_width = width;
+    if (runtime_ultrawide_fill) {
+        return; // widened view: the frame is scaled to the whole window (FSR 1 scales each axis)
+    }
     if (ratio > expected_ratio) {
         expected_frame_width = static_cast<s32>(height * expected_ratio);
     } else {

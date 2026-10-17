@@ -679,6 +679,7 @@ static void patch_eop_tick_wait(uint64_t image_size) {
 uint64_t runtime_guest_tsc(void);
 int runtime_time_scaled(void);
 static int rdtsc_patched;
+void runtime_patch_ultrawide(unsigned char *code, uint64_t size);
 static void patch_rdtsc(uint64_t image_size) {
 #ifndef _WIN32
     (void)image_size;
@@ -1023,6 +1024,9 @@ int main(int argc, char **argv) {
         patch_eop_tick_wait(image_end);
         patch_collection_skip(image_end);
         patch_rdtsc(image_end);
+        /* Ultrawide and field of view (runtime_ultrawide.c): the code segment at address 0. */
+        for (uint64_t s=0;s<ns;++s)
+            if ((segments[s].flags&1) && segments[s].address==0) { runtime_patch_ultrawide(image, segments[s].size); break; }
     }
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
