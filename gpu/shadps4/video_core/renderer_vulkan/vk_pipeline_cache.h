@@ -11,6 +11,7 @@
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/specialization.h"
+#include "video_core/renderer_vulkan/vk_async_compiler.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
@@ -198,6 +199,14 @@ private:
     const PreparedDraw* used_prepared = nullptr;
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
+    /// bbport: graphics pipelines built on compiler threads (BB_ASYNC_SHADERS=0: off); the draws
+    /// that need one skip until it is published.
+    std::unique_ptr<AsyncCompiler> compiler;
+    std::vector<vk::UniquePipelineCache> worker_pipeline_caches;
+    tsl::robin_map<GraphicsPipelineKey, std::shared_ptr<struct AsyncGraphicsCompilation>>
+        pending_graphics;
+    bool AsyncCompilation() const;
+    void PublishGraphics();
     PipelineSelection sel{}; ///< GPU thread selection state
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start

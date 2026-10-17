@@ -10,9 +10,12 @@
 #include <mutex>
 #include <ranges>
 #include <string>
+#include <algorithm>
+#include <thread>
 #include <unordered_set>
 
 #include "common/hash.h"
+#include "common/thread.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "core/debug_state.h"
@@ -134,6 +137,19 @@ void VertexCheckPoll() {
                     static_cast<unsigned long long>(total), static_cast<unsigned long long>(frame));
     }
 }
+
+/// bbport: a graphics pipeline being built on a compiler thread, from copies of what the GPU
+/// thread selected (the live stage infos change with every draw).
+struct AsyncGraphicsCompilation {
+    AsyncJob<std::shared_ptr<AsyncGraphicsCompilation>> job;
+    PipelineSelection selection;
+    std::array<std::unique_ptr<Shader::Info>, MaxShaderStages> infos;
+    std::array<std::vector<u32>, MaxShaderStages> user_data;
+    std::array<const Shader::Info*, MaxShaderStages> live_infos{};
+    GraphicsPipeline::SerializationSupport data;
+    std::unique_ptr<GraphicsPipeline> pipeline;
+    bool failure_logged = false;
+};
 
 using Shader::HwStage;
 using Shader::Output;
@@ -456,9 +472,60 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(cache_result));
     pipeline_cache = std::move(cache);
+
+    // bbport: compiler threads for graphics pipelines (from the God of War III port). A new
+    // pipeline used to be built on the GPU thread while the game waited: a stutter at every
+    // new effect. The draws that need it now skip for the frames it takes to build.
+    const char* async_env = std::getenv("BB_ASYNC_SHADERS");
+    if (!(async_env && async_env[0] == '0') && instance.IsVertexInputDynamicState()) {
+        const unsigned threads = std::max(1u, std::thread::hardware_concurrency());
+        const unsigned count = std::clamp(threads / 2, 1u, 6u);
+        for (unsigned i = 0; i < count; ++i) {
+            auto [result, worker_cache] = instance.GetDevice().createPipelineCacheUnique({});
+            ASSERT_MSG(result == vk::Result::eSuccess, "Failed to create compiler pipeline cache");
+            worker_pipeline_caches.push_back(std::move(worker_cache));
+        }
+        compiler = std::make_unique<AsyncCompiler>(count, 64, [](unsigned index) {
+            Common::SetCurrentThreadName(("bb:PipelineCompile" + std::to_string(index)).c_str());
+        });
+        std::printf("Pipelines: built on %u compiler threads (BB_ASYNC_SHADERS=0: off)\n", count);
+    }
 }
 
-PipelineCache::~PipelineCache() = default;
+PipelineCache::~PipelineCache() {
+    // The compiler threads use the device: they finish before anything is released.
+    if (compiler) {
+        compiler->Stop();
+    }
+    pending_graphics.clear();
+}
+
+bool PipelineCache::AsyncCompilation() const {
+    return compiler != nullptr;
+}
+
+void PipelineCache::PublishGraphics() {
+    for (auto it = pending_graphics.begin(); it != pending_graphics.end();) {
+        auto build = it.value();
+        auto result = build->job.Poll();
+        if (!result) {
+            if (build->job.Failed() && !build->failure_logged) {
+                std::printf("Pipelines: pipeline %#llx failed to build: %s\n",
+                            static_cast<unsigned long long>(std::hash<GraphicsPipelineKey>{}(it.key())),
+                            build->job.Error().c_str());
+                build->failure_logged = true;
+            }
+            ++it;
+            continue;
+        }
+        const auto key = it.key();
+        build->pipeline->PublishStages(build->live_infos);
+        RegisterPipelineData(key, std::hash<GraphicsPipelineKey>{}(key), build->data);
+        graphics_pipelines.emplace(key, std::move(build->pipeline));
+        ++num_new_pipelines;
+        it = pending_graphics.erase(it);
+    }
+}
 
 // bbport: shader/pipeline compile time on the GPU thread, reported by BB_FRAME_STATS.
 std::atomic<u64> g_bb_compile_ns;
@@ -518,6 +585,9 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
 
 const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectParams params,
                                                            const PreparedDraw* prepared) {
+    if (!pending_graphics.empty()) {
+        PublishGraphics();
+    }
     used_prepared = nullptr;
     if (prepared) {
         if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
@@ -527,6 +597,41 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     }
     sel.draw_indirect_params = params;
     if (!RefreshGraphicsKey(sel)) {
+        return nullptr;
+    }
+    if (AsyncCompilation() && !sel.regs->stage_enable.hs_en && !EmulatorSettings.IsShaderCollect()) {
+        const auto found = graphics_pipelines.find(sel.graphics_key);
+        if (found != graphics_pipelines.end()) {
+            return found->second.get();
+        }
+        if (!pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
+            auto build = std::make_shared<AsyncGraphicsCompilation>();
+            build->selection = sel;
+            build->selection.regs = nullptr;
+            build->live_infos = sel.infos;
+            for (u32 i = 0; i < MaxShaderStages; ++i) {
+                if (sel.infos[i]) {
+                    build->infos[i] = std::make_unique<Shader::Info>(*sel.infos[i]);
+                    build->user_data[i].assign(sel.infos[i]->user_data.begin(),
+                                               sel.infos[i]->user_data.end());
+                    build->infos[i]->user_data = build->user_data[i];
+                    build->selection.infos[i] = build->infos[i].get();
+                }
+            }
+            const bool queued = build->job.Start(*compiler, [this, build] {
+                CompileTimer timer;
+                auto& s = build->selection;
+                build->pipeline = std::make_unique<GraphicsPipeline>(
+                    instance, scheduler, desc_heap, profile, s.graphics_key,
+                    *worker_pipeline_caches[AsyncCompiler::WorkerIndex()], s.infos,
+                    s.runtime_infos, s.fetch_shader, s.modules, build->data, false);
+                return build;
+            });
+            if (queued) {
+                pending_graphics.emplace(sel.graphics_key, std::move(build));
+            }
+        }
+        sel.fetch_shader.reset();
         return nullptr;
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);

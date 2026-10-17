@@ -94,6 +94,12 @@ public:
                      bool preloading);
     ~GraphicsPipeline();
 
+    /// bbport: a pipeline built on a compiler thread from copies of the stage infos takes the
+    /// live ones once it is published (they are refreshed for every draw).
+    void PublishStages(std::span<const Shader::Info*, MaxShaderStages> infos) {
+        std::ranges::copy(infos, stages.begin());
+    }
+
     const std::optional<const Shader::Gcn::FetchShaderData>& GetFetchShader() const noexcept {
         return fetch_shader;
     }
