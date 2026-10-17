@@ -28,6 +28,44 @@ int runtime_ultrawide_fill;
  * its 16:9 layout (the pipeline cache's ultrawide UI vertex shaders). */
 float runtime_ultrawide_scale = 1.0f;
 
+/* The widened constants, and the block the stubs read them from when it can be switched. */
+static float wide_constants[4];
+static float *volatile switch_constants;
+
+/* Gameplay frames get the widened view, others (menus, title screens, loading) the game's own:
+ * called by the presenter for each frame it prepares. The game builds its camera a frame or
+ * two ahead, so a switch shows up that much later. */
+void runtime_ultrawide_select(int wide) {
+    float *constants = switch_constants;
+    static int current = -1;
+    if (!constants || wide == current) return;
+    current = wide;
+    for (int i = 0; i < 4; ++i) {
+        float value = wide ? wide_constants[i] : 1.0f;
+        __atomic_store(&constants[i], &value, __ATOMIC_RELAXED);
+    }
+}
+
+/* A writable page within 2 GiB of the code (rel32 from the stubs). */
+static float *alloc_near(uint8_t *code, uint64_t size) {
+#ifdef _WIN32
+    const uintptr_t base = ((uintptr_t)code + size + 0xffff) & ~(uintptr_t)0xffff;
+    for (uintptr_t step = 0; step < (1800ull << 20); step += 1u << 16) {
+        void *p = VirtualAlloc((void *)(base + step), 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (p) return (float *)p;
+        if ((uintptr_t)code > step + (2u << 20)) {
+            p = VirtualAlloc((void *)((((uintptr_t)code - step) & ~(uintptr_t)0xffff) - 0x10000), 4096,
+                             MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            if (p) return (float *)p;
+        }
+    }
+#else
+    (void)code;
+    (void)size;
+#endif
+    return NULL;
+}
+
 typedef struct {
     uint8_t op;  /* 0x10 vmovss, 0x59 vmulss, 0x5e vdivss */
     uint8_t reg; /* destination xmm */
@@ -247,9 +285,21 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size) {
         printf("Ultrawide: no room at the end of the game code, not applied\n");
         return;
     }
-    /* Constants: k, 1/k (after a division), k/fov, fov/k. */
-    const float constants[4] = {k, 1.0f / k, k / fov, fov / k};
-    memcpy(code + cave, constants, sizeof(constants));
+    /* Constants: k, 1/k (after a division), k/fov, fov/k. They live in a writable block near the
+     * code so the presenter can switch them per frame (runtime_ultrawide_select): menus, title
+     * screens and loading get the game's own view (all 1), gameplay the widened one. Without such
+     * a block they stay in the padding, always widened. */
+    wide_constants[0] = k;
+    wide_constants[1] = 1.0f / k;
+    wide_constants[2] = k / fov;
+    wide_constants[3] = fov / k;
+    float *constants = alloc_near(code, size);
+    if (constants) {
+        for (int i = 0; i < 4; ++i) constants[i] = 1.0f;
+    } else {
+        constants = (float *)(code + cave);
+        memcpy(constants, wide_constants, sizeof(wide_constants));
+    }
     static const uint8_t nops[6][5] = {{0}, {0x90}, {0x66, 0x90}, {0x0f, 0x1f, 0x00}, {0x0f, 0x1f, 0x40, 0x00},
                                        {0x0f, 0x1f, 0x44, 0x00, 0x00}};
     for (int s = 0; s < ns; ++s) {
@@ -258,13 +308,14 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size) {
         uint8_t *c = code + stub;
         memcpy(c, code + at, len);
         c += len;
-        const uint64_t constant = cave + ((uint32_t)sites[s].op.disp == field ? 0 : 8) + (sites[s].op.op == 0x5e ? 4 : 0);
+        const float *constant =
+            constants + ((uint32_t)sites[s].op.disp == field ? 0 : 2) + (sites[s].op.op == 0x5e ? 1 : 0);
         /* vmulss xmm(reg), xmm(reg), [rip + constant] */
         c[0] = 0xc5;
         c[1] = (uint8_t)((reg < 8 ? 0x80 : 0) | ((~reg & 15) << 3) | 2);
         c[2] = 0x59;
         c[3] = (uint8_t)(((reg & 7) << 3) | 5);
-        int32_t rel = (int32_t)((int64_t)constant - (int64_t)(c - code + 8));
+        int32_t rel = (int32_t)((intptr_t)constant - (intptr_t)(c + 8));
         memcpy(c + 4, &rel, 4);
         c += 8;
         c[0] = 0xe9; /* jmp back */
@@ -278,6 +329,7 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size) {
     }
     runtime_ultrawide_fill = wide;
     runtime_ultrawide_scale = k;
-    printf("Ultrawide: %d camera reads widened for %ux%u (field %#x), field of view %u%%\n", ns, width,
-           height, field, fov_pct);
+    if (constants != (float *)(code + cave)) switch_constants = constants;
+    printf("Ultrawide: %d camera reads widened for %ux%u (field %#x), field of view %u%%%s\n", ns,
+           width, height, field, fov_pct, switch_constants ? ", gameplay only" : "");
 }

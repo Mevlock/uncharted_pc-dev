@@ -4654,6 +4654,13 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
     return true;
 }
 
+} // namespace Vulkan
+
+// src/runtime_ultrawide.c: the camera widening of gameplay frames on or off.
+extern "C" void runtime_ultrawide_select(int wide);
+
+namespace Vulkan {
+
 /// bbport: depth-tested draws on a full-size depth buffer since the last frame was prepared (the
 /// presenter's TakeSceneFrame; the pipeline cache's ultrawide UI test reads it too).
 std::atomic<u32> g_frame_scene_draws{0};
@@ -4676,6 +4683,8 @@ bool Rasterizer::TakeSceneFrame() noexcept {
     const bool scene =
         g_frame_scene_draws.exchange(0, std::memory_order_relaxed) >= SceneFrameDraws();
     g_last_frame_scene.store(scene, std::memory_order_relaxed);
+    // The game's camera: widened for gameplay, its own for menus and title screens.
+    runtime_ultrawide_select(scene ? 1 : 0);
     return scene;
 }
 
