@@ -296,14 +296,24 @@ bool TemporalUpscaler::OnFrameStart() {
     // The guest's startup resolution patch remains in effect until restart. Keep the FSR
     // model at the applied preset while the menu saves the requested one for run.sh.
     // Velocity mode (Uncharted) runs at the game's own size: anti-aliasing (Native AA) only.
-    const int preset = camera_motion.VelocityMode() ? 0 : BbSettings::RenderPreset();
+    // bbport (experiment): BB_UNCHARTED_SCALED=1 lets velocity mode (Uncharted) use the scaled
+    // presets and outputs too; BB_OUTPUT_RES then keeps its size (also non-16:9 ones).
+    static const bool velocity_scaled = [] {
+        const char* env = std::getenv("BB_UNCHARTED_SCALED");
+        return env && env[0] == '1';
+    }();
+    static const bool custom_output = [] {
+        const char* env = std::getenv("BB_OUTPUT_RES");
+        return env && env[0];
+    }();
+    const bool native_only = camera_motion.VelocityMode() && !velocity_scaled;
+    const int preset = native_only ? 0 : BbSettings::RenderPreset();
     if (applied_preset != preset || settings.upscaler == BbSettings::UpscalerOff) failed = false;
     const bool active = Active();
     const bool jitter_on = active && settings.jitter && !BbToggle::Disabled(1u << 25);
     const int upscaler = settings.upscaler.load();
-    const int output =
-        camera_motion.VelocityMode() ? BbSettings::OutputDefault : settings.output_res.load();
-    const bool output_changed = !scaled_session && applied_output != output;
+    const int output = native_only ? BbSettings::OutputDefault : settings.output_res.load();
+    const bool output_changed = !scaled_session && !custom_output && applied_output != output;
     if (output_changed) {
         target_width = BbSettings::OutputWidths[output];
         target_height = BbSettings::OutputHeights[output];
