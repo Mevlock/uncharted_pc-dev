@@ -211,8 +211,11 @@ static void StartProfileWriter() {
 }
 #endif
 
+void BbSamplerStart(); // bbport_sampler.cpp (BB_SAMPLE_THREADS)
+
 extern "C" int bbgpu_init(const BbGpuConfig* config) {
     BbSettings::Load();
+    BbSamplerStart();
 #ifdef BB_PGO_GENERATE
     StartProfileWriter();
 #endif
