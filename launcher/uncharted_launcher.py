@@ -76,6 +76,13 @@ WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
                 ('3840x2160', '3840 × 2160 (4K)'), ('2560x1080', '2560 × 1080 (21:9)'),
                 ('3440x1440', '3440 × 1440 (21:9)'), ('3840x1600', '3840 × 1600 (21:9)'),
                 ('5120x1440', '5120 × 1440 (32:9)')]
+# The size Uncharted 3 renders at (BB_RENDER_RES, set for Uncharted 3 only): the game's display
+# mode, memory budget, camera and movies are patched in memory. Its GPU memory stays under 4 GiB,
+# which allows about 3440 x 1440 (RENDER_PIXELS_MAX); a larger size is scaled down to that.
+RENDER_RESOLUTIONS = [('1080', "1920 × 1080 (the game's own)"),
+                      ('native', 'Native (the window, or the screen in fullscreen)'),
+                      ('2560x1440', '2560 × 1440')]
+RENDER_PIXELS_MAX = 3440 * 1440
 # Wider than 16:9 (BB_ULTRAWIDE): the games' view is widened to the window, or the screen in
 # fullscreen, and the picture fills it; in memory, the game files are not changed.
 ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'), ('0', "16:9 with black bars (the games' own)")]
@@ -146,7 +153,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
                 'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False,
-                'window_size': '1920x1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
+                'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
@@ -283,8 +290,8 @@ def side_buttons():
         return (False, False)
 
 
-def display_refresh_rate():
-    """Refresh rate of the main display in Hz, or None."""
+def display_mode():
+    """(width, height, refresh rate in Hz) of the main display, or None."""
     try:
         class DevMode(ctypes.Structure):
             _fields_ = [('name', ctypes.c_wchar * 32), ('spec', ctypes.c_ushort), ('driver', ctypes.c_ushort),
@@ -296,11 +303,42 @@ def display_refresh_rate():
                         ('rest', ctypes.c_ulong * 8)]
         mode = DevMode()
         mode.size = ctypes.sizeof(DevMode)
-        if ctypes.windll.user32.EnumDisplaySettingsW(None, -1, ctypes.byref(mode)) and mode.frequency > 1:
-            return int(mode.frequency)
+        if ctypes.windll.user32.EnumDisplaySettingsW(None, -1, ctypes.byref(mode)):
+            return int(mode.width), int(mode.height), int(mode.frequency)
     except (AttributeError, OSError):
         pass
     return None
+
+
+def display_refresh_rate():
+    """Refresh rate of the main display in Hz, or None."""
+    mode = display_mode()
+    return mode[2] if mode and mode[2] > 1 else None
+
+
+def render_resolution(s):
+    """'WIDTHxHEIGHT' for BB_RENDER_RES (Uncharted 3), or None for the game's own 1920 x 1080."""
+    choice = str(s.get('render_resolution') or '1080')
+    if choice == '1080':
+        return None
+    try:
+        if choice == 'native':
+            mode = display_mode() if s.get('fullscreen') else None
+            if mode:
+                width, height = mode[0], mode[1]
+            else:
+                width, height = (int(v) for v in str(s.get('window_size') or '1920x1080').split('x'))
+        else:
+            width, height = (int(v) for v in choice.split('x'))
+    except ValueError:
+        return None
+    if width * height > RENDER_PIXELS_MAX:
+        scale = (RENDER_PIXELS_MAX / (width * height)) ** 0.5
+        width, height = int(width * scale), int(height * scale)
+    width, height = width // 8 * 8, height // 4 * 4
+    if width * height <= 1920 * 1080:
+        return None
+    return f'{width}x{height}'
 
 
 def fsr411_assets():
@@ -388,6 +426,9 @@ def game_environment(s, start=None):
     if cap:
         env['BB_FPS_LIMIT'] = str(cap)
     env['BB_WINDOW_SIZE'] = str(s.get('window_size') or '1920x1080')
+    render = render_resolution(s) if start == 'u3' else None
+    if render:
+        env['BB_RENDER_RES'] = render
     env['BB_ULTRAWIDE'] = str(s.get('ultrawide') or 'auto')
     env['BB_FOV'] = str(s.get('fov') or '100')
     env['BB_FSR1'] = '1' if s.get('scaler', 'fsr1') == 'fsr1' else '0'
@@ -1068,6 +1109,12 @@ class Launcher:
         self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
                  _('The games render at 1920 × 1080. A larger window, or fullscreen on a 1440p or 4K '
                    'screen, gets the image upscaled to fit.'))
+        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', RENDER_RESOLUTIONS, 34),
+                 _('Uncharted 3 only, for now: renders the game at a higher resolution instead of '
+                   'upscaling 1920 × 1080, for a sharper picture with less shimmering. Native follows '
+                   'the window size, or the screen in fullscreen, up to about 3440 × 1440 (the game\'s '
+                   'memory limit). Needs a faster GPU; anti-aliasing is off at other sizes than '
+                   '1920 × 1080.'))
         self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
                  _('On a screen or window wider than 16:9 (21:9, 32:9) gameplay shows more at the sides '
                    'and fills it. Menus, loading screens and cutscene videos stay 16:9; the in-game HUD '

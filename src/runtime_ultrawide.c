@@ -200,7 +200,10 @@ static int output_size(unsigned *w, unsigned *h) {
     return window && parse_size(window, w, h);
 }
 
-void runtime_patch_ultrawide(uint8_t *code, uint64_t size) {
+static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_end, unsigned *width,
+                             unsigned *height);
+
+void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     const char *mode = getenv("BB_ULTRAWIDE");
     const int off = mode && mode[0] == '0' && mode[1] == 0;
     /* BB_RENDER_RES (runtime_patch_resolution): the game takes its camera's aspect from the render
@@ -210,10 +213,8 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size) {
      * those frames at 16:9) before any widening. */
     float c = 1.0f;
     unsigned render_w, render_h;
-    const char *render = getenv("BB_RENDER_RES");
-    if (render && parse_size(render, &render_w, &render_h) && render_w >= 640 && render_h >= 360 &&
-        render_w <= 7680 && render_h <= 4320) {
-        c = (float)(render_w & ~7u) / (float)(render_h & ~3u) / (16.0f / 9.0f);
+    if (render_resolution(code, size, image_end, &render_w, &render_h)) {
+        c = (float)render_w / (float)render_h / (16.0f / 9.0f);
         if (c < 1.0f) c = 1.0f; /* narrower buffers: not handled (letterboxed by the game?) */
     }
     unsigned width = 1920, height = 1080;
@@ -378,13 +379,68 @@ static int match_mode_block(const uint8_t *p, uint8_t m) {
     return 1;
 }
 
+/* The game's memory table entries ({id, parent, size, alignment}): the render target heaps
+ * (0x84, 0x85 under the GPU context), the GPU context's total (entry 3, 3052 MiB) and its free
+ * entry (0x0e, ALLOCATION_APP_GPU_FREE, 208.7 MiB, alignment 1). */
+static const uint8_t heap_a[24] = {0x84, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x40, 0xbc, 0x08, 0, 0, 0, 0,
+                                   0x80, 0,    0, 0, 0, 0, 0, 0};
+static const uint8_t heap_b[24] = {0x85, 0, 0, 0, 6, 0, 0, 0, 0x00, 0xbc, 0x10, 0x23, 0, 0, 0, 0,
+                                   0x80, 0,    0, 0, 0, 0, 0, 0};
+static const uint8_t gpu_total[24] = {3, 0, 0, 0, 2, 0, 0, 0, 0x00, 0x00, 0xc0, 0xbe, 0, 0, 0, 0,
+                                      0x00, 0x00, 0x10, 0, 0, 0, 0, 0};
+static const uint8_t gpu_free[24] = {0x0e, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x04, 0x0b, 0x0d, 0, 0, 0, 0,
+                                     1,    0, 0, 0, 0, 0, 0, 0};
+/* The direct memory context's check: movabs rdx, 4608 MiB; xor ecx, ecx; mov rdi, rbx; call. */
+static const uint8_t direct_check[16] = {0x48, 0xba, 0, 0, 0, 0x20, 1, 0, 0, 0, 0x31, 0xc9, 0x48, 0x89, 0xdf, 0xe8};
+/* The movie textures' sizes in the render target setup and the movie's chroma offset (below). */
+static const uint8_t movie_first[7] = {0x44, 0x89, 0xf9, 0x4c, 0x89, 0xc3, 0xe8};
+static const uint8_t movie_second[15] = {0x48, 0x8b, 0x8d, 0x18, 0xfd, 0xff, 0xff, 0x4c,
+                                         0x8b, 0x85, 0x10, 0xfd, 0xff, 0xff, 0xe8};
+static const uint8_t movie_chroma[11] = {0x41, 0x0f, 0xaf, 0xde, 0x83, 0xe3, 0xc0, 0x48, 0x03, 0x5d, 0x80};
+
+/* The size BB_RENDER_RES asks for, when the loaded game is one the patch knows (U3: every piece it
+ * changes is found, once where it must be unique); otherwise nothing is changed at all. */
+static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_end, unsigned *width,
+                             unsigned *height) {
+    static int known = -1;
+    static unsigned w, h;
+    if (known < 0) {
+        known = 0;
+        const char *env = getenv("BB_RENDER_RES");
+        if (!env || !parse_size(env, &w, &h) || w < 640 || h < 360 || w > 7680 || h > 4320) return 0;
+        w &= ~7u;
+        h &= ~3u;
+        if (w == 1920 && h == 1080) return 0;
+        int blocks = 0, direct = 0, first = 0, second = 0, chroma = 0, entries = 0;
+        for (uint64_t i = 0; i + 200 < size; ++i) {
+            const uint8_t *q = code + i;
+            if (q[0] == 0xc7 && q[2] == 0x08 && (q[1] == 0x47 || q[1] == 0x40) && match_mode_block(q, q[1])) ++blocks;
+            if (q[0] == 0x48 && !memcmp(q, direct_check, 16)) ++direct;
+            if (q[0] == 0x44 && !memcmp(q, movie_first, 7)) ++first;
+            if (q[0] == 0x48 && !memcmp(q, movie_second, 15)) ++second;
+            if (q[0] == 0x41 && !memcmp(q, movie_chroma, 11)) ++chroma;
+        }
+        const uint8_t *wanted[4] = {heap_a, heap_b, gpu_total, gpu_free};
+        for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end; i += 8)
+            for (int e = 0; e < 4; ++e)
+                if (!memcmp(code + i, wanted[e], 24)) entries |= 1 << e;
+        if (!blocks || direct != 1 || first != 1 || second != 1 || chroma != 1 || entries != 15) {
+            printf("Render resolution: BB_RENDER_RES is for Uncharted 3, this game is left at 1920x1080 "
+                   "(%d %d %d %d %d %#x)\n", blocks, direct, first, second, chroma, entries);
+            return 0;
+        }
+        known = 1;
+    }
+    if (known && width) {
+        *width = w;
+        *height = h;
+    }
+    return known;
+}
+
 void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) {
-    const char *env = getenv("BB_RENDER_RES");
     unsigned width, height;
-    if (!env || !parse_size(env, &width, &height)) return;
-    if (width < 640 || height < 360 || width > 7680 || height > 4320) return;
-    width &= ~7u;
-    height &= ~3u;
+    if (!render_resolution(code, size, image_end, &width, &height)) return;
     float *floats = NULL;
     int blocks = 0, sizes = 0, loads = 0, limits = 0;
     for (uint64_t i = 0; i + 200 < size; ++i) {
@@ -458,16 +514,12 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
      *  - imul ebx, r14d; and ebx, -64 (chroma offset) becomes mov ebx, 1920 * 1088. */
     int movies = 0;
     {
-        static const uint8_t first[7] = {0x44, 0x89, 0xf9, 0x4c, 0x89, 0xc3, 0xe8};
-        static const uint8_t second[15] = {0x48, 0x8b, 0x8d, 0x18, 0xfd, 0xff, 0xff, 0x4c,
-                                           0x8b, 0x85, 0x10, 0xfd, 0xff, 0xff, 0xe8};
-        static const uint8_t chroma[11] = {0x41, 0x0f, 0xaf, 0xde, 0x83, 0xe3, 0xc0, 0x48, 0x03, 0x5d, 0x80};
         int64_t at_first = -1, at_second = -1, at_chroma = -1;
         int n_first = 0, n_second = 0, n_chroma = 0;
         for (uint64_t i = 0; i + 16 < size; ++i) {
-            if (code[i] == 0x44 && !memcmp(code + i, first, 7)) at_first = (int64_t)i, ++n_first;
-            if (code[i] == 0x48 && !memcmp(code + i, second, 15)) at_second = (int64_t)i, ++n_second;
-            if (code[i] == 0x41 && !memcmp(code + i, chroma, 11)) at_chroma = (int64_t)i, ++n_chroma;
+            if (code[i] == 0x44 && !memcmp(code + i, movie_first, 7)) at_first = (int64_t)i, ++n_first;
+            if (code[i] == 0x48 && !memcmp(code + i, movie_second, 15)) at_second = (int64_t)i, ++n_second;
+            if (code[i] == 0x41 && !memcmp(code + i, movie_chroma, 11)) at_chroma = (int64_t)i, ++n_chroma;
         }
         /* The stub: the last 0x40 bytes of the code segment's zero padding. */
         const uint64_t stub = (size - 0x40) & ~(uint64_t)0xf;
@@ -513,15 +565,6 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
      * pixel count. The context's entries must add up to its total (3052 MiB, entry 3 of the
      * table above it), which grows by as much, and the direct memory the runtime reports
      * (BB_DMEM_MB, 5056 MiB) with it unless it is set. */
-    static const uint8_t heap_a[24] = {0x84, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x40, 0xbc, 0x08, 0, 0, 0, 0,
-                                       0x80, 0,    0, 0, 0, 0, 0, 0};
-    static const uint8_t heap_b[24] = {0x85, 0, 0, 0, 6, 0, 0, 0, 0x00, 0xbc, 0x10, 0x23, 0, 0, 0, 0,
-                                       0x80, 0,    0, 0, 0, 0, 0, 0};
-    static const uint8_t gpu_total[24] = {3, 0, 0, 0, 2, 0, 0, 0, 0x00, 0x00, 0xc0, 0xbe, 0, 0, 0, 0,
-                                          0x00, 0x00, 0x10, 0, 0, 0, 0, 0};
-    /* The GPU context's free entry (0x0e, ALLOCATION_APP_GPU_FREE, 208.7 MiB, alignment 1). */
-    static const uint8_t gpu_free[24] = {0x0e, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x04, 0x0b, 0x0d, 0, 0, 0, 0,
-                                         1,    0, 0, 0, 0, 0, 0, 0};
     uint8_t *entries[4] = {NULL, NULL, NULL, NULL};
     const uint8_t *wanted[4] = {heap_a, heap_b, gpu_total, gpu_free};
     for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end; i += 8)
@@ -576,8 +619,6 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         /* The direct memory context holding it is checked against a constant in the memory map
          * setup: movabs rdx, 4608 MiB; xor ecx, ecx; mov rdi, rbx; call ValidateContext, followed
          * by the next context's mov edx, 512 MiB. */
-        static const uint8_t direct_check[20] = {0x48, 0xba, 0, 0, 0, 0x20, 1, 0, 0, 0, 0x31, 0xc9, 0x48, 0x89,
-                                                 0xdf, 0xe8, 0, 0, 0, 0};
         for (uint64_t i = 0; i + 64 < size; ++i) {
             if (memcmp(code + i, direct_check, 16)) continue;
             uint64_t expected;

@@ -263,8 +263,8 @@ void Menu() {
                  "resolution needs a restart. \"Live resolution changes\" below allows "
                  "changes without a restart (post-processing then stays at 1080p, slower).");
         } else {
-            Hint("BB_RENDER_RES fixes the scene size at start. Remove this explicit variable "
-                 "to change resolution and presets without restarting the game.");
+            Hint("The game renders at this size from the start (the launcher's Render resolution, "
+                 "BB_RENDER_RES). Change it in the launcher; it applies when the game starts.");
         }
     } else {
         Hint("Native AA: FSR works as anti-aliasing. The other presets lower the resolution the "
