@@ -94,6 +94,11 @@ struct Liverpool {
                                             RegDirty* dirty = nullptr);
 
 public:
+    /// bbport: runs the commands guest threads queued (SendCommand), from inside a packet.
+    void RunPendingCommands() {
+        ProcessCommands();
+    }
+
     explicit Liverpool();
     ~Liverpool();
 

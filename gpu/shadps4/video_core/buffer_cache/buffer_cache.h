@@ -38,6 +38,10 @@ namespace VideoCore {
 /// bbport diagnosis (BB_ASYNC_TRACE=1): a GPU-side access to guest memory; uploads = it copies
 /// guest data to the GPU.
 void NoteAsyncAccess(const char* kind, VAddr address, u64 size, bool written, bool uploads);
+/// bbport: BB_ASYNC_PAUSE=2 and the windows of async side queue read-backs in flight.
+bool AsyncPauseTargeted();
+bool AsyncWindowsInFlight();
+bool AsyncWindowOverlaps(VAddr address, u64 size);
 
 class TextureCache;
 class MemoryTracker;

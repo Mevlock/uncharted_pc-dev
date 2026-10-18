@@ -253,6 +253,8 @@ private:
                             const IndirectDraw& indirect);
     /// Everything of an indirect dispatch after the pipeline selection.
     void DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr args, u32 size);
+    void WaitAsyncWindows(const Pipeline* pipeline, bool is_indexed, u32 index_offset,
+                          bool compute, const IndirectDraw* indirect);
     /// Hands a draw (or, with `cs`, a dispatch) to the recording thread.
     void PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared, bool is_indexed,
                   u32 index_offset, const AmdGpu::ComputeProgram* cs = nullptr,

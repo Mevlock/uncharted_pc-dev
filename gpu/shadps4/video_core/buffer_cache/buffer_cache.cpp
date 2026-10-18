@@ -312,6 +312,32 @@ bool TicketTouched(VAddr start) {
 }
 } // namespace
 
+/// BB_ASYNC_PAUSE=2: a draw or dispatch reading a window whose async read-back is in flight
+/// waits for it (Rasterizer::WaitAsyncWindows).
+bool AsyncPauseTargeted() {
+    static const bool targeted = [] {
+        const char* env = std::getenv("BB_ASYNC_PAUSE");
+        return env && env[0] == '2';
+    }();
+    return targeted;
+}
+
+bool AsyncWindowsInFlight() {
+    return in_flight_count.load(std::memory_order_relaxed) != 0;
+}
+
+bool AsyncWindowOverlaps(VAddr address, u64 size) {
+    const VAddr end = address + size;
+    for (auto& r : trace_in_flight) {
+        const VAddr rs = r.start.load(std::memory_order_acquire);
+        if (rs && rs < end && address < r.end.load(std::memory_order_relaxed) &&
+            r.async.load(std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool AsyncAccessTracking() {
     return AsyncTraceEnabled() || in_flight_count.load(std::memory_order_relaxed) != 0;
 }
@@ -364,6 +390,10 @@ void NoteAsyncAccess(const char* kind, VAddr address, u64 size, bool written, bo
         }
     }
 }
+
+/// bbport: guest threads waiting for an async side queue read-back (BB_ASYNC_PAUSE: the GPU
+/// thread decodes no draw or dispatch meanwhile, see Liverpool).
+std::atomic<u32> g_async_stalled{0};
 
 bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
     SideTicket ticket;
@@ -489,7 +519,8 @@ bool BufferCache::BeginSideDownload(VAddr page, u64 length, SideTicket& ticket) 
         .pCommandBuffers = &slot->cmdbuf,
     };
     Vulkan::Check(side.queue.submit(submit, *slot->fence));
-    if ((AsyncTraceEnabled() || (ticket.async && AsyncStrict())) && !pages.empty()) {
+    if ((AsyncTraceEnabled() || (ticket.async && (AsyncStrict() || AsyncPauseTargeted()))) &&
+        !pages.empty()) {
         TraceBegin(pages.front(), pages.back() + TRACKER_BYTES_PER_PAGE, ticket.async);
     }
     return true;
@@ -541,6 +572,100 @@ bool BufferCache::FinishSideDownload(SideTicket& ticket, VAddr fault_page, u64 f
             continue; // newer GPU data than the copy
         }
         owned.push_back(at);
+    }
+    // bbport diagnosis: BB_ASYNC_VERIFY=1 — before an async read-back hands pages back, a second
+    // copy of them, taken after all work recorded so far, is compared with it: a difference is
+    // GPU data the tracking missed (stale data about to reach the guest).
+    static const bool verify = [] {
+        const char* env = std::getenv("BB_ASYNC_VERIFY");
+        return env && env[0] == '1';
+    }();
+    if (verify && ticket.async && ticket.slot && ticket.total && !owned.empty()) {
+        if (auto* check = side_queue->Acquire()) {
+            scheduler.Flush();
+            const u64 wait_tick = scheduler.CurrentTick() - 1;
+            auto& side = *side_queue;
+            Vulkan::Check(side.device.resetCommandPool(*check->pool));
+            Vulkan::Check(
+                check->cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
+            check->cmdbuf.copyBuffer(ticket.arena->Handle(), check->staging.Handle(),
+                                     ticket.copies);
+            const vk::MemoryBarrier2 to_host = {
+                .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+                .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+            };
+            check->cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
+            Vulkan::Check(check->cmdbuf.end());
+            const vk::Semaphore timeline = scheduler.GetWorkSemaphore()->Handle();
+            const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
+            const vk::TimelineSemaphoreSubmitInfo timeline_info = {
+                .waitSemaphoreValueCount = 1,
+                .pWaitSemaphoreValues = &wait_tick,
+            };
+            const vk::SubmitInfo submit = {
+                .pNext = &timeline_info,
+                .waitSemaphoreCount = 1,
+                .pWaitSemaphores = &timeline,
+                .pWaitDstStageMask = &wait_stage,
+                .commandBufferCount = 1,
+                .pCommandBuffers = &check->cmdbuf,
+            };
+            Vulkan::Check(side.queue.submit(submit, *check->fence));
+            Vulkan::Check(side.device.waitForFences(*check->fence, true, UINT64_MAX));
+            Vulkan::Check(side.device.resetFences(*check->fence));
+            check->staging.Invalidate(0, ticket.total);
+            const u8* first = ticket.slot->staging.mapped_data.data();
+            const u8* second = check->staging.mapped_data.data();
+            const bool touched = TicketTouched(ticket.pages.front());
+            static std::atomic<u64> checked{0}, stale{0};
+            static std::atomic<u32> prints{0};
+            for (const auto& copy : ticket.copies) {
+                const VAddr start = ticket.arena->cpu_addr + copy.srcOffset;
+                const VAddr end = start + copy.size;
+                for (VAddr at = start; at < end;) {
+                    const VAddr page = Common::AlignDown(at, TRACKER_BYTES_PER_PAGE);
+                    const VAddr part_end = std::min<VAddr>(end, page + TRACKER_BYTES_PER_PAGE);
+                    if (std::ranges::find(owned, page) != owned.end()) {
+                        const u64 offset = copy.dstOffset + (at - start);
+                        u64 differ = 0, first_diff = ~0ull;
+                        for (u64 i = 0; i < part_end - at; ++i) {
+                            if (first[offset + i] != second[offset + i]) {
+                                ++differ;
+                                first_diff = std::min(first_diff, i);
+                            }
+                        }
+                        checked.fetch_add(1, std::memory_order_relaxed);
+                        if (differ) {
+                            stale.fetch_add(1, std::memory_order_relaxed);
+                            if (prints.fetch_add(1, std::memory_order_relaxed) < 400) {
+                                const bool faulting = page >= fault_page &&
+                                                      page < fault_page + fault_length;
+                                std::printf(
+                                    "Async verify: STALE %s page %#llx: %llu of %llu bytes differ "
+                                    "from %#llx, touched %d, write tick %llu, page tick now %llu, "
+                                    "%.2f ms after submit (%llu stale of %llu pages so far)\n",
+                                    faulting ? "fault" : "neighbour",
+                                    (unsigned long long)page, (unsigned long long)differ,
+                                    (unsigned long long)(part_end - at),
+                                    (unsigned long long)(at + first_diff), int(touched),
+                                    (unsigned long long)ticket.write_tick,
+                                    (unsigned long long)memory_tracker->LatestGpuWriteTick(
+                                        page, TRACKER_BYTES_PER_PAGE),
+                                    std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - ticket.start)
+                                        .count(),
+                                    (unsigned long long)stale.load(),
+                                    (unsigned long long)checked.load());
+                            }
+                        }
+                    }
+                    at = part_end;
+                }
+            }
+            side_queue->Release(check);
+        }
     }
     if (auto* slot = ticket.slot; slot && ticket.total) {
         const u8* staging = slot->staging.mapped_data.data();
@@ -909,6 +1034,8 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                 started = BeginSideDownload(page, length, ticket);
                 if (!started) {
                     resolve();
+                } else {
+                    g_async_stalled.fetch_add(1, std::memory_order_relaxed);
                 }
             });
             if (started) {
@@ -920,6 +1047,9 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                     if (Vulkan::g_drain_draw_pipe) {
                         Vulkan::g_drain_draw_pipe();
                     }
+                    struct Unstall {
+                        ~Unstall() { g_async_stalled.fetch_sub(1, std::memory_order_relaxed); }
+                    } unstall;
                     if (!FinishSideDownload(ticket, page, length)) {
                         resolve(); // the GPU wrote a page meanwhile: decide again
                         return;

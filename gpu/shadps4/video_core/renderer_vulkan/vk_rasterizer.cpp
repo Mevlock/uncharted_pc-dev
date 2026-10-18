@@ -1271,9 +1271,98 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
     }
 }
 
+/// bbport: BB_ASYNC_PAUSE=2 — a draw or dispatch whose buffers overlap the window of an async
+/// side queue read-back in flight waits for it here, before the recording thread gets it. The
+/// guest thread that faulted there is about to write the data such work may read (with
+/// synchronous read-backs the GPU thread waited too): one-frame geometry spikes otherwise.
+void Rasterizer::WaitAsyncWindows(const Pipeline* pipeline, bool is_indexed, u32 index_offset,
+                                  bool compute, const IndirectDraw* indirect) {
+    boost::container::small_vector<std::pair<VAddr, u64>, 48> ranges;
+    for (const auto* stage : pipeline->GetStages()) {
+        if (!stage) {
+            continue;
+        }
+        for (const auto& desc : stage->buffers) {
+            if (desc.IsSpecial()) {
+                continue;
+            }
+            const auto sharp = desc.GetSharp(*stage);
+            if (sharp.base_address && sharp.GetSize()) {
+                ranges.emplace_back(sharp.base_address, sharp.GetSize());
+            }
+        }
+        // Images: the size is an upper bound (pitch x height x layers at 16 bytes a texel).
+        for (const auto& desc : stage->images) {
+            const auto image = desc.GetSharp(*stage);
+            if (image.Address()) {
+                const u64 size = u64(image.Pitch()) * (u64(image.height) + 1) *
+                                 image.NumLayers() * 16;
+                ranges.emplace_back(image.Address(), std::min<u64>(size, 64_MB));
+            }
+        }
+    }
+    const auto& regs = liverpool->regs;
+    if (!compute) {
+        const auto* graphics = static_cast<const GraphicsPipeline*>(pipeline);
+        decltype(vertex_binds.attributes) attributes;
+        decltype(vertex_binds.bindings) bindings;
+        VertexInputs<vk::VertexInputBindingDivisorDescriptionEXT> divisors;
+        VertexInputs<AmdGpu::Buffer> guest_buffers;
+        if (graphics->GetFetchShader()) {
+            graphics->GetVertexInputs(attributes, bindings, divisors, guest_buffers,
+                                      regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
+        }
+        for (const auto& vb : guest_buffers) {
+            if (vb.base_address && vb.GetSize()) {
+                ranges.emplace_back(vb.base_address, vb.GetSize());
+            }
+        }
+        if (is_indexed && !indirect) {
+            const u32 index_size =
+                regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16 ? 2 : 4;
+            ranges.emplace_back(regs.index_base_address.Address<VAddr>() +
+                                    u64(index_offset) * index_size,
+                                u64(regs.num_indices) * index_size);
+        }
+    }
+    if (indirect) {
+        ranges.emplace_back(indirect->args, 64);
+    }
+    const auto overlaps = [&] {
+        for (const auto& [address, size] : ranges) {
+            if (VideoCore::AsyncWindowOverlaps(address, size)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!overlaps()) {
+        return;
+    }
+    static std::atomic<u64> waits{0}, wait_ns{0};
+    static auto window = std::chrono::steady_clock::now();
+    const auto start = std::chrono::steady_clock::now();
+    while (overlaps()) {
+        liverpool->RunPendingCommands();
+        std::this_thread::yield();
+    }
+    const auto now = std::chrono::steady_clock::now();
+    waits.fetch_add(1, std::memory_order_relaxed);
+    wait_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(now - start).count(),
+                      std::memory_order_relaxed);
+    if (now - window >= std::chrono::seconds(5)) {
+        std::printf("Async pause (5 s): %llu draws/dispatches waited, %.1f ms in all\n",
+                    (unsigned long long)waits.exchange(0), wait_ns.exchange(0) / 1e6);
+        window = now;
+    }
+}
+
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
                           bool is_indexed, u32 index_offset, const AmdGpu::ComputeProgram* cs,
                           const IndirectDraw* indirect) {
+    if (pipeline && VideoCore::AsyncPauseTargeted() && VideoCore::AsyncWindowsInFlight()) {
+        WaitAsyncWindows(pipeline, is_indexed, index_offset, cs != nullptr, indirect);
+    }
     auto& dirty = liverpool->pipe_dirty;
     if (!pipe_synced) {
         // Stage B has not run yet: its register copy starts as this one.

@@ -29,7 +29,38 @@
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
+namespace VideoCore {
+extern std::atomic<u32> g_async_stalled; // buffer_cache.cpp
+}
+
 namespace AmdGpu {
+
+namespace {
+/// bbport diagnosis: BB_ASYNC_PAUSE=1 — while a guest thread waits for its async side queue
+/// read-back, draws and dispatches wait too (as with synchronous read-backs, where the GPU
+/// thread does): the game may hand over work that reads what that thread is about to write.
+bool IsConsumingOpcode(PM4ItOpcode opcode) {
+    static const bool pause = [] {
+        const char* env = std::getenv("BB_ASYNC_PAUSE");
+        return env && env[0] == '1';
+    }();
+    if (!pause) {
+        return false;
+    }
+    switch (opcode) {
+    case PM4ItOpcode::DrawIndex2:
+    case PM4ItOpcode::DrawIndexOffset2:
+    case PM4ItOpcode::DrawIndexAuto:
+    case PM4ItOpcode::DrawIndirect:
+    case PM4ItOpcode::DrawIndexIndirect:
+    case PM4ItOpcode::DispatchDirect:
+    case PM4ItOpcode::DispatchIndirect:
+        return true;
+    default:
+        return false;
+    }
+}
+} // namespace
 
 // bbport diagnosis: BB_SUBMIT_DELAY_US=<us> starts each submission no earlier than that long
 // after the guest submitted it, as a GPU still busy with earlier work would. Tests whether the
@@ -905,6 +936,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            if (IsConsumingOpcode(opcode)) {
+                while (VideoCore::g_async_stalled.load(std::memory_order_relaxed)) {
+                    ProcessCommands();
+                    std::this_thread::yield();
+                }
+            }
             ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
             // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
             if (rasterizer && !PipelinedOpcode(opcode) &&
@@ -1573,6 +1610,12 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        if (IsConsumingOpcode(opcode)) {
+            while (VideoCore::g_async_stalled.load(std::memory_order_relaxed)) {
+                ProcessCommands();
+                std::this_thread::yield();
+            }
+        }
 
         // bbport: compute work that uses the caches or guest memory directly waits for the draw
         // recording thread. Register writes need not (the recording thread works from register
