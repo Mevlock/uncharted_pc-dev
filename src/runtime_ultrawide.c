@@ -470,23 +470,58 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
                                        0x80, 0,    0, 0, 0, 0, 0, 0};
     static const uint8_t gpu_total[24] = {3, 0, 0, 0, 2, 0, 0, 0, 0x00, 0x00, 0xc0, 0xbe, 0, 0, 0, 0,
                                           0x00, 0x00, 0x10, 0, 0, 0, 0, 0};
-    uint8_t *entries[3] = {NULL, NULL, NULL};
-    const uint8_t *wanted[3] = {heap_a, heap_b, gpu_total};
+    /* The GPU context's free entry (0x0e, ALLOCATION_APP_GPU_FREE, 208.7 MiB, alignment 1). */
+    static const uint8_t gpu_free[24] = {0x0e, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x04, 0x0b, 0x0d, 0, 0, 0, 0,
+                                         1,    0, 0, 0, 0, 0, 0, 0};
+    uint8_t *entries[4] = {NULL, NULL, NULL, NULL};
+    const uint8_t *wanted[4] = {heap_a, heap_b, gpu_total, gpu_free};
     for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end; i += 8)
-        for (int e = 0; e < 3; ++e)
+        for (int e = 0; e < 4; ++e)
             if (!entries[e] && !memcmp(code + i, wanted[e], 24)) entries[e] = code + i;
-    uint64_t grown = 0, heaps[2] = {0, 0}, total = 0, direct_total = 0;
+    uint64_t grown = 0, heaps[2] = {0, 0}, total = 0, direct_total = 0, free_size = 0;
     const double ratio = (double)width * height / (1920.0 * 1080.0);
-    if (entries[0] && entries[1] && entries[2] && ratio > 1.0) {
+    if (entries[0] && entries[1] && entries[2] && entries[3] && ratio > 1.0) {
+        /* The engine keeps the GPU context's size in 32 bits (its arena wraps around past 4 GiB),
+         * so the total stays below 4096 MiB: the 10% margin shrinks to fit, and growth beyond that
+         * comes out of the free entry. Sizes in whole 2 MiB, the unit the areas are allocated in. */
+        const uint64_t mib2 = 0x1fffff, cap = 4094ull << 20;
+        memcpy(&heaps[0], entries[0] + 8, 8);
+        memcpy(&heaps[1], entries[1] + 8, 8);
+        memcpy(&total, entries[2] + 8, 8);
+        memcpy(&free_size, entries[3] + 8, 8);
+        const double need = (heaps[0] + heaps[1]) * (ratio - 1.0);
+        const uint64_t room = cap > total ? cap - total : 0;
+        double margin = 1.1;
+        if (need * margin > (double)room) margin = need > 0 ? (double)room / need : 1.0;
+        if (margin < 1.0) margin = 1.0;
+        uint64_t grow[2];
         for (int e = 0; e < 2; ++e) {
-            memcpy(&heaps[e], entries[e] + 8, 8);
-            /* Whole 2 MiB: the memory areas are allocated in those. */
-            const uint64_t grow = ((uint64_t)(heaps[e] * (ratio - 1.0) * 1.1) + 0x1fffff) & ~(uint64_t)0x1fffff;
-            heaps[e] += grow;
-            grown += grow;
+            grow[e] = ((uint64_t)(heaps[e] * (ratio - 1.0) * margin) + mib2) & ~mib2;
+            grown += grow[e];
+        }
+        uint64_t borrowed = 0;
+        if (grown > room) {
+            borrowed = grown - room;
+            if (borrowed + (4ull << 20) > free_size) { /* does not fit: grow as far as it does */
+                const uint64_t short_by = borrowed + (4ull << 20) - free_size;
+                borrowed -= short_by < borrowed ? short_by : borrowed;
+                grown = room + borrowed;
+                const uint64_t a = ((uint64_t)((double)grown * heaps[0] / (heaps[0] + heaps[1]))) & ~mib2;
+                grow[0] = a;
+                grow[1] = (grown - a) & ~mib2;
+                grown = grow[0] + grow[1];
+                borrowed = grown > room ? grown - room : 0;
+                printf("Render resolution: not enough GPU memory under 4 GiB for this size, the render "
+                       "target heaps grow %.0f MiB short\n", (need - (double)grown) / 1048576.0);
+            }
+            free_size -= borrowed;
+            memcpy(entries[3] + 8, &free_size, 8);
+        }
+        for (int e = 0; e < 2; ++e) {
+            heaps[e] += grow[e];
             memcpy(entries[e] + 8, &heaps[e], 8);
         }
-        memcpy(&total, entries[2] + 8, 8);
+        grown -= borrowed; /* the part that enlarges the context */
         total += grown;
         memcpy(entries[2] + 8, &total, 8);
         /* The direct memory context holding it is checked against a constant in the memory map
@@ -515,7 +550,7 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
     }
     runtime_render_resolution = blocks > 0;
     printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched, "
-           "render target heaps %.1f + %.1f MiB, GPU memory %.1f MiB, direct %.1f MiB, BB_DMEM_MB %s)\n",
+           "render target heaps %.1f + %.1f MiB, GPU memory %.1f MiB (%.1f free), direct %.1f MiB, BB_DMEM_MB %s)\n",
            width, height, blocks, sizes, loads, limits, heaps[0] / 1048576.0, heaps[1] / 1048576.0,
-           total / 1048576.0, direct_total / 1048576.0, getenv("BB_DMEM_MB") ? getenv("BB_DMEM_MB") : "unset");
+           total / 1048576.0, free_size / 1048576.0, direct_total / 1048576.0, getenv("BB_DMEM_MB") ? getenv("BB_DMEM_MB") : "unset");
 }
