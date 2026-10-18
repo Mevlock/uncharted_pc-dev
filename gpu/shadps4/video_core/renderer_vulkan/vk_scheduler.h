@@ -743,6 +743,11 @@ public:
     /// BB_RECORDER_TRACE=1: prints the most frequent CommandBuffer() callers every 2000 calls.
     static void TraceDirectRecording(void* caller);
 
+    /// bbport diagnosis (BB_GPU_BUSY): a GPU timestamp where the guest queue of the recorded
+    /// work changes to `label`; GPU time is reported per label.
+    void MarkSegment(u32 label);
+    [[nodiscard]] bool SegmentsEnabled() const;
+
     /// Records `func(vk::CommandBuffer)` in order with other commands. The closure must own
     /// everything it uses (capture by value): it may run later on the recording thread.
     template <typename Func>

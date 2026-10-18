@@ -35,6 +35,10 @@ extern std::atomic<u32> g_async_stalled; // buffer_cache.cpp
 
 namespace AmdGpu {
 
+/// bbport diagnosis: the queue whose packet the GPU thread decodes (0 graphics, 1 + vqid for
+/// the compute queues); read by Rasterizer::PostDraw (BB_QUEUE_WATCH).
+std::atomic<int> g_decoding_queue{0};
+
 namespace {
 /// bbport diagnosis: BB_ASYNC_PAUSE=1 — while a guest thread waits for its async side queue
 /// read-back, draws and dispatches wait too (as with synchronous read-backs, where the GPU
@@ -917,6 +921,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
     while (!dcb.empty()) {
         ProcessCommands();
+        g_decoding_queue.store(0, std::memory_order_relaxed);
 
         const auto* header = reinterpret_cast<const PM4Header*>(dcb.data());
         const u32 type = header->type;
@@ -1569,6 +1574,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     size_t acb_size = acb.size_bytes();
     while (!acb.empty()) {
         ProcessCommands();
+        g_decoding_queue.store(int(vqid) + 1, std::memory_order_relaxed);
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
         u32 next_dw_off = header->type3.NumWords() + 1;

@@ -1357,9 +1357,124 @@ void Rasterizer::WaitAsyncWindows(const Pipeline* pipeline, bool is_indexed, u32
     }
 }
 
+} // namespace Vulkan
+namespace AmdGpu {
+extern std::atomic<int> g_decoding_queue; // liverpool.cpp
+}
+namespace Vulkan {
+
+/// bbport diagnosis: BB_QUEUE_WATCH=<hex address>: which guest queue's work writes the 64 KiB
+/// from there (and how much work each queue hands over, every 5 s).
+static void NoteQueueWork(const Pipeline* pipeline, const AmdGpu::ComputeProgram* cs) {
+    const bool compute = cs != nullptr;
+    // BB_QUEUE_SHADERS=1: the compute queues' dispatches by shader (count, average groups,
+    // buffers written), every 5 s.
+    static const bool shaders = std::getenv("BB_QUEUE_SHADERS") != nullptr;
+    if (shaders && compute && pipeline) {
+        const int queue = AmdGpu::g_decoding_queue.load(std::memory_order_relaxed);
+        struct Entry {
+            u64 count = 0, groups = 0, written = 0, queues = 0;
+        };
+        static std::unordered_map<u64, Entry> table;
+        static auto window = std::chrono::steady_clock::now();
+        const auto* stage = pipeline->GetStages()[0];
+        if (stage) {
+            auto& e = table[stage->pgm_hash];
+            ++e.count;
+            e.groups += u64(cs->dim_x) * cs->dim_y * cs->dim_z;
+            e.queues |= 1ull << std::clamp(queue, 0, 63);
+            for (const auto& desc : stage->buffers) {
+                e.written += !desc.IsSpecial() && desc.is_written;
+            }
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now - window >= std::chrono::seconds(5)) {
+            std::vector<std::pair<u64, Entry>> sorted(table.begin(), table.end());
+            std::ranges::sort(sorted, std::greater{}, [](const auto& p) { return p.second.count; });
+            for (size_t i = 0; i < std::min<size_t>(sorted.size(), 12); ++i) {
+                const auto& [hash, e] = sorted[i];
+                std::printf("Queue shaders (5 s): cs %016llx %llu dispatches, %.1f groups each, "
+                            "%.1f buffers written, queues mask %llx\n",
+                            (unsigned long long)hash, (unsigned long long)e.count,
+                            double(e.groups) / e.count, double(e.written) / e.count,
+                            (unsigned long long)e.queues);
+            }
+            table.clear();
+            window = now;
+        }
+    }
+    static const VAddr watch = [] {
+        const char* env = std::getenv("BB_QUEUE_WATCH");
+        return env ? VAddr(std::strtoull(env, nullptr, 16)) : VAddr{0};
+    }();
+    if (!watch) {
+        return;
+    }
+    const int queue = AmdGpu::g_decoding_queue.load(std::memory_order_relaxed);
+    static std::array<u64, 16> draws{}, dispatches{}, watched{};
+    static std::atomic<u32> prints{0};
+    static auto window = std::chrono::steady_clock::now();
+    const int q = std::clamp(queue, 0, 15);
+    (compute ? dispatches : draws)[q]++;
+    if (pipeline) {
+        for (const auto* stage : pipeline->GetStages()) {
+            if (!stage) {
+                continue;
+            }
+            for (const auto& desc : stage->buffers) {
+                if (desc.IsSpecial() || !desc.is_written) {
+                    continue;
+                }
+                const auto sharp = desc.GetSharp(*stage);
+                const VAddr address = sharp.base_address;
+                const u64 size = sharp.GetSize();
+                if (address && address < watch + 0x10000 && watch < address + size) {
+                    watched[q]++;
+                    if (prints.fetch_add(1, std::memory_order_relaxed) < 40) {
+                        std::printf("Queue watch: %s on queue %d (shader %llx) writes %#llx+%#llx\n",
+                                    compute ? "dispatch" : "draw", queue,
+                                    (unsigned long long)stage->pgm_hash,
+                                    (unsigned long long)address, (unsigned long long)size);
+                    }
+                }
+            }
+        }
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window >= std::chrono::seconds(5)) {
+        for (int i = 0; i < 16; ++i) {
+            if (draws[i] || dispatches[i]) {
+                std::printf("Queue work (5 s): queue %d: %llu draws, %llu dispatches, %llu write "
+                            "the watched range\n",
+                            i, (unsigned long long)draws[i], (unsigned long long)dispatches[i],
+                            (unsigned long long)watched[i]);
+            }
+        }
+        draws = {};
+        dispatches = {};
+        watched = {};
+        window = now;
+    }
+}
+
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
                           bool is_indexed, u32 index_offset, const AmdGpu::ComputeProgram* cs,
                           const IndirectDraw* indirect) {
+    NoteQueueWork(pipeline, cs);
+    if (scheduler.SegmentsEnabled()) {
+        // BB_GPU_BUSY: a timestamp on the recording thread where the guest queue changes.
+        static int last_queue = -1;
+        const int queue = AmdGpu::g_decoding_queue.load(std::memory_order_relaxed);
+        if (queue != last_queue) {
+            last_queue = queue;
+            const u32 label = u32(queue);
+            RunInOrder([](Rasterizer& self, const u8* data) {
+                u32 l;
+                std::memcpy(&l, data, sizeof(l));
+                self.scheduler.MarkSegment(l);
+            }, &label, sizeof(label));
+        }
+    }
     if (pipeline && VideoCore::AsyncPauseTargeted() && VideoCore::AsyncWindowsInFlight()) {
         WaitAsyncWindows(pipeline, is_indexed, index_offset, cs != nullptr, indirect);
     }
@@ -2895,6 +3010,26 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         }
     }
 
+    // bbport diagnosis (BB_QUEUE_SHADERS=1): dispatches and the barriers before them, by shader.
+    if (static const bool tally = std::getenv("BB_QUEUE_SHADERS") != nullptr; tally) {
+        static std::unordered_map<u64, std::pair<u64, u64>> table;
+        static auto window = std::chrono::steady_clock::now();
+        auto& entry = table[cs.pgm_hash];
+        ++entry.first;
+        entry.second += needs_barrier;
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(5)) {
+            for (const auto& [hash, e] : table) {
+                if (e.first >= 5000) {
+                    std::printf("Dispatch barriers (5 s): cs %016llx %llu dispatches, %llu with a "
+                                "barrier first\n",
+                                (unsigned long long)hash, (unsigned long long)e.first,
+                                (unsigned long long)e.second);
+                }
+            }
+            table.clear();
+            window = now;
+        }
+    }
     if (needs_barrier) {
         runtime.FlushBarriers();
     }
@@ -3902,7 +4037,31 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
-                bound_buffers.emplace_back(buffer, offset, size, desc.is_written);
+                // bbport: what typed writes can reach (BB_TIGHT_WRITES=0: the whole range).
+                // Through a strided view a typed store writes one element per record, so the
+                // last record ends `stride - element` before the nominal end. U3's skinning
+                // (cs 8f067540, ~108k single-group dispatches/s) writes interleaved vertices
+                // through two views 12 bytes apart: the second view's nominal end overlapped
+                // the next object's first vertex, and ~86% of those dispatches waited for the
+                // GPU to drain behind a barrier for bytes nobody writes.
+                const u64 tracked_size = [&]() -> u64 {
+                    static const bool tight = [] {
+                        const char* env = std::getenv("BB_TIGHT_WRITES");
+                        return !(env && env[0] == '0');
+                    }();
+                    const u32 stride = vsharp.GetStride();
+                    const u32 records = u32(vsharp.num_records);
+                    if (!tight || !desc.is_written || !desc.is_formatted || stride == 0 ||
+                        records == 0) {
+                        return size;
+                    }
+                    const u32 element = AmdGpu::NumBitsPerBlock(vsharp.GetDataFmt()) / 8;
+                    if (element == 0 || element > stride) {
+                        return size;
+                    }
+                    return std::min<u64>(size, u64(stride) * (records - 1) + element);
+                }();
+                bound_buffers.emplace_back(buffer, offset, tracked_size, desc.is_written);
                 if (g_gpu_checkpoints && num_checkpoint_buffers < std::size(checkpoint_buffers)) {
                     checkpoint_buffers[num_checkpoint_buffers++] = {
                         vsharp.base_address, static_cast<u32>(size), desc.is_written};
@@ -3911,7 +4070,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                 }
-                needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
+                needs_barrier |=
+                    runtime.IsBufferAccessed(buffer, offset, tracked_size, desc.is_written);
                 if (const VAddr watch = WatchedGpuWrite();
                     watch && desc.is_written && vsharp.base_address < watch + 0x1000 &&
                     watch < vsharp.base_address + size) {
@@ -4942,6 +5102,17 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
     DrainDrawPipe();
+    if (static const char* qw = std::getenv("BB_QUEUE_WATCH"); qw && !dst_gds) {
+        const VAddr watch = VAddr(std::strtoull(qw, nullptr, 16));
+        static std::atomic<u32> prints{0};
+        if (dst < watch + 0x10000 && watch < dst + num_bytes &&
+            prints.fetch_add(1, std::memory_order_relaxed) < 40) {
+            std::printf("Queue watch: DMA copy on queue %d: %#llx <- %s%#llx (%u bytes)\n",
+                        AmdGpu::g_decoding_queue.load(std::memory_order_relaxed),
+                        (unsigned long long)dst, src_gds ? "GDS " : "", (unsigned long long)src,
+                        num_bytes);
+        }
+    }
     if (const VAddr watch = WatchedGpuWrite(); watch && !dst_gds && dst < watch + 0x1000 && watch < dst + num_bytes) {
         static std::atomic<u32> reported{0};
         if (reported.fetch_add(1, std::memory_order_relaxed) < 20) {

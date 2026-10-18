@@ -27,6 +27,68 @@
 
 namespace Vulkan {
 
+namespace {
+/// bbport diagnosis: BB_GPU_BUSY=1 — a timestamp where each command buffer of the draw scheduler
+/// starts and ends; every 5 s: how busy the GPU was, its idle gaps, and how long submissions
+/// took from submit to done (how far the GPU runs behind).
+struct GpuBusy {
+    static constexpr u32 Slots = 2048;
+    static constexpr u32 Marks = 128; // segment timestamps per command buffer
+    static constexpr u32 Labels = 16;
+    vk::Device device;
+    vk::QueryPool pool;
+    vk::QueryPool marks; // Slots x Marks
+    struct Block {
+        std::array<u8, Marks> labels;
+        u32 count;
+        u8 initial;
+    };
+    std::vector<Block> blocks = std::vector<Block>(Slots);
+    u8 last_label = 0;
+    std::array<double, Labels> label_ns{};
+    u64 overflowed = 0;
+    double period_ns = 1.0;
+    const Scheduler* owner = nullptr;
+    s64 open = -1; // slot of the command buffer being recorded
+    u64 next = 0;
+    struct Pending {
+        u32 slot;
+        u64 tick;
+        std::chrono::steady_clock::time_point submitted;
+    };
+    std::vector<Pending> pending;
+    std::vector<std::pair<u64, u64>> spans; // GPU [start, end) of finished command buffers
+    double latency_ms = 0;
+    u64 latency_count = 0;
+    std::chrono::steady_clock::time_point window = std::chrono::steady_clock::now();
+
+    static GpuBusy* Get(const Instance& instance) {
+        static GpuBusy* busy = [&]() -> GpuBusy* {
+            const char* env = std::getenv("BB_GPU_BUSY");
+            if (!env || env[0] != '1') {
+                return nullptr;
+            }
+            auto* b = new GpuBusy;
+            b->device = instance.GetDevice();
+            b->period_ns = instance.GetPhysicalDevice().getProperties().limits.timestampPeriod;
+            b->pool = Check(b->device.createQueryPool({
+                .queryType = vk::QueryType::eTimestamp,
+                .queryCount = Slots * 2,
+            }));
+            b->device.resetQueryPool(b->pool, 0, Slots * 2);
+            b->marks = Check(b->device.createQueryPool({
+                .queryType = vk::QueryType::eTimestamp,
+                .queryCount = Slots * Marks,
+            }));
+            b->device.resetQueryPool(b->marks, 0, Slots * Marks);
+            std::printf("GPU busy: on (timestamp period %.2f ns)\n", b->period_ns);
+            return b;
+        }();
+        return busy;
+    }
+};
+} // namespace
+
 std::mutex Scheduler::submit_mutex;
 
 extern void (*g_gpu_stall_report)();
@@ -433,6 +495,33 @@ void Scheduler::PopPendingOperations() {
     }
 }
 
+bool Scheduler::SegmentsEnabled() const {
+    auto* busy = GpuBusy::Get(instance);
+    return busy && busy->owner == this;
+}
+
+void Scheduler::MarkSegment(u32 label) {
+    auto* busy = GpuBusy::Get(instance);
+    if (!busy || busy->owner != this) {
+        return;
+    }
+    busy->last_label = u8(label);
+    if (busy->open < 0) {
+        return;
+    }
+    auto& block = busy->blocks[busy->open];
+    if (block.count >= GpuBusy::Marks) {
+        ++busy->overflowed;
+        return;
+    }
+    const u32 index = block.count++;
+    block.labels[index] = u8(label);
+    const u32 query = u32(busy->open) * GpuBusy::Marks + index;
+    Record([pool = busy->marks, query](vk::CommandBuffer cmdbuf) {
+        cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, pool, query);
+    });
+}
+
 void Scheduler::AllocateWorkerCommandBuffers() {
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
@@ -440,6 +529,15 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
     current_cmdbuf = command_pool.Commit();
     Check(current_cmdbuf.begin(begin_info));
+    if (auto* busy = GpuBusy::Get(instance); busy && busy->owner == this) {
+        const u32 slot = u32(busy->next++ % GpuBusy::Slots);
+        current_cmdbuf.resetQueryPool(busy->pool, slot * 2, 2);
+        current_cmdbuf.resetQueryPool(busy->marks, slot * GpuBusy::Marks, GpuBusy::Marks);
+        current_cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, busy->pool, slot * 2);
+        busy->open = slot;
+        busy->blocks[slot].count = 0;
+        busy->blocks[slot].initial = busy->last_label;
+    }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
     dynamic_state.Invalidate();
@@ -517,6 +615,15 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     SyncRecording();
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
+    auto* busy = GpuBusy::Get(instance);
+    if (busy && !busy->owner && on_submit) {
+        busy->owner = this; // the draw scheduler; its next command buffer starts the timing
+    }
+    const bool busy_timed = busy && busy->owner == this && busy->open >= 0;
+    if (busy_timed) {
+        current_cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, busy->pool,
+                                      u32(busy->open) * 2 + 1);
+    }
     Check(current_cmdbuf.end());
 
     const vk::Semaphore timeline = work_semaphore.Handle();
@@ -562,6 +669,82 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }
 
     work_semaphore.Refresh();
+    if (busy_timed) {
+        busy->pending.push_back({u32(busy->open), signal_value, std::chrono::steady_clock::now()});
+        busy->open = -1;
+        const auto now = std::chrono::steady_clock::now();
+        std::erase_if(busy->pending, [&](const GpuBusy::Pending& p) {
+            if (!work_semaphore.IsFree(p.tick)) {
+                return false;
+            }
+            u64 stamps[2]{};
+            if (busy->device.getQueryPoolResults(busy->pool, p.slot * 2, 2, sizeof(stamps), stamps,
+                                                 sizeof(u64), vk::QueryResultFlagBits::e64) ==
+                    vk::Result::eSuccess &&
+                stamps[1] >= stamps[0]) {
+                busy->spans.emplace_back(stamps[0], stamps[1]);
+                // GPU time between segment marks, charged to the label active before each.
+                const auto& block = busy->blocks[p.slot];
+                const u32 count = std::min(block.count, GpuBusy::Marks);
+                std::array<u64, GpuBusy::Marks> marks{};
+                if (count == 0 ||
+                    busy->device.getQueryPoolResults(busy->marks, p.slot * GpuBusy::Marks, count,
+                                                     count * sizeof(u64), marks.data(), sizeof(u64),
+                                                     vk::QueryResultFlagBits::e64) ==
+                        vk::Result::eSuccess) {
+                    u64 previous = stamps[0];
+                    u8 label = block.initial;
+                    for (u32 i = 0; i < count; ++i) {
+                        const u64 at = std::clamp(marks[i], previous, stamps[1]);
+                        busy->label_ns[label % GpuBusy::Labels] += (at - previous) * busy->period_ns;
+                        previous = at;
+                        label = block.labels[i];
+                    }
+                    busy->label_ns[label % GpuBusy::Labels] += (stamps[1] - previous) * busy->period_ns;
+                }
+            }
+            busy->latency_ms += std::chrono::duration<double, std::milli>(now - p.submitted).count();
+            ++busy->latency_count;
+            return true;
+        });
+        if (now - busy->window >= std::chrono::seconds(5) && busy->spans.size() > 2) {
+            auto& spans = busy->spans;
+            std::ranges::sort(spans);
+            u64 covered = 0, cursor = spans.front().first, gaps_over_1ms = 0, gap_total = 0;
+            for (const auto& [start, end] : spans) {
+                if (start > cursor) {
+                    const u64 gap = start - cursor;
+                    gap_total += gap;
+                    gaps_over_1ms += gap * busy->period_ns >= 1e6;
+                }
+                if (end > cursor) {
+                    covered += end - std::max(start, cursor);
+                    cursor = end;
+                }
+            }
+            const double total = double(cursor - spans.front().first);
+            std::printf("GPU busy (5 s): %.1f%% of the time, %zu command buffers, idle gaps %.2f "
+                        "ms/s (%llu over 1 ms); upper bound on submit-to-done %.2f ms\n",
+                        100.0 * covered / total, spans.size(),
+                        gap_total * busy->period_ns / 1e6 / (total * busy->period_ns / 1e9),
+                        (unsigned long long)gaps_over_1ms,
+                        busy->latency_ms / std::max<u64>(busy->latency_count, 1));
+            const double seconds = total * busy->period_ns / 1e9;
+            std::printf("GPU busy by guest queue (ms/s):");
+            for (u32 l = 0; l < GpuBusy::Labels; ++l) {
+                if (busy->label_ns[l] > 0) {
+                    std::printf(" q%u %.1f", l, busy->label_ns[l] / 1e6 / seconds);
+                }
+            }
+            std::printf("%s\n", busy->overflowed ? " (some marks dropped)" : "");
+            busy->label_ns = {};
+            busy->overflowed = 0;
+            spans.clear();
+            busy->latency_ms = 0;
+            busy->latency_count = 0;
+            busy->window = now;
+        }
+    }
     AllocateWorkerCommandBuffers();
 
     // Apply pending operations
