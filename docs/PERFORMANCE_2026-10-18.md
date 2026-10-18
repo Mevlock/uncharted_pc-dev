@@ -35,8 +35,23 @@ Uncharted 1 (the jungle with Sully after "Continue"), native 3440×1440 (82f9373
 | `BB_TIGHT_WRITES=0 BB_FLUSH_EVERY_DRAWS=0` | ~115 |
 | Defaults | **~147** (+28%) |
 
-The gain depends on the scene: U1's jungle has only two characters to skin. Why U2's museum gains
-the most (+90%) was not measured (`BB_QUEUE_SHADERS=1` and `BB_GPU_BUSY=1` there would show it).
+The gain depends on the scene: U1's jungle has only two characters to skin.
+
+Why U2 gains the most, measured in the museum spot with `BB_QUEUE_SHADERS=1 BB_GPU_BUSY=1`
+(FPS with the diagnostics on): U2 runs the same skinning shader (`cs 8f067540`, ~89k
+single-workgroup dispatches/s), and it needs both changes.
+
+| U2 museum | `BB_TIGHT_WRITES=0` | `BB_FLUSH_EVERY_DRAWS=0` | Defaults |
+|---|---|---|---|
+| Skinning dispatches with a barrier first | 97% | 0.1% | 0.1% |
+| GPU time on the compute queues | ~490 ms/s | ~8 ms/s | ~10 ms/s |
+| GPU busy | 83% | 31% | 43% |
+| Submit-to-done | 11 ms | 15 ms | 3 ms |
+| FPS | ~74 | ~69 | ~91 |
+
+Without early submits the GPU idles most of the time yet runs 15 ms behind (work arrives in large,
+late batches), so the CPU's waits for GPU data grow; without tight writes it is busy with skinning
+barriers. U2's compute queues are guest queues 1–6 (U3's are 2–7).
 
 Only the two big changes could be switched off: adding `BB_COMPUTE_DRAIN_ALL=1` and
 `BB_COMPUTE_RELEASE_DRAIN=1` (the old compute-queue drains) stalled U2 right after boot, so those
