@@ -349,6 +349,9 @@ void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id 
         const Id limit{ctx.ConstF32(limit_value, limit_value, limit_value, limit_value)};
         texel = ctx.OpSelect(color_type, ctx.OpIsNan(ctx.U1[4], texel), zero, texel);
         texel = ctx.OpFClamp(color_type, texel, ctx.OpFNegate(color_type, limit), limit);
+        if (BbNanGuard::BloomOff()) {
+            texel = zero;
+        }
     }
     ctx.OpImageWrite(image, coords, texel, operands.mask, operands.operands);
 }

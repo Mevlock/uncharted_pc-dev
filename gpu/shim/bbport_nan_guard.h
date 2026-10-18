@@ -35,8 +35,17 @@ inline float BloomClamp() {
     return limit;
 }
 
+/// BB_BLOOM=0: the bright pass writes nothing but zero, so the game has no bloom at all.
+inline bool BloomOff() {
+    static const bool off = [] {
+        const char* env = std::getenv("BB_BLOOM");
+        return env && env[0] == '0';
+    }();
+    return off;
+}
+
 inline bool BloomClampShader(unsigned long long hash) {
-    return static_cast<unsigned>(hash) == 0x1e8e11d0u && BloomClamp() > 0.0f;
+    return static_cast<unsigned>(hash) == 0x1e8e11d0u && (BloomOff() || BloomClamp() > 0.0f);
 }
 
 /// Shaders compiled in each mode are cached apart.
