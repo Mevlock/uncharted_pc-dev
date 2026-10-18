@@ -200,6 +200,10 @@ private:
     struct SideQueue;
     std::unique_ptr<SideQueue> side_queue;
     bool DownloadOnSideQueue(VAddr page, u64 length);
+    struct SideTicket;
+    bool BeginSideDownload(VAddr page, u64 length, SideTicket& ticket);
+    void WaitSideDownload(SideTicket& ticket);
+    bool FinishSideDownload(SideTicket& ticket);
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
