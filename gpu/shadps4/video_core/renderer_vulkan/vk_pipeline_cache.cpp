@@ -1084,6 +1084,9 @@ bool PipelineCache::RefreshComputeKey() {
     return true;
 }
 
+bool BbMovieShaderScaled(u64 pgm_hash);
+static std::vector<u32> ScaleMovieShader(std::span<const u32> code);
+
 vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
                                                 Shader::RuntimeInfo& runtime_info,
                                                 const std::span<const u32>& code, size_t perm_idx,
@@ -1096,8 +1099,14 @@ vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
 
     ++g_bb_translations;
     auto translate_timer = std::make_optional<SpanTimer>(g_bb_translate_ns);
+    std::vector<u32> scaled_code;
+    std::span<const u32> program_code = code;
+    if (BbMovieShaderScaled(info.pgm_hash)) {
+        scaled_code = ScaleMovieShader(code);
+        program_code = scaled_code;
+    }
     const auto ir_program =
-        Shader::TranslateProgram(code, translate_pools, info, runtime_info, profile);
+        Shader::TranslateProgram(program_code, translate_pools, info, runtime_info, profile);
     translate_timer.reset();
     {
         SpanTimer emit_timer{g_bb_emit_ns};
@@ -1126,9 +1135,65 @@ vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
     return module;
 }
 
+/// bbport: BB_RENDER_RES (runtime_ultrawide.c) renders U3 at another size, but its movie
+/// compute shader (YUV to RGB over the display buffer, c85d9816) samples the 1920x1080 movie at
+/// (x + 0.5) / 1920, (y + 0.5) / 1088 with those reciprocals as literals: they become the render
+/// size's, so the movie fills the frame. That shader is then neither loaded from nor saved to
+/// the shader cache (its translation depends on the size).
+static bool MovieShaderSize(u32* width, u32* height) {
+    static u32 w = 0, h = 0;
+    static const bool on = [] {
+        const char* res = std::getenv("BB_RENDER_RES");
+        unsigned a = 0, b = 0;
+        if (!res || std::sscanf(res, "%ux%u", &a, &b) != 2 || a < 640 || b < 360 || a > 7680 ||
+            b > 4320) {
+            return false;
+        }
+        w = a & ~7u;
+        h = b & ~3u;
+        return w != 1920 || h != 1080;
+    }();
+    if (on && width) {
+        *width = w;
+        *height = h;
+    }
+    return on;
+}
+
+bool BbMovieShaderScaled(u64 pgm_hash) {
+    return u32(pgm_hash) == 0xc85d9816u && MovieShaderSize(nullptr, nullptr);
+}
+
+static std::vector<u32> ScaleMovieShader(std::span<const u32> code) {
+    std::vector<u32> out(code.begin(), code.end());
+    u32 w = 1920, h = 1080;
+    MovieShaderSize(&w, &h);
+    const float vh = float(h) * 1088.0f / 1080.0f;
+    const struct {
+        float from, to;
+    } literals[] = {{1.0f / 1920.0f, 1.0f / float(w)},
+                    {1.0f / 3840.0f, 0.5f / float(w)},
+                    {1.0f / 1088.0f, 1.0f / vh},
+                    {1.0f / 2176.0f, 0.5f / vh}};
+    int replaced = 0;
+    for (auto& word : out) {
+        for (const auto& l : literals) {
+            u32 from, to;
+            std::memcpy(&from, &l.from, 4);
+            std::memcpy(&to, &l.to, 4);
+            if (word == from) {
+                word = to;
+                ++replaced;
+            }
+        }
+    }
+    std::printf("Render resolution: movie shader scaled to %ux%u (%d constants)\n", w, h, replaced);
+    return out;
+}
+
 /// bbport: whether a shader is saved to the shader cache.
 static bool SaveShaderBinary(u64 pgm_hash, Shader::HwStage stage) {
-    return !Shader::Backend::SPIRV::IsForcedShader(pgm_hash) &&
+    return !Shader::Backend::SPIRV::IsForcedShader(pgm_hash) && !BbMovieShaderScaled(pgm_hash) &&
            !(Shader::VertexCheck::address && stage == Shader::HwStage::Vertex);
 }
 

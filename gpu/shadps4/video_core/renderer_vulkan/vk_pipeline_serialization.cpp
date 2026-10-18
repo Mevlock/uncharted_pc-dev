@@ -20,6 +20,8 @@ static constexpr u32 PipelineKeyVersion = 6u; // bbport: GraphicsPipelineKey::ui
 
 namespace Vulkan {
 
+bool BbMovieShaderScaled(u64 pgm_hash); // vk_pipeline_cache.cpp
+
 void RegisterPipelineData(const ComputePipelineKey& key,
                           ComputePipeline::SerializationSupport& sdata) {
     if (!Storage::DataBase::Instance().IsOpened()) {
@@ -269,7 +271,8 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     spec.info = &program->info;
     size_t perm_idx{};
     if (!LoadShaderMeta(ar, program->info, sel.fetch_shader, spec, perm_idx) ||
-        Shader::Backend::SPIRV::IsForcedShader(program->info.pgm_hash)) {
+        Shader::Backend::SPIRV::IsForcedShader(program->info.pgm_hash) ||
+        BbMovieShaderScaled(program->info.pgm_hash)) {
         return false;
     }
 
