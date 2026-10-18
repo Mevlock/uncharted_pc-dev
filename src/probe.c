@@ -1918,6 +1918,9 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
+    if (argc == 2 && !strcmp(argv[1], "--controller-info")) return runtime_pad_tool(0,100);
+    if (argc == 3 && !strcmp(argv[1], "--controller-test"))
+        return runtime_pad_tool(1,atoi(argv[2]));
     char isa_names[64];
     isa_sets=check_cpu(isa_names,sizeof(isa_names));
     if (argc == 2 && !strcmp(argv[1], "--cpu-features")) {   /* run.py: does the game need the rewrite table? */
