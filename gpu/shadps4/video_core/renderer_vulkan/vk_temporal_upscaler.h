@@ -121,7 +121,8 @@ public:
     /// for sampling, its channel swizzle.
     bool RedirectColor(VideoCore::ImageId color, const VideoCore::ImageViewInfo& view,
                        Target& target);
-    bool RedirectDepth(VideoCore::ImageId depth, Target& target);
+    /// `color_to_ui`: the pass's color target goes to the UI image (RedirectColor).
+    bool RedirectDepth(VideoCore::ImageId depth, Target& target, bool color_to_ui);
     /// A sampled image replaced by the upscaled frame (the display pass).
     bool RedirectSampled(VideoCore::ImageId image, const VideoCore::ImageViewInfo& info,
                          vk::ImageView& view, vk::ImageLayout& layout);
