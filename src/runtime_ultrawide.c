@@ -284,8 +284,19 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     }
     /* Sites: reads with a read of the other field from the same register close by. */
     static Read sites[MAX_SITES];
-    int ns = 0;
+    int ns = 0, flares = 0;
+    /* The lens flare / glint pass (U3) builds its screen-to-view scale as C / zoom, then times
+     * the inverse aspect: vdivss xmm0, xmm0, [zoom]; vpermilps xmm1, xmm0, 0x15; vmulss xmm0,
+     * xmm0, [inverse aspect]. Widened, the flares (treasure glints) became large white blooms:
+     * its zoom read keeps the game's value. */
+    static const uint8_t flare_next[6] = {0xc4, 0xe3, 0x79, 0x04, 0xc8, 0x15};
     for (int i = 0; i < nk; ++i) {
+        if (kept[i].op.op == 0x5e && (uint32_t)kept[i].op.disp == field + 4 &&
+            kept[i].at + kept[i].op.len + 6 <= size &&
+            !memcmp(code + kept[i].at + kept[i].op.len, flare_next, 6)) {
+            ++flares;
+            continue;
+        }
         const uint32_t other = (uint32_t)kept[i].op.disp == field ? field + 4 : field;
         int paired = 0;
         for (int j = 0; j < nk && !paired; ++j)
@@ -329,7 +340,20 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     }
     static const uint8_t nops[6][5] = {{0}, {0x90}, {0x66, 0x90}, {0x0f, 0x1f, 0x00}, {0x0f, 0x1f, 0x40, 0x00},
                                        {0x0f, 0x1f, 0x44, 0x00, 0x00}};
+    /* Diagnosis: BB_ULTRAWIDE_SKIP=first-last leaves those camera reads (indices in address
+     * order, 0-based) unpatched, to find one that must keep the game's values. */
+    int skip_first = -1, skip_last = -1;
+    const char *skip = getenv("BB_ULTRAWIDE_SKIP");
+    if (skip) {
+        char *end;
+        skip_first = (int)strtol(skip, &end, 10);
+        skip_last = *end == '-' ? (int)strtol(end + 1, NULL, 10) : skip_first;
+        for (int s = 0; s < ns; ++s)
+            printf("Ultrawide: camera read %d at %#llx%s\n", s, (unsigned long long)sites[s].at,
+                   s >= skip_first && s <= skip_last ? " (skipped)" : "");
+    }
     for (int s = 0; s < ns; ++s) {
+        if (s >= skip_first && s <= skip_last) continue;
         const uint64_t at = sites[s].at, stub = cave + 0x20 + (uint64_t)s * 0x20;
         const uint8_t len = sites[s].op.len, reg = sites[s].op.reg;
         uint8_t *c = code + stub;
@@ -357,9 +381,9 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     runtime_ultrawide_fill = wide;
     runtime_ultrawide_scale = k;
     if (constants != (float *)(code + cave)) switch_constants = constants;
-    printf("Ultrawide: %d camera reads widened for %ux%u (field %#x), field of view %u%%%s, render aspect "
-           "correction %.3f\n",
-           ns, width, height, field, fov_pct, switch_constants ? ", gameplay only" : "", c);
+    printf("Ultrawide: %d camera reads widened for %ux%u (field %#x, %d lens flare reads kept), field of "
+           "view %u%%%s, render aspect correction %.3f\n",
+           ns, width, height, field, flares, fov_pct, switch_constants ? ", gameplay only" : "", c);
 }
 
 /* Render resolution (BB_RENDER_RES=WIDTHxHEIGHT, U3 for now): the engine's display mode table
