@@ -562,7 +562,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         reported_fast = true;
         std::printf("Frame generation: paused while the game runs above 165 FPS\n");
     }
-    if (frame_generator->Wanted() && !frame->is_hdr && !upscaled && !fast_game) {
+    // bbport: an upscaled frame (the upscaler's output-size image) is generated from too: its
+    // picture before the UI is captured at its own size (TemporalUpscaler::RunScaledVelocity).
+    if (frame_generator->Wanted() && !frame->is_hdr && !fast_game) {
         EnsureGenerated(frame);
         // The picture before the UI, composed like the frame (equal outside the UI).
         vk::Image hudless{};

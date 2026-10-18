@@ -1298,6 +1298,10 @@ void TemporalUpscaler::OnDrawRecorded(u64 ps_hash, VideoCore::ImageId color) {
         !frame_generator->Wanted()) {
         return;
     }
+    // Upscaled at a patched size: the frame without UI is the upscaled one (RunScaledVelocity).
+    if (velocity_pending) {
+        return;
+    }
     auto& image = texture_cache.GetImage(color);
     scheduler.EndRendering();
     runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
@@ -2014,6 +2018,31 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
     velocity_ui = true;
     ui_color = target;
     ui_depth = velocity_depth;
+    // Frame generation: the upscaled frame before the UI is the frame without UI (its size and
+    // sharpness match the frame shown).
+    if (frame_generator && frame_generator->Wanted()) {
+        vk::ImageMemoryBarrier2 t{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+            .image = vk::Image(ui_image),
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &t});
+        frame_generator->CaptureHudless(cmdbuf, vk::Image(ui_image), vk::Format::eR8G8B8A8Unorm,
+                                        ow, oh);
+        t.srcStageMask = vk::PipelineStageFlagBits2::eTransfer;
+        t.srcAccessMask = vk::AccessFlagBits2::eTransferRead;
+        t.dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+        t.dstAccessMask = vk::AccessFlagBits2::eColorAttachmentRead |
+                          vk::AccessFlagBits2::eColorAttachmentWrite;
+        t.oldLayout = vk::ImageLayout::eTransferSrcOptimal;
+        t.newLayout = vk::ImageLayout::eGeneral;
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &t});
+    }
     std::scoped_lock lock{display_mutex};
     auto& shown = displays[color.info.guest_address];
     shown.alias = vk::Image(ui_image);
