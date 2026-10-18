@@ -61,6 +61,7 @@ u32 ConstCheckHash() {
 } // namespace
 
 extern bool (*g_draw_pipe_busy)();
+extern void (*g_drain_draw_pipe)();
 extern bool g_gpu_checkpoints;
 extern VkQueue g_crash_queue;
 extern void (*g_gpu_checkpoint_report)();
@@ -710,6 +711,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     static Rasterizer* busy_check;
     busy_check = this;
     g_draw_pipe_busy = [] { return busy_check->OnStageA() && !busy_check->DrawPipeIdle(); };
+    g_drain_draw_pipe = [] { busy_check->DrainDrawPipe(); };
     Shader::g_srt_read_check = [](const Shader::SrtReadLog& log) {
         return busy_check->SyncSrtReads(log);
     };

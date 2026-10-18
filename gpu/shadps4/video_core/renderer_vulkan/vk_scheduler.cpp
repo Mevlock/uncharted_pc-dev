@@ -31,6 +31,8 @@ std::mutex Scheduler::submit_mutex;
 
 extern void (*g_gpu_stall_report)();
 bool (*g_draw_pipe_busy)() = nullptr;
+/// bbport: runs the draws handed to the recording thread so far (set by the rasterizer).
+void (*g_drain_draw_pipe)() = nullptr;
 
 namespace {
 // bbport: the last submissions to the graphics queue (all schedulers share it), printed when a
