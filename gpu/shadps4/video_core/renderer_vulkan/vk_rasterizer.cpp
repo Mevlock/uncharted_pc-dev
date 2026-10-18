@@ -3017,9 +3017,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // size; the temporal upscaler restores the detail of the output's mip level (FSR guide:
     // log2(render / output)). Shadows, post-processing and UI keep the guest's bias.
     sampler_lod_bias = 0.0f;
-    if (!pipeline->IsCompute() && !BbToggle::Disabled(BbToggle::SceneMipBias) &&
+    material_draw = !pipeline->IsCompute() &&
         std::popcount(static_cast<const GraphicsPipeline*>(pipeline)->GetGraphicsKey().mrt_mask &
-                      0xff) >= 5) {
+                      0xff) >= 5;
+    if (material_draw && !BbToggle::Disabled(BbToggle::SceneMipBias)) {
         sampler_lod_bias = upscaler->SceneMipBias();
         static float reported = 0.0f;
         if (sampler_lod_bias != reported) {
@@ -4176,17 +4177,18 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 
 // bbport (from bloodborne_pc 0.3): the PS4 build samples most scene textures with little or no
 // anisotropic filtering, so floors and walls seen at a grazing angle blur with distance.
-// Mipmapped linear samplers of graphics draws get BB_ANISO (default 0 = the game's) times: in U3
-// with DLSS it softened the picture.
-static void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth, bool compute) {
+// Mipmapped linear samplers of G-buffer draws (the scene's material textures) get BB_ANISO
+// (default 16; 0 = the game's) times. Not post-processing: on every draw it softened U3's picture
+// (blur and downsampling passes read their mip chains on purpose).
+static void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth, bool scene) {
     static const int forced = [] {
         const char* value = std::getenv("BB_ANISO");
-        const int n = value ? std::atoi(value) : 0;
+        const int n = value ? std::atoi(value) : 16;
         std::printf("Anisotropic filtering: %s\n", n > 1 ? std::to_string(n).append("x").c_str()
                                                         : "the game's");
         return n;
     }();
-    if (forced <= 1 || is_depth || compute || sharp.mip_filter == AmdGpu::MipFilter::None ||
+    if (forced <= 1 || is_depth || !scene || sharp.mip_filter == AmdGpu::MipFilter::None ||
         (sharp.xy_min_filter != AmdGpu::Filter::Bilinear &&
          sharp.xy_min_filter != AmdGpu::Filter::AnisoLinear)) {
         return;
@@ -4207,12 +4209,11 @@ static void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth, bool compute)
 
 void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
                               Shader::Backend::Bindings& binding, u32& write_index) {
-    const bool compute = stage.sw_stage == Shader::SwStage::Compute;
     for (u32 sampler_index = 0; sampler_index < stage.samplers.size(); ++sampler_index) {
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
-        ForceAnisotropy(ssharp, sampler.is_depth, compute);
+        ForceAnisotropy(ssharp, sampler.is_depth, material_draw);
         const auto vk_sampler = texture_cache.GetSampler(
             ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
