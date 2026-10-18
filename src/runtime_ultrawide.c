@@ -27,6 +27,9 @@ int runtime_ultrawide_fill;
 /* The horizontal factor k (<= 1): the UI drawn over a widened frame is squeezed by it back to
  * its 16:9 layout (the pipeline cache's ultrawide UI vertex shaders). */
 float runtime_ultrawide_scale = 1.0f;
+/* Set when BB_RENDER_RES patched the display mode: the presenter shows frames that do not fill
+ * the window at 16:9 (the game's layout stretched over the larger buffer). */
+int runtime_render_resolution;
 
 /* The widened constants, and the block the stubs read them from when it can be switched. */
 static float wide_constants[4];
@@ -487,6 +490,7 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
 #endif
         }
     }
+    runtime_render_resolution = blocks > 0;
     printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched, "
            "render target heaps %.1f + %.1f MiB, GPU memory %.1f MiB, direct %.1f MiB, BB_DMEM_MB %s)\n",
            width, height, blocks, sizes, loads, limits, heaps[0] / 1048576.0, heaps[1] / 1048576.0,

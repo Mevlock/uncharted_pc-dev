@@ -100,13 +100,17 @@ bool CanBlitToSwapchain(const vk::PhysicalDevice physical_device, vk::Format for
 // bbport: set by the loader when the game's view was widened to the window (runtime_ultrawide.c):
 // gameplay frames then fill the window; menus, loading screens and movies stay 16:9.
 extern "C" int runtime_ultrawide_fill;
+// bbport: the game renders at BB_RENDER_RES (runtime_ultrawide.c) with its 16:9 layout stretched over
+// it: frames that do not fill the window are shown at 16:9, not at the buffer's shape.
+extern "C" int runtime_render_resolution;
 
 static vk::Rect2D FitImage(s32 frame_width, s32 frame_height, s32 swapchain_width,
                            s32 swapchain_height, bool fill = false) {
     if (fill) {
         return vk::Rect2D{{0, 0}, {static_cast<u32>(swapchain_width), static_cast<u32>(swapchain_height)}};
     }
-    float frame_aspect = static_cast<float>(frame_width) / frame_height;
+    float frame_aspect = runtime_render_resolution ? 16.0f / 9.0f
+                                                   : static_cast<float>(frame_width) / frame_height;
     float swapchain_aspect = static_cast<float>(swapchain_width) / swapchain_height;
 
     u32 dst_width = swapchain_width;
@@ -535,7 +539,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                         vk::AccessFlagBits2::eShaderRead);
         runtime.FlushBarriers();
     }
-    expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
+    expected_ratio = runtime_render_resolution
+                         ? 16.0f / 9.0f
+                         : static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr);
