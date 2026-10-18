@@ -4176,11 +4176,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 
 // bbport (from bloodborne_pc 0.3): the PS4 build samples most scene textures with little or no
 // anisotropic filtering, so floors and walls seen at a grazing angle blur with distance.
-// Mipmapped linear samplers of graphics draws get BB_ANISO (16; 0 or 1 = the game's) times.
+// Mipmapped linear samplers of graphics draws get BB_ANISO (default 0 = the game's) times: in U3
+// with DLSS it softened the picture.
 static void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth, bool compute) {
     static const int forced = [] {
         const char* value = std::getenv("BB_ANISO");
-        const int n = value ? std::atoi(value) : 16;
+        const int n = value ? std::atoi(value) : 0;
         std::printf("Anisotropic filtering: %s\n", n > 1 ? std::to_string(n).append("x").c_str()
                                                         : "the game's");
         return n;
