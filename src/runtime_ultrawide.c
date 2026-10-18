@@ -352,7 +352,7 @@ static int match_mode_block(const uint8_t *p, uint8_t m) {
     return 1;
 }
 
-void runtime_patch_resolution(uint8_t *code, uint64_t size) {
+void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) {
     const char *env = getenv("BB_RENDER_RES");
     unsigned width, height;
     if (!env || !parse_size(env, &width, &height)) return;
@@ -433,6 +433,21 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size) {
         if (height > b) memcpy(q + 10, &height, 4);
         ++limits;
     }
-    printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched)\n",
-           width, height, blocks, sizes, loads, limits);
+    /* The render target heap in the game's memory table ({id, kind, size, alignment}: entry 0x84,
+     * kind 6, 139.8 MiB), sized for 1080p: grown with the pixel count. */
+    static const uint8_t heap[24] = {0x84, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x40, 0xbc, 0x08, 0, 0, 0, 0,
+                                     0x80, 0,    0, 0, 0, 0, 0, 0};
+    uint64_t heap_size = 0;
+    const double ratio = (double)width * height / (1920.0 * 1080.0);
+    for (uint64_t i = size & ~(uint64_t)7; ratio > 1.0 && i + 24 <= image_end; i += 8) {
+        if (memcmp(code + i, heap, 24)) continue;
+        uint64_t old_size;
+        memcpy(&old_size, code + i + 8, 8);
+        heap_size = ((uint64_t)(old_size * ratio * 1.1) + 0xffff) & ~(uint64_t)0xffff;
+        memcpy(code + i + 8, &heap_size, 8);
+        break;
+    }
+    printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched, "
+           "render target heap %.1f MiB)\n",
+           width, height, blocks, sizes, loads, limits, heap_size / 1048576.0);
 }
