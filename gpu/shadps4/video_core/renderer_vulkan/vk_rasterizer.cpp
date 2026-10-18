@@ -649,6 +649,14 @@ void ReportCheckpoints() {
 }
 } // namespace
 
+// BB_GPU_CHECKPOINTS: a checkpoint outside the rasterizer (frame generation in the presenter).
+void BbGpuCheckpoint(vk::CommandBuffer cmd, const char* kind, u32 a, u32 b) {
+    if (!g_gpu_checkpoints || !checkpoint_ring) {
+        return;
+    }
+    cmd.setCheckpointNV(NoteCheckpoint(kind, 0, 0, a, b, 0, 0));
+}
+
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.

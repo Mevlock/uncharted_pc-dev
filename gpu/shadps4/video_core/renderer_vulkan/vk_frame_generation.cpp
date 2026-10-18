@@ -84,6 +84,8 @@ bool DumpRequested() {
 
 } // namespace
 
+void BbGpuCheckpoint(vk::CommandBuffer cmd, const char* kind, u32 a, u32 b); // vk_rasterizer.cpp
+
 FrameGenerator::FrameGenerator(const Instance& instance_, Scheduler& scheduler_)
     : instance{instance_}, scheduler{scheduler_} {
     auto& settings = BbSettings::Get();
@@ -650,6 +652,7 @@ u32 FrameGenerator::GenerateDlss(vk::CommandBuffer cmdbuf, vk::Image color,
         // The previous feature may still be used by submitted work; `cmdbuf` stays open.
         scheduler.WaitSubmitted();
         dlss->ReleaseFrameGen();
+        BbGpuCheckpoint(cmdbuf, "dlss-fg create", width, height);
         if (!dlss->CreateFrameGen(cmdbuf, desc)) {
             Fail(BbSettings::FrameGenDlss, "DLSS Frame Generation feature creation failed");
             return 0;
@@ -661,6 +664,7 @@ u32 FrameGenerator::GenerateDlss(vk::CommandBuffer cmdbuf, vk::Image color,
         return Dlss::Resource{image, view, format, vk::ImageAspectFlagBits::eColor, w, h};
     };
     for (u32 index = 1; index <= count; ++index) {
+        BbGpuCheckpoint(cmdbuf, "dlss-fg evaluate", width, height);
         const bool ok = dlss->EvaluateFrameGen(
             cmdbuf, {
                         .backbuffer = resource(color, color_view, ColorFormat, width, height),
@@ -688,6 +692,7 @@ u32 FrameGenerator::GenerateDlss(vk::CommandBuffer cmdbuf, vk::Image color,
             return 0;
         }
     }
+    BbGpuCheckpoint(cmdbuf, "dlss-fg done", width, height);
     return count;
 }
 
