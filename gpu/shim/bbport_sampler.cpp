@@ -9,7 +9,9 @@
 #ifdef _WIN32
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -30,7 +32,86 @@ struct Sampled {
     DWORD id = 0;
     u64 samples = 0;
     std::unordered_map<u64, u32> hits;
+    /// Samples outside bb-probe.exe (waits, system calls, the driver), by the first two
+    /// bb-probe.exe return addresses on the frame pointer chain.
+    u64 outside = 0;
+    std::map<std::pair<u64, u64>, u32> callers;
 };
+
+u64 image_begin = 0, image_end = 0;
+
+bool InImage(u64 address) {
+    return address >= image_begin && address < image_end;
+}
+
+bool ReadWord(u64 address, u64& value) {
+    SIZE_T done = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), &value,
+                             sizeof(value), &done) &&
+           done == sizeof(value);
+}
+
+/// The current stack (fibers switch it; the thread block follows) of a suspended thread.
+bool StackBounds(HANDLE thread, u64& low, u64& high) {
+    using QueryThread = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    static const auto query = reinterpret_cast<QueryThread>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+    struct BasicInformation {
+        LONG exit_status;
+        PVOID teb;
+        PVOID client_id[2];
+        ULONG_PTR affinity;
+        LONG priority, base_priority;
+    } info{};
+    if (!query || query(thread, 0, &info, sizeof(info), nullptr) != 0 || !info.teb) {
+        return false;
+    }
+    const u64 teb = reinterpret_cast<u64>(info.teb);
+    return ReadWord(teb + 0x08, high) && ReadWord(teb + 0x10, low) && low < high;
+}
+
+/// The first two bb-probe.exe return addresses above a suspended thread, by the unwind tables
+/// (through the system DLLs and the driver; stops at the game's code, which has none).
+std::pair<u64, u64> Callers(HANDLE thread, CONTEXT context) {
+    std::array<u64, 2> found{};
+    u32 count = 0;
+    u64 low = 0, high = 0;
+    if (!StackBounds(thread, low, high)) {
+        return {};
+    }
+    for (int depth = 0; depth < 48 && count < 2; ++depth) {
+        if (context.Rsp < low || context.Rsp + 64 > high) {
+            break;
+        }
+        DWORD64 base = 0;
+        if (auto* entry = RtlLookupFunctionEntry(context.Rip, &base, nullptr)) {
+            PVOID handler_data = nullptr;
+            DWORD64 frame = 0;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, context.Rip, entry, &context,
+                             &handler_data, &frame, nullptr);
+        } else {
+            HMODULE module = nullptr;
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    reinterpret_cast<LPCWSTR>(context.Rip), &module)) {
+                break; // the game's code: no unwind information
+            }
+            u64 ret = 0; // a leaf function: the return address is at rsp
+            if (!ReadWord(context.Rsp, ret)) {
+                break;
+            }
+            context.Rip = ret;
+            context.Rsp += 8;
+        }
+        if (!context.Rip) {
+            break;
+        }
+        if (InImage(context.Rip)) {
+            found[count++] = context.Rip;
+        }
+    }
+    return {found[0], found[1]};
+}
 
 std::string Narrow(const wchar_t* text) {
     std::string out;
@@ -126,8 +207,24 @@ void Report(std::vector<Sampled>& threads, double seconds) {
             std::printf("Sampler:   %5.2f%% %s\n", 100.0 * top[i].second / t.samples,
                         Describe(top[i].first).c_str());
         }
+        if (t.outside) {
+            std::vector<std::pair<std::pair<u64, u64>, u32>> by_caller(t.callers.begin(),
+                                                                       t.callers.end());
+            std::ranges::sort(by_caller, std::greater{}, &std::pair<std::pair<u64, u64>, u32>::second);
+            std::printf("Sampler: '%s' outside the port (waits, system calls, driver) %.1f%%, by "
+                        "caller (bb-probe.exe offsets):\n",
+                        t.name.c_str(), 100.0 * t.outside / t.samples);
+            for (size_t i = 0; i < by_caller.size() && i < 20; ++i) {
+                const auto [first, second] = by_caller[i].first;
+                std::printf("Sampler:   %5.2f%% %#llx <- %#llx\n", 100.0 * by_caller[i].second / t.samples,
+                            static_cast<unsigned long long>(first ? first - image_begin : 0),
+                            static_cast<unsigned long long>(second ? second - image_begin : 0));
+            }
+        }
         t.samples = 0;
         t.hits.clear();
+        t.outside = 0;
+        t.callers.clear();
     }
 }
 
@@ -148,6 +245,13 @@ void BbSamplerStart() {
             list = comma == std::string::npos ? "" : list.substr(comma + 1);
         }
     }
+    {
+        const auto base = reinterpret_cast<u64>(GetModuleHandleW(nullptr));
+        const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        image_begin = base;
+        image_end = base + nt->OptionalHeader.SizeOfImage;
+    }
     std::thread([prefixes] {
         Common::SetCurrentThreadName("bb:Sampler");
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
@@ -157,6 +261,7 @@ void BbSamplerStart() {
         auto window = std::chrono::steady_clock::now();
         auto last_scan = window - std::chrono::seconds(10);
         std::vector<u64> rips;
+        std::vector<std::pair<u64, u64>> callers;
         for (;;) {
             const auto now = std::chrono::steady_clock::now();
             if (now - last_scan >= std::chrono::seconds(2) && threads.size() < prefixes.size()) {
@@ -164,14 +269,18 @@ void BbSamplerStart() {
                 last_scan = now;
             }
             rips.assign(threads.size(), 0);
+            callers.assign(threads.size(), {});
             for (size_t i = 0; i < threads.size(); ++i) {
                 if (SuspendThread(threads[i].handle) == DWORD(-1)) {
                     continue;
                 }
                 CONTEXT context{};
-                context.ContextFlags = CONTEXT_CONTROL;
+                context.ContextFlags = CONTEXT_FULL;
                 if (GetThreadContext(threads[i].handle, &context)) {
                     rips[i] = context.Rip;
+                    if (!InImage(context.Rip)) {
+                        callers[i] = Callers(threads[i].handle, context);
+                    }
                 }
                 ResumeThread(threads[i].handle);
             }
@@ -179,6 +288,10 @@ void BbSamplerStart() {
                 if (rips[i]) {
                     ++threads[i].hits[rips[i]];
                     ++threads[i].samples;
+                    if (!InImage(rips[i])) {
+                        ++threads[i].outside;
+                        ++threads[i].callers[callers[i]];
+                    }
                 }
             }
             if (now - window >= std::chrono::seconds(10)) {

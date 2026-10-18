@@ -14,6 +14,7 @@
 #include <xxhash.h>
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
+#include "common/thread.h"
 #include "common/alignment.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -39,6 +40,8 @@ extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_
 namespace Vulkan {
 extern void (*g_gpu_crash_context)();
 }
+
+extern "C" char __ImageBase; // the executable's load address (PE linkers define it)
 
 namespace VideoCore {
 
@@ -331,6 +334,60 @@ constexpr u64 FaultHistorySize = 1u << 16;
 std::unique_ptr<FaultEvent[]> fault_history;
 std::atomic<u64> fault_events{0};
 
+/// bbport diagnosis (BB_PERF_DIAG=1): every 5 s, the 64 KiB regions whose guest writes waited
+/// for a side queue read-back most often, with the time waited and how many guest frames ago the
+/// GPU wrote / last used the faulting page.
+void NoteSideDownload(VAddr page, std::chrono::steady_clock::duration waited, u32 write_age,
+                      u32 use_age) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_PERF_DIAG");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    struct Stat {
+        VAddr region;
+        u32 count;
+        u64 ns;
+        u32 min_write_age, max_write_age, min_use_age;
+    };
+    static std::array<Stat, 64> stats{};
+    static u64 total = 0, total_ns = 0;
+    static auto window = std::chrono::steady_clock::now();
+    const VAddr region = page & ~VAddr{0xFFFF};
+    const u64 ns = std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count();
+    ++total;
+    total_ns += ns;
+    auto slot = std::ranges::find_if(stats, [&](const Stat& s) { return s.count && s.region == region; });
+    if (slot == stats.end()) {
+        slot = std::ranges::min_element(stats, {}, &Stat::count);
+        *slot = {region, 0, 0, write_age, write_age, use_age};
+    }
+    ++slot->count;
+    slot->ns += ns;
+    slot->min_write_age = std::min(slot->min_write_age, write_age);
+    slot->max_write_age = std::max(slot->max_write_age, write_age);
+    slot->min_use_age = std::min(slot->min_use_age, use_age);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) {
+        return;
+    }
+    const double seconds = std::chrono::duration<double>(now - window).count();
+    window = now;
+    std::printf("Side read-backs: %.0f/s, %.1f ms/s waited\n", total / seconds,
+                total_ns / 1e6 / seconds);
+    std::ranges::sort(stats, std::greater{}, &Stat::count);
+    for (u32 i = 0; i < 10 && stats[i].count; ++i) {
+        const auto& s = stats[i];
+        std::printf("  %#llx: %.1f/s, %.0f us each, GPU wrote %u-%u frames ago, used %u ago\n",
+                    static_cast<unsigned long long>(s.region), s.count / seconds,
+                    s.ns / 1e3 / s.count, s.min_write_age, s.max_write_age, s.min_use_age);
+    }
+    stats = {};
+    total = total_ns = 0;
+}
+
 void NoteFault(VAddr page, u64 length, u32 frame, u32 gpu_write, u32 gpu_use, u32 kind) {
     if (!fault_history) {
         return;
@@ -456,6 +513,20 @@ void BufferCache::WriteBackGpuData(u8* dst, const u8* data, u64 size) {
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
+    {
+        // bbport diagnosis: the thread of guest writes over BB_GPU_WRITE_WATCH's 64 KiB.
+        static const VAddr watch = [] {
+            const char* env = std::getenv("BB_GPU_WRITE_WATCH");
+            return env ? static_cast<VAddr>(std::strtoull(env, nullptr, 16)) : VAddr{0};
+        }();
+        static std::atomic<u32> thread_prints{0};
+        if (watch && device_addr < watch + 0x10000 && watch < device_addr + size &&
+            thread_prints.fetch_add(1, std::memory_order_relaxed) < 12) {
+            std::printf("GPU write watch: write at %#llx from thread '%s'%s\n",
+                        static_cast<unsigned long long>(device_addr),
+                        Common::GetCurrentThreadName().c_str(), assume_locks ? " (GPU side)" : "");
+        }
+    }
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
         // bbport: a guest write to a page holding GPU data read that data back first, which
         // waits for the whole GPU queue (U3's Cartagena square: ~70 times a second, 5-20 ms each,
@@ -478,13 +549,28 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
         const u64 length = Common::AlignUp(device_addr + size, TRACKER_BYTES_PER_PAGE) - page;
         // Decided on the GPU thread, where GPU writes are recorded: none can come in between.
         auto resolve = [this, page, length, device_addr, size] {
+            // bbport diagnosis: guest writes over BB_GPU_WRITE_WATCH's 64 KiB (see ObtainBuffer).
+            static const VAddr watch = [] {
+                const char* env = std::getenv("BB_GPU_WRITE_WATCH");
+                return env ? static_cast<VAddr>(std::strtoull(env, nullptr, 16)) : VAddr{0};
+            }();
+            static std::atomic<u32> fault_prints{0};
+            if (watch && device_addr < watch + 0x10000 && watch < device_addr + size &&
+                fault_prints.fetch_add(1, std::memory_order_relaxed) < 40) {
+                std::printf("GPU write watch: guest write fault at %#llx+%#llx\n",
+                            static_cast<unsigned long long>(device_addr),
+                            static_cast<unsigned long long>(size));
+            }
             const u32 frames = g_guest_frames.load(std::memory_order_relaxed);
             const u32 gpu_write = memory_tracker->LatestGpuWriteFrame(page, length);
             const u32 gpu_use = LastGpuUse(page, length);
+            const auto side_start = std::chrono::steady_clock::now();
             if (DownloadOnSideQueue(page, length)) {
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
                 BbStats::gpu_side_downloads.fetch_add(1, std::memory_order_relaxed);
                 NoteFault(page, length, frames, gpu_write, gpu_use, 4);
+                NoteSideDownload(page, std::chrono::steady_clock::now() - side_start,
+                                 frames - gpu_write, frames - gpu_use);
                 return;
             }
             if (dead_frames && frames >= dead_frames && gpu_write <= frames - dead_frames &&
@@ -954,6 +1040,23 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     }
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
+        // bbport diagnosis: BB_GPU_WRITE_WATCH=<hex address>: who marks GPU writes over it
+        // (bb-probe.exe offsets of the two callers; llvm-symbolizer at 0x140000000 + offset).
+        static const VAddr watch = [] {
+            const char* env = std::getenv("BB_GPU_WRITE_WATCH");
+            return env ? static_cast<VAddr>(std::strtoull(env, nullptr, 16)) : VAddr{0};
+        }();
+        static std::atomic<u32> watch_prints{0};
+        if (watch && device_addr < watch + 0x10000 && watch < device_addr + size &&
+            watch_prints.fetch_add(1, std::memory_order_relaxed) < 40) {
+            const auto base = reinterpret_cast<uintptr_t>(&__ImageBase);
+            std::printf("GPU write watch: %#llx+%#x written; callers %#llx %#llx\n",
+                        static_cast<unsigned long long>(device_addr), size,
+                        static_cast<unsigned long long>(
+                            reinterpret_cast<uintptr_t>(__builtin_return_address(0)) - base),
+                        static_cast<unsigned long long>(
+                            reinterpret_cast<uintptr_t>(__builtin_return_address(1)) - base));
+        }
     }
     return {arena, arena->Offset(device_addr)};
 }
