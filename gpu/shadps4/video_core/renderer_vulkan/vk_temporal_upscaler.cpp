@@ -200,8 +200,8 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     if (const char* res = std::getenv("BB_RENDER_RES")) {
         u32 w = 0, h = 0;
         if (std::sscanf(res, "%ux%u", &w, &h) == 2 && w && h) {
-            render_width = w;
-            render_height = h;
+            render_width = w & ~15u; // as runtime_patch_resolution rounds it
+            render_height = h & ~3u;
         }
     }
     // Scene depth copied into the output-size UI depth by a blit (depth aspect).

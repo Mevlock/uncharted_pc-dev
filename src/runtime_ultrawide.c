@@ -409,7 +409,7 @@ static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_
         known = 0;
         const char *env = getenv("BB_RENDER_RES");
         if (!env || !parse_size(env, &w, &h) || w < 640 || h < 360 || w > 7680 || h > 4320) return 0;
-        w &= ~7u;
+        w &= ~15u; /* the game asserts displaySize.m_w % 16 == 0 */
         h &= ~3u;
         if (w == 1920 && h == 1080) return 0;
         int blocks = 0, direct = 0, first = 0, second = 0, chroma = 0, entries = 0;

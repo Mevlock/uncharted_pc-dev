@@ -1149,7 +1149,7 @@ static bool MovieShaderSize(u32* width, u32* height) {
             b > 4320) {
             return false;
         }
-        w = a & ~7u;
+        w = a & ~15u;
         h = b & ~3u;
         return w != 1920 || h != 1080;
     }();

@@ -354,7 +354,7 @@ def render_sizes(s):
     if width * height > RENDER_PIXELS_MAX:
         shrink = (RENDER_PIXELS_MAX / (width * height)) ** 0.5
         width, height = width * shrink, height * shrink
-    width, height = int(width) // 8 * 8, int(height) // 4 * 4
+    width, height = int(width) // 16 * 16, int(height) // 4 * 4  # the game: width % 16 == 0
     if width < 640 or height < 360 or (width, height, out_w, out_h) == (1920, 1080, 1920, 1080):
         return None
     return f'{width}x{height}', f'{out_w}x{out_h}'
