@@ -32,6 +32,7 @@ static uint64_t pool_size_bytes(void) {
         uint64_t mb = env ? strtoull(env, NULL, 10) : 0;
         if (mb < 5056 || mb > 16384) mb = 5056;
         size = mb * 1024 * 1024;
+        printf("Direct memory: %llu MiB\n", (unsigned long long)mb);
     }
     return size;
 }

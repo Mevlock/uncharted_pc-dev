@@ -433,34 +433,47 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         if (height > b) memcpy(q + 10, &height, 4);
         ++limits;
     }
-    /* The render target heap in the game's memory table ({id, kind, size, alignment}: entry 0x84,
-     * kind 6 = the application's GPU memory, 139.8 MiB), sized for 1080p: grown with the pixel
-     * count. The kind's entries must add up to its total, so the growth comes out of its free
-     * entry (0x0e, ALLOCATION_APP_GPU_FREE, 208.7 MiB), which also caps it. */
-    static const uint8_t heap[24] = {0x84, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x40, 0xbc, 0x08, 0, 0, 0, 0,
-                                     0x80, 0,    0, 0, 0, 0, 0, 0};
-    static const uint8_t spare[8] = {0x0e, 0, 0, 0, 6, 0, 0, 0};
-    uint8_t *heap_entry = NULL, *free_entry = NULL;
-    for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end && !(heap_entry && free_entry); i += 8) {
-        if (!heap_entry && !memcmp(code + i, heap, 24)) heap_entry = code + i;
-        if (heap_entry && !free_entry && code + i > heap_entry && code + i < heap_entry + 0x200 &&
-            !memcmp(code + i, spare, 8) && code[i + 16] == 1)
-            free_entry = code + i;
-    }
-    uint64_t heap_size = 0, free_size = 0;
+    /* The render target heaps in the game's memory table ({id, parent, size, alignment}: entries
+     * 0x84 and 0x85 under the GPU context, 139.8 and 561.1 MiB), sized for 1080p: grown with the
+     * pixel count. The context's entries must add up to its total (3052 MiB, entry 3 of the
+     * table above it), which grows by as much, and the direct memory the runtime reports
+     * (BB_DMEM_MB, 5056 MiB) with it unless it is set. */
+    static const uint8_t heap_a[24] = {0x84, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x40, 0xbc, 0x08, 0, 0, 0, 0,
+                                       0x80, 0,    0, 0, 0, 0, 0, 0};
+    static const uint8_t heap_b[24] = {0x85, 0, 0, 0, 6, 0, 0, 0, 0x00, 0xbc, 0x10, 0x23, 0, 0, 0, 0,
+                                       0x80, 0,    0, 0, 0, 0, 0, 0};
+    static const uint8_t gpu_total[24] = {3, 0, 0, 0, 2, 0, 0, 0, 0x00, 0x00, 0xc0, 0xbe, 0, 0, 0, 0,
+                                          0x00, 0x00, 0x10, 0, 0, 0, 0, 0};
+    uint8_t *entries[3] = {NULL, NULL, NULL};
+    const uint8_t *wanted[3] = {heap_a, heap_b, gpu_total};
+    for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end; i += 8)
+        for (int e = 0; e < 3; ++e)
+            if (!entries[e] && !memcmp(code + i, wanted[e], 24)) entries[e] = code + i;
+    uint64_t grown = 0, heaps[2] = {0, 0}, total = 0;
     const double ratio = (double)width * height / (1920.0 * 1080.0);
-    if (heap_entry && free_entry && ratio > 1.0) {
-        memcpy(&heap_size, heap_entry + 8, 8);
-        memcpy(&free_size, free_entry + 8, 8);
-        uint64_t grow = ((uint64_t)(heap_size * (ratio - 1.0) * 1.05) + 0xffff) & ~(uint64_t)0xffff;
-        const uint64_t keep = 4ull << 20;
-        if (grow > free_size - keep) grow = (free_size - keep) & ~(uint64_t)0xffff;
-        heap_size += grow;
-        free_size -= grow;
-        memcpy(heap_entry + 8, &heap_size, 8);
-        memcpy(free_entry + 8, &free_size, 8);
+    if (entries[0] && entries[1] && entries[2] && ratio > 1.0) {
+        for (int e = 0; e < 2; ++e) {
+            memcpy(&heaps[e], entries[e] + 8, 8);
+            const uint64_t grow = ((uint64_t)(heaps[e] * (ratio - 1.0) * 1.1) + 0xffff) & ~(uint64_t)0xffff;
+            heaps[e] += grow;
+            grown += grow;
+            memcpy(entries[e] + 8, &heaps[e], 8);
+        }
+        memcpy(&total, entries[2] + 8, 8);
+        total += grown;
+        memcpy(entries[2] + 8, &total, 8);
+        if (!getenv("BB_DMEM_MB")) {
+            char dmem[48];
+            snprintf(dmem, sizeof(dmem), "BB_DMEM_MB=%llu", 5056ull + (grown >> 20) + 256);
+#ifdef _WIN32
+            _putenv(dmem);
+#else
+            putenv(strdup(dmem));
+#endif
+        }
     }
     printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched, "
-           "render target heap %.1f MiB, %.1f MiB left free)\n",
-           width, height, blocks, sizes, loads, limits, heap_size / 1048576.0, free_size / 1048576.0);
+           "render target heaps %.1f + %.1f MiB, GPU memory %.1f MiB, BB_DMEM_MB %s)\n",
+           width, height, blocks, sizes, loads, limits, heaps[0] / 1048576.0, heaps[1] / 1048576.0,
+           total / 1048576.0, getenv("BB_DMEM_MB") ? getenv("BB_DMEM_MB") : "unset");
 }
