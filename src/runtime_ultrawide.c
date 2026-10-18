@@ -33,6 +33,9 @@ int runtime_render_resolution;
 
 /* The widened constants, and the block the stubs read them from when it can be switched. */
 static float wide_constants[4];
+/* The constants for the other frames: all 1 (the game's own view), unless BB_RENDER_RES renders
+ * into a buffer wider than 16:9 (the game then builds its camera from the buffer's shape). */
+static float narrow_constants[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 static float *volatile switch_constants;
 
 /* Gameplay frames get the widened view, others (menus, title screens, loading) the game's own:
@@ -44,7 +47,7 @@ void runtime_ultrawide_select(int wide) {
     if (!constants || wide == current) return;
     current = wide;
     for (int i = 0; i < 4; ++i) {
-        float value = wide ? wide_constants[i] : 1.0f;
+        float value = wide ? wide_constants[i] : narrow_constants[i];
         __atomic_store(&constants[i], &value, __ATOMIC_RELAXED);
     }
 }
@@ -199,15 +202,32 @@ static int output_size(unsigned *w, unsigned *h) {
 
 void runtime_patch_ultrawide(uint8_t *code, uint64_t size) {
     const char *mode = getenv("BB_ULTRAWIDE");
-    if (mode && mode[0] == '0' && mode[1] == 0) return;
+    const int off = mode && mode[0] == '0' && mode[1] == 0;
+    /* BB_RENDER_RES (runtime_patch_resolution): the game takes its camera's aspect from the render
+     * buffer, which keeps the horizontal view and crops the vertical one when the buffer is wider
+     * than 16:9. The inverse aspect is scaled back by c = buffer aspect / (16/9) on every frame,
+     * so the view is the 16:9 one stretched over the buffer like the UI (the presenter shows
+     * those frames at 16:9) before any widening. */
+    float c = 1.0f;
+    unsigned render_w, render_h;
+    const char *render = getenv("BB_RENDER_RES");
+    if (render && parse_size(render, &render_w, &render_h) && render_w >= 640 && render_h >= 360 &&
+        render_w <= 7680 && render_h <= 4320) {
+        c = (float)(render_w & ~7u) / (float)(render_h & ~3u) / (16.0f / 9.0f);
+        if (c < 1.0f) c = 1.0f; /* narrower buffers: not handled (letterboxed by the game?) */
+    }
     unsigned width = 1920, height = 1080;
-    if (!output_size(&width, &height)) return;
+    if (off || !output_size(&width, &height)) {
+        if (c == 1.0f) return;
+        width = 1920;
+        height = 1080;
+    }
     const char *fov_env = getenv("BB_FOV");
     unsigned fov_pct = fov_env ? (unsigned)strtoul(fov_env, NULL, 10) : 100;
     if (fov_pct < 60 || fov_pct > 150) fov_pct = 100;
     const float aspect = (float)width / (float)height;
     const int wide = aspect > 16.0f / 9.0f + 0.01f;
-    if (!wide && fov_pct == 100) return;
+    if (!wide && fov_pct == 100 && c == 1.0f) return;
     const float k = wide ? (16.0f / 9.0f) / aspect : 1.0f, fov = fov_pct / 100.0f;
 
     uint64_t persp[MAX_ANCHORS], ortho[MAX_ANCHORS];
@@ -292,13 +312,15 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size) {
      * code so the presenter can switch them per frame (runtime_ultrawide_select): menus, title
      * screens and loading get the game's own view (all 1), gameplay the widened one. Without such
      * a block they stay in the padding, always widened. */
-    wide_constants[0] = k;
-    wide_constants[1] = 1.0f / k;
+    wide_constants[0] = k * c;
+    wide_constants[1] = 1.0f / (k * c);
+    narrow_constants[0] = c;
+    narrow_constants[1] = 1.0f / c;
     wide_constants[2] = k / fov;
     wide_constants[3] = fov / k;
     float *constants = alloc_near(code, size);
     if (constants) {
-        for (int i = 0; i < 4; ++i) constants[i] = 1.0f;
+        for (int i = 0; i < 4; ++i) constants[i] = narrow_constants[i];
     } else {
         constants = (float *)(code + cave);
         memcpy(constants, wide_constants, sizeof(wide_constants));
@@ -333,8 +355,9 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size) {
     runtime_ultrawide_fill = wide;
     runtime_ultrawide_scale = k;
     if (constants != (float *)(code + cave)) switch_constants = constants;
-    printf("Ultrawide: %d camera reads widened for %ux%u (field %#x), field of view %u%%%s\n", ns,
-           width, height, field, fov_pct, switch_constants ? ", gameplay only" : "");
+    printf("Ultrawide: %d camera reads widened for %ux%u (field %#x), field of view %u%%%s, render aspect "
+           "correction %.3f\n",
+           ns, width, height, field, fov_pct, switch_constants ? ", gameplay only" : "", c);
 }
 
 /* Render resolution (BB_RENDER_RES=WIDTHxHEIGHT, U3 for now): the engine's display mode table
