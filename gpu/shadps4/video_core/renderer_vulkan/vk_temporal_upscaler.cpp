@@ -1399,8 +1399,10 @@ void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
     // Velocity mode at a patched size: the first draw into the display buffer that is not a
     // full-screen pass (vertex shader f585649d: the final composite and its copies) is the UI.
     // The next frame's scene (a draw with the scene depth) ends the UI phase of the last one.
+    // UI tested against the scene depth before the flip keeps the phase.
     draw_vs = u32(vs_hash);
-    if (velocity_ui && ui_phase && depth && depth == velocity_depth) {
+    if (velocity_ui && ui_phase && depth && depth == velocity_depth &&
+        g_flips.load(std::memory_order_relaxed) != velocity_ui_flip) {
         ui_phase = false;
     }
     if (velocity_pending && color &&
@@ -2164,8 +2166,14 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
 bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target) {
     // Uncharted's UI phase lasts into the next frame's scene, whose draws use the scene depth:
     // that depth is never redirected (a depth-only pass would otherwise go to ui_depth_image).
-    if (!ui_phase || depth != ui_depth || velocity_ui) {
+    // In velocity mode, UI tested against the scene depth before the flip (prompts and markers
+    // in the world) goes to the UI image with it; after the flip it is the next frame's scene.
+    if (!ui_phase || depth != ui_depth ||
+        (velocity_ui && g_flips.load(std::memory_order_relaxed) != velocity_ui_flip)) {
         return false;
+    }
+    if (velocity_ui) {
+        BbDrawLogNote(" [DEPTH-TO-UI]");
     }
     target = {*ui_depth_view, vk::ImageLayout::eGeneral, ui_width, ui_height, true};
     return true;
