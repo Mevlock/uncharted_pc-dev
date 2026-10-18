@@ -32,6 +32,7 @@
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
+#include <vk_mem_alloc.h>
 
 // bbport: the render size BB_RENDER_RES patched in (runtime_ultrawide.c), 0 without it.
 extern "C" unsigned runtime_render_width, runtime_render_height;
@@ -1950,6 +1951,107 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     draw_inputs.pending = false;
     if (!bound) {
         return;
+    }
+    // bbport diagnosis: BB_DUMP_PS=<pixel shader hash,...> with BB_DUMP_PS_TRIGGER=<file>: when
+    // the file exists, the next frame's draws of those shaders write every RGBA16F image they
+    // bind (mips 0..3, as before the draw) to BB_DUMP_DIR as psdump_*.raw.
+    {
+        static const std::vector<u32> dump_ps = [] {
+            std::vector<u32> list;
+            if (const char* env = std::getenv("BB_DUMP_PS")) {
+                for (const char* p = env; *p;) {
+                    char* end;
+                    const u32 value = u32(std::strtoul(p, &end, 16));
+                    if (end == p) break;
+                    list.push_back(value);
+                    p = *end == ',' ? end + 1 : end;
+                }
+            }
+            return list;
+        }();
+        static const char* dump_trigger = std::getenv("BB_DUMP_PS_TRIGGER");
+        static u64 dump_flip = ~0ull;
+        static u32 dump_draw = 0;
+        const u64 flip_now = g_flips.load(std::memory_order_relaxed);
+        const auto* dump_fs = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        if (dump_trigger && !dump_ps.empty()) {
+            if (dump_flip == ~0ull && std::filesystem::exists(dump_trigger)) {
+                std::error_code ec;
+                std::filesystem::remove(dump_trigger, ec);
+                dump_flip = flip_now + 1;
+                dump_draw = 0;
+            }
+            if (dump_flip != ~0ull && flip_now > dump_flip) {
+                dump_flip = ~0ull;
+            }
+            if (dump_fs && flip_now == dump_flip &&
+                std::find(dump_ps.begin(), dump_ps.end(), u32(dump_fs->pgm_hash)) != dump_ps.end()) {
+                static const std::string dir = [] {
+                    const char* env = std::getenv("BB_DUMP_DIR");
+                    return std::string{env && env[0] ? env : "out/dump"};
+                }();
+                ++dump_draw;
+                scheduler.EndRendering();
+                std::vector<VideoCore::ImageId> seen;
+                u32 index = 0;
+                for (const auto id : bound_images) {
+                    if (!id || std::find(seen.begin(), seen.end(), id) != seen.end()) continue;
+                    seen.push_back(id);
+                    auto& image = texture_cache.GetImage(id);
+                    if (image.info.pixel_format != vk::Format::eR16G16B16A16Sfloat) continue;
+                    runtime.Transit(&image, vk::ImageLayout::eGeneral,
+                                    vk::PipelineStageFlagBits2::eTransfer,
+                                    vk::AccessFlagBits2::eTransferRead);
+                    runtime.FlushBarriers();
+                    const auto cmd = scheduler.CommandBuffer();
+                    const u32 levels = std::min(4u, u32(image.info.resources.levels));
+                    for (u32 mip = 0; mip < levels; ++mip) {
+                        const u32 w = std::max(1u, image.info.size.width >> mip);
+                        const u32 h = std::max(1u, image.info.size.height >> mip);
+                        const VkDeviceSize size = VkDeviceSize(w) * h * 8;
+                        const VkBufferCreateInfo buffer_ci{
+                            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                            .size = size,
+                            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                        };
+                        const VmaAllocationCreateInfo alloc_ci{
+                            .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                                     VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+                            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                        };
+                        VkBuffer buffer{};
+                        VmaAllocation allocation{};
+                        VmaAllocationInfo info{};
+                        if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci,
+                                            &buffer, &allocation, &info) != VK_SUCCESS) {
+                            continue;
+                        }
+                        const vk::BufferImageCopy region{
+                            .imageSubresource = {vk::ImageAspectFlagBits::eColor, mip, 0, 1},
+                            .imageExtent = {w, h, 1},
+                        };
+                        cmd.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eGeneral,
+                                              vk::Buffer(buffer), region);
+                        char path[512];
+                        std::snprintf(path, sizeof(path), "%s/psdump_%08x_d%u_i%u_m%u_%ux%u_rgba16f.raw",
+                                      dir.c_str(), u32(dump_fs->pgm_hash), dump_draw, index, mip, w, h);
+                        scheduler.DeferPriorityOperation(
+                            [allocator = instance.GetAllocator(), buffer, allocation, info, size,
+                             file = std::string{path}] {
+                                vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
+                                if (FILE* f = std::fopen(file.c_str(), "wb")) {
+                                    std::fwrite(info.pMappedData, 1, size, f);
+                                    std::fclose(f);
+                                }
+                                vmaDestroyBuffer(allocator, buffer, allocation);
+                            });
+                    }
+                    ++index;
+                }
+                std::printf("PS dump: %08x draw %u, %u images\n", u32(dump_fs->pgm_hash),
+                            dump_draw, index);
+            }
+        }
     }
     const auto state = BeginRendering(pipeline);
 

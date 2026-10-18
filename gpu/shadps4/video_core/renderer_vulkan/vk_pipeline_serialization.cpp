@@ -9,6 +9,7 @@
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "bbport_nan_guard.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
 namespace Serialization {
@@ -272,7 +273,8 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     size_t perm_idx{};
     if (!LoadShaderMeta(ar, program->info, sel.fetch_shader, spec, perm_idx) ||
         Shader::Backend::SPIRV::IsForcedShader(program->info.pgm_hash) ||
-        BbMovieShaderScaled(program->info.pgm_hash)) {
+        BbMovieShaderScaled(program->info.pgm_hash) ||
+        BbNanGuard::BloomClampShader(program->info.pgm_hash)) {
         return false;
     }
 

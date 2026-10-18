@@ -34,6 +34,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "bbport_nan_guard.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include <vk_mem_alloc.h>
 
@@ -1194,6 +1195,7 @@ static std::vector<u32> ScaleMovieShader(std::span<const u32> code) {
 /// bbport: whether a shader is saved to the shader cache.
 static bool SaveShaderBinary(u64 pgm_hash, Shader::HwStage stage) {
     return !Shader::Backend::SPIRV::IsForcedShader(pgm_hash) && !BbMovieShaderScaled(pgm_hash) &&
+           !BbNanGuard::BloomClampShader(pgm_hash) &&
            !(Shader::VertexCheck::address && stage == Shader::HwStage::Vertex);
 }
 

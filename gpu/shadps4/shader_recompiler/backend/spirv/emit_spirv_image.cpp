@@ -6,6 +6,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/microinstruction.h"
+#include "bbport_nan_guard.h"
 
 namespace Shader::Backend::SPIRV {
 
@@ -340,7 +341,15 @@ void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id 
         image_ptr = ctx.OpAccessChain(single_image_ptr_type, image_ptr, std::array{lod});
     }
     const Id image = ctx.OpLoad(texture.image_type, image_ptr);
-    const Id texel = texture.is_integer ? ctx.OpBitcast(color_type, color) : color;
+    Id texel = texture.is_integer ? ctx.OpBitcast(color_type, color) : color;
+    if (!texture.is_integer && BbNanGuard::BloomClampShader(ctx.info.pgm_hash)) {
+        // bbport: the bloom bright pass's output: NaN -> 0, then at most BloomClamp().
+        const Id zero{ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f)};
+        const float limit_value = BbNanGuard::BloomClamp();
+        const Id limit{ctx.ConstF32(limit_value, limit_value, limit_value, limit_value)};
+        texel = ctx.OpSelect(color_type, ctx.OpIsNan(ctx.U1[4], texel), zero, texel);
+        texel = ctx.OpFClamp(color_type, texel, ctx.OpFNegate(color_type, limit), limit);
+    }
     ctx.OpImageWrite(image, coords, texel, operands.mask, operands.operands);
 }
 
