@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <xxhash.h>
 
 #include "bbport_toggles.h"
@@ -497,6 +502,57 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     return new_image_id;
 }
 
+// bbport diagnosis (from the God of War III port): BB_PERF_DIAG=1 reports every 5 s how many
+// images FindImage created and which ones most often. An image made again every frame (the
+// GoW3 port found one at 1100-1500 per 5 s) costs CPU time and uploads with the GPU idle.
+void TextureCache::NoteImageCreate(const ImageInfo& info, BindingType binding) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_PERF_DIAG");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    struct Stat {
+        VAddr address;
+        u32 width, height;
+        vk::Format format;
+        BindingType binding;
+        u32 count;
+    };
+    static std::array<Stat, 32> stats{};
+    static u64 total = 0;
+    static auto window = std::chrono::steady_clock::now();
+    ++total;
+    auto slot = std::ranges::find_if(stats, [&](const Stat& s) {
+        return s.count && s.address == info.guest_address && s.width == info.size.width &&
+               s.height == info.size.height && s.format == info.pixel_format;
+    });
+    if (slot == stats.end()) {
+        slot = std::ranges::min_element(stats, {}, &Stat::count);
+        *slot = {info.guest_address, info.size.width, info.size.height, info.pixel_format, binding, 0};
+    }
+    ++slot->count;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) {
+        return;
+    }
+    window = now;
+    static constexpr const char* names[] = {"texture", "storage", "render target", "depth target",
+                                            "video out"};
+    std::printf("Image creates: %llu in 5 s\n", static_cast<unsigned long long>(total));
+    std::ranges::sort(stats, std::greater{}, &Stat::count);
+    for (u32 i = 0; i < 6 && stats[i].count > 1; ++i) {
+        const auto& s = stats[i];
+        std::printf("  %u x %#llx %ux%u %s as %s\n", s.count,
+                    static_cast<unsigned long long>(s.address), s.width, s.height,
+                    vk::to_string(s.format).c_str(),
+                    u32(s.binding) < 5 ? names[u32(s.binding)] : "?");
+    }
+    stats = {};
+    total = 0;
+}
+
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     const auto& info = desc.info;
     ASSERT(info.guest_address != 0);
@@ -604,6 +660,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     if (!image_id) {
         image_id = slot_images.insert(instance, runtime, slot_image_views, info);
         RegisterImage(image_id);
+        NoteImageCreate(info, desc.type);
     }
 
     Image& image = slot_images[image_id];

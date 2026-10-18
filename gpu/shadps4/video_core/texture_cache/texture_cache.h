@@ -120,6 +120,8 @@ public:
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
+    /// BB_PERF_DIAG: counts the images FindImage creates (texture_cache.cpp).
+    void NoteImageCreate(const ImageInfo& info, BindingType binding);
 
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
