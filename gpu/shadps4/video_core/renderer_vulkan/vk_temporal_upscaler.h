@@ -104,6 +104,12 @@ public:
     /// game's finished frame.
     void OnColorTarget(VideoCore::ImageId color);
 
+    /// bbport: the first draw into a display buffer, before CameraMotion::OnDisplayPass clears
+    /// the frame's depth and camera. Velocity mode (Uncharted) at a patched render size
+    /// (BB_RENDER_RES, BB_OUTPUT_RES): records this frame's motion vectors and keeps its depth
+    /// and jitter for the upscale at the first UI draw (RunScaledVelocity).
+    void BeforeDisplayPass(VAddr display);
+
     struct Target {
         vk::ImageView view;
         vk::ImageLayout layout;
@@ -152,6 +158,18 @@ private:
     /// The scene depth and the game's motion vectors for frame generation (velocity mode).
     void CaptureFrameGen();
     void RunScaled();
+    /// Velocity mode at a patched render size: the finished frame in the display buffer
+    /// (`display`), upscaled to the output size before the game's UI, which then draws into the
+    /// output-size image the presenter shows.
+    /// `source`: the image the final composite drew the frame into; `target`: the one the UI
+    /// draws into (the texture cache may keep several images of the display buffer).
+    void RunScaledVelocity(VideoCore::ImageId source, VideoCore::ImageId target);
+    /// The upscale of RunScaled/RunScaledVelocity after the motion vectors: into ui_image.
+    bool DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::Image& color,
+                      const VideoCore::Image& depth, vk::Image color_image,
+                      vk::ImageView color_view, vk::Format color_format, vk::Image depth_image,
+                      vk::ImageView depth_view, u32 source_width, u32 source_height, u32 w, u32 h,
+                      u32 ow, u32 oh);
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
     void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
     void PrepareUiDepth(VideoCore::ImageId depth);
@@ -238,6 +256,15 @@ private:
     vk::UniqueImageView ui_depth_view;
     bool depth_blit = false;
     bool scaled_session = false;
+    /// BeforeDisplayPass recorded this frame's motion vectors (velocity mode, patched size).
+    bool velocity_pending = false;
+    /// The UI phase belongs to RunScaledVelocity: the next display pass is not redirected.
+    bool velocity_ui = false;
+    VideoCore::ImageId velocity_depth{};
+    VAddr velocity_address = 0;           ///< the display buffer of the frame
+    VideoCore::ImageId velocity_display{}; ///< the image the frame's first draw there used
+    std::array<float, 2> velocity_jitter{};
+    u32 velocity_width = 0, velocity_height = 0;
     u32 ui_width = 0, ui_height = 0;
     u32 render_width = 0, render_height = 0;
     vk::Format ui_format = vk::Format::eUndefined;
@@ -253,6 +280,7 @@ private:
     std::vector<MirrorView> ui_views;
     struct DisplayImage {
         VideoCore::UniqueImage image;
+        vk::Image alias{}; ///< RunScaledVelocity: ui_image stands for the display buffer
         std::vector<MirrorView> views;
         vk::Format format{};
         u32 width = 0, height = 0;

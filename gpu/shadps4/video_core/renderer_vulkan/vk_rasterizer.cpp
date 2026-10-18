@@ -958,15 +958,17 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     } else if (camera_motion->VelocityMode() && db_desc.first && !camera_motion->Depth()) {
         // Uncharted: no G-buffer of 5 targets. The frame's first pass at the display size that
         // is depth-only (U1's prepass) or draws RGBA16F color (U2's first scene pass) holds the
-        // scene depth.
+        // scene depth. The display size: 1920x1080, or the size BB_RENDER_RES patched in.
+        const u32 display_w = runtime_render_width ? runtime_render_width : 1920u;
+        const u32 display_h = runtime_render_height ? runtime_render_height : 1080u;
         const auto& depth = texture_cache.GetImage(db_desc.first);
         bool scene_pass = !cb_descs[0].first;
         if (cb_descs[0].first) {
             const auto& color = texture_cache.GetImage(cb_descs[0].first);
             scene_pass = color.info.pixel_format == vk::Format::eR16G16B16A16Sfloat &&
-                         color.info.size.width == 1920 && color.info.size.height == 1080;
+                         color.info.size.width == display_w && color.info.size.height == display_h;
         }
-        if (scene_pass && depth.info.size.width == 1920 && depth.info.size.height == 1080 &&
+        if (scene_pass && depth.info.size.width == display_w && depth.info.size.height == display_h &&
             (depth.info.pixel_format == vk::Format::eD32SfloatS8Uint ||
              depth.info.pixel_format == vk::Format::eD32Sfloat)) {
             camera_motion->OnGBufferPass(db_desc.first);
@@ -1913,6 +1915,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (camera_motion->Enabled() && regs.color_buffers[0] &&
         FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
         scene_started = false;
+        upscaler->BeforeDisplayPass(regs.color_buffers[0].Address());
         camera_motion->OnDisplayPass(cb_descs[0].first);
         if (upscaler->OnFrameStart()) {
             object_motion->InvalidateHistory();

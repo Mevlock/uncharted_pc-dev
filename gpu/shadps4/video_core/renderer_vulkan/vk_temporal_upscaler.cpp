@@ -351,8 +351,9 @@ bool TemporalUpscaler::OnFrameStart() {
     dispatched_last_frame = false;
 
     // The display pass of an upscaled frame reads the upscaled UI image.
-    display_redirect = ui_phase;
+    display_redirect = ui_phase && !velocity_ui;
     ui_phase = false;
+    velocity_ui = false;
     ui_read_barrier = false;
     done_this_frame = false;
     frame_gen_captured = false;
@@ -1381,6 +1382,26 @@ void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {
 
 void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
                               VideoCore::ImageId depth, bool native_viewport) {
+    // Velocity mode at a patched size: the first draw into the display buffer that is not a
+    // full-screen pass (vertex shader f585649d: the final composite and its copies) is the UI.
+    // The next frame's scene (a draw with the scene depth) ends the UI phase of the last one.
+    if (velocity_ui && ui_phase && depth && depth == velocity_depth) {
+        ui_phase = false;
+    }
+    if (velocity_pending && color &&
+        texture_cache.GetImage(color).info.guest_address == velocity_address) {
+        if (!velocity_display) {
+            velocity_display = color; // the final composite (the display pass)
+        }
+        if (u32(vs_hash) != 0xf585649du) {
+            static int noted = 0;
+            if (noted++ < 2) {
+                std::printf("Upscaler: upscale at the first UI draw (vs %08x)\n", u32(vs_hash));
+            }
+            RunScaledVelocity(velocity_display, color);
+            return;
+        }
+    }
     if (!Scaled() && vs_hash == ui_trigger_vs) done_this_frame = true;
     if (!Scaled() || !color) {
         return;
@@ -1685,6 +1706,44 @@ void TemporalUpscaler::RunScaled() {
             vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
             vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eShaderRead);
 
+    const bool ok = DispatchToUi(cmdbuf, color, depth, color_image, color_view,
+                                 color.info.pixel_format, depth_image, depth_view, source_width,
+                                 source_height, w, h, ow, oh);
+    done_this_frame = true; // the UI is not jittered
+    if (ok) {
+        ui_phase = true;
+        ui_color = ldr_target;
+        ui_depth = camera_motion.Depth();
+    }
+}
+
+bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::Image& color,
+                                    const VideoCore::Image& depth, vk::Image color_image,
+                                    vk::ImageView color_view, vk::Format color_format,
+                                    vk::Image depth_image, vk::ImageView depth_view,
+                                    u32 source_width, u32 source_height, u32 w, u32 h, u32 ow,
+                                    u32 oh) {
+    const auto depth_format = depth.info.pixel_format;
+    const auto barrier = [&](vk::Image image, vk::ImageAspectFlags aspect,
+                             vk::ImageLayout old_layout, vk::PipelineStageFlags2 src_stage,
+                             vk::AccessFlags2 src_access, vk::ImageLayout new_layout,
+                             vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access) {
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = src_stage,
+            .srcAccessMask = src_access,
+            .dstStageMask = dst_stage,
+            .dstAccessMask = dst_access,
+            .oldLayout = old_layout,
+            .newLayout = new_layout,
+            .image = image,
+            .subresourceRange = {aspect, 0, 1, 0, 1},
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    };
+    const auto all = vk::PipelineStageFlagBits2::eAllCommands;
+    const auto color_access = vk::AccessFlagBits2::eColorAttachmentRead |
+                              vk::AccessFlagBits2::eColorAttachmentWrite;
+    const auto rw = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
     const auto now = std::chrono::steady_clock::now();
     float frame_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
     if (frame_ms <= 0.0f || frame_ms > 200.0f) {
@@ -1702,7 +1761,7 @@ void TemporalUpscaler::RunScaled() {
             RecordTaa(cmdbuf, color_view, depth_view);
         } else if (UseDlss()) {
             ok4 = RecordDlss(cmdbuf,
-                             {color_image, color_view, color.info.pixel_format,
+                             {color_image, color_view, color_format,
                               vk::ImageAspectFlagBits::eColor, source_width, source_height},
                              {depth_image, depth_view, depth_format, vk::ImageAspectFlagBits::eDepth,
                               source_width, source_height},
@@ -1762,20 +1821,14 @@ void TemporalUpscaler::RunScaled() {
                 }
             }
         }
-        done_this_frame = true;
-        if (ok4) {
-            ui_phase = true;
-            ui_color = ldr_target;
-            ui_depth = camera_motion.Depth();
-        }
-        return;
+        return ok4;
     }
 
     const auto& settings = BbSettings::Get();
     FfxVkPortableUpscaleDispatchInfo info{};
     info.structSize = sizeof(info);
     info.commandBuffer = cmdbuf;
-    info.color = Describe(color_image, color.info.pixel_format, source_width, source_height,
+    info.color = Describe(color_image, color_format, source_width, source_height,
                           color.usage_flags, vk::ImageAspectFlagBits::eColor,
                           FFX_VK_PORTABLE_RESOURCE_STATE_GENERIC_READ);
     info.depth = Describe(depth_image, depth_format, source_width, source_height, depth.usage_flags,
@@ -1836,12 +1889,138 @@ void TemporalUpscaler::RunScaled() {
             rw, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eColorAttachmentOutput,
             color_access);
 
-    done_this_frame = true; // the UI is not jittered
-    if (ok) {
-        ui_phase = true;
-        ui_color = ldr_target;
-        ui_depth = camera_motion.Depth();
+    return ok;
+}
+
+
+void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
+    // Every draw into a display buffer passes here; the frame's first one still has the depth
+    // and camera (OnDisplayPass clears them). Later ones (Uncharted's full-screen copies before
+    // the UI) keep the pending upscale.
+    if (!camera_motion.Depth()) {
+        return;
     }
+    velocity_pending = false;
+    if (!scaled_session || !camera_motion.VelocityMode() || failed || !Active() ||
+        !camera_motion.Ready()) {
+        return;
+    }
+    auto& depth = texture_cache.GetImage(camera_motion.Depth());
+    const auto [w, h] = SceneSize(depth.info.size.width, depth.info.size.height);
+    const u32 ow = target_width, oh = target_height;
+    if (w > ow || h > oh) {
+        return;
+    }
+    if (!EnsureResources(w, h, ow, oh, false)) {
+        failed = true;
+        return;
+    }
+    const auto depth_view = CachedView(depth, depth.info.pixel_format,
+                                       vk::ImageAspectFlagBits::eDepth);
+    scheduler.EndRendering();
+    runtime.Transit(&depth, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    vk::ImageMemoryBarrier2 b{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eNone,
+        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .image = vk::Image(motion_image),
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    camera_motion.RecordVelocity(cmdbuf, depth_view, *motion_view, w, h);
+    b.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+    b.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
+    b.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
+    b.dstAccessMask = vk::AccessFlagBits2::eShaderRead;
+    b.oldLayout = vk::ImageLayout::eGeneral;
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    velocity_pending = true;
+    velocity_depth = camera_motion.Depth();
+    velocity_address = display;
+    velocity_display = {};
+    velocity_jitter = jitter;
+    velocity_width = w;
+    velocity_height = h;
+    static bool noted = false;
+    if (!noted) {
+        noted = true;
+        std::printf("Upscaler: render %ux%u -> output %ux%u before the UI (velocity mode)\n", w,
+                    h, ow, oh);
+    }
+}
+
+void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::ImageId target) {
+    velocity_pending = false;
+    auto& color = texture_cache.GetImage(source);
+    auto& depth = texture_cache.GetImage(velocity_depth);
+    const u32 w = velocity_width, h = velocity_height, ow = target_width, oh = target_height;
+    const u32 iw = color.info.size.width, ih = color.info.size.height;
+    if (iw != depth.info.size.width || ih != depth.info.size.height || iw < w || ih < h) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::printf("Upscaler: display %ux%u and depth %ux%u differ, not upscaled\n", iw, ih,
+                        depth.info.size.width, depth.info.size.height);
+        }
+        return;
+    }
+    // ui_image in UNORM: the upscaler reads the sRGB-encoded display through a UNORM view and
+    // writes encoded values; the UI and the presenter use sRGB views of it.
+    EnsureUiResources(ow, oh, vk::Format::eR8G8B8A8Unorm, depth.info.pixel_format);
+    PrepareUiDepth(velocity_depth);
+    const auto color_view = CachedView(color, vk::Format::eR8G8B8A8Unorm,
+                                       vk::ImageAspectFlagBits::eColor);
+    const auto depth_view = CachedView(depth, depth.info.pixel_format,
+                                       vk::ImageAspectFlagBits::eDepth);
+    scheduler.EndRendering();
+    runtime.Transit(&depth, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderRead);
+    runtime.Transit(&color, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    const vk::ImageMemoryBarrier2 b{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eNone,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .image = vk::Image(ui_image),
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    static int noted = 0;
+    if (noted++ < 2) {
+        std::printf("Upscaler: %s %ux%u -> %ux%u into the UI image\n",
+                    UseDlss() ? "DLSS" : UseFsr4() ? "FSR 4" : "FSR 3", w, h, ow, oh);
+    }
+    const auto frame_jitter = jitter;
+    jitter = velocity_jitter; // the frame's own jitter (OnFrameStart already chose the next)
+    const bool ok = DispatchToUi(cmdbuf, color, depth, color.GetImage(), color_view,
+                                 vk::Format::eR8G8B8A8Unorm, depth.GetImage(), depth_view, iw, ih,
+                                 w, h, ow, oh);
+    jitter = frame_jitter;
+    if (!ok) {
+        return;
+    }
+    ui_phase = true;
+    velocity_ui = true;
+    ui_color = target;
+    ui_depth = velocity_depth;
+    std::scoped_lock lock{display_mutex};
+    auto& shown = displays[color.info.guest_address];
+    shown.alias = vk::Image(ui_image);
+    shown.format = color.info.pixel_format;
+    shown.width = ow;
+    shown.height = oh;
+    shown.valid = true;
 }
 
 vk::ImageView TemporalUpscaler::Mirror(vk::Image image, std::vector<MirrorView>& views,
@@ -1892,6 +2071,7 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
         scheduler.Finish();
         display.views.clear();
         std::printf("Display: host buffer %ux%u (live)\n", ui_width, ui_height);
+        display.alias = vk::Image{};
         display.format = image.info.pixel_format;
         display.width = ui_width;
         display.height = ui_height;
@@ -1932,7 +2112,9 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
 }
 
 bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target) {
-    if (!ui_phase || depth != ui_depth) {
+    // Uncharted's UI phase lasts into the next frame's scene, whose draws use the scene depth:
+    // that depth is never redirected (a depth-only pass would otherwise go to ui_depth_image).
+    if (!ui_phase || depth != ui_depth || velocity_ui) {
         return false;
     }
     target = {*ui_depth_view, vk::ImageLayout::eGeneral, ui_width, ui_height, true};
@@ -1968,12 +2150,21 @@ bool TemporalUpscaler::RedirectSampled(VideoCore::ImageId image,
 }
 
 bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
+    // A frame without UI draws (cutscenes, a hidden HUD): upscaled when it is shown.
+    if (velocity_pending && velocity_display && address == velocity_address) {
+        static int noted = 0;
+        if (noted++ < 2) {
+            std::printf("Upscaler: upscale when shown (no UI draw)\n");
+        }
+        RunScaledVelocity(velocity_display, velocity_display);
+    }
     std::scoped_lock lock{display_mutex};
     const auto it = displays.find(address);
     if (it == displays.end() || !it->second.valid) {
         return false;
     }
-    display = {vk::Image(it->second.image), it->second.format, it->second.width, it->second.height};
+    display = {it->second.alias ? it->second.alias : vk::Image(it->second.image),
+               it->second.format, it->second.width, it->second.height};
     // Diagnostic capture of the actual completed display buffer, including native UI.
     // BB_PRESENT_DUMP_COUNT=N: the trigger dumps N consecutive frames (temporal stability).
     static const char* dump = std::getenv("BB_PRESENT_DUMP_TRIGGER");
