@@ -397,11 +397,58 @@ std::atomic<u32> g_async_stalled{0};
 
 bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
     SideTicket ticket;
+    // bbport diagnosis (BB_PERF_DIAG=1): where a synchronous read-back's time goes. U3's
+    // Cartagena square: ~78% find the writing work done (~50 us); the rest wait ~4 ms for the GPU
+    // to catch up, nearly all on two regions: GDS counters copied next to records the guest
+    // writes (and then reads the counters: skipping the wait crashed it), and a ring of mixed
+    // guest/GPU blocks whose pages move every frame.
+    static const bool diag = [] {
+        const char* env = std::getenv("BB_PERF_DIAG");
+        return env && env[0] == '1';
+    }();
+    const auto t0 = std::chrono::steady_clock::now();
+    const u64 tick_before = scheduler.CurrentTick();
     if (!BeginSideDownload(page, length, ticket)) {
         return false;
     }
+    const auto t1 = std::chrono::steady_clock::now();
+    const bool was_done = ticket.write_tick == 0 || scheduler.IsFree(ticket.write_tick);
+    const u64 flushes = scheduler.CurrentTick() - tick_before;
     WaitSideDownload(ticket);
-    return FinishSideDownload(ticket, page, length); // nothing came in between here
+    const auto t2 = std::chrono::steady_clock::now();
+    const u64 pages = ticket.pages.size(), bytes = ticket.total;
+    const bool ok = FinishSideDownload(ticket, page, length); // nothing came in between here
+    if (diag) {
+        const auto t3 = std::chrono::steady_clock::now();
+        static u64 n = 0, done = 0, flush_count = 0, page_count = 0, byte_count = 0;
+        static double begin_us = 0, wait_us = 0, wait_done_us = 0, finish_us = 0;
+        static auto window = t3;
+        const auto us = [](auto d) { return std::chrono::duration<double, std::micro>(d).count(); };
+        ++n;
+        done += was_done;
+        flush_count += flushes;
+        page_count += pages;
+        byte_count += bytes;
+        begin_us += us(t1 - t0);
+        wait_us += us(t2 - t1);
+        if (was_done) {
+            wait_done_us += us(t2 - t1);
+        }
+        finish_us += us(t3 - t2);
+        if (t3 - window >= std::chrono::seconds(5)) {
+            std::printf("Sync read-back breakdown: %llu, writing work already done for %.0f%% "
+                        "(wait %.0f us then), %.2f flushes each; begin %.0f us, wait %.0f us, "
+                        "store %.0f us; %.1f pages, %.1f KiB each\n",
+                        (unsigned long long)n, 100.0 * done / n,
+                        done ? wait_done_us / done : 0.0, double(flush_count) / n, begin_us / n,
+                        wait_us / n, finish_us / n, double(page_count) / n,
+                        byte_count / 1024.0 / n);
+            n = done = flush_count = page_count = byte_count = 0;
+            begin_us = wait_us = wait_done_us = finish_us = 0;
+            window = t3;
+        }
+    }
+    return ok;
 }
 
 /// GPU thread: chooses the pages and submits their copy on the side queue (which waits there
