@@ -164,7 +164,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'anisotropy': '0',
+                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'skip_intro': False, 'anisotropy': '0',
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
@@ -471,6 +471,8 @@ def game_environment(s, start=None):
     env['BB_FOV'] = str(s.get('fov') or '100')
     if not s.get('bloom', True):
         env['BB_BLOOM'] = '0'
+    if s.get('skip_intro', False):
+        env['BB_SKIP_INTRO'] = '1'
     env['BB_ANISO'] = str(s.get('anisotropy') or '0')
     env['BB_FSR1'] = '1' if s.get('scaler', 'fsr1') == 'fsr1' else '0'
     sharpening = str(s.get('sharpening') or 'off')
@@ -1132,6 +1134,9 @@ class Launcher:
                  _('The language the PS4 would be set to; the games use it for text and speech.'))
         name = self.ttk.Entry(f, textvariable=self.var('player_name'), width=30)
         self.row(f, _('Player name'), name, _('Shown where the game uses the PSN name.'))
+        self.check(f, 'skip_intro', _('Skip intro logos'),
+                   _('Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos '
+                     '(they cannot be skipped with a button). All three games.'))
 
     def build_display(self):
         f = self.page('display', _('Display'), _('How the game window is shown.'))
