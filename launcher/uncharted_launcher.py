@@ -79,9 +79,15 @@ WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
 # The size Uncharted 3 renders at (BB_RENDER_RES, set for Uncharted 3 only): the game's display
 # mode, memory budget, camera and movies are patched in memory. Its GPU memory stays under 4 GiB,
 # which allows about 3440 x 1440 (RENDER_PIXELS_MAX); a larger size is scaled down to that.
+# Native renders at the output size (the window, or the screen in fullscreen); the scaled modes
+# render below it and the anti-aliasing (DLSS, FSR) upscales the frame to it before the HUD
+# (BB_OUTPUT_RES), like DLSS's own modes.
 RENDER_RESOLUTIONS = [('1080', "1920 × 1080 (the game's own)"),
                       ('native', 'Native (the window, or the screen in fullscreen)'),
-                      ('2560x1440', '2560 × 1440')]
+                      ('quality', 'Quality: upscaled from 67%'),
+                      ('balanced', 'Balanced: upscaled from 58%'),
+                      ('performance', 'Performance: upscaled from 50%')]
+RENDER_SCALES = {'native': 1.0, 'quality': 1.5, 'balanced': 1.7, 'performance': 2.0}
 RENDER_PIXELS_MAX = 3440 * 1440
 # Wider than 16:9 (BB_ULTRAWIDE): the games' view is widened to the window, or the screen in
 # fullscreen, and the picture fills it; in memory, the game files are not changed.
@@ -320,29 +326,44 @@ def display_refresh_rate():
     return mode[2] if mode and mode[2] > 1 else None
 
 
-def render_resolution(s):
-    """'WIDTHxHEIGHT' for BB_RENDER_RES (Uncharted 3), or None for the game's own 1920 x 1080."""
-    choice = str(s.get('render_resolution') or '1080')
-    if choice == '1080':
-        return None
+def output_size(s):
+    """The size the frame is shown at: the screen in fullscreen, else the window."""
+    mode = display_mode() if s.get('fullscreen') else None
+    if mode:
+        return mode[0], mode[1]
     try:
-        if choice == 'native':
-            mode = display_mode() if s.get('fullscreen') else None
-            if mode:
-                width, height = mode[0], mode[1]
-            else:
-                width, height = (int(v) for v in str(s.get('window_size') or '1920x1080').split('x'))
-        else:
-            width, height = (int(v) for v in choice.split('x'))
+        width, height = (int(v) for v in str(s.get('window_size') or '1920x1080').split('x'))
+        return width, height
     except ValueError:
-        return None
+        return 1920, 1080
+
+
+def render_sizes(s):
+    """('WxH', 'WxH'): Uncharted 3's render size (BB_RENDER_RES) and the output size it is
+    upscaled to (BB_OUTPUT_RES), or None for the game's own 1920 x 1080."""
+    choice = str(s.get('render_resolution') or '1080')
+    out_w, out_h = output_size(s)
+    if choice in RENDER_SCALES:
+        scale = RENDER_SCALES[choice]
+        width, height = out_w / scale, out_h / scale
+    else:
+        try:
+            width, height = (int(v) for v in choice.split('x'))  # an older fixed size
+        except ValueError:
+            return None
     if width * height > RENDER_PIXELS_MAX:
-        scale = (RENDER_PIXELS_MAX / (width * height)) ** 0.5
-        width, height = int(width * scale), int(height * scale)
-    width, height = width // 8 * 8, height // 4 * 4
-    if width * height <= 1920 * 1080:
+        shrink = (RENDER_PIXELS_MAX / (width * height)) ** 0.5
+        width, height = width * shrink, height * shrink
+    width, height = int(width) // 8 * 8, int(height) // 4 * 4
+    if width < 640 or height < 360 or (width, height, out_w, out_h) == (1920, 1080, 1920, 1080):
         return None
-    return f'{width}x{height}'
+    return f'{width}x{height}', f'{out_w}x{out_h}'
+
+
+def render_resolution(s):
+    """BB_RENDER_RES for Uncharted 3, or None."""
+    sizes = render_sizes(s)
+    return sizes[0] if sizes else None
 
 
 def fsr411_assets():
@@ -430,9 +451,9 @@ def game_environment(s, start=None):
     if cap:
         env['BB_FPS_LIMIT'] = str(cap)
     env['BB_WINDOW_SIZE'] = str(s.get('window_size') or '1920x1080')
-    render = render_resolution(s) if start == 'u3' else None
-    if render:
-        env['BB_RENDER_RES'] = render
+    sizes = render_sizes(s) if start == 'u3' else None
+    if sizes:
+        env['BB_RENDER_RES'], env['BB_OUTPUT_RES'] = sizes
     env['BB_ULTRAWIDE'] = str(s.get('ultrawide') or 'auto')
     env['BB_FOV'] = str(s.get('fov') or '100')
     env['BB_FSR1'] = '1' if s.get('scaler', 'fsr1') == 'fsr1' else '0'
@@ -1116,11 +1137,12 @@ class Launcher:
                  _('The games render at 1920 × 1080. A larger window, or fullscreen on a 1440p or 4K '
                    'screen, gets the image upscaled to fit.'))
         self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', RENDER_RESOLUTIONS, 34),
-                 _('Uncharted 3 only, for now: renders the game at a higher resolution instead of '
-                   'upscaling 1920 × 1080, for a sharper picture with less shimmering. Native follows '
-                   'the window size, or the screen in fullscreen, up to about 3440 × 1440 (the game\'s '
-                   'memory limit). Needs a faster GPU; anti-aliasing is off at other sizes than '
-                   '1920 × 1080.'))
+                 _('Uncharted 3 only, for now. Native renders at the window size (or the screen in '
+                   'fullscreen) instead of enlarging 1920 × 1080: the sharpest picture, the most GPU work. '
+                   'Quality, Balanced and Performance render smaller and let the anti-aliasing (DLSS or '
+                   'FSR) rebuild the full size before the HUD, which stays sharp. Up to about 3440 × 1440 '
+                   '(the game\'s memory limit). Where the CPU sets the frame rate (busy scenes), a '
+                   'smaller size gains little.'))
         self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
                  _('On a screen or window wider than 16:9 (21:9, 32:9) gameplay shows more at the sides '
                    'and fills it. Menus, loading screens and cutscene videos stay 16:9; the in-game HUD '
