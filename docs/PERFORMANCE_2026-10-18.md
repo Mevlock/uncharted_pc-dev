@@ -35,8 +35,8 @@ Uncharted 1 (the jungle with Sully after "Continue"), native 3440×1440 (82f9373
 | `BB_TIGHT_WRITES=0 BB_FLUSH_EVERY_DRAWS=0` | ~115 |
 | Defaults | **~147** (+28%) |
 
-The gain follows the skinning load: two characters in U1's jungle, a crowd in U3's square, several
-in U2's museum.
+The gain depends on the scene: U1's jungle has only two characters to skin. Why U2's museum gains
+the most (+90%) was not measured (`BB_QUEUE_SHADERS=1` and `BB_GPU_BUSY=1` there would show it).
 
 Only the two big changes could be switched off: adding `BB_COMPUTE_DRAIN_ALL=1` and
 `BB_COMPUTE_RELEASE_DRAIN=1` (the old compute-queue drains) stalled U2 right after boot, so those
