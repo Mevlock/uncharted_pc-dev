@@ -449,7 +449,7 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
     for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end; i += 8)
         for (int e = 0; e < 3; ++e)
             if (!entries[e] && !memcmp(code + i, wanted[e], 24)) entries[e] = code + i;
-    uint64_t grown = 0, heaps[2] = {0, 0}, total = 0;
+    uint64_t grown = 0, heaps[2] = {0, 0}, total = 0, direct_total = 0;
     const double ratio = (double)width * height / (1920.0 * 1080.0);
     if (entries[0] && entries[1] && entries[2] && ratio > 1.0) {
         for (int e = 0; e < 2; ++e) {
@@ -462,6 +462,20 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         memcpy(&total, entries[2] + 8, 8);
         total += grown;
         memcpy(entries[2] + 8, &total, 8);
+        /* The direct memory context holding it is checked against a constant in the memory map
+         * setup: movabs rdx, 4608 MiB; xor ecx, ecx; mov rdi, rbx; call ValidateContext, followed
+         * by the next context's mov edx, 512 MiB. */
+        static const uint8_t direct_check[20] = {0x48, 0xba, 0, 0, 0, 0x20, 1, 0, 0, 0, 0x31, 0xc9, 0x48, 0x89,
+                                                 0xdf, 0xe8, 0, 0, 0, 0};
+        for (uint64_t i = 0; i + 64 < size; ++i) {
+            if (memcmp(code + i, direct_check, 16)) continue;
+            uint64_t expected;
+            memcpy(&expected, code + i + 2, 8);
+            expected += grown;
+            memcpy(code + i + 2, &expected, 8);
+            direct_total = expected;
+            break;
+        }
         if (!getenv("BB_DMEM_MB")) {
             char dmem[48];
             snprintf(dmem, sizeof(dmem), "BB_DMEM_MB=%llu", 5056ull + (grown >> 20) + 256);
@@ -473,7 +487,7 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         }
     }
     printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched, "
-           "render target heaps %.1f + %.1f MiB, GPU memory %.1f MiB, BB_DMEM_MB %s)\n",
+           "render target heaps %.1f + %.1f MiB, GPU memory %.1f MiB, direct %.1f MiB, BB_DMEM_MB %s)\n",
            width, height, blocks, sizes, loads, limits, heaps[0] / 1048576.0, heaps[1] / 1048576.0,
-           total / 1048576.0, getenv("BB_DMEM_MB") ? getenv("BB_DMEM_MB") : "unset");
+           total / 1048576.0, direct_total / 1048576.0, getenv("BB_DMEM_MB") ? getenv("BB_DMEM_MB") : "unset");
 }
