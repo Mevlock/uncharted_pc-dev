@@ -351,6 +351,64 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
     }
 }
 
+// bbport: a compute queue's RELEASE_MEM (the label after each dispatch), run in order with the
+// draws like end-of-pipe events instead of draining the draw pipeline before it: Uncharted 3
+// sends ~1800 per frame, and those drains were ~13% of the GPU thread.
+struct ReleaseMemTask {
+    PM4CmdReleaseMem packet;
+    u32 pipe_id;
+};
+
+void SignalReleaseMem(const PM4CmdReleaseMem& release, u32 pipe_id) {
+    u64 value = 0;
+    u32 bytes = 0;
+    switch (release.data_sel.Value()) {
+    case DataSelect::Data32Low:
+        value = release.DataDWord();
+        bytes = 4;
+        break;
+    case DataSelect::Data64:
+        value = release.DataQWord();
+        bytes = 8;
+        break;
+    case DataSelect::GpuClock64:
+        value = GetGpuClock64();
+        bytes = 8;
+        break;
+    case DataSelect::PerfCounter:
+        value = GetGpuPerfCounter();
+        bytes = 8;
+        break;
+    default:
+        break; // GDS stores take the synchronous path
+    }
+    if (bytes) {
+        auto* address = release.Address<void*>();
+        BbWriteLog::Note(reinterpret_cast<u64>(address), &value, bytes, BbWriteLog::Fence);
+        if (!Core::Memory::Instance()->TryWriteBacking(address, &value, bytes)) {
+            std::memcpy(address, &value, bytes);
+        }
+    }
+    const auto irq = release.int_sel.Value();
+    if (irq == InterruptSelect::IrqUndocumented || irq == InterruptSelect::IrqWhenWriteConfirm) {
+        Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
+    }
+}
+
+void RunReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
+    const auto task = *reinterpret_cast<const ReleaseMemTask*>(data);
+    rasterizer.ProcessDownloadImages();
+    rasterizer.GetBufferCache().CheckStableBindings();
+    rasterizer.CheckConstants();
+    if (Vulkan::DrawPipe::OnStageB() && !BbToggle::Disabled(BbToggle::RecorderFences)) {
+        rasterizer.SignalAfterHostCopies([task] { SignalReleaseMem(task.packet, task.pipe_id); });
+    } else {
+        rasterizer.WaitHostCopies();
+        rasterizer.WaitDeferredSignals();
+        SignalReleaseMem(task.packet, task.pipe_id);
+    }
+}
+
 void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto* dma_data = reinterpret_cast<const PM4DmaData*>(data);
     ASSERT(dma_data->command.das == 0);
@@ -1441,9 +1499,6 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     size_t acb_size = acb.size_bytes();
     while (!acb.empty()) {
         ProcessCommands();
-        if (rasterizer) {
-            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute); // bbport: compute work uses the caches
-        }
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
         u32 next_dw_off = header->type3.NumWords() + 1;
@@ -1485,6 +1540,38 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+
+        // bbport: compute work that uses the caches or guest memory directly waits for the draw
+        // recording thread. Register writes need not (the recording thread works from register
+        // snapshots), nor dispatches (DispatchDirect hands them over like draws or drains
+        // itself). Draining before every packet was ~13% of the GPU thread in Uncharted 3's
+        // Cartagena square (78k drains/s). BB_COMPUTE_DRAIN_ALL=1: before every packet again.
+        static const bool drain_all = [] {
+            const char* env = std::getenv("BB_COMPUTE_DRAIN_ALL");
+            return env && env[0] == '1';
+        }();
+        // BB_COMPUTE_RELEASE_DRAIN=1: RELEASE_MEM drains and signals here, as before.
+        static const bool release_drain = [] {
+            const char* env = std::getenv("BB_COMPUTE_RELEASE_DRAIN");
+            return env && env[0] == '1';
+        }();
+        const bool release_in_order =
+            opcode == PM4ItOpcode::ReleaseMem && !release_drain &&
+            reinterpret_cast<const PM4CmdReleaseMem*>(header)->data_sel != DataSelect::GdsMemStore;
+        const bool no_drain = opcode == PM4ItOpcode::Nop || opcode == PM4ItOpcode::SetShReg ||
+                              opcode == PM4ItOpcode::SetQueueReg ||
+                              opcode == PM4ItOpcode::DispatchDirect ||
+                              opcode == PM4ItOpcode::IndirectBuffer || // its packets decide
+                              release_in_order;
+        // BB_COMPUTE_DRAIN_OPCODES=1 (with BB_FRAME_STATS): drains counted by opcode instead.
+        static const bool by_opcode = [] {
+            const char* env = std::getenv("BB_COMPUTE_DRAIN_OPCODES");
+            return env && env[0] == '1';
+        }();
+        if (rasterizer && (drain_all || !no_drain)) {
+            rasterizer->DrainDrawPipe(by_opcode ? static_cast<u32>(opcode)
+                                                : Vulkan::DrawPipe::ReasonCompute);
+        }
 
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
         switch (opcode) {
@@ -1673,6 +1760,29 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
         case PM4ItOpcode::ReleaseMem: {
+            if (rasterizer && release_in_order) {
+                const ReleaseMemTask task{*reinterpret_cast<const PM4CmdReleaseMem*>(header),
+                                          queue.pipe_id};
+                if (rasterizer->RunInOrder(&RunReleaseMem, &task, sizeof(task))) {
+                    // Pending until the recording thread runs it: guest reads of the label
+                    // wait for it, and WAIT_REG_MEM sees the value it will have.
+                    const VAddr address = task.packet.Address<VAddr>();
+                    const u32 bytes =
+                        task.packet.data_sel.Value() == DataSelect::Data32Low ? 4u : 8u;
+                    const u64 value = bytes == 4 ? task.packet.DataDWord() : task.packet.DataQWord();
+                    while (!pending_fences.empty() &&
+                           rasterizer->DrawPipeReached(pending_fences.front().position)) {
+                        pending_fences.pop_front();
+                    }
+                    if (task.packet.data_sel.Value() == DataSelect::Data32Low ||
+                        task.packet.data_sel.Value() == DataSelect::Data64) {
+                        pending_fences.push_back(
+                            {address, value, bytes, rasterizer->DrawPipeHead()});
+                    }
+                    rasterizer->NotePendingGpuWrite(address, bytes);
+                }
+                break;
+            }
             // bbport: copies deferred to the recording thread precede writes the guest sees, and
             // so do graphics fences deferred to it (the pipe was drained before this packet).
             if (rasterizer) {
