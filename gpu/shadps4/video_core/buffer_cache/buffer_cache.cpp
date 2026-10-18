@@ -692,14 +692,15 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             BbStats::gpu_read_backs.fetch_add(1, std::memory_order_relaxed);
             NoteFault(page, length, frames, gpu_write, gpu_use, 3);
         };
-        // bbport: a guest thread waits for its own side queue read-back (BB_ASYNC_SIDE_DOWNLOAD,
-        // default on; 0: the GPU thread waits as before). The GPU thread submits the copy and
+        // bbport: a guest thread waits for its own side queue read-back (BB_ASYNC_SIDE_DOWNLOAD=1;
+        // default off: the GPU thread waits, as before. While a read-back is in flight the GPU
+        // thread read stale guest memory for later draws: one-frame geometry spikes in U3's pub). The GPU thread submits the copy and
         // goes on; the guest thread waits for it and stores the data; the GPU thread then hands
         // the pages back unless it wrote one of them meanwhile (then the synchronous path). In
         // U3's Cartagena square the GPU thread spent ~40% waiting for these read-backs.
         static const bool async_side = [] {
             const char* env = std::getenv("BB_ASYNC_SIDE_DOWNLOAD");
-            return !(env && env[0] == '0');
+            return env && env[0] == '1';
         }();
         if (assume_locks) {
             resolve();
