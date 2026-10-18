@@ -447,20 +447,54 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
             }
         }
     }
-    /* The movie renderer takes the movie frame size (its luma and chroma textures over the
-     * decoder's 1920x1080 NV12 output) from the config's third render size: lea rax, [config];
-     * mov r13d, [rax + 0x24]; mov eax, [rax + 0x28]; mov [rbp - 0xd0], rax. Those 14 bytes become
-     * mov r13d, 1920; mov eax, 1080; nop. */
+    /* Movies: the decoder writes 1920x1080 NV12 (pitch 1920, chroma after 1088 rows), which a
+     * compute pass converts over the whole screen. The render target setup creates the movie's
+     * luma and chroma textures (two sets) from the render size instead, and the movie renderer
+     * puts the chroma at width * align64(height) of it; both get the movie's size:
+     *  - mov ecx, r15d; mov rbx, r8 (r15/rbx: width/height for the first set, halved for its
+     *    chroma) jumps to a stub setting r15d = ecx = 1920, ebx = r8d = 1080;
+     *  - mov rcx, [rbp - 0x2e8]; mov r8, [rbp - 0x2f0] (second luma) become mov ecx, 1920;
+     *    mov r8d, 1080;
+     *  - imul ebx, r14d; and ebx, -64 (chroma offset) becomes mov ebx, 1920 * 1088. */
     int movies = 0;
-    static const uint8_t movie_size[18] = {0x44, 0x8b, 0x68, 0x24, 0x8b, 0x40, 0x28, 0x48, 0x89,
-                                           0x85, 0x30, 0xff, 0xff, 0xff};
-    for (uint64_t i = 7; i + 14 < size; ++i) {
-        uint8_t *q = code + i;
-        if (memcmp(q, movie_size, 14) || q[-7] != 0x48 || q[-6] != 0x8d || q[-5] != 0x05) continue;
-        uint8_t *lea = q - 7;
-        static const uint8_t fixed[14] = {0x41, 0xbd, 0x80, 0x07, 0, 0, 0xb8, 0x38, 0x04, 0, 0, 0x0f, 0x1f, 0x00};
-        memcpy(lea, fixed, 14);
-        ++movies;
+    {
+        static const uint8_t first[7] = {0x44, 0x89, 0xf9, 0x4c, 0x89, 0xc3, 0xe8};
+        static const uint8_t second[15] = {0x48, 0x8b, 0x8d, 0x18, 0xfd, 0xff, 0xff, 0x4c,
+                                           0x8b, 0x85, 0x10, 0xfd, 0xff, 0xff, 0xe8};
+        static const uint8_t chroma[11] = {0x41, 0x0f, 0xaf, 0xde, 0x83, 0xe3, 0xc0, 0x48, 0x03, 0x5d, 0x80};
+        int64_t at_first = -1, at_second = -1, at_chroma = -1;
+        int n_first = 0, n_second = 0, n_chroma = 0;
+        for (uint64_t i = 0; i + 16 < size; ++i) {
+            if (code[i] == 0x44 && !memcmp(code + i, first, 7)) at_first = (int64_t)i, ++n_first;
+            if (code[i] == 0x48 && !memcmp(code + i, second, 15)) at_second = (int64_t)i, ++n_second;
+            if (code[i] == 0x41 && !memcmp(code + i, chroma, 11)) at_chroma = (int64_t)i, ++n_chroma;
+        }
+        /* The stub: the last 0x40 bytes of the code segment's zero padding. */
+        const uint64_t stub = (size - 0x40) & ~(uint64_t)0xf;
+        int room = 1;
+        for (uint64_t i = stub; i < stub + 0x20; ++i) room &= code[i] == 0;
+        if (n_first == 1 && n_second == 1 && n_chroma == 1 && room) {
+            uint8_t *c = code + stub;
+            static const uint8_t sizes[22] = {0x41, 0xbf, 0x80, 0x07, 0, 0, /* mov r15d, 1920 */
+                                              0xbb, 0x38, 0x04, 0, 0,       /* mov ebx, 1080 */
+                                              0xb9, 0x80, 0x07, 0, 0,       /* mov ecx, 1920 */
+                                              0x41, 0xb8, 0x38, 0x04, 0, 0}; /* mov r8d, 1080 */
+            memcpy(c, sizes, 22);
+            c[22] = 0xe9; /* jmp back after the two moves */
+            int32_t rel = (int32_t)((int64_t)(at_first + 6) - (int64_t)(stub + 27));
+            memcpy(c + 23, &rel, 4);
+            uint8_t *site = code + at_first;
+            site[0] = 0xe9;
+            rel = (int32_t)((int64_t)stub - (at_first + 5));
+            memcpy(site + 1, &rel, 4);
+            site[5] = 0x90;
+            static const uint8_t second_fixed[14] = {0xb9, 0x80, 0x07, 0, 0, 0x66, 0x90,
+                                                     0x41, 0xb8, 0x38, 0x04, 0, 0, 0x90};
+            memcpy(code + at_second, second_fixed, 14);
+            static const uint8_t chroma_fixed[7] = {0xbb, 0x00, 0xe0, 0x1f, 0x00, 0x66, 0x90};
+            memcpy(code + at_chroma, chroma_fixed, 7);
+            movies = 1;
+        }
     }
     /* A size limit set next to it (2560x1216): raised if the new size is larger. */
     for (uint64_t i = 0; i + 14 < size; ++i) {
@@ -564,8 +598,8 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         }
     }
     runtime_render_resolution = blocks > 0;
-    printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits, %d movie sizes patched, "
+    printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched, movies %s, "
            "render target heaps %.1f + %.1f MiB, GPU memory %.1f MiB (%.1f free), direct %.1f MiB, BB_DMEM_MB %s)\n",
-           width, height, blocks, sizes, loads, limits, movies, heaps[0] / 1048576.0, heaps[1] / 1048576.0,
+           width, height, blocks, sizes, loads, limits, movies ? "1920x1080" : "not patched", heaps[0] / 1048576.0, heaps[1] / 1048576.0,
            total / 1048576.0, free_size / 1048576.0, direct_total / 1048576.0, getenv("BB_DMEM_MB") ? getenv("BB_DMEM_MB") : "unset");
 }
