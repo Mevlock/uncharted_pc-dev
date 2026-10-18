@@ -32,6 +32,8 @@
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace Vulkan {
+void BbDrawLogNote(const char* text); // vk_rasterizer.cpp
+extern std::atomic<u64> g_flips;       // vk_rasterizer.cpp: flips so far
 
 namespace {
 
@@ -352,8 +354,16 @@ bool TemporalUpscaler::OnFrameStart() {
 
     // The display pass of an upscaled frame reads the upscaled UI image.
     display_redirect = ui_phase && !velocity_ui;
-    ui_phase = false;
-    velocity_ui = false;
+    // Velocity mode: every draw into the display buffer passes here, the UI drawn after the
+    // upscale too (Uncharted 3's tutorial text, then its button icons). Their UI phase lasts
+    // until the frame is shown; restarting it at the second UI draw sent the rest of the UI to
+    // the guest buffer and showed that one (no text, not upscaled).
+    const bool velocity_ui_on = velocity_ui && ui_phase &&
+                                g_flips.load(std::memory_order_relaxed) == velocity_ui_flip;
+    if (!velocity_ui_on) {
+        ui_phase = false;
+        velocity_ui = false;
+    }
     ui_read_barrier = false;
     done_this_frame = false;
     frame_gen_captured = false;
@@ -1389,6 +1399,7 @@ void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
     // Velocity mode at a patched size: the first draw into the display buffer that is not a
     // full-screen pass (vertex shader f585649d: the final composite and its copies) is the UI.
     // The next frame's scene (a draw with the scene depth) ends the UI phase of the last one.
+    draw_vs = u32(vs_hash);
     if (velocity_ui && ui_phase && depth && depth == velocity_depth) {
         ui_phase = false;
     }
@@ -1402,6 +1413,7 @@ void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
             if (noted++ < 2) {
                 std::printf("Upscaler: upscale at the first UI draw (vs %08x)\n", u32(vs_hash));
             }
+            BbDrawLogNote(" [UPSCALE-AT-UI]");
             RunScaledVelocity(velocity_display, color);
             return;
         }
@@ -2016,6 +2028,7 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
     }
     ui_phase = true;
     velocity_ui = true;
+    velocity_ui_flip = g_flips.load(std::memory_order_relaxed);
     ui_color = target;
     ui_depth = velocity_depth;
     // Frame generation: the upscaled frame before the UI is the frame without UI (its size and
@@ -2078,6 +2091,14 @@ vk::ImageView TemporalUpscaler::Mirror(vk::Image image, std::vector<MirrorView>&
 bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
                                      const VideoCore::ImageViewInfo& view_info, Target& target) {
     if (ui_phase && color == ui_color) {
+        if (velocity_ui && draw_vs == 0xf585649du) {
+            // Uncharted 3's full-screen copies of the display buffer after the UI (to another
+            // buffer and back) stay in the guest buffer: into the UI image they would cover the
+            // upscaled frame and the UI with the render-size one. The shown image is unchanged.
+            BbDrawLogNote(" [COPY-KEPT-IN-GUEST]");
+            return false;
+        }
+        BbDrawLogNote(" [TO-UI-IMAGE]");
         target = {Mirror(vk::Image(ui_image), ui_views, view_info.format, {}),
                   vk::ImageLayout::eGeneral, ui_width, ui_height, true};
         return true;
@@ -2185,6 +2206,7 @@ bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
         if (noted++ < 2) {
             std::printf("Upscaler: upscale when shown (no UI draw)\n");
         }
+        BbDrawLogNote(" [UPSCALE-AT-FLIP]");
         RunScaledVelocity(velocity_display, velocity_display);
     }
     std::scoped_lock lock{display_mutex};

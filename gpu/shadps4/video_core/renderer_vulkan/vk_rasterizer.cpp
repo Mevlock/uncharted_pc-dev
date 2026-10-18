@@ -424,6 +424,9 @@ std::atomic<int> frames_left{0};
 std::vector<std::string> lines;
 std::string pending;
 u32 frame = 0, draw = 0;
+// The draw's vertex stream 0 and index buffer, for BB_DRAWLOG_VS vertex dumps.
+VAddr vertex_base = 0, index_base = 0;
+u32 vertex_stride = 0, index_size = 0, index_count = 0;
 
 bool Active() {
     return frames_left.load(std::memory_order_relaxed) > 0;
@@ -549,6 +552,11 @@ void Flip(u64 flip) {
     lines.clear();
 }
 } // namespace DrawLog
+
+// For the upscaler: a note in the draw log at the next draw.
+void BbDrawLogNote(const char* text) {
+    DrawLog::Text(text);
+}
 
 
 // bbport diagnosis: BB_GPU_CHECKPOINTS=1 — a checkpoint (VK_NV_device_diagnostic_checkpoints)
@@ -1953,7 +1961,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         return;
     }
     // bbport diagnosis: BB_DUMP_PS=<pixel shader hash,...> with BB_DUMP_PS_TRIGGER=<file>: when
-    // the file exists, the next frame's draws of those shaders write every RGBA16F image they
+    // the file exists, the next frame's draws of those shaders write every RGBA16F/RGBA8 image they
     // bind (mips 0..3, as before the draw) to BB_DUMP_DIR as psdump_*.raw.
     {
         static const std::vector<u32> dump_ps = [] {
@@ -1998,7 +2006,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     if (!id || std::find(seen.begin(), seen.end(), id) != seen.end()) continue;
                     seen.push_back(id);
                     auto& image = texture_cache.GetImage(id);
-                    if (image.info.pixel_format != vk::Format::eR16G16B16A16Sfloat) continue;
+                    const auto format = image.info.pixel_format;
+                    const bool rgba8 = format == vk::Format::eR8G8B8A8Unorm ||
+                                       format == vk::Format::eR8G8B8A8Srgb;
+                    if (format != vk::Format::eR16G16B16A16Sfloat && !rgba8) continue;
                     runtime.Transit(&image, vk::ImageLayout::eGeneral,
                                     vk::PipelineStageFlagBits2::eTransfer,
                                     vk::AccessFlagBits2::eTransferRead);
@@ -2008,7 +2019,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     for (u32 mip = 0; mip < levels; ++mip) {
                         const u32 w = std::max(1u, image.info.size.width >> mip);
                         const u32 h = std::max(1u, image.info.size.height >> mip);
-                        const VkDeviceSize size = VkDeviceSize(w) * h * 8;
+                        const VkDeviceSize size = VkDeviceSize(w) * h * (rgba8 ? 4 : 8);
                         const VkBufferCreateInfo buffer_ci{
                             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                             .size = size,
@@ -2033,8 +2044,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                         cmd.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eGeneral,
                                               vk::Buffer(buffer), region);
                         char path[512];
-                        std::snprintf(path, sizeof(path), "%s/psdump_%08x_d%u_i%u_m%u_%ux%u_rgba16f.raw",
-                                      dir.c_str(), u32(dump_fs->pgm_hash), dump_draw, index, mip, w, h);
+                        std::snprintf(path, sizeof(path), "%s/psdump_%08x_d%u_i%u_m%u_%ux%u_%s.raw",
+                                      dir.c_str(), u32(dump_fs->pgm_hash), dump_draw, index, mip, w, h,
+                                      rgba8 ? "rgba8" : "rgba16f");
                         scheduler.DeferPriorityOperation(
                             [allocator = instance.GetAllocator(), buffer, allocation, info, size,
                              file = std::string{path}] {
@@ -2353,6 +2365,34 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         if (DrawLog::LogValues(vs_info.pgm_hash)) {
             const auto& flat = vs_info.flattened_ud_buf;
             DrawLog::Values("U", flat.data(), std::min<size_t>(flat.size(), 96));
+            // Render target 0's blend (factors as the BlendControl enum) and write mask.
+            const auto& bc = regs.blend_control[0];
+            DrawLog::Text(fmt::format(" blend e{} rgb {}*src {} {}*dst a {}*src {} {}*dst sep{} mask {:x} bypass {}",
+                                      u32(bc.enable), u32(bc.color_src_factor), u32(bc.color_func),
+                                      u32(bc.color_dst_factor), u32(bc.alpha_src_factor),
+                                      u32(bc.alpha_func), u32(bc.alpha_dst_factor),
+                                      u32(bc.separate_alpha_blend), regs.color_target_mask.raw & 0xf,
+                                      u32(regs.color_buffers[0].info.blend_bypass)));
+            // The first vertices it draws: the first 9 words of each (stream 0).
+            auto* vmem = Core::Memory::Instance();
+            if (DrawLog::vertex_base && DrawLog::vertex_stride >= 16 && DrawLog::index_base &&
+                vmem->IsValidGpuMapping(DrawLog::index_base, 64)) {
+                std::string verts = " V[";
+                const u32 n = std::min<u32>(DrawLog::index_count, 12);
+                for (u32 k = 0; k < n; ++k) {
+                    const u32 idx = DrawLog::index_size == 2
+                        ? reinterpret_cast<const u16*>(DrawLog::index_base)[k]
+                        : reinterpret_cast<const u32*>(DrawLog::index_base)[k];
+                    const VAddr at = DrawLog::vertex_base + VAddr(idx) * DrawLog::vertex_stride;
+                    if (!vmem->IsValidGpuMapping(at, 36)) break;
+                    const float* f = reinterpret_cast<const float*>(at);
+                    const u32* w = reinterpret_cast<const u32*>(at);
+                    verts += fmt::format("{}#{}:{:.5f},{:.5f},{:.3f},{:.3f} {:08x} {:08x} {:08x} {:08x} {:08x}",
+                                         k ? " | " : "", idx, f[0], f[1], f[2], f[3], w[4], w[5], w[6],
+                                         w[7], w[8]);
+                }
+                DrawLog::Text(verts + "]");
+            }
             // The pixel shader's flattened resource-table data (its constants) too.
             if (const auto* fs = pipeline->GetStages()[u32(Shader::SwStage::Fragment)]) {
                 const auto& ps_flat = fs->flattened_ud_buf;
@@ -2378,6 +2418,20 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         // The viewport (size and corner), the scissor, render target 0 and the bound images.
         const auto& vp = regs.viewports[0];
         const auto& cb0 = regs.color_buffers[0];
+        if (cb0 && FrameCapture::IsDisplayBuffer(cb0.Address())) {
+            DrawLog::Text(" DISPLAY");
+        }
+        const auto& ws = regs.window_scissor;
+        const auto& gs = regs.generic_scissor;
+        const auto& vs0 = regs.viewport_scissors[0];
+        DrawLog::Text(fmt::format(" win {},{}-{},{} gen {},{}-{},{} vsc {},{}-{},{} scr {},{}",
+                                  u32(ws.top_left_x), u32(ws.top_left_y), u32(ws.bottom_right_x),
+                                  u32(ws.bottom_right_y), u32(gs.top_left_x), u32(gs.top_left_y),
+                                  u32(gs.bottom_right_x), u32(gs.bottom_right_y),
+                                  u32(vs0.top_left_x), u32(vs0.top_left_y),
+                                  u32(vs0.bottom_right_x), u32(vs0.bottom_right_y),
+                                  u32(regs.screen_scissor.top_left_x),
+                                  u32(regs.screen_scissor.top_left_y)));
         DrawLog::Text(fmt::format(" vp {:.0f}x{:.0f}@{:.0f},{:.0f} sc {}-{} rt {}x{}{}",
                                   vp.xscale * 2, -vp.yscale * 2, vp.xoffset - vp.xscale,
                                   vp.yoffset + vp.yscale, regs.screen_scissor.bottom_right_x,
@@ -3300,6 +3354,8 @@ void Rasterizer::ResolveVertexBuffers(const GraphicsPipeline* pipeline,
     auto& host_strides = v.host_strides;
     u32 stream_with_memory = 0;
     if (DrawLog::Active()) {
+        DrawLog::vertex_base = guest_buffers.empty() ? 0 : guest_buffers[0].base_address;
+        DrawLog::vertex_stride = guest_buffers.empty() ? 0 : guest_buffers[0].GetStride();
         for (u32 i = 0; i < guest_buffers.size(); ++i) {
             DrawLog::Buffer('F', i, guest_buffers[i].base_address, guest_buffers[i].GetSize(),
                             guest_buffers[i].GetStride(), false);
@@ -3353,6 +3409,9 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
     // Bind index buffer.
     const u32 index_buffer_size = regs.num_indices * index_size;
     DrawLog::Buffer('I', 0, index_address, index_buffer_size, index_size, false);
+    DrawLog::index_base = index_address;
+    DrawLog::index_size = index_size;
+    DrawLog::index_count = regs.num_indices;
     static const bool force_ib_upload = ForceUploadKind('i');
     if (force_ib_upload || (ForceUploadVs(true) && ForceUploadVs(true) == current_vs_hash)) {
         buffer_cache.ForceUpload(index_address, index_buffer_size);

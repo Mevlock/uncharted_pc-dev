@@ -260,6 +260,8 @@ private:
     bool velocity_pending = false;
     /// The UI phase belongs to RunScaledVelocity: the next display pass is not redirected.
     bool velocity_ui = false;
+    u64 velocity_ui_flip = 0; ///< the flip count when RunScaledVelocity started the UI phase
+    u32 draw_vs = 0;          ///< the vertex shader of the draw OnDraw last saw
     VideoCore::ImageId velocity_depth{};
     VAddr velocity_address = 0;           ///< the display buffer of the frame
     VideoCore::ImageId velocity_display{}; ///< the image the frame's first draw there used

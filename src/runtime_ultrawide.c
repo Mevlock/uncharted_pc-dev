@@ -457,25 +457,35 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
     if (!render_resolution(code, size, image_end, &width, &height)) return;
     float *floats = NULL;
     int blocks = 0, sizes = 0, loads = 0, limits = 0;
+    /* BB_RENDER_RES_SKIP (diagnosis): pieces left at 1920x1080. 1/2/3 the render size pairs at
+     * +0x08/+0x18/+0x24, q the eighth/quarter size, o the output size, v the view setup, m movies. */
+    const char *skip = getenv("BB_RENDER_RES_SKIP");
+    if (!skip) skip = "";
+    if (*skip) printf("Render resolution: BB_RENDER_RES_SKIP=%s\n", skip);
     for (uint64_t i = 0; i + 200 < size; ++i) {
         if (code[i] != 0xc7 || code[i + 2] != 0x08) continue;
         const uint8_t m = code[i + 1];
         if ((m != 0x47 && m != 0x40) || !match_mode_block(code + i, m)) continue;
         uint8_t *p = code + i;
         const uint32_t w8 = width / 8, h4 = height / 4;
-        memcpy(p + 7 * 0 + 3, &width, 4);
-        memcpy(p + 7 * 1 + 3, &height, 4);
-        memcpy(p + 7 * 3 + 3, &width, 4);
-        memcpy(p + 7 * 4 + 3, &height, 4);
-        memcpy(p + 7 * 6 + 3, &width, 4);
-        memcpy(p + 7 * 7 + 3, &height, 4);
-        memcpy(p + 7 * 10 + 3, &w8, 4);
-        memcpy(p + 7 * 11 + 3, &h4, 4);
+        if (!strchr(skip, '1')) { memcpy(p + 7 * 0 + 3, &width, 4); memcpy(p + 7 * 1 + 3, &height, 4); }
+        if (!strchr(skip, '2')) { memcpy(p + 7 * 3 + 3, &width, 4); memcpy(p + 7 * 4 + 3, &height, 4); }
+        if (!strchr(skip, '3')) { memcpy(p + 7 * 6 + 3, &width, 4); memcpy(p + 7 * 7 + 3, &height, 4); }
+        /* BB_RENDER_RES_ASPECT (diagnosis): the aspect stored with pair 2 (+0x20) and/or pair 3
+         * (+0x2c) becomes width / height instead of 16:9. */
+        const char *aspect_env = getenv("BB_RENDER_RES_ASPECT");
+        if (aspect_env) {
+            const float aspect = (float)width / (float)height;
+            if (strchr(aspect_env, '2')) memcpy(p + 7 * 5 + 3, &aspect, 4);
+            if (strchr(aspect_env, '3')) memcpy(p + 7 * 8 + 3, &aspect, 4);
+            printf("Render resolution: BB_RENDER_RES_ASPECT=%s (%.3f)\n", aspect_env, aspect);
+        }
+        if (!strchr(skip, 'q')) { memcpy(p + 7 * 10 + 3, &w8, 4); memcpy(p + 7 * 11 + 3, &h4, 4); }
         ++blocks;
         /* The output size after it: movabs rax, (1080 << 32) | 1920, or two dword stores. */
         static const uint8_t movabs[10] = {0x48, 0xb8, 0x80, 0x07, 0, 0, 0x38, 0x04, 0, 0};
         const uint64_t packed = ((uint64_t)height << 32) | width;
-        for (int j = 84; j < 140; ++j) {
+        for (int j = 84; j < 140 && !strchr(skip, 'o'); ++j) {
             uint8_t *q = p + j;
             if (!memcmp(q, movabs, 10)) {
                 memcpy(q + 2, &packed, 8);
@@ -495,7 +505,7 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
             }
         }
         /* The view setup's float arguments: vmovss xmm0/xmm1/xmm2, [rip + ...] then jmp. */
-        for (int j = 84; j < 200; ++j) {
+        for (int j = 84; j < 200 && !strchr(skip, 'v'); ++j) {
             uint8_t *q = p + j;
             if (q[0] == 0xc5 && q[1] == 0xfa && q[2] == 0x10 && q[3] == 0x05 && !memcmp(q + 8, "\xc5\xfa\x10\x0d", 4) &&
                 !memcmp(q + 16, "\xc5\xfa\x10\x15", 4) && q[24] == 0xe9) {
@@ -544,7 +554,7 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         for (uint64_t i = stubs; i < stubs + 0x60; ++i) room &= code[i] == 0;
         static const uint8_t chroma_size[6] = {0x44, 0x89, 0xf9, 0x41, 0x89, 0xd8}; /* mov ecx, r15d; mov r8d, ebx */
         const int64_t at_chroma1 = at_first + 0x57, at_chroma2 = at_first + 0xe5;
-        if (n_first == 1 && n_second == 1 && n_chroma == 1 && room && at_first + 0xf0 < (int64_t)size &&
+        if (!strchr(skip, 'm') && n_first == 1 && n_second == 1 && n_chroma == 1 && room && at_first + 0xf0 < (int64_t)size &&
             !memcmp(code + at_chroma1, chroma_size, 6) && !memcmp(code + at_chroma2, chroma_size, 6)) {
             /* A stub at `stub` running `body`, then jumping back to after the 6 bytes at `site`. */
             static const uint8_t luma[14] = {0xb9, 0x80, 0x07, 0, 0,       /* mov ecx, 1920 */
