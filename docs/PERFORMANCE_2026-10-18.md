@@ -20,6 +20,18 @@ Glitch check of the final build: full pub fight recording (10 575 distinct frame
 `tools/glitch_scan`, every isolated candidate and the largest clustered ones reviewed by eye —
 no spikes, no exploded frames.
 
+Uncharted 2 (Chapter 2 "Breaking and Entering", the Istanbul museum balcony after "Continue"),
+native 3440×1440 (b20ace7), frame generation off, no frame rate cap:
+
+| Uncharted 2 | FPS (last 30 s of 50) |
+|---|---|
+| `BB_TIGHT_WRITES=0 BB_FLUSH_EVERY_DRAWS=0` | ~49 |
+| Defaults | **~93** (+90%) |
+
+Only the two big changes could be switched off: adding `BB_COMPUTE_DRAIN_ALL=1` and
+`BB_COMPUTE_RELEASE_DRAIN=1` (the old compute-queue drains) stalled U2 right after boot, so those
+switches should be treated as unsupported with the current code.
+
 ## The changes, in the order they landed
 
 | Commit | Change | Square FPS after |
