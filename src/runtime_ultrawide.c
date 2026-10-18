@@ -395,7 +395,9 @@ static int match_mode_block(const uint8_t *p, uint8_t m) {
 
 /* The game's memory table entries ({id, parent, size, alignment}): the render target heaps
  * (0x84, 0x85 under the GPU context), the GPU context's total (entry 3, 3052 MiB) and its free
- * entry (0x0e, ALLOCATION_APP_GPU_FREE, 208.7 MiB, alignment 1). */
+ * entry (0x0e, ALLOCATION_APP_GPU_FREE, 208.7 MiB, alignment 1). The sizes below are U3's;
+ * matching takes id, parent and alignment and a size range (match_entry): U2's table has the
+ * same entries with other sizes (497 MiB, 2988 MiB, 176.7 MiB). */
 static const uint8_t heap_a[24] = {0x84, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x40, 0xbc, 0x08, 0, 0, 0, 0,
                                    0x80, 0,    0, 0, 0, 0, 0, 0};
 static const uint8_t heap_b[24] = {0x85, 0, 0, 0, 6, 0, 0, 0, 0x00, 0xbc, 0x10, 0x23, 0, 0, 0, 0,
@@ -411,6 +413,16 @@ static const uint8_t movie_first[7] = {0x44, 0x89, 0xf9, 0x4c, 0x89, 0xc3, 0xe8}
 static const uint8_t movie_second[15] = {0x48, 0x8b, 0x8d, 0x18, 0xfd, 0xff, 0xff, 0x4c,
                                          0x8b, 0x85, 0x10, 0xfd, 0xff, 0xff, 0xe8};
 static const uint8_t movie_chroma[11] = {0x41, 0x0f, 0xaf, 0xde, 0x83, 0xe3, 0xc0, 0x48, 0x03, 0x5d, 0x80};
+
+/* A memory table entry like `want` (same id, parent and alignment) with a size from half to
+ * twice `want`'s. */
+static int match_entry(const uint8_t *p, const uint8_t *want) {
+    if (memcmp(p, want, 8) || memcmp(p + 16, want + 16, 8)) return 0;
+    uint64_t size, wanted;
+    memcpy(&size, p + 8, 8);
+    memcpy(&wanted, want + 8, 8);
+    return size >= wanted / 2 && size <= wanted * 2;
+}
 
 /* The size BB_RENDER_RES asks for, when the loaded game is one the patch knows (U3: every piece it
  * changes is found, once where it must be unique); otherwise nothing is changed at all. */
@@ -435,12 +447,14 @@ static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_
             if (q[0] == 0x41 && !memcmp(q, movie_chroma, 11)) ++chroma;
         }
         const uint8_t *wanted[4] = {heap_a, heap_b, gpu_total, gpu_free};
+        int matches[4] = {0, 0, 0, 0};
         for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end; i += 8)
             for (int e = 0; e < 4; ++e)
-                if (!memcmp(code + i, wanted[e], 24)) entries |= 1 << e;
+                if (match_entry(code + i, wanted[e])) entries |= 1 << e, ++matches[e];
+        if (matches[0] > 1 || matches[1] > 1 || matches[2] > 1 || matches[3] > 1) entries = -1;
         if (!blocks || direct != 1 || first != 1 || second != 1 || chroma != 1 || entries != 15) {
-            printf("Render resolution: BB_RENDER_RES is for Uncharted 3, this game is left at 1920x1080 "
-                   "(%d %d %d %d %d %#x)\n", blocks, direct, first, second, chroma, entries);
+            printf("Render resolution: BB_RENDER_RES is for Uncharted 2 and 3, this game is left at "
+                   "1920x1080 (%d %d %d %d %d %#x)\n", blocks, direct, first, second, chroma, entries);
             return 0;
         }
         known = 1;
@@ -609,7 +623,7 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
     const uint8_t *wanted[4] = {heap_a, heap_b, gpu_total, gpu_free};
     for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end; i += 8)
         for (int e = 0; e < 4; ++e)
-            if (!entries[e] && !memcmp(code + i, wanted[e], 24)) entries[e] = code + i;
+            if (!entries[e] && match_entry(code + i, wanted[e])) entries[e] = code + i;
     uint64_t grown = 0, heaps[2] = {0, 0}, total = 0, direct_total = 0, free_size = 0;
     const double ratio = (double)width * height / (1920.0 * 1080.0);
     if (entries[0] && entries[1] && entries[2] && entries[3] && ratio > 1.0) {
