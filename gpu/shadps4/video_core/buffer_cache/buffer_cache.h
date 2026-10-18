@@ -203,7 +203,7 @@ private:
     struct SideTicket;
     bool BeginSideDownload(VAddr page, u64 length, SideTicket& ticket);
     void WaitSideDownload(SideTicket& ticket);
-    bool FinishSideDownload(SideTicket& ticket);
+    bool FinishSideDownload(SideTicket& ticket, VAddr fault_page, u64 fault_length);
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;

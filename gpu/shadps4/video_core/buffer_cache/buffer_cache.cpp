@@ -211,7 +211,7 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
         return false;
     }
     WaitSideDownload(ticket);
-    return FinishSideDownload(ticket); // on this thread nothing came in between
+    return FinishSideDownload(ticket, page, length); // nothing came in between here
 }
 
 /// GPU thread: chooses the pages and submits their copy on the side queue (which waits there
@@ -332,8 +332,10 @@ bool BufferCache::BeginSideDownload(VAddr page, u64 length, SideTicket& ticket) 
     return true;
 }
 
-/// Any thread: waits for the copy and stores the GPU's data in guest memory. The pages stay
-/// protected and marked GPU-modified until FinishSideDownload, so no upload reads them.
+/// Any thread: waits for the copy. Storing it in guest memory is FinishSideDownload's: only it
+/// knows which pages are still the GPU's (another path may have handed one back meanwhile, and
+/// the guest may have written it since; storing the older GPU data over that left stale vertex
+/// data: spikes and tears in U3's pub).
 void BufferCache::WaitSideDownload(SideTicket& ticket) {
     auto* slot = ticket.slot;
     if (!slot) {
@@ -342,32 +344,58 @@ void BufferCache::WaitSideDownload(SideTicket& ticket) {
     Vulkan::Check(side_queue->device.waitForFences(*slot->fence, true, UINT64_MAX));
     Vulkan::Check(side_queue->device.resetFences(*slot->fence));
     slot->staging.Invalidate(0, ticket.total);
-    for (const auto& copy : ticket.copies) {
-        WriteBackGpuData(std::bit_cast<u8*>(ticket.arena->cpu_addr + copy.srcOffset),
-                         slot->staging.mapped_data.data() + copy.dstOffset, copy.size);
-    }
-    side_queue->Release(slot);
-    ticket.slot = nullptr;
 }
 
-/// GPU thread: the pages are the guest's again, unless the GPU wrote one of them after the
-/// read-back was submitted (false: the caller reads back again, synchronously).
-bool BufferCache::FinishSideDownload(SideTicket& ticket) {
+/// GPU thread: stores the read-back of the pages that are still the GPU's and hands them back.
+/// A page the GPU wrote again after the submission keeps its GPU data; if that is a page the
+/// fault needs, false: the caller reads back again, synchronously. A page handed back by
+/// another path meanwhile is left alone (the guest's data there is newer).
+bool BufferCache::FinishSideDownload(SideTicket& ticket, VAddr fault_page, u64 fault_length) {
+    boost::container::small_vector<VAddr, 16> owned;
+    bool fault_ok = true;
     for (const VAddr at : ticket.pages) {
+        if (!memory_tracker->IsRegionGpuModified(at, TRACKER_BYTES_PER_PAGE)) {
+            continue; // handed back meanwhile
+        }
         if (memory_tracker->LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE) > ticket.write_tick) {
-            return false;
+            if (at >= fault_page && at < fault_page + fault_length) {
+                fault_ok = false;
+            }
+            continue; // newer GPU data than the copy
+        }
+        owned.push_back(at);
+    }
+    if (auto* slot = ticket.slot; slot && ticket.total) {
+        const u8* staging = slot->staging.mapped_data.data();
+        for (const auto& copy : ticket.copies) {
+            // A copy can span pages: store the parts in the pages still owned.
+            const VAddr start = ticket.arena->cpu_addr + copy.srcOffset;
+            const VAddr end = start + copy.size;
+            for (VAddr at = start; at < end;) {
+                const VAddr page = Common::AlignDown(at, TRACKER_BYTES_PER_PAGE);
+                const VAddr part_end = std::min<VAddr>(end, page + TRACKER_BYTES_PER_PAGE);
+                if (std::ranges::find(owned, page) != owned.end()) {
+                    WriteBackGpuData(std::bit_cast<u8*>(at), staging + copy.dstOffset + (at - start),
+                                     part_end - at);
+                }
+                at = part_end;
+            }
         }
     }
-    for (const VAddr at : ticket.pages) {
+    for (const VAddr at : owned) {
         gpu_modified_ranges.Subtract(at, TRACKER_BYTES_PER_PAGE);
         memory_tracker->UnmarkRegionAsGpuModified(at, TRACKER_BYTES_PER_PAGE);
+    }
+    if (ticket.slot) {
+        side_queue->Release(ticket.slot);
+        ticket.slot = nullptr;
     }
     BbStats::gpu_side_download_ns.fetch_add(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
                                                              ticket.start)
             .count(),
         std::memory_order_relaxed);
-    return true;
+    return fault_ok;
 }
 
 BufferCache::~BufferCache() = default;
@@ -694,7 +722,7 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             if (started) {
                 WaitSideDownload(ticket);
                 liverpool->SendCommand<true>([&] {
-                    if (!FinishSideDownload(ticket)) {
+                    if (!FinishSideDownload(ticket, page, length)) {
                         resolve(); // the GPU wrote a page meanwhile: decide again
                         return;
                     }
