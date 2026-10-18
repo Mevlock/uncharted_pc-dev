@@ -95,6 +95,8 @@ ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'), ('0', "16:9 with black 
 # The games' field of view in percent (BB_FOV), on every screen.
 FIELDS_OF_VIEW = [('100', "100% (the games' own)"), ('110', '110%'), ('120', '120%'), ('130', '130%')]
 SCALERS = [('fsr1', 'FSR 1 (AMD FidelityFX, sharp)'), ('bilinear', 'Smooth (bilinear)')]
+# Anisotropic filtering of scene textures (BB_ANISO; 0 = the game's own).
+ANISOTROPY = [('16', '16x'), ('8', '8x'), ('4', '4x'), ('0', "Off (the game's own)")]
 SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'), ('0', 'Maximum')]
 # Temporal anti-aliasing at the games' 1920x1080 (BB_UPSCALER): it takes the scene before the
 # games' post-processing with their own motion vectors, so it replaces their edge smoothing.
@@ -162,7 +164,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True,
+                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'anisotropy': '16',
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
@@ -462,6 +464,7 @@ def game_environment(s, start=None):
     env['BB_FOV'] = str(s.get('fov') or '100')
     if not s.get('bloom', True):
         env['BB_BLOOM'] = '0'
+    env['BB_ANISO'] = str(s.get('anisotropy') or '16')
     env['BB_FSR1'] = '1' if s.get('scaler', 'fsr1') == 'fsr1' else '0'
     sharpening = str(s.get('sharpening') or 'off')
     env['BB_RCAS'] = '0' if sharpening == 'off' else '1'
@@ -1155,6 +1158,9 @@ class Launcher:
                    'is stretched for now.'))
         self.row(f, _('Field of view'), self.choice(f, 'fov', FIELDS_OF_VIEW, 34),
                  _('Shows more of the scene in every direction, also when aiming and in cutscenes.'))
+        self.row(f, _('Texture filtering'), self.choice(f, 'anisotropy', ANISOTROPY, 34),
+                 _('Anisotropic filtering: floors, roads and walls seen at a shallow angle stay sharp '
+                   'into the distance instead of blurring. 16x costs very little on a modern GPU.'))
         self.check(f, 'bloom', _('Bloom'),
                    _('Uncharted 3 only. The soft glow around bright lights and glints; '
                      'turn it off for a crisper, flatter picture.'))

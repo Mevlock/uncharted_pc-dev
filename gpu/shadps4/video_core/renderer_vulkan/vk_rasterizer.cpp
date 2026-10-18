@@ -4174,12 +4174,44 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
     BindSamplers(stage, prepared, binding, write_index);
 }
 
+// bbport (from bloodborne_pc 0.3): the PS4 build samples most scene textures with little or no
+// anisotropic filtering, so floors and walls seen at a grazing angle blur with distance.
+// Mipmapped linear samplers of graphics draws get BB_ANISO (16; 0 or 1 = the game's) times.
+static void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth, bool compute) {
+    static const int forced = [] {
+        const char* value = std::getenv("BB_ANISO");
+        const int n = value ? std::atoi(value) : 16;
+        std::printf("Anisotropic filtering: %s\n", n > 1 ? std::to_string(n).append("x").c_str()
+                                                        : "the game's");
+        return n;
+    }();
+    if (forced <= 1 || is_depth || compute || sharp.mip_filter == AmdGpu::MipFilter::None ||
+        (sharp.xy_min_filter != AmdGpu::Filter::Bilinear &&
+         sharp.xy_min_filter != AmdGpu::Filter::AnisoLinear)) {
+        return;
+    }
+    if (AmdGpu::IsAnisoFilter(sharp.xy_min_filter) && sharp.MaxAniso() >= forced) {
+        return;
+    }
+    const auto ratio = forced >= 16 ? AmdGpu::AnisoRatio::Sixteen
+                       : forced >= 8 ? AmdGpu::AnisoRatio::Eight
+                       : forced >= 4 ? AmdGpu::AnisoRatio::Four
+                                     : AmdGpu::AnisoRatio::Two;
+    sharp.xy_min_filter.Assign(AmdGpu::Filter::AnisoLinear);
+    if (sharp.xy_mag_filter == AmdGpu::Filter::Bilinear) {
+        sharp.xy_mag_filter.Assign(AmdGpu::Filter::AnisoLinear);
+    }
+    sharp.max_aniso.Assign(ratio);
+}
+
 void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
                               Shader::Backend::Bindings& binding, u32& write_index) {
+    const bool compute = stage.sw_stage == Shader::SwStage::Compute;
     for (u32 sampler_index = 0; sampler_index < stage.samplers.size(); ++sampler_index) {
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
+        ForceAnisotropy(ssharp, sampler.is_depth, compute);
         const auto vk_sampler = texture_cache.GetSampler(
             ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
