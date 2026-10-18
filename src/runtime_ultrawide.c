@@ -454,7 +454,8 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
     if (entries[0] && entries[1] && entries[2] && ratio > 1.0) {
         for (int e = 0; e < 2; ++e) {
             memcpy(&heaps[e], entries[e] + 8, 8);
-            const uint64_t grow = ((uint64_t)(heaps[e] * (ratio - 1.0) * 1.1) + 0xffff) & ~(uint64_t)0xffff;
+            /* Whole 2 MiB: the memory areas are allocated in those. */
+            const uint64_t grow = ((uint64_t)(heaps[e] * (ratio - 1.0) * 1.1) + 0x1fffff) & ~(uint64_t)0x1fffff;
             heaps[e] += grow;
             grown += grow;
             memcpy(entries[e] + 8, &heaps[e], 8);
