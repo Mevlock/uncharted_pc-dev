@@ -375,7 +375,8 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
            ns, width, height, field, fov_pct, switch_constants ? ", gameplay only" : "", c);
 }
 
-/* Render resolution (BB_RENDER_RES=WIDTHxHEIGHT, U3 for now): the engine's display mode table
+/* Render resolution (BB_RENDER_RES=WIDTHxHEIGHT; U1, U2 and U3 share every piece below): the
+ * engine's display mode table
  * (one setter per mode: 1280x720, 1920x1080, 1024x600, 1168x657) fills a global display config:
  * the render size three times (+0x08, +0x18, +0x24, with the 16:9 aspect at +0x20/+0x2c), the
  * output size (+0x38), an eighth/quarter size (+0x40/+0x44), and passes the size as floats to the
@@ -396,8 +397,8 @@ static int match_mode_block(const uint8_t *p, uint8_t m) {
 /* The game's memory table entries ({id, parent, size, alignment}): the render target heaps
  * (0x84, 0x85 under the GPU context), the GPU context's total (entry 3, 3052 MiB) and its free
  * entry (0x0e, ALLOCATION_APP_GPU_FREE, 208.7 MiB, alignment 1). The sizes below are U3's;
- * matching takes id, parent and alignment and a size range (match_entry): U2's table has the
- * same entries with other sizes (497 MiB, 2988 MiB, 176.7 MiB). */
+ * matching takes id, parent and alignment and a size range (match_entry): U2's and U1's tables
+ * have the same entries with other sizes (497 MiB, 2988 MiB, 176.7 / 208.7 MiB). */
 static const uint8_t heap_a[24] = {0x84, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x40, 0xbc, 0x08, 0, 0, 0, 0,
                                    0x80, 0,    0, 0, 0, 0, 0, 0};
 static const uint8_t heap_b[24] = {0x85, 0, 0, 0, 6, 0, 0, 0, 0x00, 0xbc, 0x10, 0x23, 0, 0, 0, 0,
@@ -453,7 +454,7 @@ static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_
                 if (match_entry(code + i, wanted[e])) entries |= 1 << e, ++matches[e];
         if (matches[0] > 1 || matches[1] > 1 || matches[2] > 1 || matches[3] > 1) entries = -1;
         if (!blocks || direct != 1 || first != 1 || second != 1 || chroma != 1 || entries != 15) {
-            printf("Render resolution: BB_RENDER_RES is for Uncharted 2 and 3, this game is left at "
+            printf("Render resolution: BB_RENDER_RES is for the Uncharted games, this one is left at "
                    "1920x1080 (%d %d %d %d %d %#x)\n", blocks, direct, first, second, chroma, entries);
             return 0;
         }

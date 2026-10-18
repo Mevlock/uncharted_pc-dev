@@ -76,7 +76,7 @@ WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
                 ('3840x2160', '3840 × 2160 (4K)'), ('2560x1080', '2560 × 1080 (21:9)'),
                 ('3440x1440', '3440 × 1440 (21:9)'), ('3840x1600', '3840 × 1600 (21:9)'),
                 ('5120x1440', '5120 × 1440 (32:9)')]
-# The size Uncharted 3 and 2 render at (BB_RENDER_RES; Uncharted 2 native only): the game's display
+# The size the games render at (BB_RENDER_RES; Uncharted 1 and 2 native only): the game's display
 # mode, memory budget, camera and movies are patched in memory. Its GPU memory stays under 4 GiB,
 # which allows about 3440 x 1440 (RENDER_PIXELS_MAX); a larger size is scaled down to that.
 # Native renders at the output size (the window, or the screen in fullscreen); the scaled modes
@@ -461,9 +461,9 @@ def game_environment(s, start=None):
         sizes = render_sizes(s)
         if sizes:
             env['BB_RENDER_RES'], env['BB_OUTPUT_RES'] = sizes
-    elif start == 'u2' and str(s.get('render_resolution') or '1080') != '1080':
-        # Uncharted 2: native only. The upscaled modes rebuild the frame through Uncharted 3's
-        # upscaling hooks (BB_OUTPUT_RES), which do not know U2's passes: they render native here.
+    elif start in ('u1', 'u2') and str(s.get('render_resolution') or '1080') != '1080':
+        # Uncharted 1 and 2: native only. The upscaled modes rebuild the frame through Uncharted
+        # 3's upscaling hooks (BB_OUTPUT_RES), which do not know their passes: native here.
         sizes = render_sizes({**s, 'render_resolution': 'native'})
         if sizes:
             env['BB_RENDER_RES'] = sizes[0]
@@ -1153,8 +1153,8 @@ class Launcher:
                  _('The games render at 1920 × 1080. A larger window, or fullscreen on a 1440p or 4K '
                    'screen, gets the image upscaled to fit.'))
         self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', RENDER_RESOLUTIONS, 34),
-                 _('Uncharted 3 and 2 (Uncharted 2: Native only; the upscaled modes render native '
-                   'there). Native renders at the window size (or the screen in '
+                 _('Uncharted 1 and 2: Native only (the upscaled modes render native there). '
+                   'Native renders at the window size (or the screen in '
                    'fullscreen) instead of enlarging 1920 × 1080: the sharpest picture, the most GPU work. '
                    'Quality, Balanced and Performance render smaller and let the anti-aliasing (DLSS or '
                    'FSR) rebuild the full size before the HUD, which stays sharp. Up to about 3440 × 1440 '
