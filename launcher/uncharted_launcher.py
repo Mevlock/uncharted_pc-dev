@@ -354,7 +354,9 @@ def render_sizes(s):
     if width * height > RENDER_PIXELS_MAX:
         shrink = (RENDER_PIXELS_MAX / (width * height)) ** 0.5
         width, height = width * shrink, height * shrink
-    width, height = int(width) // 16 * 16, int(height) // 4 * 4  # the game: width % 16 == 0
+    # The game asserts width % 16 == 0; its bloom chain needs a height that halves cleanly
+    # (844 rows made treasure glints into big white blobs): nearest multiple of 8.
+    width, height = int(width) // 16 * 16, max(8, int(round(height / 8)) * 8)
     if width < 640 or height < 360 or (width, height, out_w, out_h) == (1920, 1080, 1920, 1080):
         return None
     return f'{width}x{height}', f'{out_w}x{out_h}'

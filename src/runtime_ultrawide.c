@@ -284,19 +284,8 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     }
     /* Sites: reads with a read of the other field from the same register close by. */
     static Read sites[MAX_SITES];
-    int ns = 0, flares = 0;
-    /* The lens flare / glint pass (U3) builds its screen-to-view scale as C / zoom, then times
-     * the inverse aspect: vdivss xmm0, xmm0, [zoom]; vpermilps xmm1, xmm0, 0x15; vmulss xmm0,
-     * xmm0, [inverse aspect]. Widened, the flares (treasure glints) became large white blooms:
-     * its zoom read keeps the game's value. */
-    static const uint8_t flare_next[6] = {0xc4, 0xe3, 0x79, 0x04, 0xc8, 0x15};
+    int ns = 0;
     for (int i = 0; i < nk; ++i) {
-        if (kept[i].op.op == 0x5e && (uint32_t)kept[i].op.disp == field + 4 &&
-            kept[i].at + kept[i].op.len + 6 <= size &&
-            !memcmp(code + kept[i].at + kept[i].op.len, flare_next, 6)) {
-            ++flares;
-            continue;
-        }
         const uint32_t other = (uint32_t)kept[i].op.disp == field ? field + 4 : field;
         int paired = 0;
         for (int j = 0; j < nk && !paired; ++j)
@@ -381,9 +370,9 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     runtime_ultrawide_fill = wide;
     runtime_ultrawide_scale = k;
     if (constants != (float *)(code + cave)) switch_constants = constants;
-    printf("Ultrawide: %d camera reads widened for %ux%u (field %#x, %d lens flare reads kept), field of "
-           "view %u%%%s, render aspect correction %.3f\n",
-           ns, width, height, field, flares, fov_pct, switch_constants ? ", gameplay only" : "", c);
+    printf("Ultrawide: %d camera reads widened for %ux%u (field %#x), field of view %u%%%s, render aspect "
+           "correction %.3f\n",
+           ns, width, height, field, fov_pct, switch_constants ? ", gameplay only" : "", c);
 }
 
 /* Render resolution (BB_RENDER_RES=WIDTHxHEIGHT, U3 for now): the engine's display mode table
@@ -434,7 +423,7 @@ static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_
         const char *env = getenv("BB_RENDER_RES");
         if (!env || !parse_size(env, &w, &h) || w < 640 || h < 360 || w > 7680 || h > 4320) return 0;
         w &= ~15u; /* the game asserts displaySize.m_w % 16 == 0 */
-        h &= ~3u;
+        h &= ~7u; /* the bloom chain: a quarter-size height that halves again (844 gave a big glint) */
         if (w == 1920 && h == 1080) return 0;
         int blocks = 0, direct = 0, first = 0, second = 0, chroma = 0, entries = 0;
         for (uint64_t i = 0; i + 200 < size; ++i) {

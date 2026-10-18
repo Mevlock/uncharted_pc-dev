@@ -2251,6 +2251,27 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         if (DrawLog::LogValues(vs_info.pgm_hash)) {
             const auto& flat = vs_info.flattened_ud_buf;
             DrawLog::Values("U", flat.data(), std::min<size_t>(flat.size(), 96));
+            // The pixel shader's flattened resource-table data (its constants) too.
+            if (const auto* fs = pipeline->GetStages()[u32(Shader::SwStage::Fragment)]) {
+                const auto& ps_flat = fs->flattened_ud_buf;
+                DrawLog::Values("P", ps_flat.data(), std::min<size_t>(ps_flat.size(), 96));
+                // And the first floats of its guest buffers (its constant buffer).
+                auto* memory = Core::Memory::Instance();
+                u32 index = 0;
+                for (const auto& desc : fs->buffers) {
+                    if (desc.buffer_type != Shader::BufferType::Guest) {
+                        continue;
+                    }
+                    const auto sharp = desc.GetSharp(*fs);
+                    if (sharp.base_address && sharp.GetSize() &&
+                        memory->IsValidGpuMapping(sharp.base_address, std::min<u64>(sharp.GetSize(), 256))) {
+                        const char name[3] = {'B', char('0' + index % 10), 0};
+                        DrawLog::Values(name, reinterpret_cast<const u32*>(sharp.base_address),
+                                        std::min<size_t>(sharp.GetSize() / 4, 32));
+                    }
+                    ++index;
+                }
+            }
         }
         // The viewport (size and corner), the scissor, render target 0 and the bound images.
         const auto& vp = regs.viewports[0];
