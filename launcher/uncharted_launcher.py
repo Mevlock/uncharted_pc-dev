@@ -1153,13 +1153,12 @@ class Launcher:
                  _('The games render at 1920 × 1080. A larger window, or fullscreen on a 1440p or 4K '
                    'screen, gets the image upscaled to fit.'))
         self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', RENDER_RESOLUTIONS, 34),
-                 _('Uncharted 1 and 2: Native only (the upscaled modes render native there). '
-                   'Native renders at the window size (or the screen in '
-                   'fullscreen) instead of enlarging 1920 × 1080: the sharpest picture, the most GPU work. '
-                   'Quality, Balanced and Performance render smaller and let the anti-aliasing (DLSS or '
-                   'FSR) rebuild the full size before the HUD, which stays sharp. Up to about 3440 × 1440 '
-                   '(the game\'s memory limit). Where the CPU sets the frame rate (busy scenes), a '
-                   'smaller size gains little.'))
+                 _('The size the game draws its picture at. Native draws at your window size (or your '
+                   'screen in fullscreen) for the sharpest image. Quality, Balanced and Performance draw '
+                   'a smaller picture and let DLSS or FSR rebuild it at full size, while the HUD stays '
+                   'sharp. Those three are for Uncharted 3 only: Uncharted 1 and 2 use Native instead. '
+                   'The games\' memory limits this to about 3440 × 1440. In busy scenes the CPU usually '
+                   'sets the frame rate, so a smaller size gains little there.'))
         self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
                  _('On a screen or window wider than 16:9 (21:9, 32:9) gameplay shows more at the sides '
                    'and fills it. Menus, loading screens and cutscene videos stay 16:9; the in-game HUD '
