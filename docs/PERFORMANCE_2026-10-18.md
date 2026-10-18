@@ -35,7 +35,20 @@ Uncharted 1 (the jungle with Sully after "Continue"), native 3440×1440 (82f9373
 | `BB_TIGHT_WRITES=0 BB_FLUSH_EVERY_DRAWS=0` | ~115 |
 | Defaults | **~147** (+28%) |
 
-The gain depends on the scene: U1's jungle has only two characters to skin.
+The gain depends on the scene: U1's jungle has only two characters to skin. Measured there the same
+way (FPS with the diagnostics on):
+
+| U1 jungle | `BB_TIGHT_WRITES=0` | `BB_FLUSH_EVERY_DRAWS=0` | Defaults |
+|---|---|---|---|
+| Skinning dispatches/s (with a barrier first) | ~6 300 (80%) | ~4 800 (1.5%) | ~6 300 (1.4%) |
+| GPU time on the compute queues | ~42 ms/s | ~4 ms/s | ~5 ms/s |
+| GPU busy | 56% | 38% | 53% |
+| Submit-to-done | 0.9 ms | 8 ms | 0.9 ms |
+| FPS | ~151 | ~117 | ~152 |
+
+U1's gain here is almost all early submits: the false barriers are fixed too, but with ~6 300
+skinning dispatches/s (U2's museum ~89 000) they cost little. At ~152 FPS the GPU is half idle and
+under 1 ms behind: the GPU command thread is the limit.
 
 Why U2 gains the most, measured in the museum spot with `BB_QUEUE_SHADERS=1 BB_GPU_BUSY=1`
 (FPS with the diagnostics on): U2 runs the same skinning shader (`cs 8f067540`, ~89k
