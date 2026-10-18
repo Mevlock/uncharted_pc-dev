@@ -33,6 +33,9 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+// bbport: the render size BB_RENDER_RES patched in (runtime_ultrawide.c), 0 without it.
+extern "C" unsigned runtime_render_width, runtime_render_height;
+
 namespace Vulkan {
 
 // bbport diagnosis: BB_CONST_CHECK=<shader hash>: the constants of that shader's draws as they
@@ -915,9 +918,12 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     }
 
     // bbport: depth-tested draws on a full-size depth buffer: the 3D scene; a menu's backdrop
-    // into the display buffer: a menu over it (TakeSceneFrame).
+    // into the display buffer: a menu over it (TakeSceneFrame). Under BB_RENDER_RES a
+    // full-size depth buffer is nearly the render size: half-resolution passes (particles at
+    // 1720x720 for 3440x1440) do not count.
     if (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid() &&
-        regs.depth_buffer.Pitch() >= 1280 && regs.depth_buffer.Height() >= 720) {
+        regs.depth_buffer.Pitch() >= std::max(1280u, runtime_render_width * 7 / 8) &&
+        regs.depth_buffer.Height() >= std::max(720u, runtime_render_height * 7 / 8)) {
         g_frame_scene_draws.fetch_add(1, std::memory_order_relaxed);
     } else if (regs.color_buffers[0] &&
                FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {

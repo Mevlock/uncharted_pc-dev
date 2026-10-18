@@ -30,6 +30,7 @@ float runtime_ultrawide_scale = 1.0f;
 /* Set when BB_RENDER_RES patched the display mode: the presenter shows frames that do not fill
  * the window at 16:9 (the game's layout stretched over the larger buffer). */
 int runtime_render_resolution;
+unsigned runtime_render_width, runtime_render_height;
 
 /* The widened constants, and the block the stubs read them from when it can be switched. */
 static float wide_constants[4];
@@ -655,6 +656,10 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         }
     }
     runtime_render_resolution = blocks > 0;
+    if (runtime_render_resolution) {
+        runtime_render_width = width;
+        runtime_render_height = height;
+    }
     printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched, movies %s, "
            "render target heaps %.1f + %.1f MiB, GPU memory %.1f MiB (%.1f free), direct %.1f MiB, BB_DMEM_MB %s)\n",
            width, height, blocks, sizes, loads, limits, movies ? "1920x1080" : "not patched", heaps[0] / 1048576.0, heaps[1] / 1048576.0,
