@@ -447,6 +447,21 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
             }
         }
     }
+    /* The movie renderer takes the movie frame size (its luma and chroma textures over the
+     * decoder's 1920x1080 NV12 output) from the config's third render size: lea rax, [config];
+     * mov r13d, [rax + 0x24]; mov eax, [rax + 0x28]; mov [rbp - 0xd0], rax. Those 14 bytes become
+     * mov r13d, 1920; mov eax, 1080; nop. */
+    int movies = 0;
+    static const uint8_t movie_size[18] = {0x44, 0x8b, 0x68, 0x24, 0x8b, 0x40, 0x28, 0x48, 0x89,
+                                           0x85, 0x30, 0xff, 0xff, 0xff};
+    for (uint64_t i = 7; i + 14 < size; ++i) {
+        uint8_t *q = code + i;
+        if (memcmp(q, movie_size, 14) || q[-7] != 0x48 || q[-6] != 0x8d || q[-5] != 0x05) continue;
+        uint8_t *lea = q - 7;
+        static const uint8_t fixed[14] = {0x41, 0xbd, 0x80, 0x07, 0, 0, 0xb8, 0x38, 0x04, 0, 0, 0x0f, 0x1f, 0x00};
+        memcpy(lea, fixed, 14);
+        ++movies;
+    }
     /* A size limit set next to it (2560x1216): raised if the new size is larger. */
     for (uint64_t i = 0; i + 14 < size; ++i) {
         uint8_t *q = code + i;
@@ -549,8 +564,8 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         }
     }
     runtime_render_resolution = blocks > 0;
-    printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched, "
+    printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits, %d movie sizes patched, "
            "render target heaps %.1f + %.1f MiB, GPU memory %.1f MiB (%.1f free), direct %.1f MiB, BB_DMEM_MB %s)\n",
-           width, height, blocks, sizes, loads, limits, heaps[0] / 1048576.0, heaps[1] / 1048576.0,
+           width, height, blocks, sizes, loads, limits, movies, heaps[0] / 1048576.0, heaps[1] / 1048576.0,
            total / 1048576.0, free_size / 1048576.0, direct_total / 1048576.0, getenv("BB_DMEM_MB") ? getenv("BB_DMEM_MB") : "unset");
 }
