@@ -279,6 +279,8 @@ private:
                       Shader::Backend::Bindings& binding, u32& write_index, bool& barrier,
                       bool on_helper = false);
     bool BindResources(const Pipeline* pipeline);
+    /// bbport diagnosis (draw log): the bound images, size and format.
+    std::string DescribeImages();
     void BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
                       Shader::Backend::Bindings& binding, u32& write_index);
     /// bbport: a stage's resolved textures remembered by its prepared T# hashes

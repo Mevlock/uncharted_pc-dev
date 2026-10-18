@@ -474,6 +474,14 @@ void Values(const char* name, const u32* words, size_t count) {
     pending += out;
 }
 
+void Text(const std::string& text) {
+    if (!Active()) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    pending += text;
+}
+
 void Draw(u64 vs, u64 ps, u32 indices, u32 instances, u32 vertex_offset, u32 instance_offset) {
     if (!Active()) {
         return;
@@ -2235,6 +2243,14 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             const auto& flat = vs_info.flattened_ud_buf;
             DrawLog::Values("U", flat.data(), std::min<size_t>(flat.size(), 96));
         }
+        // The viewport (size and corner), the scissor, render target 0 and the bound images.
+        const auto& vp = regs.viewports[0];
+        const auto& cb0 = regs.color_buffers[0];
+        DrawLog::Text(fmt::format(" vp {:.0f}x{:.0f}@{:.0f},{:.0f} sc {}-{} rt {}x{}{}",
+                                  vp.xscale * 2, -vp.yscale * 2, vp.xoffset - vp.xscale,
+                                  vp.yoffset + vp.yscale, regs.screen_scissor.bottom_right_x,
+                                  regs.screen_scissor.bottom_right_y, cb0 ? cb0.Pitch() : 0,
+                                  cb0 ? cb0.Height() : 0, DescribeImages()));
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         DrawLog::Draw(vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices, num_instances,
                       vertex_offset, instance_offset);
@@ -2606,6 +2622,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
     }
+    if (DrawLog::Active()) {
+        DrawLog::Text(DescribeImages());
+    }
     DrawLog::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
     // bbport diagnosis: BB_FULL_BARRIER=1 — every dispatch is followed by a barrier from all
     // commands to all commands (a missing compute -> later read dependency shows as gone);
@@ -2837,6 +2856,19 @@ void Rasterizer::JoinBindHelper(void* context) {
     if (!BindHelper::OnHelper()) {
         static_cast<Rasterizer*>(context)->bind_helper.Join();
     }
+}
+
+std::string Rasterizer::DescribeImages() {
+    std::string out = " img[";
+    for (const auto& id : bound_images) {
+        if (!id) {
+            continue;
+        }
+        const auto& image = texture_cache.GetImage(id);
+        out += fmt::format(" {}x{} {}", image.info.size.width, image.info.size.height,
+                           vk::to_string(image.info.pixel_format));
+    }
+    return out + " ]";
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {

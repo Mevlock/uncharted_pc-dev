@@ -507,8 +507,11 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
      * compute pass converts over the whole screen. The render target setup creates the movie's
      * luma and chroma textures (two sets) from the render size instead, and the movie renderer
      * puts the chroma at width * align64(height) of it; both get the movie's size:
-     *  - mov ecx, r15d; mov rbx, r8 (r15/rbx: width/height for the first set, halved for its
-     *    chroma) jumps to a stub setting r15d = ecx = 1920, ebx = r8d = 1080;
+     *  - mov ecx, r15d; mov rbx, r8 (first luma; r15/rbx keep the render size, halved after it
+     *    for the chroma and kept for other half-resolution targets: particles) jumps to a stub
+     *    passing ecx = 1920, r8d = 1080;
+     *  - mov ecx, r15d; mov r8d, ebx (the two chroma textures, 0x57 and 0xe5 bytes further) jump
+     *    to stubs passing ecx = 960, r8d = 540;
      *  - mov rcx, [rbp - 0x2e8]; mov r8, [rbp - 0x2f0] (second luma) become mov ecx, 1920;
      *    mov r8d, 1080;
      *  - imul ebx, r14d; and ebx, -64 (chroma offset) becomes mov ebx, 1920 * 1088. */
@@ -521,25 +524,38 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
             if (code[i] == 0x48 && !memcmp(code + i, movie_second, 15)) at_second = (int64_t)i, ++n_second;
             if (code[i] == 0x41 && !memcmp(code + i, movie_chroma, 11)) at_chroma = (int64_t)i, ++n_chroma;
         }
-        /* The stub: the last 0x40 bytes of the code segment's zero padding. */
-        const uint64_t stub = (size - 0x40) & ~(uint64_t)0xf;
+        /* The stubs: the last 0x80 bytes of the code segment's zero padding, 0x20 each. */
+        const uint64_t stubs = (size - 0x80) & ~(uint64_t)0xf;
         int room = 1;
-        for (uint64_t i = stub; i < stub + 0x20; ++i) room &= code[i] == 0;
-        if (n_first == 1 && n_second == 1 && n_chroma == 1 && room) {
-            uint8_t *c = code + stub;
-            static const uint8_t sizes[22] = {0x41, 0xbf, 0x80, 0x07, 0, 0, /* mov r15d, 1920 */
-                                              0xbb, 0x38, 0x04, 0, 0,       /* mov ebx, 1080 */
-                                              0xb9, 0x80, 0x07, 0, 0,       /* mov ecx, 1920 */
-                                              0x41, 0xb8, 0x38, 0x04, 0, 0}; /* mov r8d, 1080 */
-            memcpy(c, sizes, 22);
-            c[22] = 0xe9; /* jmp back after the two moves */
-            int32_t rel = (int32_t)((int64_t)(at_first + 6) - (int64_t)(stub + 27));
-            memcpy(c + 23, &rel, 4);
-            uint8_t *site = code + at_first;
-            site[0] = 0xe9;
-            rel = (int32_t)((int64_t)stub - (at_first + 5));
-            memcpy(site + 1, &rel, 4);
-            site[5] = 0x90;
+        for (uint64_t i = stubs; i < stubs + 0x60; ++i) room &= code[i] == 0;
+        static const uint8_t chroma_size[6] = {0x44, 0x89, 0xf9, 0x41, 0x89, 0xd8}; /* mov ecx, r15d; mov r8d, ebx */
+        const int64_t at_chroma1 = at_first + 0x57, at_chroma2 = at_first + 0xe5;
+        if (n_first == 1 && n_second == 1 && n_chroma == 1 && room && at_first + 0xf0 < (int64_t)size &&
+            !memcmp(code + at_chroma1, chroma_size, 6) && !memcmp(code + at_chroma2, chroma_size, 6)) {
+            /* A stub at `stub` running `body`, then jumping back to after the 6 bytes at `site`. */
+            static const uint8_t luma[14] = {0xb9, 0x80, 0x07, 0, 0,       /* mov ecx, 1920 */
+                                             0x4c, 0x89, 0xc3,             /* mov rbx, r8 */
+                                             0x41, 0xb8, 0x38, 0x04, 0, 0}; /* mov r8d, 1080 */
+            static const uint8_t chroma_args[11] = {0xb9, 0xc0, 0x03, 0, 0,       /* mov ecx, 960 */
+                                                    0x41, 0xb8, 0x1c, 0x02, 0, 0}; /* mov r8d, 540 */
+            const struct {
+                int64_t site;
+                const uint8_t *body;
+                int len;
+            } detours[3] = {{at_first, luma, 14}, {at_chroma1, chroma_args, 11}, {at_chroma2, chroma_args, 11}};
+            for (int d = 0; d < 3; ++d) {
+                const uint64_t stub = stubs + 0x20 * (uint64_t)d;
+                uint8_t *c = code + stub;
+                memcpy(c, detours[d].body, (size_t)detours[d].len);
+                c[detours[d].len] = 0xe9;
+                int32_t rel = (int32_t)((detours[d].site + 6) - (int64_t)(stub + detours[d].len + 5));
+                memcpy(c + detours[d].len + 1, &rel, 4);
+                uint8_t *site = code + detours[d].site;
+                site[0] = 0xe9;
+                rel = (int32_t)((int64_t)stub - (detours[d].site + 5));
+                memcpy(site + 1, &rel, 4);
+                site[5] = 0x90;
+            }
             static const uint8_t second_fixed[14] = {0xb9, 0x80, 0x07, 0, 0, 0x66, 0x90,
                                                      0x41, 0xb8, 0x38, 0x04, 0, 0, 0x90};
             memcpy(code + at_second, second_fixed, 14);
