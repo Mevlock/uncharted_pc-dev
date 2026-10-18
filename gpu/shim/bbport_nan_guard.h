@@ -25,12 +25,12 @@ inline bool ExportNanGuard() {
 /// Uncharted 3's bloom bright pass (compute shader 1e8e11d0, scene colour to the quarter-size
 /// bloom image): a treasure glint covering few pixels can reach 65504 (half-float max) at a
 /// reduced render size, which the bloom blur turns into a large white diamond. Its writes are
-/// limited to BB_BLOOM_CLAMP (default 32; 0 off), NaN to 0; the scene's own highlights stay
+/// limited to BB_BLOOM_CLAMP (default 4; 0 off), NaN to 0; the scene's own highlights stay
 /// below 1.
 inline float BloomClamp() {
     static const float limit = [] {
         const char* env = std::getenv("BB_BLOOM_CLAMP");
-        return env ? float(std::atof(env)) : 32.0f;
+        return env ? float(std::atof(env)) : 4.0f;
     }();
     return limit;
 }
