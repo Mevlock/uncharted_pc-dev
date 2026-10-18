@@ -847,6 +847,7 @@ void TextureCache::RefreshImage(Image& image) {
         image.hash = hash;
     }
 
+    NoteAsyncAccess("texture upload", image.info.guest_address, image.info.guest_size, false, true);
     const u32 num_layers = image.info.resources.layers;
     const u32 num_mips = image.info.resources.levels;
     const bool is_gpu_modified = True(image.flags & ImageFlagBits::GpuModified);

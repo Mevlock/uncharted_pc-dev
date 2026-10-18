@@ -35,6 +35,10 @@ class StagingBufferPool;
 
 namespace VideoCore {
 
+/// bbport diagnosis (BB_ASYNC_TRACE=1): a GPU-side access to guest memory; uploads = it copies
+/// guest data to the GPU.
+void NoteAsyncAccess(const char* kind, VAddr address, u64 size, bool written, bool uploads);
+
 class TextureCache;
 class MemoryTracker;
 class PageManager;

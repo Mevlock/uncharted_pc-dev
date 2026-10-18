@@ -137,6 +137,7 @@ struct BufferCache::SideTicket {
     u64 total = 0;
     u64 write_tick = 0;
     std::chrono::steady_clock::time_point start;
+    bool async = false; // BB_ASYNC_TRACE
 };
 
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
@@ -206,6 +207,161 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     const char* side_env = std::getenv("BB_SIDE_DOWNLOAD");
     if (instance.GetSideQueue() && !(side_env && side_env[0] == '0')) {
         side_queue = std::make_unique<SideQueue>(instance, instance.GetSideQueue());
+    }
+}
+
+// bbport diagnosis: BB_ASYNC_TRACE=1 — GPU-side accesses (buffer bindings, constant ring copies,
+// texture uploads) to pages whose side queue read-back is in flight, and uploads of pages
+// shortly after a read-back handed them back (async or synchronous, for comparison).
+namespace {
+struct TraceRange {
+    std::atomic<u64> start{0}, end{0}, time_ns{0};
+    std::atomic<bool> async{false};
+    std::atomic<bool> touched{false}; // a GPU-side access overlapped it while in flight
+};
+std::array<TraceRange, 16> trace_in_flight;
+std::array<TraceRange, 64> trace_handed_back;
+std::atomic<u64> trace_handed_head{0};
+std::atomic<u64> trace_counts[7]; // in-flight access, handback upload async/sync, finish skips x3,
+                                  // strict discards
+std::atomic<u32> in_flight_count{0};
+std::atomic<u32> trace_prints{0};
+
+bool AsyncTraceEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_ASYNC_TRACE");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+u64 TraceNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+void TracePrintSummary() {
+    static std::atomic<u64> last{0};
+    const u64 now = TraceNowNs();
+    u64 prev = last.load(std::memory_order_relaxed);
+    if (now - prev < 5'000'000'000ull || !last.compare_exchange_strong(prev, now)) {
+        return;
+    }
+    std::printf("Async trace (5 s): %llu in-flight accesses, %llu uploads after async handback, "
+                "%llu after sync handback; finish skipped %llu handed back, %llu cpu-modified, "
+                "%llu newer GPU write; %llu touched read-backs redone\n",
+                (unsigned long long)trace_counts[0].exchange(0),
+                (unsigned long long)trace_counts[1].exchange(0),
+                (unsigned long long)trace_counts[2].exchange(0),
+                (unsigned long long)trace_counts[3].exchange(0),
+                (unsigned long long)trace_counts[4].exchange(0),
+                (unsigned long long)trace_counts[5].exchange(0),
+                (unsigned long long)trace_counts[6].exchange(0));
+}
+
+void TraceBegin(VAddr start, VAddr end, bool async) {
+    for (auto& r : trace_in_flight) {
+        u64 expected = 0;
+        if (r.start.compare_exchange_strong(expected, start)) {
+            r.touched.store(false);
+            r.end.store(end);
+            r.async.store(async);
+            in_flight_count.fetch_add(1);
+            r.time_ns.store(TraceNowNs());
+            return;
+        }
+    }
+}
+
+void TraceFinish(VAddr start, std::span<const VAddr> handed, bool async) {
+    for (auto& r : trace_in_flight) {
+        if (start && r.start.load() == start) {
+            r.end.store(0);
+            r.start.store(0);
+            in_flight_count.fetch_sub(1);
+            break;
+        }
+    }
+    const u64 now = TraceNowNs();
+    for (const VAddr page : handed) {
+        auto& h = trace_handed_back[trace_handed_head.fetch_add(1) % trace_handed_back.size()];
+        h.start.store(page);
+        h.end.store(page + 4096);
+        h.async.store(async);
+        h.time_ns.store(now);
+    }
+}
+/// BB_ASYNC_STRICT (default on): an async read-back whose pages a GPU-side access touched while
+/// it was in flight is discarded and redone synchronously.
+bool AsyncStrict() {
+    static const bool strict = [] {
+        const char* env = std::getenv("BB_ASYNC_STRICT");
+        return !(env && env[0] == '0');
+    }();
+    return strict;
+}
+
+bool TicketTouched(VAddr start) {
+    for (auto& r : trace_in_flight) {
+        if (start && r.start.load() == start) {
+            return r.touched.load();
+        }
+    }
+    return false;
+}
+} // namespace
+
+bool AsyncAccessTracking() {
+    return AsyncTraceEnabled() || in_flight_count.load(std::memory_order_relaxed) != 0;
+}
+
+/// Called for GPU-side accesses to guest memory (kind names the path).
+void NoteAsyncAccess(const char* kind, VAddr address, u64 size, bool written, bool uploads) {
+    const bool trace = AsyncTraceEnabled();
+    if (!trace && in_flight_count.load(std::memory_order_relaxed) == 0) {
+        return;
+    }
+    if (trace) {
+        TracePrintSummary();
+    }
+    const VAddr end = address + size;
+    for (auto& r : trace_in_flight) {
+        const VAddr rs = r.start.load(std::memory_order_relaxed);
+        if (rs && rs < end && address < r.end.load(std::memory_order_relaxed)) {
+            r.touched.store(true);
+            trace_counts[0].fetch_add(1);
+            if (trace && trace_prints.fetch_add(1) < 300) {
+                std::printf("Async trace: %s %#llx+%#llx%s during %s read-back of %#llx-%#llx "
+                            "(%.2f ms in) thread '%s'\n",
+                            kind, (unsigned long long)address, (unsigned long long)size,
+                            written ? " (written)" : "", r.async.load() ? "async" : "sync",
+                            (unsigned long long)rs, (unsigned long long)r.end.load(),
+                            (TraceNowNs() - r.time_ns.load()) / 1e6,
+                            Common::GetCurrentThreadName().c_str());
+            }
+        }
+    }
+    if (!uploads || !trace) {
+        return;
+    }
+    const u64 now = TraceNowNs();
+    for (auto& h : trace_handed_back) {
+        const VAddr hs = h.start.load(std::memory_order_relaxed);
+        const u64 t = h.time_ns.load(std::memory_order_relaxed);
+        if (hs && hs < end && address < h.end.load(std::memory_order_relaxed) &&
+            now - t < 5'000'000ull) {
+            const bool async = h.async.load();
+            trace_counts[async ? 1 : 2].fetch_add(1);
+            if (async && trace_prints.fetch_add(1) < 300) {
+                std::printf("Async trace: %s %#llx+%#llx uploads page %#llx %.2f ms after its "
+                            "async handback, thread '%s'\n",
+                            kind, (unsigned long long)address, (unsigned long long)size,
+                            (unsigned long long)hs, (now - t) / 1e6,
+                            Common::GetCurrentThreadName().c_str());
+            }
+            return;
+        }
     }
 }
 
@@ -333,6 +489,9 @@ bool BufferCache::BeginSideDownload(VAddr page, u64 length, SideTicket& ticket) 
         .pCommandBuffers = &slot->cmdbuf,
     };
     Vulkan::Check(side.queue.submit(submit, *slot->fence));
+    if ((AsyncTraceEnabled() || (ticket.async && AsyncStrict())) && !pages.empty()) {
+        TraceBegin(pages.front(), pages.back() + TRACKER_BYTES_PER_PAGE, ticket.async);
+    }
     return true;
 }
 
@@ -357,15 +516,25 @@ void BufferCache::WaitSideDownload(SideTicket& ticket) {
 bool BufferCache::FinishSideDownload(SideTicket& ticket, VAddr fault_page, u64 fault_length) {
     boost::container::small_vector<VAddr, 16> owned;
     bool fault_ok = true;
-    for (const VAddr at : ticket.pages) {
+    const bool discard = ticket.async && AsyncStrict() && ticket.slot && !ticket.pages.empty() &&
+                         TicketTouched(ticket.pages.front());
+    if (discard) {
+        trace_counts[6].fetch_add(1, std::memory_order_relaxed);
+        fault_ok = false;
+    }
+    for (const VAddr at : discard ? std::span<const VAddr>{} :
+                                    std::span<const VAddr>(ticket.pages.data(), ticket.pages.size())) {
         if (!memory_tracker->IsRegionGpuModified(at, TRACKER_BYTES_PER_PAGE)) {
+            trace_counts[3].fetch_add(1, std::memory_order_relaxed);
             continue; // handed back meanwhile
         }
         const bool faulting = at >= fault_page && at < fault_page + fault_length;
         if (!faulting && memory_tracker->IsRegionCpuModified(at, TRACKER_BYTES_PER_PAGE)) {
+            trace_counts[4].fetch_add(1, std::memory_order_relaxed);
             continue; // a neighbour with guest data waiting for upload: not overwritten
         }
         if (memory_tracker->LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE) > ticket.write_tick) {
+            trace_counts[5].fetch_add(1, std::memory_order_relaxed);
             if (at >= fault_page && at < fault_page + fault_length) {
                 fault_ok = false;
             }
@@ -393,6 +562,10 @@ bool BufferCache::FinishSideDownload(SideTicket& ticket, VAddr fault_page, u64 f
     for (const VAddr at : owned) {
         gpu_modified_ranges.Subtract(at, TRACKER_BYTES_PER_PAGE);
         memory_tracker->UnmarkRegionAsGpuModified(at, TRACKER_BYTES_PER_PAGE);
+    }
+    if (AsyncAccessTracking()) {
+        TraceFinish(ticket.slot && !ticket.pages.empty() ? ticket.pages.front() : 0,
+                    std::span<const VAddr>(owned.data(), owned.size()), ticket.async);
     }
     if (ticket.slot) {
         side_queue->Release(ticket.slot);
@@ -716,10 +889,20 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             liverpool->SendCommand<true>(std::move(resolve));
         } else {
             SideTicket ticket;
+            ticket.async = true;
             bool started = false;
             u32 frames = 0, gpu_write = 0, gpu_use = 0;
             const auto side_start = std::chrono::steady_clock::now();
+            // BB_ASYNC_DRAIN_BEGIN=1 (diagnosis): the draws already queued run first, so writes
+            // they make to these pages are recorded before the read-back is chosen.
+            static const bool drain_begin = [] {
+                const char* env = std::getenv("BB_ASYNC_DRAIN_BEGIN");
+                return env && env[0] == '1';
+            }();
             liverpool->SendCommand<true>([&] {
+                if (drain_begin && Vulkan::g_drain_draw_pipe) {
+                    Vulkan::g_drain_draw_pipe();
+                }
                 frames = g_guest_frames.load(std::memory_order_relaxed);
                 gpu_write = memory_tracker->LatestGpuWriteFrame(page, length);
                 gpu_use = LastGpuUse(page, length);
@@ -1088,6 +1271,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     }
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
     if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
+        NoteAsyncAccess("stream buffer", device_addr, size, false, true);
         if (ClobberCheckEnabled() && gpu_modified_ranges.Intersects(device_addr, size)) {
             ReportClobber("stream copy", device_addr, size, device_addr, size, false);
         }
@@ -1127,6 +1311,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
                     static_cast<unsigned long long>(arena->cpu_addr + arena->size_bytes));
     }
     EnsureResident(arena, first_block, last_block);
+    if (AsyncAccessTracking()) {
+        NoteAsyncAccess(is_texel_buffer ? "texel buffer" : "buffer", device_addr, size, is_written,
+                        memory_tracker->IsRegionCpuModified(device_addr, size));
+    }
     const u64 uploaded_before = BbStats::buffer_upload_bytes.load(std::memory_order_relaxed);
     // bbport diagnosis: BB_MISSED_WRITE_CHECK=1 — read-only buffers whose guest bytes changed
     // since their last use while the page tracker saw no CPU write (the GPU keeps old data).

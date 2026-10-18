@@ -1266,6 +1266,7 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             buffer_cache.IsRegionGpuModified(address, size) || PendingWriteOverlaps(address, size)) {
             continue;
         }
+        VideoCore::NoteAsyncAccess("constant ring copy", address, size, false, true);
         copy(index, nullptr, address, size);
     }
 }
