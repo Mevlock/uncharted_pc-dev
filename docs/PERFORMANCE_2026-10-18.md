@@ -82,9 +82,9 @@ Without early submits the GPU idles most of the time yet runs 15 ms behind (work
 late batches), so the CPU's waits for GPU data grow; without tight writes it is busy with skinning
 barriers. U2's compute queues are guest queues 1–6 (U3's are 2–7).
 
-Only the two big changes could be switched off: adding `BB_COMPUTE_DRAIN_ALL=1` and
-`BB_COMPUTE_RELEASE_DRAIN=1` (the old compute-queue drains) stalled U2 right after boot, so those
-switches should be treated as unsupported with the current code.
+These two tables toggle only the two big changes. A first run with every off switch set ended
+right after boot, but it did not repeat: each switch alone works in U3 and all of them together
+work in U2 (the "Result" table above). That run was most likely closed during U2's slow boot.
 
 ## The changes, in the order they landed
 
