@@ -28,6 +28,16 @@ native 3440×1440 (b20ace7), frame generation off, no frame rate cap:
 | `BB_TIGHT_WRITES=0 BB_FLUSH_EVERY_DRAWS=0` | ~49 |
 | Defaults | **~93** (+90%) |
 
+Uncharted 1 (the jungle with Sully after "Continue"), native 3440×1440 (82f9373), same setup:
+
+| Uncharted 1 | FPS (last 30 s of 50) |
+|---|---|
+| `BB_TIGHT_WRITES=0 BB_FLUSH_EVERY_DRAWS=0` | ~115 |
+| Defaults | **~147** (+28%) |
+
+The gain follows the skinning load: two characters in U1's jungle, a crowd in U3's square, several
+in U2's museum.
+
 Only the two big changes could be switched off: adding `BB_COMPUTE_DRAIN_ALL=1` and
 `BB_COMPUTE_RELEASE_DRAIN=1` (the old compute-queue drains) stalled U2 right after boot, so those
 switches should be treated as unsupported with the current code.
