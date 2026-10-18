@@ -226,8 +226,10 @@ void Menu() {
     }
     const bool upscaler_on = s.upscaler != BbSettings::UpscalerOff;
     const bool taa = s.upscaler == BbSettings::UpscalerTaa;
+    // Uncharted: the upscaler only smooths the game's own frame (the renderer sets this).
+    const bool game_size = s.game_size_only.load(std::memory_order_relaxed);
     ImGui::BeginDisabled(!upscaler_on);
-    ImGui::BeginDisabled(taa);
+    ImGui::BeginDisabled(taa || game_size);
     int preset = taa ? BbSettings::NativeAA : s.preset.load();
     char preset_label[64];
     std::snprintf(preset_label, sizeof(preset_label), "%s (x%.1f)", BbSettings::PresetName(preset),
@@ -248,7 +250,10 @@ void Menu() {
         ImGui::EndCombo();
     }
     ImGui::EndDisabled();
-    if (taa) {
+    if (game_size) {
+        Hint("Uncharted: the upscaler works as anti-aliasing on the game's frame (Native AA); the "
+             "presets do not apply. For a sharper picture set Render resolution in the launcher.");
+    } else if (taa) {
         ImGui::TextWrapped("TAA smooths the scene at the output resolution, without the FSR model or upscaling. "
                            "The saved FSR preset comes back when FSR is selected.");
     }
@@ -344,6 +349,7 @@ void Menu() {
     }
 
     ImGui::SeparatorText("Output resolution");
+    ImGui::BeginDisabled(game_size);
     static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
     int output = s.output_res;
     if (ImGui::BeginCombo("Output resolution", outputs[output])) {
@@ -354,7 +360,11 @@ void Menu() {
         }
         ImGui::EndCombo();
     }
-    if (BbSettings::FixedRenderSession()) {
+    if (game_size) {
+        Hint("Uncharted: the frame keeps the game's size (1920 x 1080, or the launcher's Render "
+             "resolution) and is scaled to the window afterwards (launcher: Upscaling, Sharpening). "
+             "These two settings do not apply.");
+    } else if (BbSettings::FixedRenderSession()) {
         Hint("The size of the finished frame and interface. The preset sets the scene size relative to the "
              "output: 4K Performance = 1920x1080. Applies after restarting the game.");
     } else {
@@ -372,10 +382,13 @@ void Menu() {
         }
         ImGui::EndCombo();
     }
-    Hint("On: the output resolution and preset change without a restart, but the game's post-processing "
-         "stays at 1080p, noticeably slower on a Steam Deck and older graphics cards. "
-         "Off: everything draws at the preset's size, and a change needs a restart. Auto turns it on "
-         "on powerful dedicated graphics cards. Applies after restarting the game.");
+    if (!game_size) {
+        Hint("On: the output resolution and preset change without a restart, but the game's post-processing "
+             "stays at 1080p, noticeably slower on a Steam Deck and older graphics cards. "
+             "Off: everything draws at the preset's size, and a change needs a restart. Auto turns it on "
+             "on powerful dedicated graphics cards. Applies after restarting the game.");
+    }
+    ImGui::EndDisabled();
     // No game-effect, cheat or model-detail toggles here: those were Bloodborne patches
     // (scripts/patches.py, patches/Bloodborne.xml), which the Uncharted launch never applies.
     bool restart = s.object_motion != s.startup_object_motion ||

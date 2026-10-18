@@ -307,6 +307,7 @@ bool TemporalUpscaler::OnFrameStart() {
         return env && env[0];
     }();
     const bool native_only = camera_motion.VelocityMode() && !velocity_scaled;
+    BbSettings::Get().game_size_only.store(native_only, std::memory_order_relaxed);
     const int preset = native_only ? 0 : BbSettings::RenderPreset();
     if (applied_preset != preset || settings.upscaler == BbSettings::UpscalerOff) failed = false;
     const bool active = Active();
