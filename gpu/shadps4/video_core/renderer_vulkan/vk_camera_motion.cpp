@@ -287,6 +287,39 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     camera.valid = c[9] != 0.0f &&
                    std::all_of(camera.to_previous_clip.begin(), camera.to_previous_clip.end(),
                                [](float v) { return std::isfinite(v); });
+    // bbport: camera cuts (a melee move's own camera, cutscene shots). The velocity pass's
+    // previous camera is then the other shot: motion vectors far off screen, and the upscaler
+    // reprojecting its history along them smeared the frame into vertical streaks (U3's pub).
+    // A turn of more than ~35 degrees or a jump of more than 2 units in one frame is a cut:
+    // no motion that frame, and the history is reset (ConsumeCut).
+    {
+        const std::array<float, 3> forward{c[14], c[18], c[22]}, position{c[15], c[19], c[23]};
+        const float length = std::sqrt(forward[0] * forward[0] + forward[1] * forward[1] +
+                                       forward[2] * forward[2]);
+        camera.cut = false;
+        if (std::isfinite(length) && length > 0.0f) {
+            if (has_last_camera) {
+                const float dot = (forward[0] * last_forward[0] + forward[1] * last_forward[1] +
+                                   forward[2] * last_forward[2]) / length;
+                const float dx = position[0] - last_position[0], dy = position[1] - last_position[1],
+                            dz = position[2] - last_position[2];
+                const float moved = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (dot < 0.82f || moved > 2.0f) {
+                    camera.cut = true;
+                    camera_cut.store(true, std::memory_order_relaxed);
+                    static int noted = 0;
+                    if (noted++ < 20) {
+                        std::printf("Camera motion: camera cut (turned %.0f degrees, moved %.2f): "
+                                    "upscaler history reset\n",
+                                    std::acos(std::clamp(dot, -1.0f, 1.0f)) * 57.29578f, moved);
+                    }
+                }
+            }
+            last_forward = {forward[0] / length, forward[1] / length, forward[2] / length};
+            last_position = position;
+            has_last_camera = true;
+        }
+    }
     // The shown camera's heading for the mouse controls (bbgpu_camera_yaw: which game camera is on
     // screen), and with BB_CAMERA_LOG=1 its direction every frame, for measuring how the game turns
     // the camera from the right stick.
@@ -322,7 +355,7 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
         .size = {float(width), float(height)},
         .jitter = jitter,
         .previous_jitter = previous_jitter,
-        .mode = camera.valid ? 2u : 3u,
+        .mode = camera.valid && !camera.cut ? 2u : 3u,
     };
     const vk::DescriptorImageInfo depth_info{.imageView = depth_view,
                                              .imageLayout = vk::ImageLayout::eGeneral};

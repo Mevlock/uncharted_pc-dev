@@ -2018,6 +2018,9 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
         std::printf("Upscaler: %s %ux%u -> %ux%u into the UI image\n",
                     UseDlss() ? "DLSS" : UseFsr4() ? "FSR 4" : "FSR 3", w, h, ow, oh);
     }
+    if (camera_motion.ConsumeCut()) {
+        reset = true; // a camera cut: the history is of the other shot
+    }
     const auto frame_jitter = jitter;
     jitter = velocity_jitter; // the frame's own jitter (OnFrameStart already chose the next)
     const bool ok = DispatchToUi(cmdbuf, color, depth, color.GetImage(), color_view,

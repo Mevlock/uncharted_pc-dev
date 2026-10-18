@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <array>
 #include <vector>
 
@@ -63,6 +64,10 @@ public:
     [[nodiscard]] bool IsVelocityShader(u64 ps_hash) const noexcept;
     /// The velocity pass's constant buffer (`dwords` of it).
     void OnVelocityConstants(const float* data, u32 dwords);
+    /// Whether a camera cut happened since the last call (the upscaler resets its history).
+    [[nodiscard]] bool ConsumeCut() noexcept {
+        return camera_cut.exchange(false, std::memory_order_relaxed);
+    }
     /// Records the motion vector pass from the velocity pass's camera into `motion_view`
     /// (RG16F storage, General), pixels, previous minus current; zero without that camera.
     void RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
@@ -131,7 +136,12 @@ private:
         std::array<float, 4> uv_to_view{}; ///< view x = z (a u + c), view y = z (b v + d)
         std::array<float, 2> depth_to_z{}; ///< z = y / (depth - x)
         bool valid = false;
+        bool cut = false; ///< a camera cut this frame: no motion, history reset
     } velocity_camera;
+    /// The last frame's camera (world forward and position), for detecting cuts.
+    std::array<float, 3> last_forward{}, last_position{};
+    bool has_last_camera = false;
+    std::atomic<bool> camera_cut{false};
 
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pipeline_layout;
