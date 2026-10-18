@@ -95,6 +95,10 @@ SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'
 ANTI_ALIASING = [('off', "Off (the game's own)"), ('taa', 'TAA'), ('fsr3', 'AMD FSR 3.1 (Native AA)'),
                  ('fsr4', 'AMD FSR 4 (Native AA)'), ('dlss', 'NVIDIA DLSS (DLAA, GeForce RTX)')]
 FSR411 = ('fsr411', 'AMD FSR 4.1.1 (Native AA)')
+# The DLSS model (BB_DLSS_PRESET): the driver's default for DLAA is preset K (DLSS 4);
+# L and M are the DLSS 4.5 models.
+DLSS_MODELS = [('default', "Driver default (K, DLSS 4)"), ('K', 'K (DLSS 4)'),
+               ('L', 'L (DLSS 4.5)'), ('M', 'M (DLSS 4.5)')]
 AA_SHARPNESS = [('0', 'Off'), ('0.2', 'Low'), ('0.4', 'Medium'), ('0.7', 'High')]
 # Frames generated between two of the game's (BB_FRAME_GEN, BB_FRAME_GEN_MULTIPLIER).
 FRAME_GENERATION = [('off', 'Off'), ('fsr3', 'AMD FSR 3 Frame Generation (any GPU)'),
@@ -154,7 +158,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
                 'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
-                'anti_aliasing': 'off', 'aa_sharpness': '0.2', 'frame_generation': 'off',
+                'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'pad_invert_y': False, 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True}
@@ -437,6 +441,8 @@ def game_environment(s, start=None):
     if sharpening != 'off':
         env['BB_RCAS_ATTENUATION'] = sharpening
     env['BB_UPSCALER'] = str(s.get('anti_aliasing') or 'off')
+    if str(s.get('dlss_model') or 'default') != 'default':
+        env['BB_DLSS_PRESET'] = str(s.get('dlss_model'))
     env['BB_FSR_SHARPNESS'] = str(s.get('aa_sharpness') or '0')
     env['BB_FRAME_GEN'] = str(s.get('frame_generation') or 'off')
     env['BB_FRAME_GEN_MULTIPLIER'] = str(s.get('frame_gen_multiplier') or '2')
@@ -1131,6 +1137,10 @@ class Launcher:
                  _('Temporal anti-aliasing at the games\' 1920 × 1080, with their own motion vectors: '
                    'smoother edges and less shimmering than the games\' own. DLSS needs a GeForce RTX; '
                    'FSR 4 runs best on a Radeon RX 7000/9000 or a GeForce RTX 40/50.'))
+        self.row(f, _('DLSS model'), self.choice(f, 'dlss_model', DLSS_MODELS, 34),
+                 _('With NVIDIA DLSS: the AI model it uses. K is NVIDIA\'s choice for this (DLAA) mode; '
+                   'L and M are the newer DLSS 4.5 models, made for heavier upscaling. Compare them '
+                   'in motion.'))
         self.row(f, _('Anti-aliasing sharpness'), self.choice(f, 'aa_sharpness', AA_SHARPNESS, 34))
         self.section(f, _('Frame generation'))
         hint = _('Frames made between two of the game\'s, for smoother motion: 60 FPS shows as 120. '

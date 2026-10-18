@@ -208,6 +208,23 @@ bool Dlss::HasFeature(const FeatureDesc& desc) const {
     return impl->feature && *impl->feature == desc;
 }
 
+/// bbport: BB_DLSS_PRESET: the DLSS model (NVSDK_NGX_DLSS_Hint_Render_Preset): J, K (DLSS 4,
+/// the driver's default for DLAA), L, M (DLSS 4.5), or 0 / unset for the driver's choice.
+static u32 DlssPreset() {
+    static const u32 preset = [] {
+        const char* env = std::getenv("BB_DLSS_PRESET");
+        if (!env || !env[0]) {
+            return 0u;
+        }
+        const char c = char(env[0] & ~0x20);
+        const u32 value = c == 'J' ? 10u : c == 'K' ? 11u : c == 'L' ? 12u : c == 'M' ? 13u
+                                                                            : u32(std::strtoul(env, nullptr, 10));
+        std::printf("DLSS: model preset %s (%u)\n", env, value);
+        return value;
+    }();
+    return preset;
+}
+
 bool Dlss::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
     if (!impl->available) {
         return false;
@@ -215,7 +232,7 @@ bool Dlss::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
     impl->feature.reset();
     const BbDlssFeature feature{desc.input_width,  desc.input_height, desc.output_width,
                                 desc.output_height, desc.quality,      0,
-                                0,                  desc.hdr ? 1 : 0};
+                                DlssPreset(),       desc.hdr ? 1 : 0};
     if (!impl->api->CreateFeature(command, &feature)) {
         return false;
     }
