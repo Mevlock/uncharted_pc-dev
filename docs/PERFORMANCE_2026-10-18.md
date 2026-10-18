@@ -9,6 +9,22 @@ recorded by hand).
 
 ## Result
 
+All three games, native 3440×1440, frame generation off, no frame rate cap, 50 s in each scene
+after "Continue" (measured 2026-10-19): every off switch set
+(`BB_TIGHT_WRITES=0 BB_FLUSH_EVERY_DRAWS=0 BB_COMPUTE_RELEASE_DRAIN=1 BB_COMPUTE_DRAIN_ALL=1
+BB_PREDICATION_DRAIN=1 BB_GPU_THREAD_PRIORITY=0`) against the defaults.
+
+| Game (scene) | All changes off | All changes on | Gain |
+|---|---|---|---|
+| Uncharted 1 (the jungle with Sully) | ~112 FPS | ~151 FPS | +35% |
+| Uncharted 2 (Chapter 2, the Istanbul museum balcony) | ~44 FPS | ~96 FPS | +118% |
+| Uncharted 3 (Chapter 2, the Cartagena square) | ~43 FPS | ~97 FPS | +126% |
+
+U3 at native (~97) runs about as fast as at "balanced" 2016×832 (~100): the GPU command thread on
+the CPU sets the frame rate there, not the GPU.
+
+The measurements during the day, U3 at "balanced":
+
 | Uncharted 3, frame generation off | Start of day | Now |
 |---|---|---|
 | Cartagena square | ~42 FPS | **~100 FPS** |
