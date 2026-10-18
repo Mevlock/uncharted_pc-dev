@@ -183,6 +183,21 @@ void Liverpool::Process(std::stop_token stoken) {
 
                 if (curr_qid == GfxQueueId) {
                     Vulkan::SubmitCheckPop();
+                    // bbport: the recorded work is submitted after a guest command buffer once
+                    // BB_FLUSH_EVERY_DRAWS (250; 0: off) draws accumulated, not only at the end of
+                    // the frame (submit done): the GPU starts on the frame earlier, so a guest
+                    // write that must read GPU data back (DownloadOnSideQueue) waits for less of
+                    // it. U3's Cartagena: 55 -> 72 FPS (500: 67, 125: 72, 60: 71).
+                    static const u64 flush_draws = [] {
+                        const char* env = std::getenv("BB_FLUSH_EVERY_DRAWS");
+                        return env ? std::strtoull(env, nullptr, 10) : 250ull;
+                    }();
+                    static u64 draws_at_flush = 0;
+                    const u64 draws_now = BbStats::draws.load(std::memory_order_relaxed);
+                    if (flush_draws && rasterizer && draws_now - draws_at_flush >= flush_draws) {
+                        draws_at_flush = draws_now;
+                        rasterizer->Flush();
+                    }
                 }
                 std::scoped_lock lock{queue.m_access};
                 queue.submits.pop();
