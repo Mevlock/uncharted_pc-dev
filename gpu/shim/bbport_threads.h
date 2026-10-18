@@ -6,6 +6,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <thread>
 #ifdef _WIN32
 #include <bit>
@@ -31,6 +32,19 @@ inline unsigned Available() {
 inline void MakeBackground() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
 }
+
+/// bbport (from the Bloodborne PC port, BB_GPU_THREAD_PRIORITY): the GPU command, draw
+/// recording and Vulkan recording threads above the game's ~60 threads, so a busy CPU does not
+/// preempt the thread that sets the frame rate. BB_GPU_THREAD_PRIORITY=0: normal priority.
+inline void MakeRenderThread() {
+    static const bool raise = [] {
+        const char* env = std::getenv("BB_GPU_THREAD_PRIORITY");
+        return !(env && env[0] == '0');
+    }();
+    if (raise) {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    }
+}
 #else
 
 /// Hardware threads available to the process.
@@ -50,6 +64,9 @@ inline void MakeBackground() {
         setpriority(PRIO_PROCESS, static_cast<id_t>(gettid()), 19);
     }
 }
+
+/// Windows only (see above).
+inline void MakeRenderThread() {}
 #endif
 
 } // namespace BbThreads

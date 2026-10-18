@@ -9,6 +9,7 @@
 #include <time.h>
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
+#include "bbport_threads.h"
 #include <cstdio>
 #include <boost/preprocessor/stringize.hpp>
 
@@ -121,6 +122,7 @@ void Liverpool::ProcessCommands() {
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
+    BbThreads::MakeRenderThread();
     on_processor_thread = true;
 #ifndef _WIN32
     if (clockid_t clock; pthread_getcpuclockid(pthread_self(), &clock) == 0) {
@@ -1253,6 +1255,22 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     // registers: ApplyGraphicsRegisterPacket
                 } else if (event->event_index.Value() == EventIndex::ZpassDone) {
                     if (event->event_type.Value() == EventType::PixelPipeStatDump) {
+                        // bbport diagnosis (BB_FRAME_STATS): how many occlusion query results the
+                        // game reads. They always say "visible", so it draws everything it tests.
+                        static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
+                        if (stats) {
+                            static u64 dumps = 0;
+                            static auto window = std::chrono::steady_clock::now();
+                            ++dumps;
+                            const auto now = std::chrono::steady_clock::now();
+                            if (now - window >= std::chrono::seconds(5)) {
+                                const double seconds = std::chrono::duration<double>(now - window).count();
+                                std::printf("Occlusion queries: %.0f results/s read (always visible)\n",
+                                            dumps / seconds);
+                                dumps = 0;
+                                window = now;
+                            }
+                        }
                         static constexpr u64 OcclusionCounterValidMask = 0x8000000000000000ULL;
                         static constexpr u64 OcclusionCounterStep = 0x2FFFFFFULL;
                         u64* results = event->Address<u64*>();
