@@ -134,13 +134,31 @@ const char* RenderSizeText() {
     return text.c_str();
 }
 
-const char* UpscalerName(int upscaler) {
-    return upscaler == BbSettings::UpscalerFsr3     ? "FSR 3.1"
-           : upscaler == BbSettings::UpscalerFsr4   ? "FSR 4"
-           : upscaler == BbSettings::UpscalerFsr411 ? "FSR 4.1.1"
+/// The counter's render size: "2288x960 Q" (Balanced B, Performance P), "3440x1440".
+const char* ShortRenderText() {
+    static const std::string text = [] {
+        const char* render = std::getenv("BB_RENDER_RES");
+        const char* output = std::getenv("BB_OUTPUT_RES");
+        if (!render || !render[0]) {
+            return std::string("1920x1080");
+        }
+        if (!output || !output[0] || std::strcmp(render, output) == 0) {
+            return std::string(render);
+        }
+        const float render_w = float(std::atoi(render)), output_w = float(std::atoi(output));
+        const float scale = render_w > 0.0f ? output_w / render_w : 1.0f;
+        return std::string(render) + (scale < 1.6f ? " Q" : scale < 1.85f ? " B" : " P");
+    }();
+    return text.c_str();
+}
+
+const char* UpscalerShortName(int upscaler) {
+    return upscaler == BbSettings::UpscalerFsr3     ? "FSR3"
+           : upscaler == BbSettings::UpscalerFsr4   ? "FSR4"
+           : upscaler == BbSettings::UpscalerFsr411 ? "FSR4.1"
            : upscaler == BbSettings::UpscalerTaa    ? "TAA"
            : upscaler == BbSettings::UpscalerDlss   ? "DLSS"
-                                                    : "no AA";
+                                                    : "NoAA";
 }
 
 void SetOpen(bool value) {
@@ -340,10 +358,10 @@ void Menu() {
     ImGui::BeginDisabled(!s.show_fps);
     Checkbox("Frame time graph", s.show_fps_graph);
     ImGui::EndDisabled();
-    Hint("The counter shows the game's frame rate, its 1% low (the average of the slowest 1% of "
-         "frames: stutter) and slowest frame over the last 5 seconds, the frames on screen with "
-         "frame generation, and the render size. The graph: the game's frame times, a spike is "
-         "a hitch.");
+    Hint("Top line, the game's own frames: FPS and frame time, 1%L the average of the slowest "
+         "1% (stutter), MAX the slowest frame (last 5 seconds). Below: the anti-aliasing, the "
+         "render size (Q, B, P: Quality, Balanced, Performance) and with frame generation FG, "
+         "the frames on screen. The graph: the game's frame times, a spike is a hitch.");
 
     // Diagnosis and tuning, kept out of the way: the defaults are right for the three games.
     if (ImGui::CollapsingHeader("Developer options")) {
@@ -429,22 +447,32 @@ void FpsCounter() {
                                    viewport->WorkPos.y + pad),
                             ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f * base_scale, 4.0f * base_scale));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f * base_scale, 1.0f * base_scale));
     ImGui::Begin("##fps", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::SetWindowFontScale(0.8f);
     const auto& s = BbSettings::Get();
     UpdateGameStats();
-    ImGui::Text("%.0f FPS  %.1f ms   1%% low %.0f   slowest %.1f ms", game_fps,
+    // "60 FPS 16.7ms 1%L 52 MAX 24ms": the game's own frames; 1%L the average of the slowest
+    // 1%, MAX the slowest frame (5 seconds).
+    ImGui::Text("%.0f FPS %.1fms  1%%L %.0f  MAX %.0fms", game_fps,
                 game_fps > 0.0f ? 1000.0f / game_fps : 0.0f, game_low_fps, game_worst_ms);
-    // Generated frames show as more presents than game frames (none in menus and movies).
+    // "DLSS 2288x960 Q  FG 2x 120": anti-aliasing, render size (Quality, Balanced,
+    // Performance), and with frame generation adding frames (none in menus and movies) the
+    // frames on screen.
     const float shown_fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
     if (s.frame_gen != BbSettings::FrameGenOff && shown_fps > game_fps * 1.2f) {
-        ImGui::Text("%.0f on screen  (%s frame gen %dx)", shown_fps,
-                    s.frame_gen == BbSettings::FrameGenDlss ? "DLSS" : "FSR 3",
-                    s.frame_gen == BbSettings::FrameGenDlss ? s.frame_gen_multiplier.load() : 2);
+        ImGui::TextDisabled("%s %s  FG %dx %.0f", UpscalerShortName(s.upscaler),
+                            ShortRenderText(),
+                            s.frame_gen == BbSettings::FrameGenDlss ? s.frame_gen_multiplier.load()
+                                                                    : 2,
+                            shown_fps);
+    } else {
+        ImGui::TextDisabled("%s %s", UpscalerShortName(s.upscaler), ShortRenderText());
     }
-    ImGui::TextDisabled("%s  %s", RenderSizeText(), UpscalerName(s.upscaler));
     if (s.show_fps_graph && game_frame_count > 1) {
         static float graph[GraphFrames];
         const int n = std::min(game_frame_count, GraphFrames);
@@ -454,12 +482,11 @@ void FpsCounter() {
             top = std::max(top, graph[i]);
         }
         // At least 33 ms high, so a steady 60 or 120 sits low and a hitch stands out.
-        char label[32];
-        std::snprintf(label, sizeof(label), "%.0f ms", top);
-        ImGui::PlotLines("##frametimes", graph, n, 0, label, 0.0f, std::max(top, 33.3f),
-                         ImVec2(320.0f * base_scale, 60.0f * base_scale));
+        ImGui::PlotLines("##frametimes", graph, n, 0, nullptr, 0.0f, std::max(top, 33.3f),
+                         ImVec2(ImGui::GetContentRegionAvail().x, 28.0f * base_scale));
     }
     ImGui::End();
+    ImGui::PopStyleVar(2);
 }
 
 } // namespace
