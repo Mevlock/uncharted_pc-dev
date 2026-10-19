@@ -35,7 +35,7 @@ DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
 CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'uncharted-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
-AUTHOR = 'SuperMedo + Mevlock'  # fork: upstream author + this fork's
+AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
 VERSION = '0.3.6.1'  # fork: upstream 0.3.6 + this fork's changes
 RELEASES_API = 'https://api.github.com/repos/Supermedo/uncharted_pc/releases/latest'
