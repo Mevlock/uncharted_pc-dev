@@ -5371,8 +5371,15 @@ bool Rasterizer::TakeSceneFrame() noexcept {
                         menu_draws);
         }
     }
-    const bool scene = gameplay;
-    g_last_frame_scene.store(scene, std::memory_order_relaxed);
+    // BB_ULTRAWIDE=always (launcher: Always fill): the camera stays widened and every frame fills
+    // the window, menus and movies stretched, for players bothered by wrong switches. The UI
+    // squeeze still follows the detection (g_last_frame_scene).
+    static const bool always = [] {
+        const char* env = std::getenv("BB_ULTRAWIDE");
+        return env && std::strcmp(env, "always") == 0;
+    }();
+    g_last_frame_scene.store(gameplay, std::memory_order_relaxed);
+    const bool scene = always || gameplay;
     // The game's camera: widened for gameplay, its own for menus and title screens.
     runtime_ultrawide_select(scene ? 1 : 0);
     return scene;

@@ -94,7 +94,9 @@ RENDER_SCALES = {'native': 1.0, 'quality': 1.5, 'balanced': 1.7, 'performance': 
 RENDER_PIXELS_MAX = 3440 * 1440
 # Wider than 16:9 (BB_ULTRAWIDE): the games' view is widened to the window, or the screen in
 # fullscreen, and the picture fills it; in memory, the game files are not changed.
-ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'), ('0', "16:9 with black bars (the games' own)")]
+ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'),
+             ('always', 'Always fill (menus stretched)'),
+             ('0', "16:9 with black bars (the games' own)")]
 # The games' field of view in percent (BB_FOV), on every screen.
 FIELDS_OF_VIEW = [('100', "100% (the games' own)"), ('110', '110%'), ('120', '120%'), ('130', '130%')]
 SCALERS = [('fsr1', 'FSR 1 (AMD FidelityFX, sharp)'), ('bilinear', 'Smooth (bilinear)')]
@@ -1170,7 +1172,8 @@ class Launcher:
         self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
                  _('On a screen or window wider than 16:9 (21:9, 32:9) gameplay shows more at the sides '
                    'and fills it. Menus, loading screens and cutscene videos stay 16:9; the in-game HUD '
-                   'is stretched for now.'))
+                   'is stretched for now. Always fill never switches to 16:9 (if the switching '
+                   'misfires for you): menus, loading screens and videos are then stretched.'))
         self.row(f, _('Field of view'), self.choice(f, 'fov', FIELDS_OF_VIEW, 34),
                  _('Shows more of the scene in every direction, also when aiming and in cutscenes.'))
         self.row(f, _('Texture filtering'), self.choice(f, 'anisotropy', ANISOTROPY, 34),
