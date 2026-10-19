@@ -731,13 +731,7 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         t[k++]=0x48; t[k++]=0x89; t[k++]=0xf2;                      /* mov rdx, rsi */
         const uintptr_t base=(uintptr_t)image, host=(uintptr_t)c->callback;
         t[k++]=0x49; t[k++]=0xb8; memcpy(t+k,&base,8); k+=8;        /* movabs r8, image */
-        if (c->stack_arg) {
-            /* the first stack argument: above the return address and the nine saved registers
-             * (pushfq, rax, rcx, rdx, r8-r11, rbx: 0x48 bytes) that rbx points below */
-            t[k++]=0x4c; t[k++]=0x8b; t[k++]=0x4b; t[k++]=0x50;     /* mov r9, [rbx+0x50] */
-        } else {
-            t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1;                  /* mov r9, r14 */
-        }
+        t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1;                      /* mov r9, r14 */
         t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;        /* movabs rax, callback */
         t[k++]=0xff; t[k++]=0xd0;                                   /* call rax */
         for (int x=0;x<8;++x) {                                     /* movdqu xmmx, [rsp+0x20+16x] */

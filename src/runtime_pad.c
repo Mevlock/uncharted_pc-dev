@@ -422,15 +422,9 @@ static void __attribute__((ms_abi)) u3_camera_input(uint64_t camera, uint64_t lo
     (void)image; (void)r14;
     aim_camera((float *)(uintptr_t)look, camera ? (float *)(uintptr_t)(camera+0x7874) : NULL, 105.0f);
 }
-/* U2 1.02 (EU): camera input at image+0x16d920 (look direction rsi, stick rdx, the camera its first
- * stack argument: the callback gets it in place of r14). */
-static void __attribute__((ms_abi)) u2_camera_input(uint64_t unused, uint64_t look, uint64_t image, uint64_t camera) {
-    (void)unused; (void)image;
-    aim_camera((float *)(uintptr_t)look, camera ? (float *)(uintptr_t)(camera+0x9e60) : NULL, 135.0f);
-}
-/* CUSA02344 1.02 (BilalReloaded's build, untested here): the same steps at other addresses, and
- * U2's camera is its first argument there (his runtime_mouselook.c). */
-static void __attribute__((ms_abi)) u2_camera_input_rdi(uint64_t camera, uint64_t look, uint64_t image, uint64_t r14) {
+/* U2 1.02 (EU): camera input at image+0x16d920 (camera rdi, look direction rsi, stick rdx); the
+ * same in CUSA02344 1.02 at image+0x428f40 (BilalReloaded's build, untested here). */
+static void __attribute__((ms_abi)) u2_camera_input(uint64_t camera, uint64_t look, uint64_t image, uint64_t r14) {
     (void)image; (void)r14;
     aim_camera((float *)(uintptr_t)look, camera ? (float *)(uintptr_t)(camera+0x9e60) : NULL, 135.0f);
 }
@@ -600,20 +594,20 @@ static const unsigned char u2_leg_ik_zero[]={
 };
 _Static_assert(sizeof(u2_leg_ik_zero)==sizeof(u2_leg_ik_assert_code),"same size");
 static const RuntimeGuestCallback guest_callbacks[]={
-    {"U3 heap free (GPU data)",0x494a70,u3_heap_free_code,sizeof(u3_heap_free_code),6,u3_heap_free,NULL,0},
-    {"U1 follow camera (mouse)",0xaecf0,u1_follow_camera_code,sizeof(u1_follow_camera_code),6,u1_follow_camera,NULL,0},
-    {"U1 pad update (mouse)",0x117200,u1_pad_update_code,sizeof(u1_pad_update_code),6,u1_pad_update,NULL,0},
-    {"U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL,0},
-    {"U2 follow camera (mouse)",0x171fe0,u2_follow_camera_code,sizeof(u2_follow_camera_code),6,u2_follow_camera,NULL,0},
-    {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL,0},
-    {"U3 camera input (raw aim)",0x11d4e0,u3_camera_input_code,sizeof(u3_camera_input_code),6,u3_camera_input,NULL,0},
-    {"U2 camera input (raw aim)",0x16d920,u2_camera_input_code,sizeof(u2_camera_input_code),6,u2_camera_input,NULL,1},
-    {"U3 camera input (raw aim, CUSA02344)",0x4e42f0,u3_camera_input_02344_code,sizeof(u3_camera_input_02344_code),6,u3_camera_input,NULL,0},
-    {"U2 camera input (raw aim, CUSA02344)",0x428f40,u2_camera_input_02344_code,sizeof(u2_camera_input_02344_code),6,u2_camera_input_rdi,NULL,0},
+    {"U3 heap free (GPU data)",0x494a70,u3_heap_free_code,sizeof(u3_heap_free_code),6,u3_heap_free,NULL},
+    {"U1 follow camera (mouse)",0xaecf0,u1_follow_camera_code,sizeof(u1_follow_camera_code),6,u1_follow_camera,NULL},
+    {"U1 pad update (mouse)",0x117200,u1_pad_update_code,sizeof(u1_pad_update_code),6,u1_pad_update,NULL},
+    {"U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
+    {"U2 follow camera (mouse)",0x171fe0,u2_follow_camera_code,sizeof(u2_follow_camera_code),6,u2_follow_camera,NULL},
+    {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL},
+    {"U3 camera input (raw aim)",0x11d4e0,u3_camera_input_code,sizeof(u3_camera_input_code),6,u3_camera_input,NULL},
+    {"U2 camera input (raw aim)",0x16d920,u2_camera_input_code,sizeof(u2_camera_input_code),6,u2_camera_input,NULL},
+    {"U3 camera input (raw aim, CUSA02344)",0x4e42f0,u3_camera_input_02344_code,sizeof(u3_camera_input_02344_code),6,u3_camera_input,NULL},
+    {"U2 camera input (raw aim, CUSA02344)",0x428f40,u2_camera_input_02344_code,sizeof(u2_camera_input_02344_code),6,u2_camera_input,NULL},
     {"U2 camera focus NaN reset",0x33ba13,u2_focus_assert_code,sizeof(u2_focus_assert_code),
-     sizeof(u2_focus_reset),NULL,u2_focus_reset,0},
+     sizeof(u2_focus_reset),NULL,u2_focus_reset},
     {"U2 leg IK NaN delta",0x8ec618,u2_leg_ik_assert_code,sizeof(u2_leg_ik_assert_code),
-     sizeof(u2_leg_ik_zero),NULL,u2_leg_ik_zero,0},
+     sizeof(u2_leg_ik_zero),NULL,u2_leg_ik_zero},
 };
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     *count=sizeof(guest_callbacks)/sizeof(*guest_callbacks);

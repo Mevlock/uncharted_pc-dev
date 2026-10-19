@@ -103,9 +103,6 @@ typedef struct {
     size_t signature_size, moved;
     void (__attribute__((ms_abi)) *callback)(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14);
     const unsigned char *patch;
-    /* 1: the callback's last argument is the guest function's first stack argument (its 7th
-     * integer argument) instead of r14. */
-    int stack_arg;
 } RuntimeGuestCallback;
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
 #endif
