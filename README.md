@@ -68,6 +68,20 @@ tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
 
 ### Fixes
 
+- **Uncharted 3: Sully's shirt flashing** (Cartagena, chapter 2). For single frames, huge dark or
+  coloured triangles shot out of Sully's shirt across the screen, and their shadows with them,
+  mostly on NVIDIA and Intel graphics, only when the game ran above 30 FPS.
+
+  The shirt is simulated as cloth on the GPU. One step of that simulation adds up pairs of
+  values in the GPU's fast shared memory, and half of them come from past the end of the space
+  it reserved (2 KB reserved, 4 KB read). On the PS4 a read outside that space simply returns 0, so the game never noticed.
+  On a PC the translated shader read whatever lay beyond it instead (scratch data, or a value
+  that means "not a number"), the cloth solve went wrong, and the shirt's vertices flew off for
+  that frame. Above 30 FPS the game runs the solver with fewer steps per frame, which is why
+  30 FPS looked clean. The fix makes every out-of-range shared-memory read in translated shaders
+  return 0 and drops out-of-range writes, as the PS4 hardware does, so the cloth math gets the
+  zeros it was written for. It cost hours of captures to find: the inputs were all correct and a
+  replay of a bad frame looked clean, because the stray values only existed live.
 - Uncharted 3: missing tutorial button text, treasure glints turning into big white shapes at
   reduced render sizes, a crash in the frame generation when the picture size changed between
   menu and gameplay.
@@ -107,8 +121,7 @@ tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
   60 on the Display page and open an issue with your `user\last_run.log`.
 - **Uncharted 3:** green or black shapes flashed on some characters (Sully's shirt in Cartagena),
   mostly on NVIDIA and Intel graphics. The cloth shader reads past its shared memory, which the PS4
-  answers with zeros and the translated shader did not. Fixed after 0.3.3. If you still see it,
-  open an issue with your `user\last_run.log`.
+  answers with zeros and the translated shader did not. Fixed in this fork (see Fixes above).
 - **Crash with "ASSERTION: GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick"**
   (mostly U1 after the first cutscene): the game expected the GPU side to be done with a frame it
   wanted to reuse, and stopped when it wasn't yet (shaders building on a first run). Fixed in
