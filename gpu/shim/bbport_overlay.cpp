@@ -463,15 +463,17 @@ void FpsCounter() {
     // "DLSS 2288x960 Q  FG 2x 120": anti-aliasing, render size (Quality, Balanced,
     // Performance), and with frame generation adding frames (none in menus and movies) the
     // frames on screen.
+    // Lighter than TextDisabled, which is hard to read over the game.
+    const ImVec4 second_line(0.8f, 0.8f, 0.8f, 1.0f);
     const float shown_fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
     if (s.frame_gen != BbSettings::FrameGenOff && shown_fps > game_fps * 1.2f) {
-        ImGui::TextDisabled("%s %s  FG %dx %.0f", UpscalerShortName(s.upscaler),
+        ImGui::TextColored(second_line, "%s %s  FG %dx %.0f", UpscalerShortName(s.upscaler),
                             ShortRenderText(),
                             s.frame_gen == BbSettings::FrameGenDlss ? s.frame_gen_multiplier.load()
                                                                     : 2,
                             shown_fps);
     } else {
-        ImGui::TextDisabled("%s %s", UpscalerShortName(s.upscaler), ShortRenderText());
+        ImGui::TextColored(second_line, "%s %s", UpscalerShortName(s.upscaler), ShortRenderText());
     }
     if (s.show_fps_graph && game_frame_count > 1) {
         static float graph[GraphFrames];
