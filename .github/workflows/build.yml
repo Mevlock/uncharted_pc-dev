@@ -87,13 +87,13 @@ jobs:
       - name: Build the DLSS bridge
         shell: msys2 {0}
         run: |
-          # The Visual Studio on this image: 17 = 2022, 18 = 2026.
-          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
-          major=$("$vswhere" -latest -property catalog_productLineVersion | tr -d '\r')
-          version=$("$vswhere" -latest -property installationVersion | tr -d '\r')
-          export DLSS_GENERATOR="Visual Studio ${version%%.*} $major"
-          echo "Generator: $DLSS_GENERATOR"
+          # The Visual Studio on this image (17 = 2022, 18 = 2026), named as CMake lists it.
           export CMAKE_EXE="/c/Program Files/CMake/bin/cmake.exe"
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          version=$("$vswhere" -latest -property installationVersion | tr -d '\r')
+          export DLSS_GENERATOR=$("$CMAKE_EXE" --help | grep -o "Visual Studio ${version%%.*} [0-9]\{4\}" | head -1)
+          echo "Generator: $DLSS_GENERATOR"
+          [[ -n $DLSS_GENERATOR ]]
           unset CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER
           DLSS_SDK_ROOT="$(cygpath -u "$GITHUB_WORKSPACE")/dlss-sdk" bash packaging/windows/build_dlss.sh
 
