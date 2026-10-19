@@ -614,6 +614,7 @@ const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     return guest_callbacks;
 }
 
+static void injected_mouse(float *dx, float *dy);
 static void sample_host(PadData *d) {
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
@@ -634,55 +635,58 @@ static void sample_host(PadData *d) {
         const char *file=getenv("BB_PAD_FILE"), *host=getenv("BB_PAD_HOST");
         scripted=file && *file && !(host && host[0]=='1');
     }
-    if (scripted) return;
+    if (scripted) { injected_mouse(&mdx,&mdy); captured=1; mouse=0; wheel=0; }
     const uint64_t now=d->timestamp;
-    if (wheel>0) wheel_until_us[0]=now+80000;
-    if (wheel<0) wheel_until_us[1]=now+80000;
-    const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
-    if (g) {
-        for (int a=0;a<16;++a) {
-            const int b=input.pad[a];
-            if (b>=0 && SDL_GetGamepadButton(g,(SDL_GamepadButton)b)) d->buttons|=actions[a].ps;
-            else if (b==PAD_TRIGGER_LEFT || b==PAD_TRIGGER_RIGHT) {
-                const uint8_t v=trigger(SDL_GetGamepadAxis(g,b==PAD_TRIGGER_LEFT ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER
-                                                                              : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
-                if (v>30) d->buttons|=actions[a].ps;
-                if (actions[a].ps==BTN_L2 && v>d->l2) d->l2=v;
-                if (actions[a].ps==BTN_R2 && v>d->r2) d->r2=v;
+    int rx=0, ry=0; /* the keyboard's right stick */
+    if (!scripted) { /* the player's controller and keyboard */
+        if (wheel>0) wheel_until_us[0]=now+80000;
+        if (wheel<0) wheel_until_us[1]=now+80000;
+        const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
+        if (g) {
+            for (int a=0;a<16;++a) {
+                const int b=input.pad[a];
+                if (b>=0 && SDL_GetGamepadButton(g,(SDL_GamepadButton)b)) d->buttons|=actions[a].ps;
+                else if (b==PAD_TRIGGER_LEFT || b==PAD_TRIGGER_RIGHT) {
+                    const uint8_t v=trigger(SDL_GetGamepadAxis(g,b==PAD_TRIGGER_LEFT ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER
+                                                                                  : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+                    if (v>30) d->buttons|=actions[a].ps;
+                    if (actions[a].ps==BTN_L2 && v>d->l2) d->l2=v;
+                    if (actions[a].ps==BTN_R2 && v>d->r2) d->r2=v;
+                }
             }
-        }
-        if (SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_TOUCHPAD)) d->buttons|=BTN_TOUCHPAD; /* DualSense/DS4 click */
-        if ((d->buttons & BTN_L2) && !d->l2) d->l2=255;
-        if ((d->buttons & BTN_R2) && !d->r2) d->r2=255;
-        d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
-        d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
-        if (input.pad_invert_y) d->right_y=(uint8_t)(255-d->right_y);
-        if (SDL_GetNumGamepadTouchpads(g)>0) {
-            const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);
-            for (int finger=0;finger<fingers && d->touch_count<2;++finger) {
-                bool down=false;
-                float x=0, y=0;
-                if (SDL_GetGamepadTouchpadFinger(g,0,finger,&down,&x,&y,NULL) && down) {
-                    d->touches[d->touch_count++]=(PadTouch){.x=touch_axis(x,1919),
-                        .y=touch_axis(y,942),.id=(uint8_t)finger};
+            if (SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_TOUCHPAD)) d->buttons|=BTN_TOUCHPAD; /* DualSense/DS4 click */
+            if ((d->buttons & BTN_L2) && !d->l2) d->l2=255;
+            if ((d->buttons & BTN_R2) && !d->r2) d->r2=255;
+            d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
+            d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
+            if (input.pad_invert_y) d->right_y=(uint8_t)(255-d->right_y);
+            if (SDL_GetNumGamepadTouchpads(g)>0) {
+                const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);
+                for (int finger=0;finger<fingers && d->touch_count<2;++finger) {
+                    bool down=false;
+                    float x=0, y=0;
+                    if (SDL_GetGamepadTouchpadFinger(g,0,finger,&down,&x,&y,NULL) && down) {
+                        d->touches[d->touch_count++]=(PadTouch){.x=touch_axis(x,1919),
+                            .y=touch_axis(y,942),.id=(uint8_t)finger};
+                    }
                 }
             }
         }
+        /* Keyboard and mouse, together with the controller. */
+        for (int a=0;a<16;++a) if (action_down(a,k,mouse,now)) d->buttons|=actions[a].ps;
+        if (d->buttons & BTN_L2) d->l2=255;
+        if (d->buttons & BTN_R2) d->r2=255;
+        // The touchpad button without a finger on a touch surface is a left-side click.
+        if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
+        const int lx=action_down(A_LS_RIGHT,k,mouse,now)-action_down(A_LS_LEFT,k,mouse,now);
+        const int ly=action_down(A_LS_DOWN,k,mouse,now)-action_down(A_LS_UP,k,mouse,now);
+        if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
+        if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
+        rx=action_down(A_RS_RIGHT,k,mouse,now)-action_down(A_RS_LEFT,k,mouse,now);
+        ry=action_down(A_RS_DOWN,k,mouse,now)-action_down(A_RS_UP,k,mouse,now);
+        if (rx) d->right_x=(uint8_t)(rx<0 ? 0 : 255);
+        if (ry) d->right_y=(uint8_t)(ry<0 ? 0 : 255);
     }
-    /* Keyboard and mouse, together with the controller. */
-    for (int a=0;a<16;++a) if (action_down(a,k,mouse,now)) d->buttons|=actions[a].ps;
-    if (d->buttons & BTN_L2) d->l2=255;
-    if (d->buttons & BTN_R2) d->r2=255;
-    // The touchpad button without a finger on a touch surface is a left-side click.
-    if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
-    const int lx=action_down(A_LS_RIGHT,k,mouse,now)-action_down(A_LS_LEFT,k,mouse,now);
-    const int ly=action_down(A_LS_DOWN,k,mouse,now)-action_down(A_LS_UP,k,mouse,now);
-    if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
-    if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
-    const int rx=action_down(A_RS_RIGHT,k,mouse,now)-action_down(A_RS_LEFT,k,mouse,now);
-    const int ry=action_down(A_RS_DOWN,k,mouse,now)-action_down(A_RS_UP,k,mouse,now);
-    if (rx) d->right_x=(uint8_t)(rx<0 ? 0 : 255);
-    if (ry) d->right_y=(uint8_t)(ry<0 ? 0 : 255);
     /* Where the game's camera or joypad state takes the mouse directly (their callbacks ran in the
      * last 100 ms), the motion goes there. U2 and U3 have no joypad callback: the follow camera turns
      * with the mouse (vertically too where its arc is known), with the right stick held a little the
@@ -730,6 +734,15 @@ static void sample_host(PadData *d) {
 static struct { uint32_t buttons; int stick[4]; int touch_side; float mouse[2]; } injected={0,{-1,-1,-1,-1},-1,{0,0}};
 static int replay_armed;      /* 1 while a BB_PAD_REPLAY recording plays, 2 once it ended */
 static uint64_t replay_start; /* 0: (re)start at the next sample */
+/* Scripted mouse motion (mx= my=, pixels/s) as this sample's mouse movement (sample_host). */
+static void injected_mouse(float *dx, float *dy) {
+    static uint64_t last;
+    const uint64_t now=now_us();
+    float dt=last ? (float)(now-last)*1e-6f : 0.0f;
+    if (dt>0.1f) dt=0.1f;
+    last=now;
+    *dx=injected.mouse[0]*dt; *dy=injected.mouse[1]*dt;
+}
 static void read_inject(void) {
     static const char *path; static int checked; static uint64_t last_check; static struct timespec mtime;
     if (!checked) { path=getenv("BB_PAD_FILE"); checked=1; }
@@ -853,20 +866,11 @@ static void sample(PadData *d) {
     if (bbgpu_overlay_captures_input()) { hold_after_capture=1; return; }
     record_sample(d);
     read_inject();
-    /* scripted mouse motion (mx= my=) goes where the player's mouse would */
-    static uint64_t mouse_inject_us;
-    const uint64_t inject_now=now_us();
-    if ((injected.mouse[0]!=0.0f || injected.mouse[1]!=0.0f) && mouse_inject_us) {
-        float dt=(float)(inject_now-mouse_inject_us)*1e-6f;
-        if (dt>0.1f) dt=0.1f;
-        pthread_mutex_lock(&camera_lock);
-        for (int q=0;q<2;++q) { camera_dx[q]+=injected.mouse[0]*dt; camera_dy[q]+=injected.mouse[1]*dt; }
-        pthread_mutex_unlock(&camera_lock);
-    }
-    mouse_inject_us=inject_now;
     replay_sample(d);
     d->buttons|=injected.buttons;
-    aim_held=(d->buttons & BTN_L2)!=0;
+    const int held=(d->buttons & BTN_L2)!=0;
+    if (mouse_debug() && held!=aim_held) printf("Mouse: L2 %s (t=%.4f)\n",held ? "held" : "released",now_us()*1e-6);
+    aim_held=held;
     if (injected.touch_side>=0) touch_click(d,injected.touch_side);
     else if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
     if (injected.buttons & BTN_L2) d->l2=255;
