@@ -53,7 +53,8 @@ tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
   built up detail and the sub-pixel jitter showed as a constant shake (the title screen's rifle and
   dunes). It now keeps its history: shimmering is basically gone. Textures keep their detail at
   the upscaled render sizes (texture LOD bias), the history resets at camera cuts (no streaks), and
-  **Anti-aliasing sharpness** now works with DLSS.
+  **Anti-aliasing sharpness** now works with DLSS. Uncharted 1's sun shadows no longer shimmer
+  under DLSS, FSR and TAA (from [kj2223's fork](https://github.com/kj2223/uncharted_pc-fixes)).
 - **Bloom** on/off (Uncharted 3) and **texture filtering** (anisotropic) settings.
 - **Frame rate limit**: caps the frames shown, generated ones included (for example 120 with frame
   generation).
