@@ -1189,8 +1189,10 @@ class Launcher:
         self.row(f, _('Anti-aliasing'), self.choice(f, 'anti_aliasing', modes, 34),
                  _('Temporal anti-aliasing with the games\' own motion vectors: smoother edges and less '
                    'shimmering than the games\' own. At Native render resolution DLSS is DLAA; with '
-                   'Quality, Balanced or Performance DLSS or FSR also rebuilds the full size. DLSS needs a GeForce RTX; FSR 4 runs best on a Radeon RX 7000/9000 or '
-                   'a GeForce RTX 40/50.'))
+                   'Quality, Balanced or Performance DLSS or FSR also rebuilds the full size. DLSS needs '
+                   'a GeForce RTX; FSR 4 runs best on a Radeon RX 7000/9000 or a GeForce RTX 40/50. The '
+                   'first time FSR 4 starts (and after a graphics driver update) the game can pause for '
+                   'about 10 seconds while the driver prepares it.'))
         self.row(f, _('DLSS model'), self.choice(f, 'dlss_model', DLSS_MODELS, 34),
                  _('With NVIDIA DLSS: the AI model it uses. K is NVIDIA\'s choice for this (DLAA) mode; '
                    'L and M are the newer DLSS 4.5 models, made for heavier upscaling. Compare them '
