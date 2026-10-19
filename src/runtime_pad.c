@@ -561,7 +561,8 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
         /* following through the joypad: the shortfall is made up within about a quarter second */
         const float extra=!aim_held && following && !follow_direct ? follow_correction*4.0f : 0.0f;
         x=curve(dx*scale+extra)+push;
-        y=curve((input.mouse_invert_y ? -dy : dy)*scale);
+        /* aiming turns vertically at about 0.45 times the horizontal rate for the same stick value */
+        y=curve((input.mouse_invert_y ? -dy : dy)*scale/(aim_held ? 0.45f : 1.0f));
     }
     if (mouse_debug()) printf("Mouse: aim t=%.4f dt=%.4f dx=%.1f x=%.3f game=%.3f\n",now*1e-6,dt,dx,x,pad[2]);
     if (x!=0.0f) { pad[2]+=x; pad[6]+=x; }
