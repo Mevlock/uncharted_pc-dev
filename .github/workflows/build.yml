@@ -126,5 +126,5 @@ jobs:
         run: |
           zip="uncharted-windows-$GITHUB_REF_NAME.zip"
           cp dist/uncharted-windows.zip "$zip"
-          gh release create "$GITHUB_REF_NAME" "$zip" --title "$GITHUB_REF_NAME" --prerelease \
+          gh release create "$GITHUB_REF_NAME" "$zip" --title "$GITHUB_REF_NAME" --latest \
               --notes "Unofficial fork build ($GITHUB_REF_NAME). The official port is SuperMedo's: https://github.com/Supermedo/uncharted_pc"
