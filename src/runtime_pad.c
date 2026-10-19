@@ -471,6 +471,47 @@ static float aim_stick(float rate) {
     const float x=r<=45.0f ? SDL_sqrtf(r/45.0f) : (r+9.0f)/54.0f;
     return rate<0 ? -x : x;
 }
+/* U2 1.02 (EU): the aiming camera doesn't run the camera input step (only while it blends in); it
+ * turns from the right stick, capped at full deflection: ~46 degrees/s with the mouse as a stick.
+ * The pad update at image+0x251420 ends by converting the pad's stick bytes into the caller's
+ * input (r14: floats, right stick x at +8, y at +0xc, a copy at +0x18, +0x1c); there
+ * (image+0x251be8) the mouse's turn rate is added as a stick value beyond 1 while L2 is held.
+ * BB_U2_AIM_STICK=<x>[,<y>]: fixed values while aiming, n times them at the n-th aim press
+ * (measuring the aiming curve). */
+static void __attribute__((ms_abi)) u2_pad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t sticks) {
+    (void)unused0; (void)unused1; (void)image;
+    if (!raw_aim_enabled() || !aim_held || !sticks) return;
+    const uint64_t now=now_us();
+    static uint64_t last;
+    const float dt=last && now-last<100000 ? (float)(now-last)*1e-6f : 0.0f;
+    last=now;
+    aim_hook_us=now;
+    float dx, dy;
+    camera_take(2,&dx,&dy);
+    float *pad=(float *)(uintptr_t)sticks;
+    static int test=-1; static float test_x, test_y;
+    if (test<0) {
+        const char *e=getenv("BB_U2_AIM_STICK");
+        test=e && sscanf(e,"%f,%f",&test_x,&test_y)>=1;
+    }
+    float x=0.0f, y=0.0f;
+    if (test) { /* each aim press the next step */
+        static int presses;
+        if (dt==0.0f) ++presses;
+        x=test_x*(float)presses; y=test_y*(float)(presses%2 ? presses : -presses); /* y: up and down */
+    } else if (dt>0.0f) {
+        /* the turn rate the mouse asks for through the inverse of the aiming curve, measured here as
+         * in U1 (45 x^2 degrees/s up to x = 1, then about 54 x - 9; vertically 0.67 times that) */
+        const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity/dt;
+        x=aim_stick(dx*scale);
+        y=aim_stick((input.mouse_invert_y ? -dy : dy)*scale/0.67f);
+    }
+    pad[2]+=x; pad[3]+=y; pad[6]+=x; pad[7]+=y;
+}
+static const unsigned char u2_pad_sticks_code[]={
+    0x41,0x0f,0xb6,0x4f,0x6e,0x41,0x0f,0xb6,0x87,0xe2,0x00,0x00,0x00,0x49,0x8b,0x55,0x00,0x48,0x3b,0x55,
+    0xd0,0x75,0x16,0x01,
+};
 /* The follow camera's response to the right stick value (measured in U1): about 144 x^2 degrees/s up
  * to x = 0.5, then a speed that builds up over a second towards 240 degrees/s from x = 0.7 (and stays
  * there above 0.9): fast turns reach it late. */
@@ -602,6 +643,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL},
     {"U3 camera input (raw aim)",0x11d4e0,u3_camera_input_code,sizeof(u3_camera_input_code),6,u3_camera_input,NULL},
     {"U2 camera input (raw aim)",0x16d920,u2_camera_input_code,sizeof(u2_camera_input_code),6,u2_camera_input,NULL},
+    {"U2 pad sticks (raw aim)",0x251be8,u2_pad_sticks_code,sizeof(u2_pad_sticks_code),5,u2_pad_sticks,NULL},
     {"U3 camera input (raw aim, CUSA02344)",0x4e42f0,u3_camera_input_02344_code,sizeof(u3_camera_input_02344_code),6,u3_camera_input,NULL},
     {"U2 camera input (raw aim, CUSA02344)",0x428f40,u2_camera_input_02344_code,sizeof(u2_camera_input_02344_code),6,u2_camera_input,NULL},
     {"U2 camera focus NaN reset",0x33ba13,u2_focus_assert_code,sizeof(u2_focus_assert_code),
