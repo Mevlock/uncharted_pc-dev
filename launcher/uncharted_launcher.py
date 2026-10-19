@@ -103,10 +103,11 @@ SCALERS = [('fsr1', 'FSR 1 (AMD FidelityFX, sharp)'), ('bilinear', 'Smooth (bili
 # Anisotropic filtering of scene textures (BB_ANISO; 0 = the game's own).
 ANISOTROPY = [('0', "Off (the game's own)"), ('4', '4x'), ('8', '8x'), ('16', '16x')]
 SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'), ('0', 'Maximum')]
-# Temporal anti-aliasing at the games' 1920x1080 (BB_UPSCALER): it takes the scene before the
-# games' post-processing with their own motion vectors, so it replaces their edge smoothing.
+# Temporal anti-aliasing at the render resolution (BB_UPSCALER): it takes the scene before the
+# games' post-processing with their own motion vectors, so it replaces their edge smoothing. At a
+# reduced render resolution (Uncharted 3: Quality, Balanced, Performance) it also upscales.
 ANTI_ALIASING = [('off', "Off (the game's own)"), ('taa', 'TAA'), ('fsr3', 'AMD FSR 3.1 (Native AA)'),
-                 ('fsr4', 'AMD FSR 4 (Native AA)'), ('dlss', 'NVIDIA DLSS (DLAA, GeForce RTX)')]
+                 ('fsr4', 'AMD FSR 4 (Native AA)'), ('dlss', 'NVIDIA DLSS / DLAA (GeForce RTX)')]
 FSR411 = ('fsr411', 'AMD FSR 4.1.1 (Native AA)')
 # The DLSS model (BB_DLSS_PRESET): the driver's default for DLAA is preset K (DLSS 4);
 # L and M are the DLSS 4.5 models.
@@ -1189,9 +1190,11 @@ class Launcher:
         self.section(f, _('Anti-aliasing'))
         modes = ANTI_ALIASING + ([FSR411] if fsr411_assets() else [])
         self.row(f, _('Anti-aliasing'), self.choice(f, 'anti_aliasing', modes, 34),
-                 _('Temporal anti-aliasing at the games\' 1920 × 1080, with their own motion vectors: '
-                   'smoother edges and less shimmering than the games\' own. DLSS needs a GeForce RTX; '
-                   'FSR 4 runs best on a Radeon RX 7000/9000 or a GeForce RTX 40/50.'))
+                 _('Temporal anti-aliasing with the games\' own motion vectors: smoother edges and less '
+                   'shimmering than the games\' own. At Native render resolution DLSS is DLAA (all three '
+                   'games); with Quality, Balanced or Performance (Uncharted 3) DLSS or FSR also rebuilds '
+                   'the full size. DLSS needs a GeForce RTX; FSR 4 runs best on a Radeon RX 7000/9000 or '
+                   'a GeForce RTX 40/50.'))
         self.row(f, _('DLSS model'), self.choice(f, 'dlss_model', DLSS_MODELS, 34),
                  _('With NVIDIA DLSS: the AI model it uses. K is NVIDIA\'s choice for this (DLAA) mode; '
                    'L and M are the newer DLSS 4.5 models, made for heavier upscaling. Compare them '
