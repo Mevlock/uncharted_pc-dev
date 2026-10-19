@@ -471,17 +471,17 @@ static float aim_stick(float rate) {
     const float x=r<=45.0f ? SDL_sqrtf(r/45.0f) : (r+9.0f)/54.0f;
     return rate<0 ? -x : x;
 }
-/* U2 1.02 (EU): the aiming camera doesn't run the camera input step (only while it blends in); it
- * turns from the right stick, capped at full deflection: ~46 degrees/s with the mouse as a stick.
- * The pad update at image+0x251420 ends by converting the pad's stick bytes into the caller's
- * input (r14: floats, right stick x at +8, y at +0xc, a copy at +0x18, +0x1c); there
- * (image+0x251be8) the mouse's turn rate is added as a stick value beyond 1 while L2 is held.
- * BB_U2_AIM_STICK=<x>[,<y>]: fixed values while aiming, n times them at the n-th aim press
- * (measuring the aiming curve). */
-static void __attribute__((ms_abi)) u2_pad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t sticks) {
-    (void)unused0; (void)unused1; (void)image;
+/* U2 and U3 1.02 (EU): the aiming camera doesn't run the camera input step (only while it blends
+ * in); it turns from the right stick, capped at full deflection: ~46 degrees/s with the mouse as a
+ * stick. The pad update ends by converting the pad's stick bytes into the caller's input (floats,
+ * right stick x at +8, y at +0xc, a copy at +0x18, +0x1c); there the mouse's turn rate is added as
+ * a stick value beyond 1 while L2 is held, through the inverse of the aiming curve, measured as in
+ * U1 (45 x^2 degrees/s up to x = 1, then about 54 x - 9; vertically `pitch` times that).
+ * BB_AIM_STICK=<x>[,<y>]: fixed values while aiming, n times them at the n-th aim press (y up and
+ * down in turn; measuring the aiming curve). */
+static void aim_pad_sticks(float *pad, float pitch) {
     if (aim_held) bbgpu_note_aiming(); /* BB_DOF=aim */
-    if (!raw_aim_enabled() || !aim_held || !sticks) return;
+    if (!raw_aim_enabled() || !aim_held || !pad) return;
     const uint64_t now=now_us();
     static uint64_t last;
     const float dt=last && now-last<100000 ? (float)(now-last)*1e-6f : 0.0f;
@@ -489,26 +489,47 @@ static void __attribute__((ms_abi)) u2_pad_sticks(uint64_t unused0, uint64_t unu
     aim_hook_us=now;
     float dx, dy;
     camera_take(2,&dx,&dy);
-    float *pad=(float *)(uintptr_t)sticks;
     static int test=-1; static float test_x, test_y;
     if (test<0) {
-        const char *e=getenv("BB_U2_AIM_STICK");
+        const char *e=getenv("BB_AIM_STICK");
         test=e && sscanf(e,"%f,%f",&test_x,&test_y)>=1;
     }
     float x=0.0f, y=0.0f;
-    if (test) { /* each aim press the next step */
+    if (test) {
         static int presses;
         if (dt==0.0f) ++presses;
-        x=test_x*(float)presses; y=test_y*(float)(presses%2 ? presses : -presses); /* y: up and down */
+        x=test_x*(float)presses; y=test_y*(float)(presses%2 ? presses : -presses);
     } else if (dt>0.0f) {
-        /* the turn rate the mouse asks for through the inverse of the aiming curve, measured here as
-         * in U1 (45 x^2 degrees/s up to x = 1, then about 54 x - 9; vertically 0.67 times that) */
         const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity/dt;
         x=aim_stick(dx*scale);
-        y=aim_stick((input.mouse_invert_y ? -dy : dy)*scale/0.67f);
+        y=aim_stick((input.mouse_invert_y ? -dy : dy)*scale/pitch);
     }
     pad[2]+=x; pad[3]+=y; pad[6]+=x; pad[7]+=y;
 }
+/* U2: the pad update at image+0x251420 ends at image+0x251be8 with its input in r14. */
+static void __attribute__((ms_abi)) u2_pad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t sticks) {
+    (void)unused0; (void)unused1; (void)image;
+    aim_pad_sticks((float *)(uintptr_t)sticks,0.66f);
+}
+/* U3: the pad update at image+0x741a30 keeps its input (rdi) in r13; at its end (image+0x74231e)
+ * the input is the one its start saw. */
+static uint64_t u3_pad_input;
+static void __attribute__((ms_abi)) u3_pad_update(uint64_t sticks, uint64_t unused, uint64_t image, uint64_t r14) {
+    (void)unused; (void)image; (void)r14;
+    u3_pad_input=sticks;
+}
+static void __attribute__((ms_abi)) u3_pad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
+    (void)unused0; (void)unused1; (void)image; (void)r14;
+    aim_pad_sticks((float *)(uintptr_t)u3_pad_input,0.66f);
+}
+static const unsigned char u3_pad_update_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xb8,0x00,0x00,0x00,
+    0x49,0x89,0xfd,0x4c,
+};
+static const unsigned char u3_pad_sticks_code[]={
+    0x41,0x0f,0xb6,0x4f,0x76,0x41,0x0f,0xb6,0x87,0xf2,0x00,0x00,0x00,0x49,0x8b,0x16,0x48,0x3b,0x55,0xd0,
+    0x75,0x16,0x01,0xc0,
+};
 static const unsigned char u2_pad_sticks_code[]={
     0x41,0x0f,0xb6,0x4f,0x6e,0x41,0x0f,0xb6,0x87,0xe2,0x00,0x00,0x00,0x49,0x8b,0x55,0x00,0x48,0x3b,0x55,
     0xd0,0x75,0x16,0x01,
@@ -646,6 +667,8 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 camera input (raw aim)",0x11d4e0,u3_camera_input_code,sizeof(u3_camera_input_code),6,u3_camera_input,NULL},
     {"U2 camera input (raw aim)",0x16d920,u2_camera_input_code,sizeof(u2_camera_input_code),6,u2_camera_input,NULL},
     {"U2 pad sticks (raw aim)",0x251be8,u2_pad_sticks_code,sizeof(u2_pad_sticks_code),5,u2_pad_sticks,NULL},
+    {"U3 pad update (raw aim)",0x741a30,u3_pad_update_code,sizeof(u3_pad_update_code),6,u3_pad_update,NULL},
+    {"U3 pad sticks (raw aim)",0x74231e,u3_pad_sticks_code,sizeof(u3_pad_sticks_code),5,u3_pad_sticks,NULL},
     {"U3 camera input (raw aim, CUSA02344)",0x4e42f0,u3_camera_input_02344_code,sizeof(u3_camera_input_02344_code),6,u3_camera_input,NULL},
     {"U2 camera input (raw aim, CUSA02344)",0x428f40,u2_camera_input_02344_code,sizeof(u2_camera_input_02344_code),6,u2_camera_input,NULL},
     {"U2 camera focus NaN reset",0x33ba13,u2_focus_assert_code,sizeof(u2_focus_assert_code),
