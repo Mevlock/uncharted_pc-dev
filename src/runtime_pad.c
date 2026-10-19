@@ -384,6 +384,15 @@ static int raw_aim_enabled(void) {
     return on;
 }
 static void aim_camera(float *look, float *arc, float arc_degrees) {
+    if (mouse_debug()) { /* calls per second, aiming or not (which camera step runs when) */
+        static uint64_t window; static unsigned calls, aiming;
+        const uint64_t t=now_us();
+        ++calls; aiming+=aim_held!=0;
+        if (t-window>1000000) {
+            printf("Mouse: camera input %u calls/s (%u while L2 held), arc %s\n",calls,aiming,arc ? "known" : "unknown");
+            calls=aiming=0; window=t;
+        }
+    }
     if (!raw_aim_enabled() || !aim_held || !look) return;
     const uint64_t now=now_us();
     if (aim_hook_us && now-aim_hook_us>100000) { float ix, iy; camera_take(2,&ix,&iy); } /* stale */
@@ -419,6 +428,20 @@ static void __attribute__((ms_abi)) u2_camera_input(uint64_t unused, uint64_t lo
     (void)unused; (void)image;
     aim_camera((float *)(uintptr_t)look, camera ? (float *)(uintptr_t)(camera+0x9e60) : NULL, 135.0f);
 }
+/* CUSA02344 1.02 (BilalReloaded's build, untested here): the same steps at other addresses, and
+ * U2's camera is its first argument there (his runtime_mouselook.c). */
+static void __attribute__((ms_abi)) u2_camera_input_rdi(uint64_t camera, uint64_t look, uint64_t image, uint64_t r14) {
+    (void)image; (void)r14;
+    aim_camera((float *)(uintptr_t)look, camera ? (float *)(uintptr_t)(camera+0x9e60) : NULL, 135.0f);
+}
+static const unsigned char u3_camera_input_02344_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xc8,0x00,0x00,0x00,
+    0x45,0x89,0xc7,0x48,
+};
+static const unsigned char u2_camera_input_02344_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x78,0xc5,0xfa,0x11,
+    0x85,0x70,0xff,0xff,
+};
 static const unsigned char u3_camera_input_code[]={
     0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xc8,0x00,0x00,0x00,
     0xc5,0xfa,0x11,0x85,
@@ -585,6 +608,8 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL,0},
     {"U3 camera input (raw aim)",0x11d4e0,u3_camera_input_code,sizeof(u3_camera_input_code),6,u3_camera_input,NULL,0},
     {"U2 camera input (raw aim)",0x16d920,u2_camera_input_code,sizeof(u2_camera_input_code),6,u2_camera_input,NULL,1},
+    {"U3 camera input (raw aim, CUSA02344)",0x4e42f0,u3_camera_input_02344_code,sizeof(u3_camera_input_02344_code),6,u3_camera_input,NULL,0},
+    {"U2 camera input (raw aim, CUSA02344)",0x428f40,u2_camera_input_02344_code,sizeof(u2_camera_input_02344_code),6,u2_camera_input_rdi,NULL,0},
     {"U2 camera focus NaN reset",0x33ba13,u2_focus_assert_code,sizeof(u2_focus_assert_code),
      sizeof(u2_focus_reset),NULL,u2_focus_reset,0},
     {"U2 leg IK NaN delta",0x8ec618,u2_leg_ik_assert_code,sizeof(u2_leg_ik_assert_code),
