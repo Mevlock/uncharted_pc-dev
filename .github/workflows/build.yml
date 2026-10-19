@@ -129,5 +129,11 @@ jobs:
         run: |
           zip="uncharted-windows-$GITHUB_REF_NAME.zip"
           cp dist/uncharted-windows.zip "$zip"
+          # The changelog: docs/releases/<tag>.md (write it before tagging), else a short note.
+          notes="docs/releases/$GITHUB_REF_NAME.md"
+          if [[ ! -f $notes ]]; then
+              notes=release-notes.md
+              echo "Unofficial fork build ($GITHUB_REF_NAME). The official port is SuperMedo's: https://github.com/Supermedo/uncharted_pc" > "$notes"
+          fi
           gh release create "$GITHUB_REF_NAME" "$zip" --title "$GITHUB_REF_NAME" --latest \
-              --notes "Unofficial fork build ($GITHUB_REF_NAME). The official port is SuperMedo's: https://github.com/Supermedo/uncharted_pc"
+              --notes-file "$notes"
