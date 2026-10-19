@@ -37,14 +37,14 @@ Glitch check of the final build: full pub fight recording (10 575 distinct frame
 no spikes, no exploded frames.
 
 Uncharted 2 (Chapter 2 "Breaking and Entering", the Istanbul museum balcony after "Continue"),
-native 3440×1440 (b20ace7), frame generation off, no frame rate cap:
+native 3440×1440 (cd611c9), frame generation off, no frame rate cap:
 
 | Uncharted 2 | FPS (last 30 s of 50) |
 |---|---|
 | `BB_TIGHT_WRITES=0 BB_FLUSH_EVERY_DRAWS=0` | ~49 |
 | Defaults | **~93** (+90%) |
 
-Uncharted 1 (the jungle with Sully after "Continue"), native 3440×1440 (82f9373), same setup:
+Uncharted 1 (the jungle with Sully after "Continue"), native 3440×1440 (5524352), same setup:
 
 | Uncharted 1 | FPS (last 30 s of 50) |
 |---|---|
@@ -90,18 +90,18 @@ work in U2 (the "Result" table above). That run was most likely closed during U2
 
 | Commit | Change | Square FPS after |
 |---|---|---|
-| c9d4cd0 | Compute queues: RELEASE_MEM handled in order with the draws instead of draining the draw pipe; the compute queue drains only before packets that use the caches | 42 → 54 |
-| 8880a36 | Recorded GPU work is submitted every 250 draws (`BB_FLUSH_EVERY_DRAWS`, 0 = off), not only at the guest's submit | 54 → 72 |
-| 9bfc964 | **Tight write ranges for typed buffer writes** + barrier tracker cap (below) | 72 → ~100 |
+| ebb83d4 | Compute queues: RELEASE_MEM handled in order with the draws instead of draining the draw pipe; the compute queue drains only before packets that use the caches | 42 → 54 |
+| 425d80a | Recorded GPU work is submitted every 250 draws (`BB_FLUSH_EVERY_DRAWS`, 0 = off), not only at the guest's submit | 54 → 72 |
+| b92b387 | **Tight write ranges for typed buffer writes** + barrier tracker cap (below) | 72 → ~100 |
 
 Smaller ones from the same day, kept because they are harmless or useful:
 
-- 65b5545 — from the God of War III port: no drain for ignored SET_PREDICATION
+- aae2cf8 — from the God of War III port: no drain for ignored SET_PREDICATION
   (`BB_PREDICATION_DRAIN=1` restores it), `BB_STREAM_MEMORY=device|cached|host`, `BB_PERF_DIAG`.
-- 7695006 — GPU command, draw recording and Vulkan recording threads above normal priority
+- bf94839 — GPU command, draw recording and Vulkan recording threads above normal priority
   (`BB_GPU_THREAD_PRIORITY=0` turns it off). No measurable gain in U3.
 
-### 9bfc964: tight write ranges (the big one)
+### b92b387: tight write ranges (the big one)
 
 GPU timestamps per guest queue (`BB_GPU_BUSY=1`) showed the GPU busy 72% of the time, ~520 ms of
 every second on the game's compute queues 2–7, and only ~170 ms/s on the graphics queue. Nearly
@@ -159,7 +159,7 @@ Now that read-backs take ~150 µs, there is far less left to gain here.
 
 ### Making synchronous read-backs cheaper
 
-`BB_PERF_DIAG=1` prints a breakdown. Before 9bfc964: ~78% of read-backs found the writing GPU work
+`BB_PERF_DIAG=1` prints a breakdown. Before b92b387: ~78% of read-backs found the writing GPU work
 done (~50 µs); the rest waited ~4 ms for the GPU, nearly all on two regions:
 
 - `0x1036160000`: GDS counters copied to memory by DMA on the graphics queue, right after records
