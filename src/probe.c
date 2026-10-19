@@ -870,8 +870,9 @@ static void patch_collection_skip(uint64_t image_size) {
 }
 /* Idle job workers sleep (all three games). From BilalReloaded's Uncharted port
  * (github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port, GPL-2.0-or-later,
- * tools/probe_uncharted.py JOB_SLEEP_PATCHES), with the 1.00 encodings added. The engine's six
- * job worker threads spin on their queues unless the job manager's sleep flag (byte +0x59, the
+ * tools/probe_uncharted.py JOB_SLEEP_PATCHES, made for CUSA02344 1.02), with the EU release's
+ * encodings (CUSA02343 1.02: other registers, short jumps) added. The engine's six job worker
+ * threads spin on their queues unless the job manager's sleep flag (byte +0x59, the
  * engine's own SetSleepMode) is set; with it, an idle worker waits on the manager's condition
  * variable after 1000 spins (10 ms timeout) and each job submission wakes them. On the PS4 every
  * worker owns a core and the flag stays off; on a PC the spinning workers take cores from the
@@ -901,12 +902,12 @@ static void patch_job_sleep(uint64_t image_size) {
     const char *env=getenv("BB_JOB_SLEEP");
     if (env && env[0]=='0') return;
     static const unsigned char nop2[]={0x66,0x90}, nop6[]={0x66,0x0f,0x1f,0x44,0x00,0x00};
-    /* Each site: alternatives (1.00, 1.02); the first one found exactly once is used. */
+    /* Each site: alternatives (EU CUSA02343, CUSA02344); the first one found exactly once is used. */
     static const struct masked_pattern sites[3][2]={
         {{"80 7f 59 00 74 ?? 49 81 f8 e8 03 00 00",4,2,nop2}, {0}},                   /* worker loop */
         {{"80 78 59 00 74 ?? 48 89 c7 48 83 ef 80",4,2,nop2}, {0}},                   /* re-check */
-        {{"80 7f 59 00 74 ?? 48 83 c7 60 be ff ff ff ff e8",4,2,nop2},                 /* submission, 1.00 */
-         {"80 78 59 00 0f 84 ?? ?? 00 00 48 83 c0 60",4,6,nop6}},                      /* submission, 1.02 */
+        {{"80 7f 59 00 74 ?? 48 83 c7 60 be ff ff ff ff e8",4,2,nop2},                 /* submission, EU */
+         {"80 78 59 00 0f 84 ?? ?? 00 00 48 83 c0 60",4,6,nop6}},                      /* submission, CUSA02344 */
     };
     int64_t at[3];
     const struct masked_pattern *use[3];
