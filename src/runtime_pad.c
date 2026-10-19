@@ -222,7 +222,7 @@ static pthread_mutex_t camera_lock=PTHREAD_MUTEX_INITIALIZER;
 /* Mouse motion (pixels) not yet given to the follow camera [0] and to the joypad state [1]: each
  * gets all of it (the follow camera does not read the joypad's right stick values, the other
  * cameras do not use the follow camera's direction). */
-static float camera_dx[2], camera_dy[2];
+static float camera_dx[3], camera_dy[3]; /* [2]: the aiming camera (raw aim) */
 static uint64_t camera_hook_us;       /* last follow camera callback: it turns with the mouse */
 static uint64_t sticks_hook_us;       /* last joypad callback: the mouse is a right stick value there */
 static float camera_test_rate=-1.0f;  /* BB_MOUSE_CAMERA_TEST=<degrees per frame>: constant turn */
@@ -371,6 +371,62 @@ static void __attribute__((ms_abi)) u3_follow_camera(uint64_t camera, uint64_t u
     (void)unused; (void)image; (void)r14;
     follow_camera(camera,0x78c0,0x7874,105.0f);
 }
+/* Raw aim (Uncharted 2 and 3). While aiming the follow camera is not the one shown, and the mouse
+ * went to the right stick: through the aiming camera's curve, speed cap and dead zone. The games'
+ * camera input step (every camera, aiming included; after BilalReloaded's Uncharted port, located
+ * in the EU 1.02 builds by the fields it uses) gets the look direction it is about to turn from:
+ * the mouse rotates it by its exact angle, and moves the camera's vertical arc the way the follow
+ * camera does, so aiming turns 1:1 with the same sensitivity. BB_RAW_AIM=0: off (the stick). */
+static uint64_t aim_hook_us; /* last camera input step while aiming: the mouse aims directly */
+static int raw_aim_enabled(void) {
+    static int on=-1;
+    if (on<0) { const char *e=getenv("BB_RAW_AIM"); on=!(e && e[0]=='0'); }
+    return on;
+}
+static void aim_camera(float *look, float *arc, float arc_degrees) {
+    if (!raw_aim_enabled() || !aim_held || !look) return;
+    const uint64_t now=now_us();
+    if (aim_hook_us && now-aim_hook_us>100000) { float ix, iy; camera_take(2,&ix,&iy); } /* stale */
+    aim_hook_us=now;
+    float dx, dy;
+    camera_take(2,&dx,&dy);
+    static float test=-1.0f; /* BB_RAW_AIM_TEST=<pixels per frame>: a steady turn (automated tests) */
+    if (test<0.0f) { const char *e=getenv("BB_RAW_AIM_TEST"); test=e ? (float)atof(e) : 0.0f; }
+    if (test>0.0f) { dx=test; dy=0.0f; }
+    const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+    if (dx!=0.0f) {
+        /* the follow camera's convention: a positive turn (mouse right) rotates x towards z */
+        const float a=dx*scale*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
+        const float x=look[0], z=look[2];
+        look[0]=x*c-z*s;
+        look[2]=x*s+z*c;
+    }
+    if (dy!=0.0f && arc) {
+        const float v=*arc+(input.mouse_invert_y ? -dy : dy)*(scale/arc_degrees);
+        if (SDL_isinf(v)==0 && v==v) *arc=v<0.0f ? 0.0f : v>1.0f ? 1.0f : v;
+    }
+    if (mouse_debug()) printf("Mouse: aim t=%.4f dx=%.1f dy=%.1f heading=%.2f arc=%.3f\n",now*1e-6,dx,dy,
+                              heading_of(look),arc ? *arc : -1.0f);
+}
+/* U3 1.02 (EU): camera input at image+0x11d4e0 (camera rdi, look direction rsi, stick rdx). */
+static void __attribute__((ms_abi)) u3_camera_input(uint64_t camera, uint64_t look, uint64_t image, uint64_t r14) {
+    (void)image; (void)r14;
+    aim_camera((float *)(uintptr_t)look, camera ? (float *)(uintptr_t)(camera+0x7874) : NULL, 105.0f);
+}
+/* U2 1.02 (EU): camera input at image+0x16d920 (look direction rsi, stick rdx, the camera its first
+ * stack argument: the callback gets it in place of r14). */
+static void __attribute__((ms_abi)) u2_camera_input(uint64_t unused, uint64_t look, uint64_t image, uint64_t camera) {
+    (void)unused; (void)image;
+    aim_camera((float *)(uintptr_t)look, camera ? (float *)(uintptr_t)(camera+0x9e60) : NULL, 135.0f);
+}
+static const unsigned char u3_camera_input_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xc8,0x00,0x00,0x00,
+    0xc5,0xfa,0x11,0x85,
+};
+static const unsigned char u2_camera_input_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x68,0xc5,0xfa,0x11,
+    0x45,0x8c,0x4c,0x89,
+};
 static const unsigned char u1_follow_camera_code[]={
     0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x28,0x01,0x00,0x00,
     0x44,0x89,0x8d,0x00,0xff,0xff,0xff,0x49,0x89,0xcd,0x48,0x89,0xd3,0x49,0x89,0xf7,0x49,0x89,0xfc,
@@ -521,16 +577,18 @@ static const unsigned char u2_leg_ik_zero[]={
 };
 _Static_assert(sizeof(u2_leg_ik_zero)==sizeof(u2_leg_ik_assert_code),"same size");
 static const RuntimeGuestCallback guest_callbacks[]={
-    {"U3 heap free (GPU data)",0x494a70,u3_heap_free_code,sizeof(u3_heap_free_code),6,u3_heap_free,NULL},
-    {"U1 follow camera (mouse)",0xaecf0,u1_follow_camera_code,sizeof(u1_follow_camera_code),6,u1_follow_camera,NULL},
-    {"U1 pad update (mouse)",0x117200,u1_pad_update_code,sizeof(u1_pad_update_code),6,u1_pad_update,NULL},
-    {"U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
-    {"U2 follow camera (mouse)",0x171fe0,u2_follow_camera_code,sizeof(u2_follow_camera_code),6,u2_follow_camera,NULL},
-    {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL},
+    {"U3 heap free (GPU data)",0x494a70,u3_heap_free_code,sizeof(u3_heap_free_code),6,u3_heap_free,NULL,0},
+    {"U1 follow camera (mouse)",0xaecf0,u1_follow_camera_code,sizeof(u1_follow_camera_code),6,u1_follow_camera,NULL,0},
+    {"U1 pad update (mouse)",0x117200,u1_pad_update_code,sizeof(u1_pad_update_code),6,u1_pad_update,NULL,0},
+    {"U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL,0},
+    {"U2 follow camera (mouse)",0x171fe0,u2_follow_camera_code,sizeof(u2_follow_camera_code),6,u2_follow_camera,NULL,0},
+    {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL,0},
+    {"U3 camera input (raw aim)",0x11d4e0,u3_camera_input_code,sizeof(u3_camera_input_code),6,u3_camera_input,NULL,0},
+    {"U2 camera input (raw aim)",0x16d920,u2_camera_input_code,sizeof(u2_camera_input_code),6,u2_camera_input,NULL,1},
     {"U2 camera focus NaN reset",0x33ba13,u2_focus_assert_code,sizeof(u2_focus_assert_code),
-     sizeof(u2_focus_reset),NULL,u2_focus_reset},
+     sizeof(u2_focus_reset),NULL,u2_focus_reset,0},
     {"U2 leg IK NaN delta",0x8ec618,u2_leg_ik_assert_code,sizeof(u2_leg_ik_assert_code),
-     sizeof(u2_leg_ik_zero),NULL,u2_leg_ik_zero},
+     sizeof(u2_leg_ik_zero),NULL,u2_leg_ik_zero,0},
 };
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     *count=sizeof(guest_callbacks)/sizeof(*guest_callbacks);
@@ -614,13 +672,16 @@ static void sample_host(PadData *d) {
     pthread_mutex_lock(&camera_lock);
     const int following=camera_hook_us && now-camera_hook_us<100000;
     const int joypad=sticks_hook_us && now-sticks_hook_us<100000;
+    const int aiming=aim_held && aim_hook_us && now-aim_hook_us<100000; /* raw aim takes the mouse */
     for (int q=0;q<2;++q) {
         if (captured && (following || joypad)) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
         else { camera_dx[q]=camera_dy[q]=0; }
     }
+    if (captured && aim_held && raw_aim_enabled()) { camera_dx[2]+=mdx; camera_dy[2]+=mdy; }
+    else { camera_dx[2]=camera_dy[2]=0; }
     pthread_mutex_unlock(&camera_lock);
-    const int direct_x=joypad || (following && !aim_held && follow_direct);
-    const int direct_y=joypad || (following && !aim_held && follow_direct && follow_has_arc);
+    const int direct_x=joypad || aiming || (following && !aim_held && follow_direct);
+    const int direct_y=joypad || aiming || (following && !aim_held && follow_direct && follow_has_arc);
     if (captured && direct_x && direct_y) {
         mouse_vx=mouse_vy=0; mouse_last_us=0;
     } else if (captured) {
