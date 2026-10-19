@@ -825,7 +825,11 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
 void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w,
                                     u32 h) {
     const auto& settings = BbSettings::Get();
-    const float extra = std::clamp(settings.sharpness.load(), 0.0f, 2.0f) - 1.0f;
+    // FSR 3/4 sharpen up to 1 themselves (their RCAS): this pass adds the rest. DLSS no longer
+    // sharpens (its sharpness parameter is ignored since 2.5.1, preset K included): the whole
+    // strength comes from here, so the launcher's Anti-aliasing sharpness works with DLSS too.
+    const float sharpness = std::clamp(settings.sharpness.load(), 0.0f, 2.0f);
+    const float extra = UseDlss() ? sharpness : sharpness - 1.0f;
     if (!settings.sharpen || extra <= 0.0f) {
         return;
     }

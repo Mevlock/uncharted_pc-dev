@@ -1190,7 +1190,9 @@ class Launcher:
                  _('With NVIDIA DLSS: the AI model it uses. K is NVIDIA\'s choice for this (DLAA) mode; '
                    'L and M are the newer DLSS 4.5 models, made for heavier upscaling. Compare them '
                    'in motion.'))
-        self.row(f, _('Anti-aliasing sharpness'), self.choice(f, 'aa_sharpness', AA_SHARPNESS, 34))
+        self.row(f, _('Anti-aliasing sharpness'), self.choice(f, 'aa_sharpness', AA_SHARPNESS, 34),
+                 _('Sharpens the picture after the anti-aliasing (DLSS, FSR, TAA), which can look '
+                   'slightly soft, most at the upscaled render resolutions.'))
         self.section(f, _('Frame generation'))
         hint = _('Frames made between two of the game\'s, for smoother motion: 60 FPS shows as 120. '
                  'Use Mailbox or Immediate presentation and a display of at least that refresh rate. '
