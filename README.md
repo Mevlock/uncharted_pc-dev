@@ -45,8 +45,8 @@ tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
 ### Picture
 
 - **Render resolution** (Display page): all three games can render at your screen's resolution
-  instead of enlarging 1920×1080, up to about 3440×1440 (the games' memory limit). Uncharted 3 can
-  also render below it and let DLSS or FSR rebuild the full size (Quality, Balanced, Performance).
+  instead of enlarging 1920×1080, up to about 3440×1440 (the games' memory limit). They can also
+  render below it and let DLSS or FSR rebuild the full size (Quality, Balanced, Performance).
 - **Ultrawide** (21:9, 32:9): gameplay shows more at the sides and fills the screen; menus,
   loading screens and videos stay 16:9. **Field of view** setting.
 - **DLSS and FSR in Uncharted 3 fixed:** the upscaler's history was reset every frame, so it never
@@ -55,7 +55,7 @@ tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
   the upscaled render sizes (texture LOD bias), the history resets at camera cuts (no streaks), and
   **Anti-aliasing sharpness** now works with DLSS. Uncharted 1's sun shadows no longer shimmer
   under DLSS, FSR and TAA (from [kj2223's fork](https://github.com/kj2223/uncharted_pc-fixes)).
-- **Bloom** on/off (Uncharted 3) and **texture filtering** (anisotropic) settings.
+- **Bloom** on/off and **texture filtering** (anisotropic) settings.
 - **Frame rate limit**: caps the frames shown, generated ones included (for example 120 with frame
   generation).
 
@@ -74,14 +74,9 @@ tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
 
 ### Known issues in this fork
 
-- **Upscaled render sizes are Uncharted 3 only.** Quality, Balanced and Performance (render
-  smaller, DLSS or FSR rebuilds the full size) need hooks into each game's frame; Uncharted 1
-  and 2 offer native or 1080p for now.
-- **Bloom on/off is Uncharted 3 only:** it targets that game's bloom pass.
-- **The DLSS fixes are only tested in Uncharted 3.** The code is shared, so Uncharted 1 and 2
-  should benefit too, but they have not been checked for shimmer or shake yet.
-- **Uncharted 2 at native resolution** works but has not had a full playthrough (cutscene
-  videos, HUD, frame generation).
+- **Uncharted 1 and 2 with Quality, Balanced or Performance** (new) and **Uncharted 2 at native
+  resolution** work in the opening areas but have not had a full playthrough (cutscene videos,
+  HUD, menus, frame generation).
 - **Ultrawide:** gameplay and menus are told apart automatically, and short scripted scenes can
   still switch to 16:9 by mistake. **Always fill** (Display page) never switches, at the cost of
   stretched menus and videos.

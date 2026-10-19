@@ -79,7 +79,7 @@ WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
                 ('3840x2160', '3840 × 2160 (4K)'), ('2560x1080', '2560 × 1080 (21:9)'),
                 ('3440x1440', '3440 × 1440 (21:9)'), ('3840x1600', '3840 × 1600 (21:9)'),
                 ('5120x1440', '5120 × 1440 (32:9)')]
-# The size the games render at (BB_RENDER_RES; Uncharted 1 and 2 native only): the game's display
+# The size the games render at (BB_RENDER_RES): the game's display
 # mode, memory budget, camera and movies are patched in memory. Its GPU memory stays under 4 GiB,
 # which allows about 3440 x 1440 (RENDER_PIXELS_MAX); a larger size is scaled down to that.
 # Native renders at the output size (the window, or the screen in fullscreen); the scaled modes
@@ -347,7 +347,7 @@ def output_size(s):
 
 
 def render_sizes(s):
-    """('WxH', 'WxH'): Uncharted 3's render size (BB_RENDER_RES) and the output size it is
+    """('WxH', 'WxH'): the render size (BB_RENDER_RES) and the output size it is
     upscaled to (BB_OUTPUT_RES), or None for the game's own 1920 x 1080."""
     choice = str(s.get('render_resolution') or '1080')
     out_w, out_h = output_size(s)
@@ -373,7 +373,7 @@ def render_sizes(s):
 
 
 def render_resolution(s):
-    """BB_RENDER_RES for Uncharted 3, or None."""
+    """BB_RENDER_RES, or None."""
     sizes = render_sizes(s)
     return sizes[0] if sizes else None
 
@@ -463,16 +463,14 @@ def game_environment(s, start=None):
     if cap:
         env['BB_FPS_LIMIT'] = str(cap)
     env['BB_WINDOW_SIZE'] = str(s.get('window_size') or '1920x1080')
-    if start == 'u3':
-        sizes = render_sizes(s)
-        if sizes:
-            env['BB_RENDER_RES'], env['BB_OUTPUT_RES'] = sizes
-    elif start in ('u1', 'u2') and str(s.get('render_resolution') or '1080') != '1080':
-        # Uncharted 1 and 2: native only. The upscaled modes rebuild the frame through Uncharted
-        # 3's upscaling hooks (BB_OUTPUT_RES), which do not know their passes: native here.
-        sizes = render_sizes({**s, 'render_resolution': 'native'})
-        if sizes:
-            env['BB_RENDER_RES'] = sizes[0]
+    sizes = render_sizes(s)
+    if sizes:
+        env['BB_RENDER_RES'] = sizes[0]
+        # The upscaling hooks (BB_OUTPUT_RES) work in all three games: Uncharted 1 and 2 draw
+        # their final composite, HUD-less frame and HUD with Uncharted 3's shaders. At native,
+        # Uncharted 1 and 2 keep the plain path (anti-aliasing at the render size, tested).
+        if start == 'u3' or sizes[0] != sizes[1]:
+            env['BB_OUTPUT_RES'] = sizes[1]
     env['BB_ULTRAWIDE'] = str(s.get('ultrawide') or 'auto')
     env['BB_FOV'] = str(s.get('fov') or '100')
     if not s.get('bloom', True):
@@ -1161,14 +1159,13 @@ class Launcher:
                    'changes nothing. Lower it for a steadier picture on a slower PC or to save power.'))
         self.section(f, _('Resolution'))
         self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
-                 _('The games render at 1920 × 1080. A larger window, or fullscreen on a 1440p or 4K '
-                   'screen, gets the image upscaled to fit.'))
+                 _('The window\'s size in windowed mode. With Render resolution at 1920 × 1080, a larger '
+                   'window, or fullscreen on a 1440p or 4K screen, gets the image upscaled to fit.'))
         self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', RENDER_RESOLUTIONS, 34),
                  _('The size the game draws its picture at. Native draws at your window size (or your '
                    'screen in fullscreen) for the sharpest image. Quality, Balanced and Performance draw '
                    'a smaller picture and let DLSS or FSR rebuild it at full size, while the HUD stays '
-                   'sharp. Those three are for Uncharted 3 only: Uncharted 1 and 2 use Native instead. '
-                   'The games\' memory limits this to about 3440 × 1440. In busy scenes the CPU usually '
+                   'sharp. The games\' memory limits this to about 3440 × 1440. In busy scenes the CPU usually '
                    'sets the frame rate, so a smaller size gains little there.'))
         self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
                  _('On a screen or window wider than 16:9 (21:9, 32:9) gameplay shows more at the sides '
@@ -1181,7 +1178,7 @@ class Launcher:
                  _('Anisotropic filtering: floors, roads and walls seen at a shallow angle stay sharp '
                    'into the distance. In Uncharted 3 with DLSS it makes the picture softer, so it is off by default.'))
         self.check(f, 'bloom', _('Bloom'),
-                   _('Uncharted 3 only. The soft glow around bright lights and glints; '
+                   _('The soft glow around bright lights and glints (all three games share the effect); '
                      'turn it off for a crisper, flatter picture.'))
         self.row(f, _('Upscaling'), self.choice(f, 'scaler', SCALERS, 34),
                  _('FSR 1 keeps edges sharp when the image is enlarged; bilinear is softer.'))
@@ -1191,9 +1188,8 @@ class Launcher:
         modes = ANTI_ALIASING + ([FSR411] if fsr411_assets() else [])
         self.row(f, _('Anti-aliasing'), self.choice(f, 'anti_aliasing', modes, 34),
                  _('Temporal anti-aliasing with the games\' own motion vectors: smoother edges and less '
-                   'shimmering than the games\' own. At Native render resolution DLSS is DLAA (all three '
-                   'games); with Quality, Balanced or Performance (Uncharted 3) DLSS or FSR also rebuilds '
-                   'the full size. DLSS needs a GeForce RTX; FSR 4 runs best on a Radeon RX 7000/9000 or '
+                   'shimmering than the games\' own. At Native render resolution DLSS is DLAA; with '
+                   'Quality, Balanced or Performance DLSS or FSR also rebuilds the full size. DLSS needs a GeForce RTX; FSR 4 runs best on a Radeon RX 7000/9000 or '
                    'a GeForce RTX 40/50.'))
         self.row(f, _('DLSS model'), self.choice(f, 'dlss_model', DLSS_MODELS, 34),
                  _('With NVIDIA DLSS: the AI model it uses. K is NVIDIA\'s choice for this (DLAA) mode; '
