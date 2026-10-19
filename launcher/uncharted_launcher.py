@@ -465,12 +465,12 @@ def game_environment(s, start=None):
     env['BB_WINDOW_SIZE'] = str(s.get('window_size') or '1920x1080')
     sizes = render_sizes(s)
     if sizes:
-        env['BB_RENDER_RES'] = sizes[0]
         # The upscaling hooks (BB_OUTPUT_RES) work in all three games: Uncharted 1 and 2 draw
-        # their final composite, HUD-less frame and HUD with Uncharted 3's shaders. At native,
-        # Uncharted 1 and 2 keep the plain path (anti-aliasing at the render size, tested).
-        if start == 'u3' or sizes[0] != sizes[1]:
-            env['BB_OUTPUT_RES'] = sizes[1]
+        # their final composite, HUD-less frame and HUD with Uncharted 3's shaders. They are
+        # also what runs the anti-aliasing at native: without BB_OUTPUT_RES the older path
+        # only works at the games' own 1920x1080, so at any other size it never ran (U1 and U2
+        # at Native had no anti-aliasing at all, only the sub-pixel jitter).
+        env['BB_RENDER_RES'], env['BB_OUTPUT_RES'] = sizes
     env['BB_ULTRAWIDE'] = str(s.get('ultrawide') or 'auto')
     env['BB_FOV'] = str(s.get('fov') or '100')
     if not s.get('bloom', True):

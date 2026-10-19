@@ -1108,11 +1108,34 @@ void TemporalUpscaler::Run() {
     if (color.info.pixel_format != vk::Format::eR16G16B16A16Sfloat ||
         depth.info.size.width != ow || depth.info.size.height != oh ||
         !(color.usage_flags & vk::ImageUsageFlagBits::eStorage)) {
+        // bbport: say so once: this path silently did nothing in U1/U2 at native before the
+        // launcher passed BB_OUTPUT_RES there (no anti-aliasing, only the jitter).
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::printf("Upscaler: scene %ux%u (format %d, depth %ux%u) not taken: no anti-aliasing "
+                        "on this path\n", ow, oh, int(color.info.pixel_format),
+                        depth.info.size.width, depth.info.size.height);
+        }
         return;
     }
     if (!EnsureResources(w, h, ow, oh, true)) {
         failed = true;
         return;
+    }
+    {
+        // bbport: the mode this path runs, once per change (tests can confirm FSR 4 / TAA / DLSS).
+        static int last_mode = -1;
+        const int mode = BbSettings::Get().upscaler;
+        if (mode != last_mode) {
+            last_mode = mode;
+            std::printf("Upscaler: %s on the scene, %ux%u -> %ux%u\n",
+                        mode == BbSettings::UpscalerTaa    ? "TAA"
+                        : mode == BbSettings::UpscalerDlss ? "DLSS"
+                        : BbSettings::IsFsr4(mode)         ? "FSR 4"
+                                                           : "FSR 3.1",
+                        w, h, ow, oh);
+        }
     }
     const auto depth_format = depth.info.pixel_format;
     const auto depth_view =
