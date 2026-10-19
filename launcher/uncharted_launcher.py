@@ -32,7 +32,8 @@ PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).r
 sys.path.insert(0, str(PORT_DIR / 'scripts'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
-CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / 'uncharted-launcher'
+# expanduser, not Path.home(): started without USERPROFILE or HOME, the launcher still opens.
+CONFIG_DIR = Path(os.environ.get('APPDATA') or os.path.expanduser('~')) / 'uncharted-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
