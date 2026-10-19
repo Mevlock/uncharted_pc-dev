@@ -780,6 +780,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             game_frame_ms = game_frame_ms + (ms - game_frame_ms) * 0.1;
         }
         last_game_present = start;
+        BbOverlay::NoteGameFrame();
     }
     const auto step = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double, std::milli>(game_frame_ms / (generated + 1)));

@@ -33,6 +33,9 @@ bool Visible();
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
 /// Every presented frame (FPS readout; BB_FPS_LOG=1 prints the rate every 5 seconds).
 void NotePresent();
+/// Every new frame of the game's own (not generated, not shown again): the game's frame rate,
+/// lows and frame time graph of the FPS counter.
+void NoteGameFrame();
 
 /// The menu is open or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();
