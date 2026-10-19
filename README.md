@@ -37,7 +37,9 @@ busy scenes, with no change to the picture. Frame generation off, native 3440×1
 | Uncharted 3 (Cartagena square) | ~43 FPS | ~97 FPS (2.3×) |
 
 The biggest single fix: character skinning (about 100 000 tiny GPU jobs a second) made the GPU stop
-and wait before nearly every job over a bookkeeping mistake. Details, measurements and everything
+and wait before nearly every job over a bookkeeping mistake. The games' idle job threads now sleep
+instead of spinning (from [BilalReloaded's Uncharted port](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port)),
+which frees CPU cores: about 7% more in Uncharted 3. Details, measurements and everything
 tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
 
 ### Picture
