@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 #include <SDL3/SDL.h>
@@ -169,13 +170,32 @@ void Menu() {
     }
     ImGui::Text("%.0f FPS  (%.1f ms)", frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f,
                 frame_ms_avg);
+    Hint("Changes here apply at once, for this session. The launcher's settings apply each time "
+         "the game starts: set the same there to keep a change.");
 
-    ImGui::SeparatorText("Temporal upscaler");
-    static const char* upscalers[] = {"Off", "FSR 3.1", "FSR 4 (INT8)", "FSR 4.1.1 (INT8)",
-                                     "TAA (native anti-aliasing)", "DLSS (NVIDIA RTX)"};
-    static const char* later[] = {"XeSS"};
+    ImGui::SeparatorText("Picture");
+    // The render size comes from the launcher (BB_RENDER_RES, patched in at start), the size
+    // the upscaler rebuilds from it from BB_OUTPUT_RES (Uncharted 3's upscaled modes).
+    {
+        const char* render = std::getenv("BB_RENDER_RES");
+        const char* output = std::getenv("BB_OUTPUT_RES");
+        const bool upscaled = render && render[0] && output && output[0] &&
+                              std::strcmp(render, output) != 0;
+        if (upscaled) {
+            ImGui::Text("Rendering %s, upscaled to %s", render, output);
+        } else if (render && render[0]) {
+            ImGui::Text("Rendering %s (native)", render);
+        } else {
+            ImGui::Text("Rendering 1920x1080 (the game's own), scaled to the window");
+        }
+        Hint("Set in the launcher (Display: Render resolution); it applies when the game starts. "
+             "Quality, Balanced and Performance render smaller and let the anti-aliasing (DLSS or "
+             "FSR) rebuild the full size: Uncharted 3 only.");
+    }
+    static const char* upscalers[] = {"Off (the game's own)", "FSR 3.1", "FSR 4 (INT8)",
+                                     "FSR 4.1.1 (INT8)", "TAA", "DLSS (NVIDIA RTX)"};
     int upscaler = s.upscaler;
-    if (ImGui::BeginCombo("Upscaler", upscalers[upscaler])) {
+    if (ImGui::BeginCombo("Anti-aliasing", upscalers[upscaler])) {
         for (int i = 0; i < BbSettings::UpscalerCount; ++i) {
             const bool supported = i == BbSettings::UpscalerFsr4 ? s.fsr4_supported.load()
                 : i == BbSettings::UpscalerFsr411 ? s.fsr411_supported.load()
@@ -190,13 +210,6 @@ void Menu() {
                 ImGui::TextDisabled("— not supported by this graphics card");
             }
         }
-        for (const char* name : later) {
-            ImGui::BeginDisabled();
-            ImGui::Selectable(name, false);
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            ImGui::TextDisabled("— in progress");
-        }
         ImGui::EndCombo();
     }
     if (const char* problem = s.dlss_problem.load(); problem && upscaler == BbSettings::UpscalerDlss) {
@@ -209,111 +222,14 @@ void Menu() {
             ImGui::TextUnformatted("The mode selected above is active. FSR 4 can be selected again.");
         ImGui::PopTextWrapPos();
     }
-    if (BbSettings::IsFsr4(s.upscaler)) {
-        if (s.upscaler == BbSettings::UpscalerFsr411) {
-            Hint("FSR 4.1.1 in INT8 mode: the model from AMD's 4.1.1 DLL, reproduced in Vulkan "
-                 "(the result matches the DLL). One model for Native..Performance and a separate one "
-                 "for Ultra Performance. Assets: tools/fsr4cap/build_assets.sh (needs the DLL and Proton).");
-        } else {
-            Hint("FSR 4 in INT8 mode (model v07 from the AMD FidelityFX SDK sources). Better quality "
-                 "than FSR 3.1, but a heavier pass. Changing the preset rebuilds the model (a short "
-                 "pause). Assets: tools/fetch_fsr4_assets.sh.");
-        }
-        Checkbox("FSR 4: auto exposure", s.fsr4_auto_exposure);
-        Checkbox("FSR 4: inverted jitter sign", s.fsr4_invert_jitter);
-        Hint("A check for ghosting: the FSR 4 network normalizes colour by exposure and uses it to decide "
-             "when to discard past frames. They change at once, without a restart.");
-    }
+    Hint("Smooths edges and keeps the picture stable from frame to frame; with an upscaled render "
+         "resolution it also rebuilds the full size. DLSS needs a GeForce RTX card.");
     const bool upscaler_on = s.upscaler != BbSettings::UpscalerOff;
-    const bool taa = s.upscaler == BbSettings::UpscalerTaa;
-    // Uncharted: the upscaler only smooths the game's own frame (the renderer sets this).
-    const bool game_size = s.game_size_only.load(std::memory_order_relaxed);
-    ImGui::BeginDisabled(!upscaler_on);
-    ImGui::BeginDisabled(taa || game_size);
-    int preset = taa ? BbSettings::NativeAA : s.preset.load();
-    char preset_label[64];
-    std::snprintf(preset_label, sizeof(preset_label), "%s (x%.1f)", BbSettings::PresetName(preset),
-                  BbSettings::PresetScale(preset));
-    if (ImGui::BeginCombo("Preset", preset_label)) {
-        for (int i = 0; i < BbSettings::PresetCount; ++i) {
-            char label[64];
-            const float scale = BbSettings::PresetScale(i);
-            const int output = s.output_res;
-            std::snprintf(label, sizeof(label), "%s (x%.1f, render %dx%d)",
-                          BbSettings::PresetName(i), scale,
-                          int(std::lround(BbSettings::OutputWidths[output] / scale / 2) * 2),
-                          int(std::lround(BbSettings::OutputHeights[output] / scale / 2) * 2));
-            if (ImGui::Selectable(label, i == preset)) {
-                Store(s.preset, i, true);
-            }
-        }
-        ImGui::EndCombo();
-    }
-    ImGui::EndDisabled();
-    if (game_size) {
-        Hint("Uncharted: the upscaler works as anti-aliasing on the game's frame (Native AA); the "
-             "presets do not apply. For a sharper picture set Render resolution in the launcher.");
-    } else if (taa) {
-        ImGui::TextWrapped("TAA smooths the scene at the output resolution, without the FSR model or upscaling. "
-                           "The saved FSR preset comes back when FSR is selected.");
-    }
-    ImGui::Text("Scene rendered at: %d x %d", s.active_render_width.load(),
-                s.active_render_height.load());
-    if (BbSettings::FixedRenderSession()) {
-        ImGui::Text("Preset at start: %s", BbSettings::PresetName(s.startup_preset));
-        if (const char* automatic = std::getenv("BB_AUTO_RENDER_RES");
-            automatic && automatic[0] == '1') {
-            Hint("With an output other than 1080p the whole game draws at the preset's size (a patch at start): "
-                 "the fastest on a Steam Deck and weak GPUs. A change of preset or output "
-                 "resolution needs a restart. \"Live resolution changes\" below allows "
-                 "changes without a restart (post-processing then stays at 1080p, slower).");
-        } else {
-            Hint("The game renders at this size from the start (the launcher's Render resolution, "
-                 "BB_RENDER_RES). Change it in the launcher; it applies when the game starts.");
-        }
-    } else {
-        Hint("Native AA: FSR works as anti-aliasing. The other presets lower the resolution the "
-             "scene is drawn at, relative to the output. The interface draws at the output resolution. "
-             "The preset applies from the next frame, without restarting the game.");
-    }
-    Checkbox("Sharpening (RCAS)", s.sharpen);
-    ImGui::BeginDisabled(!s.sharpen);
+    ImGui::BeginDisabled(!upscaler_on || !s.sharpen);
     Slider("Sharpness", s.sharpness, 0.0f, 2.0f);
-    Hint("Up to 1: the upscaler's own sharpening (RCAS). Above 1 another RCAS pass is added. "
-         "Ctrl+click the slider to type an exact value.");
     ImGui::EndDisabled();
-    Checkbox("Sub-pixel jitter", s.jitter);
-    Hint("Each frame the scene shifts by a fraction of a pixel, and the upscaler gathers more detail "
-         "from several frames. Without it you only get smoothing from the history.");
-
-    ImGui::SeparatorText("Reactive mask");
-    ImGui::BeginDisabled(taa);
-    Checkbox("Enable the mask", s.reactive);
-    Hint("Marks transparent effects (particles, haze) so the upscaler relies less on "
-         "past frames. Fewer trails behind effects, but shimmering comes back under them.");
-    ImGui::BeginDisabled(!s.reactive);
-    Slider("Scale", s.reactive_scale, 0.0f, 4.0f);
-    Slider("Threshold", s.reactive_threshold, 0.0f, 1.0f);
-    Slider("Maximum", s.reactive_max, 0.0f, 1.0f);
-    bool show_mask = s.debug_view == BbSettings::DebugReactive;
-    if (ImGui::Checkbox("Show the mask (debug)", &show_mask)) {
-        s.debug_view = show_mask ? BbSettings::DebugReactive : BbSettings::DebugNone;
-    }
-    ImGui::EndDisabled();
-    ImGui::EndDisabled();
-    Checkbox("Character motion vectors", s.object_motion);
-    Hint("Exact vectors for animated objects: clothes and weapons break up less "
-         "in motion. A static scene gets no extra pass. "
-         "The change applies after restarting the game.");
-    bool show_motion = s.debug_view == BbSettings::DebugMotion;
-    if (ImGui::Checkbox("Show the motion vectors (debug)", &show_motion)) {
-        s.debug_view = show_motion ? BbSettings::DebugMotion : BbSettings::DebugNone;
-    }
-    Hint("Red/green: horizontal/vertical motion (8 pixels = full brightness). "
-         "Blue: the pixel got an exact object vector, not only the camera motion. "
-         "A moving object with no blue and no red/green is treated by the upscaler "
-         "as still, hence the trail.");
-    ImGui::EndDisabled(); // upscaler off
+    Hint("Sharpens the anti-aliased picture (AMD RCAS, also with DLSS). 0 is off; the launcher's "
+         "Low, Medium and High are 0.2, 0.4 and 0.7. Ctrl+click to type a value.");
 
     ImGui::SeparatorText("Frame generation");
     static const char* frame_gens[] = {"Off", "FSR 3 (any graphics card)",
@@ -334,9 +250,6 @@ void Menu() {
         }
         ImGui::EndCombo();
     }
-    Hint("Frames between two of the game's: 60 FPS on screen becomes 120. Needs Mailbox or "
-         "Immediate presentation and a display that fast. Adds a little input latency. "
-         "Menus and cutscene videos are not generated.");
     const int max_multiplier = s.frame_gen == BbSettings::FrameGenDlss ? s.dlssg_max_multiplier.load() : 2;
     ImGui::BeginDisabled(s.frame_gen == BbSettings::FrameGenOff || max_multiplier <= 2);
     int multiplier = std::min(s.frame_gen_multiplier.load(), max_multiplier);
@@ -347,54 +260,48 @@ void Menu() {
     if (const char* problem = s.frame_gen_problem.load()) {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s", problem);
     }
+    Hint("Generated frames between the game's own: 60 FPS on screen becomes 120. Adds a little "
+         "input latency; menus and cutscene videos are not generated. The launcher's Frame rate "
+         "limit counts generated frames.");
 
-    ImGui::SeparatorText("Output resolution");
-    ImGui::BeginDisabled(game_size);
-    static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
-    int output = s.output_res;
-    if (ImGui::BeginCombo("Output resolution", outputs[output])) {
-        for (int i = 0; i < BbSettings::OutputCount; ++i) {
-            if (ImGui::Selectable(outputs[i], i == output)) {
-                Store(s.output_res, i, true);
-            }
+    ImGui::SeparatorText("Other");
+    Checkbox("FPS counter in the corner", s.show_fps);
+
+    // Diagnosis and tuning, kept out of the way: the defaults are right for the three games.
+    if (ImGui::CollapsingHeader("Developer options")) {
+        Checkbox("Sub-pixel jitter", s.jitter);
+        Hint("Each frame the scene shifts by a fraction of a pixel and the anti-aliasing gathers "
+             "detail from several frames. Off: smoothing from the history only.");
+        Checkbox("Sharpening pass", s.sharpen);
+        if (BbSettings::IsFsr4(s.upscaler)) {
+            Checkbox("FSR 4: auto exposure", s.fsr4_auto_exposure);
+            Checkbox("FSR 4: inverted jitter sign", s.fsr4_invert_jitter);
         }
-        ImGui::EndCombo();
-    }
-    if (game_size) {
-        Hint("Uncharted: the frame keeps the game's size (1920 x 1080, or the launcher's Render "
-             "resolution) and is scaled to the window afterwards (launcher: Upscaling, Sharpening). "
-             "These two settings do not apply.");
-    } else if (BbSettings::FixedRenderSession()) {
-        Hint("The size of the finished frame and interface. The preset sets the scene size relative to the "
-             "output: 4K Performance = 1920x1080. Applies after restarting the game.");
-    } else {
-        Hint("The size of the finished frame and interface changes at the next frame boundary. "
-             "The preset sets the scene size relative to the output: 4K Performance = 1920x1080. "
-             "A size change resets the FSR history and may cause a short pause.");
-    }
-    static const char* live_modes[] = {"Auto (by graphics card)", "Off (faster)", "On"};
-    int live = s.live_resolution + 1;
-    if (ImGui::BeginCombo("Live resolution changes", live_modes[live])) {
-        for (int i = 0; i < 3; ++i) {
-            if (ImGui::Selectable(live_modes[i], i == live)) {
-                Store(s.live_resolution, i - 1, true);
-            }
+        const bool taa = s.upscaler == BbSettings::UpscalerTaa;
+        ImGui::BeginDisabled(taa || !upscaler_on);
+        Checkbox("Reactive mask", s.reactive);
+        Hint("Marks transparent effects (particles, haze) so the upscaler relies less on past "
+             "frames: fewer trails behind effects, more shimmer under them.");
+        ImGui::BeginDisabled(!s.reactive);
+        Slider("Mask scale", s.reactive_scale, 0.0f, 4.0f);
+        Slider("Mask threshold", s.reactive_threshold, 0.0f, 1.0f);
+        Slider("Mask maximum", s.reactive_max, 0.0f, 1.0f);
+        bool show_mask = s.debug_view == BbSettings::DebugReactive;
+        if (ImGui::Checkbox("Show the mask", &show_mask)) {
+            s.debug_view = show_mask ? BbSettings::DebugReactive : BbSettings::DebugNone;
         }
-        ImGui::EndCombo();
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        Checkbox("Character motion vectors", s.object_motion);
+        Hint("Exact vectors for animated objects (applies after restarting the game).");
+        bool show_motion = s.debug_view == BbSettings::DebugMotion;
+        if (ImGui::Checkbox("Show the motion vectors", &show_motion)) {
+            s.debug_view = show_motion ? BbSettings::DebugMotion : BbSettings::DebugNone;
+        }
+        Hint("Red/green: horizontal/vertical motion (8 pixels = full brightness); blue: an exact "
+             "object vector.");
     }
-    if (!game_size) {
-        Hint("On: the output resolution and preset change without a restart, but the game's post-processing "
-             "stays at 1080p, noticeably slower on a Steam Deck and older graphics cards. "
-             "Off: everything draws at the preset's size, and a change needs a restart. Auto turns it on "
-             "on powerful dedicated graphics cards. Applies after restarting the game.");
-    }
-    ImGui::EndDisabled();
-    // No game-effect, cheat or model-detail toggles here: those were Bloodborne patches
-    // (scripts/patches.py, patches/Bloodborne.xml), which the Uncharted launch never applies.
-    bool restart = s.object_motion != s.startup_object_motion ||
-                   s.live_resolution != s.startup_live_resolution ||
-                   BbSettings::ResolutionNeedsRestart();
-    if (restart) {
+    if (s.object_motion != s.startup_object_motion) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
                            "Changes apply after restarting the game");
         if (ImGui::Button("Apply and restart the game")) {
@@ -403,15 +310,10 @@ void Menu() {
         }
     }
 
-    ImGui::SeparatorText("Other");
-    Checkbox("FPS counter in the corner", s.show_fps);
-
     ImGui::Spacing();
     if (ImGui::Button("Close")) {
         keep_open = false;
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("Settings are saved in bbport.ini");
     ImGui::End();
     if (!keep_open) {
         SetOpen(false);
