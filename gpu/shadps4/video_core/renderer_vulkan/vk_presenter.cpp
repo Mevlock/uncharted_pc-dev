@@ -433,7 +433,19 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // as raw 32-bit pixels (menus and movies included; the upscaler dumps scene frames only).
     static const char* frame_dump_trigger = std::getenv("BB_FRAME_DUMP_TRIGGER");
     static int frame_dump_index = 0;
-    const bool frame_dump = frame_dump_trigger && std::remove(frame_dump_trigger) == 0;
+    // BB_FRAME_DUMP_BURST=N (diagnosis): one trigger dumps N consecutive frames.
+    static const int frame_dump_burst = [] {
+        const char* env = std::getenv("BB_FRAME_DUMP_BURST");
+        return env ? std::max(1, std::atoi(env)) : 1;
+    }();
+    static int frame_dump_left = 0;
+    if (frame_dump_trigger && std::remove(frame_dump_trigger) == 0) {
+        frame_dump_left = frame_dump_burst;
+    }
+    const bool frame_dump = frame_dump_left > 0;
+    if (frame_dump) {
+        --frame_dump_left;
+    }
     // bbport: scaled upscaler presets: the output-size display buffer drawn by the port.
     TemporalUpscaler::Display display{};
     const bool upscaled = rasterizer->GetUpscaler().DisplayOverride(cpu_address, display);

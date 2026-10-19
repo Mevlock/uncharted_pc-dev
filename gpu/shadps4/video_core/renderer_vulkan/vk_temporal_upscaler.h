@@ -237,6 +237,8 @@ private:
     bool mask_ready = false;
     std::array<float, 2> jitter{};
     u32 jitter_index = 0;
+    u64 jitter_flip = ~0ull; ///< the flip the jitter last advanced at (once per shown frame)
+    u64 start_flip = ~0ull;  ///< the flip of the last OnFrameStart's frame bookkeeping
     bool reset = true;
     u64 frame_id = 0;
     std::chrono::steady_clock::time_point last_frame{};

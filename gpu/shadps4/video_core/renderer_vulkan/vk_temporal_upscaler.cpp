@@ -5,6 +5,8 @@
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/ui_composition.h"
 
+#include <map>
+#include <set>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -343,14 +345,24 @@ bool TemporalUpscaler::OnFrameStart() {
     }
     BbSettings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
     BbSettings::Get().active_render_height = Scaled() ? render_height : scene_targets.Size().height;
-    if (changed || !dispatched_last_frame) reset = true;
+    // bbport: once per shown frame. Velocity mode passes here for every draw into the display
+    // buffer (U3: ~6 a frame); after the upscale had set dispatched_last_frame, the next UI
+    // draw cleared it and the one after found it clear: every DLSS evaluation in U3 had its
+    // history reset, so each output was that frame alone, the jitter showing as a constant
+    // shake (the title screen's rifle and dunes, at native too).
+    const u64 start_now = g_flips.load(std::memory_order_relaxed);
+    const bool new_frame = start_now != start_flip;
+    start_flip = start_now;
+    if (changed || (new_frame && !dispatched_last_frame)) reset = true;
     if (changed) jitter_index = 0;
     applied_preset = preset;
     applied_output = output;
     applied_upscaler = upscaler;
     last_active = active;
     last_jitter = jitter_on;
-    dispatched_last_frame = false;
+    if (new_frame) {
+        dispatched_last_frame = false;
+    }
 
     // The display pass of an upscaled frame reads the upscaled UI image.
     display_redirect = ui_phase && !velocity_ui;
@@ -381,8 +393,43 @@ bool TemporalUpscaler::OnFrameStart() {
     // size, which survives the frame boundary (Performance 960 -> 1920 needs 32 phases).
     const u32 phases = Scaled() ? Motion::JitterPhases(render_width, target_width)
         : Motion::JitterPhases(scene_targets.Size().width, 1920);
+    // bbport: once per shown frame. In velocity mode every draw into the display buffer comes
+    // here, the UI drawn after the upscale too: U3's title screen stepped the sequence 6 times a
+    // frame, so with Performance's 33 phases the scene saw 11 badly spread positions (every
+    // sixth Halton point) and DLSS left its thin edges shimmering.
+    const u64 flip = g_flips.load(std::memory_order_relaxed);
+    if (flip == jitter_flip && !changed) {
+        return changed;
+    }
+    jitter_flip = flip;
     jitter_index = jitter_index % phases + 1;
     jitter = {Halton(jitter_index, 2) - 0.5f, Halton(jitter_index, 3) - 0.5f};
+    // bbport diagnosis (BB_JITTER_DIAG=1): jitter steps per shown frame, and the distinct jitter
+    // positions the upscaler was given over 5 s.
+    if (static const bool diag = std::getenv("BB_JITTER_DIAG") != nullptr; diag) {
+        static u32 last_flip = 0, steps = 0;
+        static std::map<u32, u32> steps_per_flip;
+        static std::set<u32> evaluated;
+        static auto window = std::chrono::steady_clock::now();
+        const u32 flip = g_flips.load(std::memory_order_relaxed);
+        if (flip != last_flip) {
+            ++steps_per_flip[steps];
+            steps = 0;
+            last_flip = flip;
+        }
+        ++steps;
+        evaluated.insert(jitter_index);
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(5)) {
+            std::printf("Jitter diag (5 s): %u phases; steps per shown frame:", phases);
+            for (const auto& [n, count] : steps_per_flip) {
+                std::printf(" %u x%u", n, count);
+            }
+            std::printf("; %zu distinct jitter indices\n", evaluated.size());
+            steps_per_flip.clear();
+            evaluated.clear();
+            window = now;
+        }
+    }
     return changed;
 }
 
@@ -2334,6 +2381,19 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
         // The jitter and motion vectors FSR 3 gets: render pixels, current to previous.
         const float sign = BbToggle::Disabled(1u << 26) ? -1.0f : 1.0f;
         const auto& settings = BbSettings::Get();
+        // bbport diagnosis (BB_JITTER_DIAG=1): evaluations and history resets, every 5 s.
+        if (static const bool diag = std::getenv("BB_JITTER_DIAG") != nullptr; diag) {
+            static u64 evaluations = 0, resets = 0;
+            static auto window = std::chrono::steady_clock::now();
+            ++evaluations;
+            resets += reset;
+            if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(5)) {
+                std::printf("Jitter diag (5 s): DLSS %llu evaluations, %llu with the history reset\n",
+                            (unsigned long long)evaluations, (unsigned long long)resets);
+                evaluations = resets = 0;
+                window = now;
+            }
+        }
         ok = dlss->Evaluate(cmdbuf, {
             .color = color,
             .depth = depth,

@@ -39,6 +39,13 @@ public:
     vk::Image ObjectMotionImage(u32 width, u32 height) const noexcept;
 
     void SetJitter(std::array<float, 2> value) noexcept {
+        // bbport: called for every draw into the display buffer (U3: ~6 a frame); the jitter
+        // changes once per shown frame (TemporalUpscaler::OnFrameStart), and only then does the
+        // current one become the previous frame's. Shifting on every call left previous_jitter
+        // equal to the current one.
+        if (value == jitter) {
+            return;
+        }
         previous_jitter = jitter;
         jitter = value;
     }

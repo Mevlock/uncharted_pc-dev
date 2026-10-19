@@ -1271,6 +1271,30 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
     }
 }
 
+/// bbport: the temporal upscaler's sub-pixel jitter for a draw with this depth buffer. The
+/// upscaler takes the whole frame as jittered and shifts it back, so whatever is composited into
+/// the scene must carry the jitter too: U3 draws particles and blowing sand into a depth buffer
+/// of half the scene's size (856x352 at 1712x704), and without it that layer shook by the jitter
+/// every frame around the rifle and dunes of the title screen (only ~17 of ~200 depth-tested
+/// draws a frame were jittered). Half-size targets get half the shift (twice the pixel size);
+/// shadow maps and other sizes none.
+std::array<float, 2> Rasterizer::SceneJitterFor(VideoCore::ImageId depth) {
+    const auto scene_depth = camera_motion->Depth();
+    if (!scene_depth || !depth) {
+        return {};
+    }
+    const auto jitter = upscaler->Jitter();
+    if (depth == scene_depth) {
+        return jitter;
+    }
+    const auto& scene = texture_cache.GetImage(scene_depth).info.size;
+    const auto& size = texture_cache.GetImage(depth).info.size;
+    if (size.width == scene.width / 2 && size.height == scene.height / 2) {
+        return {jitter[0] * 0.5f, jitter[1] * 0.5f};
+    }
+    return {};
+}
+
 /// bbport: BB_ASYNC_PAUSE=2 — a draw or dispatch whose buffers overlap the window of an async
 /// side queue read-back in flight waits for it here, before the recording thread gets it. The
 /// guest thread that faulted there is about to write the data such work may read (with
@@ -2514,9 +2538,43 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
-    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth() &&
+    // bbport diagnosis (BB_JITTER_DIAG=1): depth-tested draws jittered, drawn before the scene
+    // depth was known, or into another depth buffer, every 5 s.
+    if (static const bool jitter_diag = std::getenv("BB_JITTER_DIAG") != nullptr;
+        jitter_diag && upscaler->Enabled() && db_desc.first &&
         (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
-        draw_jitter = upscaler->Jitter();
+        static u64 jittered = 0, no_depth = 0, other_depth = 0;
+        static std::map<std::pair<u32, u32>, u64> other_sizes, scene_sizes;
+        static auto window = std::chrono::steady_clock::now();
+        const auto scene_depth = camera_motion->Depth();
+        const auto& db_info = texture_cache.GetImage(db_desc.first).info;
+        if (!scene_depth) {
+            ++no_depth;
+        } else if (db_desc.first == scene_depth) {
+            ++jittered;
+            ++scene_sizes[{db_info.size.width, db_info.size.height}];
+        } else {
+            ++other_depth;
+            ++other_sizes[{db_info.size.width, db_info.size.height}];
+        }
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(5)) {
+            std::printf("Jitter diag (5 s): depth-tested draws %llu jittered, %llu before the scene "
+                        "depth was known, %llu into another depth buffer; scene depth",
+                        (unsigned long long)jittered, (unsigned long long)no_depth,
+                        (unsigned long long)other_depth);
+            for (const auto& [size, n] : scene_sizes) std::printf(" %ux%u:%llu", size.first, size.second, (unsigned long long)n);
+            std::printf("; others");
+            for (const auto& [size, n] : other_sizes) std::printf(" %ux%u:%llu", size.first, size.second, (unsigned long long)n);
+            std::printf("\n");
+            jittered = no_depth = other_depth = 0;
+            other_sizes.clear();
+            scene_sizes.clear();
+            window = now;
+        }
+    }
+    if (upscaler->Enabled() && db_desc.first &&
+        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
+        draw_jitter = SceneJitterFor(db_desc.first);
     }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
@@ -2759,8 +2817,8 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     push_data.yoffset *= target_scale[1];
     pipeline->BindResources(set_writes, push_data);
     draw_jitter = {};
-    if (upscaler->Enabled() && db_desc.first && db_desc.first == camera_motion->Depth()) {
-        draw_jitter = upscaler->Jitter();
+    if (upscaler->Enabled() && db_desc.first) {
+        draw_jitter = SceneJitterFor(db_desc.first);
     }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
