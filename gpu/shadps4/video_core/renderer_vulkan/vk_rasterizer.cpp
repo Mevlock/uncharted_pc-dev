@@ -5314,10 +5314,25 @@ bool MenuBackdropShader(u64 ps_hash) {
     return std::find(hashes.begin(), hashes.end(), static_cast<u32>(ps_hash)) != hashes.end();
 }
 
+/// bbport: depth-tested draws below which a gameplay frame no longer counts as one (leaving
+/// gameplay). Gameplay dips to ~180 in sparse scripted scenes (U3, 2026-10-19: 179 flipped a
+/// scripted sequence to 16:9) while menus reach ~150: one threshold has no room between them.
+/// Entering still needs SceneFrameDraws (menus never reach it); leaving goes through loading
+/// screens, fades or movies with almost no 3D draws. BB_ULTRAWIDE_EXIT_DRAWS overrides 100.
+u32 SceneExitDraws() {
+    static const u32 draws = [] {
+        const char* env = std::getenv("BB_ULTRAWIDE_EXIT_DRAWS");
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 100u;
+    }();
+    return draws;
+}
+
 bool Rasterizer::TakeSceneFrame() noexcept {
     const u32 scene_draws = g_frame_scene_draws.exchange(0, std::memory_order_relaxed);
     const u32 menu_draws = g_frame_menu_draws.exchange(0, std::memory_order_relaxed);
-    const bool raw = scene_draws >= SceneFrameDraws() && menu_draws == 0;
+    static bool gameplay = false;
+    const bool raw = scene_draws >= (gameplay ? SceneExitDraws() : SceneFrameDraws()) &&
+                     menu_draws == 0;
     // BB_ULTRAWIDE_STATS=1 (diagnosis): every 120 frames, the lowest, middle and highest scene
     // draw counts and the frames with a menu backdrop (to tune the threshold).
     static const bool stats = [] {
@@ -5344,7 +5359,6 @@ bool Rasterizer::TakeSceneFrame() noexcept {
         const char* env = std::getenv("BB_ULTRAWIDE_EXIT_FRAMES");
         return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 30u;
     }();
-    static bool gameplay = false;
     static u32 run = 0;
     if (raw == gameplay) {
         run = 0;
