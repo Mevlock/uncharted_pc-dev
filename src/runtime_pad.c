@@ -480,6 +480,7 @@ static float aim_stick(float rate) {
  * (measuring the aiming curve). */
 static void __attribute__((ms_abi)) u2_pad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t sticks) {
     (void)unused0; (void)unused1; (void)image;
+    if (aim_held) bbgpu_note_aiming(); /* BB_DOF=aim */
     if (!raw_aim_enabled() || !aim_held || !sticks) return;
     const uint64_t now=now_us();
     static uint64_t last;

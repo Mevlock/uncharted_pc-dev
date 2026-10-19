@@ -43,6 +43,9 @@ void bbgpu_mouse_configure(int look);
  * it is; 0 before the first frame with a known camera. */
 int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds);
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
+/* The player is aiming (called while the aiming camera runs): BB_DOF=aim leaves out the game's
+ * depth of field until shortly after the last call. */
+void bbgpu_note_aiming(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
 #ifdef __cplusplus

@@ -2149,6 +2149,32 @@ static u32 ForceUploadVs(bool index) {
     return (setting.second & (index ? 1 : 2)) ? setting.first : 0;
 }
 
+// bbport: BB_DOF=0 leaves out the game's depth of field, BB_DOF=aim only while the player aims
+// (bbgpu_note_aiming, until 0.4 s after the aiming camera stops: the game fades its blur out).
+// Uncharted 2's is a separable blur of the half-size scene (compute 8b10b4cb, 1c3672c5); the
+// composite then blends in the unblurred image left in its target.
+static std::atomic<double> last_aiming{0.0};
+extern "C" void bbgpu_note_aiming(void) {
+    last_aiming.store(std::chrono::duration<double>(
+                          std::chrono::steady_clock::now().time_since_epoch()).count(),
+                      std::memory_order_relaxed);
+}
+static bool SkipDepthOfField(u64 hash) {
+    static const int mode = [] { // 0 the game's, 1 off, 2 off while aiming
+        const char* env = std::getenv("BB_DOF");
+        return !env ? 0 : env[0] == '0' ? 1 : std::strcmp(env, "aim") == 0 ? 2 : 0;
+    }();
+    if (!mode || (static_cast<u32>(hash) != 0x8b10b4cbu && static_cast<u32>(hash) != 0x1c3672c5u)) {
+        return false;
+    }
+    if (mode == 1) {
+        return true;
+    }
+    const double now = std::chrono::duration<double>(
+                           std::chrono::steady_clock::now().time_since_epoch()).count();
+    return now - last_aiming.load(std::memory_order_relaxed) < 0.4;
+}
+
 // bbport: BB_SKIP_SHADERS=<hash>,...: draws and dispatches of these pixel/compute shaders
 // are not recorded (diagnostic: which pass of a frame causes a visual problem).
 static bool SkipShader(u64 hash) {
@@ -2167,7 +2193,10 @@ static bool SkipShader(u64 hash) {
         }
         return list;
     }();
-    return hash && std::find(skipped.begin(), skipped.end(), hash) != skipped.end();
+    if (hash && std::find(skipped.begin(), skipped.end(), hash) != skipped.end()) {
+        return true;
+    }
+    return SkipDepthOfField(hash);
 }
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,

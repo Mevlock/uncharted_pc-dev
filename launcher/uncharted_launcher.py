@@ -101,6 +101,8 @@ ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'),
 # The games' field of view in percent (BB_FOV), on every screen.
 FIELDS_OF_VIEW = [('100', "100% (the games' own)"), ('110', '110%'), ('120', '120%'), ('130', '130%')]
 SCALERS = [('fsr1', 'FSR 1 (AMD FidelityFX, sharp)'), ('bilinear', 'Smooth (bilinear)')]
+# The games' depth of field (BB_DOF): Uncharted 2 blurs the whole view while aiming.
+DEPTH_OF_FIELD = [('1', "On (the games' own)"), ('aim', 'Off while aiming'), ('0', 'Off')]
 # Anisotropic filtering of scene textures (BB_ANISO; 0 = the game's own).
 ANISOTROPY = [('0', "Off (the game's own)"), ('4', '4x'), ('8', '8x'), ('16', '16x')]
 SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'), ('0', 'Maximum')]
@@ -171,7 +173,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'skip_intro': False, 'anisotropy': '0',
+                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'anisotropy': '0',
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
@@ -476,6 +478,7 @@ def game_environment(s, start=None):
     env['BB_FOV'] = str(s.get('fov') or '100')
     if not s.get('bloom', True):
         env['BB_BLOOM'] = '0'
+    env['BB_DOF'] = str(s.get('depth_of_field') or '1')
     if s.get('skip_intro', False):
         env['BB_SKIP_INTRO'] = '1'
     env['BB_ANISO'] = str(s.get('anisotropy') or '0')
@@ -1181,6 +1184,10 @@ class Launcher:
         self.check(f, 'bloom', _('Bloom'),
                    _('The soft glow around bright lights and glints (all three games share the effect); '
                      'turn it off for a crisper, flatter picture.'))
+        self.row(f, _('Depth of field'), self.choice(f, 'depth_of_field', DEPTH_OF_FIELD, 34),
+                 _('The blur of what is out of focus. Uncharted 2 blurs the whole view while aiming; '
+                   '"Off while aiming" keeps it sharp there and leaves cutscenes as they are. '
+                   'Only Uncharted 2 so far.'))
         self.row(f, _('Upscaling'), self.choice(f, 'scaler', SCALERS, 34),
                  _('FSR 1 keeps edges sharp when the image is enlarged; bilinear is softer.'))
         self.row(f, _('Sharpening'), self.choice(f, 'sharpening', SHARPENING, 34),
