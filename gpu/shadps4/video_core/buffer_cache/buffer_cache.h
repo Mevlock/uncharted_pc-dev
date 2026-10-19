@@ -414,8 +414,19 @@ private:
     u64 ReleaseArenaBlocks(u64 first_block, u64 end_block);
     /// Drops pending unbinds of `arena` inside [first_block, end_block) (bound again).
     void TrimPendingUnbinds(const Buffer* arena, u64 first_block, u64 end_block);
+    /// bbport: arena memory chunks (see AllocateArenaMemory).
+    struct ArenaChunk {
+        vk::DeviceMemory memory;
+        u64 size;
+        u64 used;
+        bool host;
+    };
+    std::vector<ArenaChunk> arena_chunks;
+    bool host_arena_active{};
+    u64 AllocateArenaMemory(u64 size, vk::DeviceMemory& memory);
 
     u32 arena_memory_type_index{};
+    u32 arena_host_memory_type_index{~0u}; ///< bbport: system memory fallback
     u32 block_size{};
     u32 block_shift{};
     u32 blocks_per_arena_page{};
