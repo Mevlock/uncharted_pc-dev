@@ -83,8 +83,10 @@ done
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
 mkdir -p dist
 rm -f dist/uncharted-windows.zip
-(cd out/stage && powershell -NoProfile -Command \
-    "Compress-Archive -Path uncharted-windows -DestinationPath ../../dist/uncharted-windows.zip")
+# Python's zip writer: forward slashes in the entry names (Compress-Archive wrote backslashes,
+# which unzip tools outside Windows warn about or unpack into one flat folder).
+out/pyenv/Scripts/python.exe -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', sys.argv[2], 'uncharted-windows')" \
+    "$(cygpath -w "$PWD/dist/uncharted-windows")" "$(cygpath -w "$PWD/out/stage")"
 
 # Refresh dist/uncharted-windows, keeping what players create there (saves, settings), and only
 # while nothing runs from it: deleting a running launcher's files breaks it.
