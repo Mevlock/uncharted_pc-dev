@@ -26,7 +26,7 @@ done
 fetched=0
 for file in "${files[@]}"; do
     if [[ -s $dest/$file ]]; then continue; fi
-    curl -fsSL --retry 3 -o "$dest/$file.part" "$base/$file"
+    "${CURL:-curl}" -fsSL --retry 3 -o "$dest/$file.part" "$base/$file"
     mv "$dest/$file.part" "$dest/$file"
     fetched=$((fetched + 1))
 done

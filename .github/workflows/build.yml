@@ -64,6 +64,7 @@ jobs:
           restore-keys: ccache-${{ runner.os }}-
 
       - name: FSR 4 asset cache
+        id: fsr4_cache
         uses: actions/cache@v4
         with:
           path: fsr4_shaders
@@ -100,8 +101,10 @@ jobs:
           DLSS_SDK_ROOT="$(cygpath -u "$GITHUB_WORKSPACE")/dlss-sdk" bash packaging/windows/build_dlss.sh
 
       - name: FSR 4 assets
+        if: steps.fsr4_cache.outputs.cache-hit != 'true'
         shell: msys2 {0}
-        run: bash tools/fetch_fsr4_assets.sh
+        # Windows' own curl: MSYS2's is updated with every run and once crashed (exit 139).
+        run: CURL=/c/Windows/System32/curl.exe bash tools/fetch_fsr4_assets.sh
 
       - name: Package
         shell: msys2 {0}
