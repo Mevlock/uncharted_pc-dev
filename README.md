@@ -69,6 +69,20 @@ tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
   reduced render sizes, a crash in the frame generation when the picture size changed between
   menu and gameplay.
 
+### Known issues in this fork
+
+- **Upscaled render sizes are Uncharted 3 only.** Quality, Balanced and Performance (render
+  smaller, DLSS or FSR rebuilds the full size) need hooks into each game's frame; Uncharted 1
+  and 2 offer native or 1080p for now.
+- **Bloom on/off is Uncharted 3 only:** it targets that game's bloom pass.
+- **The DLSS fixes are only tested in Uncharted 3.** The code is shared, so Uncharted 1 and 2
+  should benefit too, but they have not been checked for shimmer or shake yet.
+- **Uncharted 2 at native resolution** works but has not had a full playthrough (cutscene
+  videos, HUD, frame generation).
+- **Ultrawide:** gameplay and menus are told apart automatically, and short scripted scenes can
+  still switch to 16:9 by mistake. **Always fill** (Display page) never switches, at the cost of
+  stretched menus and videos.
+
 ## Features
 
 - All three games from one launcher: Drake's Fortune, Among Thieves and Drake's Deception.
