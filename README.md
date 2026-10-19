@@ -13,6 +13,56 @@ code runs directly on your PC and the graphics are translated to Vulkan. Unpack 
 > big3-ps4_Shipping.elf, sce_sys, u1data, u2data and u3data).
 > This project is not affiliated with Sony Interactive Entertainment or Naughty Dog.
 
+## This fork
+
+A development fork of SuperMedo's port by [Mevlock](https://github.com/Mevlock), based on 0.3.6.
+Everything below is optional or on by default only where it is safe; the launcher has a setting
+for each.
+
+### Performance
+
+The GPU translation spent most of its time waiting. Fixing that roughly doubles the frame rate in
+busy scenes, with no change to the picture. Frame generation off, native 3440×1440:
+
+| Game (scene) | Before | Now |
+|---|---|---|
+| Uncharted 1 (the jungle) | ~112 FPS | ~151 FPS (+35%) |
+| Uncharted 2 (Istanbul museum) | ~44 FPS | ~96 FPS (2.2×) |
+| Uncharted 3 (Cartagena square) | ~43 FPS | ~97 FPS (2.3×) |
+
+The biggest single fix: character skinning (about 100 000 tiny GPU jobs a second) made the GPU stop
+and wait before nearly every job over a bookkeeping mistake. Details, measurements and everything
+tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
+
+### Picture
+
+- **Render resolution** (Display page): all three games can render at your screen's resolution
+  instead of enlarging 1920×1080, up to about 3440×1440 (the games' memory limit). Uncharted 3 can
+  also render below it and let DLSS or FSR rebuild the full size (Quality, Balanced, Performance).
+- **Ultrawide** (21:9, 32:9): gameplay shows more at the sides and fills the screen; menus,
+  loading screens and videos stay 16:9. **Field of view** setting.
+- **DLSS and FSR in Uncharted 3 fixed:** the upscaler's history was reset every frame, so it never
+  built up detail and the sub-pixel jitter showed as a constant shake (the title screen's rifle and
+  dunes). It now keeps its history: shimmering is basically gone. Textures keep their detail at
+  the upscaled render sizes (texture LOD bias), the history resets at camera cuts (no streaks), and
+  **Anti-aliasing sharpness** now works with DLSS.
+- **Bloom** on/off (Uncharted 3) and **texture filtering** (anisotropic) settings.
+- **Frame rate limit**: caps the frames shown, generated ones included (for example 120 with frame
+  generation).
+
+### Convenience
+
+- **Skip intro logos**: starts at the title screen without the Sony, Naughty Dog and Bluepoint logos
+  and their music, in all three games.
+- **Crash-safe saves**: a save is written to a temporary file and swapped in, so a crash while
+  saving cannot corrupt it.
+
+### Fixes
+
+- Uncharted 3: missing tutorial button text, treasure glints turning into big white shapes at
+  reduced render sizes, a crash in the frame generation when the picture size changed between
+  menu and gameplay.
+
 ## Features
 
 - All three games from one launcher: Drake's Fortune, Among Thieves and Drake's Deception.
