@@ -40,6 +40,9 @@ AUTHOR = 'SuperMedo'
 VERSION = '0.3.6.1'  # fork: upstream 0.3.6 + this fork's changes
 RELEASES_API = 'https://api.github.com/repos/Supermedo/uncharted_pc/releases/latest'
 RELEASES_PAGE = 'https://github.com/Supermedo/uncharted_pc/releases/latest'
+# Fork: no update check. The releases above are upstream's: installing one would replace this
+# fork's build with the official one.
+UPDATES = False
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'uncharted-update'
 # Never copied over an installation by an update (the package does not hold them either).
 USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log')
@@ -536,7 +539,7 @@ class Launcher:
         self.show('play')
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
-        if self.app.get('check_updates', True):
+        if UPDATES and self.app.get('check_updates', True):
             threading.Thread(target=self.check_update, daemon=True).start()
 
     def px(self, size):
@@ -1390,14 +1393,24 @@ class Launcher:
         self.pill(holder, _('Open the saves folder'),
                   lambda: self.open_path(self.var('user_dir').get(), 'user_dir')).pack(side='left', padx=(8, 0))
         self.section(f, _('Updates'))
-        self.check(f, 'check_updates', _('Look for a new version when the launcher starts'))
+        if UPDATES:
+            self.check(f, 'check_updates', _('Look for a new version when the launcher starts'))
         card = self.target(f)
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
-        self.pill(holder, _('Check for updates'),
-                  lambda: threading.Thread(target=self.check_update, args=(True,), daemon=True).start()
-                  ).pack(side='left')
-        self.pill(holder, _('Releases page'), lambda: webbrowser.open(RELEASES_PAGE)).pack(side='left', padx=(8, 0))
+        if UPDATES:
+            self.pill(holder, _('Check for updates'),
+                      lambda: threading.Thread(target=self.check_update, args=(True,), daemon=True).start()
+                      ).pack(side='left')
+            self.pill(holder, _('Releases page'), lambda: webbrowser.open(RELEASES_PAGE)).pack(side='left', padx=(8, 0))
+        else:
+            self.tk.Label(holder, text=_('This is an unofficial fork (version {}): it does not update '
+                                         "itself. Official releases are on SuperMedo's page; "
+                                         'installing one replaces this build.').format(VERSION),
+                          bg=CARD, fg=MUTED, font=self.font_ui_sm, wraplength=self.px(560),
+                          justify='left').pack(anchor='w')
+            self.pill(holder, _('Official releases'), lambda: webbrowser.open(RELEASES_PAGE)
+                      ).pack(anchor='w', pady=(8, 0))
 
     def build_log(self):
         tk = self.tk
