@@ -1278,6 +1278,31 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
 /// every frame around the rifle and dunes of the title screen (only ~17 of ~200 depth-tested
 /// draws a frame were jittered). Half-size targets get half the shift (twice the pixel size);
 /// shadow maps and other sizes none.
+/// bbport (kj2223's fork, github.com/kj2223/uncharted_pc-fixes, GPL-2.0-or-later): full-screen
+/// passes that rebuild positions from the scene depth through an interpolated texture coordinate
+/// (BB_JITTER_PS=<pixel shader hash>,..., run.py: U1's sun shadow pass f614041e) get the scene's
+/// jitter. Unjittered, they reconstructed each pixel from depth rendered a fraction of a pixel
+/// away, so the shadows moved against the geometry with every jitter step and flickered under
+/// DLSS, FSR and TAA.
+static bool JitterFullScreenPass(u64 hash) {
+    static const std::vector<u32> listed = [] {
+        std::vector<u32> list;
+        if (const char* env = std::getenv("BB_JITTER_PS")) {
+            for (const char* p = env; *p;) {
+                char* end;
+                const u64 value = std::strtoull(p, &end, 16);
+                if (end == p) {
+                    break;
+                }
+                list.push_back(u32(value));
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+        return list;
+    }();
+    return std::find(listed.begin(), listed.end(), u32(hash)) != listed.end();
+}
+
 std::array<float, 2> Rasterizer::SceneJitterFor(VideoCore::ImageId depth) {
     const auto scene_depth = camera_motion->Depth();
     if (!scene_depth || !depth) {
@@ -2582,6 +2607,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (upscaler->Enabled() && db_desc.first &&
         (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
         draw_jitter = SceneJitterFor(db_desc.first);
+    } else if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+               ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash)) {
+        draw_jitter = upscaler->Jitter();
     }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
@@ -2826,6 +2854,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     draw_jitter = {};
     if (upscaler->Enabled() && db_desc.first) {
         draw_jitter = SceneJitterFor(db_desc.first);
+    } else if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+               ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash)) {
+        draw_jitter = upscaler->Jitter();
     }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
