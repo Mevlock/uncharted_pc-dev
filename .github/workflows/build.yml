@@ -1,0 +1,128 @@
+# Windows build: the same steps as a local build (build.sh, build_dlss.sh, the FSR 4 assets,
+# package.sh) on a GitHub runner. Runs by hand (Actions > Build > Run workflow) and for version
+# tags (v0.3.6.1, ...), which also publish the zip as a release.
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # the release for a tag
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CCACHE_DIR: ${{ github.workspace }}\.ccache
+      CCACHE_MAXSIZE: 2G
+      # build.sh calls cmake itself: CMake takes the compiler launcher from the environment.
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      DLSS_SDK_TAG: v310.9.1  # NVIDIA's DLSS SDK: bridge headers/lib and nvngx_dlss(g).dll
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The runner's own MSYS2 in C:\msys64, where msys2-env.sh and build_dlss.sh look.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          release: false
+          path-type: inherit  # package.sh uses powershell
+          update: true
+          install: >-
+            git patch
+            mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-pkgconf mingw-w64-clang-x86_64-python mingw-w64-clang-x86_64-ccache
+            mingw-w64-clang-x86_64-vulkan-headers mingw-w64-clang-x86_64-vulkan-loader
+            mingw-w64-clang-x86_64-vulkan-memory-allocator mingw-w64-clang-x86_64-glslang
+            mingw-w64-clang-x86_64-sdl3 mingw-w64-clang-x86_64-fmt mingw-w64-clang-x86_64-boost
+            mingw-w64-clang-x86_64-robin-map mingw-w64-clang-x86_64-xxhash mingw-w64-clang-x86_64-ffmpeg
+            mingw-w64-clang-x86_64-zydis mingw-w64-clang-x86_64-spirv-tools mingw-w64-clang-x86_64-spirv-headers
+            mingw-w64-clang-x86_64-spirv-cross mingw-w64-clang-x86_64-protobuf mingw-w64-clang-x86_64-openssl
+            mingw-w64-clang-x86_64-zlib mingw-w64-clang-x86_64-miniupnpc mingw-w64-clang-x86_64-nlohmann-json
+
+      # A python.org-style Windows Python for PyInstaller (package.sh: WINPYTHON).
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: '3.13'
+
+      - name: Compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-
+
+      - name: FSR 4 asset cache
+        uses: actions/cache@v4
+        with:
+          path: fsr4_shaders
+          key: fsr4-${{ hashFiles('tools/fetch_fsr4_assets.sh', 'tools/fsr4_optimize.sh') }}
+
+      - name: Build the port
+        shell: msys2 {0}
+        run: |
+          ccache -z
+          bash build.sh
+          ccache -s
+
+      - name: DLSS SDK
+        shell: bash
+        run: |
+          git clone --depth 1 --branch "$DLSS_SDK_TAG" --filter=blob:none --sparse \
+              https://github.com/NVIDIA/DLSS.git dlss-sdk
+          git -C dlss-sdk sparse-checkout set --no-cone /include/ /lib/Windows_x86_64/x64/ \
+              /lib/Windows_x86_64/rel/nvngx_dlss.dll /lib/Windows_x86_64/rel/nvngx_dlssg.dll /LICENSE.txt
+
+      - name: Build the DLSS bridge
+        shell: msys2 {0}
+        run: |
+          # The Visual Studio on this image: 17 = 2022, 18 = 2026.
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          major=$("$vswhere" -latest -property catalog_productLineVersion | tr -d '\r')
+          version=$("$vswhere" -latest -property installationVersion | tr -d '\r')
+          export DLSS_GENERATOR="Visual Studio ${version%%.*} $major"
+          echo "Generator: $DLSS_GENERATOR"
+          export CMAKE_EXE="/c/Program Files/CMake/bin/cmake.exe"
+          unset CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER
+          DLSS_SDK_ROOT="$(cygpath -u "$GITHUB_WORKSPACE")/dlss-sdk" bash packaging/windows/build_dlss.sh
+
+      - name: FSR 4 assets
+        shell: msys2 {0}
+        run: bash tools/fetch_fsr4_assets.sh
+
+      - name: Package
+        shell: msys2 {0}
+        env:
+          PYTHON_PATH: ${{ steps.python.outputs.python-path }}
+        run: |
+          export WINPYTHON="$(cygpath -u "$PYTHON_PATH")"
+          bash packaging/windows/package.sh
+
+      - name: Upload the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: uncharted-windows-${{ github.ref_name }}-${{ github.run_number }}
+          path: out/stage/uncharted-windows
+          retention-days: 14
+
+      - name: Release (version tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          zip="uncharted-windows-$GITHUB_REF_NAME.zip"
+          cp dist/uncharted-windows.zip "$zip"
+          gh release create "$GITHUB_REF_NAME" "$zip" --title "$GITHUB_REF_NAME" --prerelease \
+              --notes "Unofficial fork build ($GITHUB_REF_NAME). The official port is SuperMedo's: https://github.com/Supermedo/uncharted_pc"
