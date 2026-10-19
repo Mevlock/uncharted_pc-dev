@@ -642,6 +642,9 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
                 YIELD_CE();
                 RESUME_CE(task);
             }
+            // shadPS4 #5258 (upstream PR #387): the nested task's frame stops at final_suspend and
+            // was never freed (~37 MiB/min of host heap during play).
+            task.handle.destroy();
             break;
         }
         default:
@@ -1477,6 +1480,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     YIELD_GFX();
                     RESUME_GFX(task);
                 }
+                task.handle.destroy(); // shadPS4 #5258: the nested task's frame (see ProcessCeUpdate)
                 break;
             }
             case PM4ItOpcode::IncrementDeCounter: {
@@ -1671,6 +1675,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 YIELD_ASC(vqid);
                 RESUME_ASC(task, vqid);
             }
+            task.handle.destroy(); // shadPS4 #5258: the nested task's frame (see ProcessCeUpdate)
             break;
         }
         case PM4ItOpcode::DmaData: {
