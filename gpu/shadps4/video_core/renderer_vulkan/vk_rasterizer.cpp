@@ -2545,6 +2545,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
         static u64 jittered = 0, no_depth = 0, other_depth = 0;
         static std::map<std::pair<u32, u32>, u64> other_sizes, scene_sizes;
+        static std::map<u32, u64> scene_mrts; // colour targets of the scene-depth draws
+        if (db_desc.first == camera_motion->Depth()) {
+            ++scene_mrts[std::popcount(pipeline->GetGraphicsKey().mrt_mask & 0xff)];
+        }
         static auto window = std::chrono::steady_clock::now();
         const auto scene_depth = camera_motion->Depth();
         const auto& db_info = texture_cache.GetImage(db_desc.first).info;
@@ -2565,10 +2569,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             for (const auto& [size, n] : scene_sizes) std::printf(" %ux%u:%llu", size.first, size.second, (unsigned long long)n);
             std::printf("; others");
             for (const auto& [size, n] : other_sizes) std::printf(" %ux%u:%llu", size.first, size.second, (unsigned long long)n);
-            std::printf("\n");
+            std::printf("; scene draws by colour targets");
+            for (const auto& [n, count] : scene_mrts) std::printf(" %u:%llu", n, (unsigned long long)count);
+            std::printf("; scene mip bias %.2f\n", upscaler->SceneMipBias());
             jittered = no_depth = other_depth = 0;
             other_sizes.clear();
             scene_sizes.clear();
+            scene_mrts.clear();
             window = now;
         }
     }
@@ -3367,7 +3374,13 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     material_draw = !pipeline->IsCompute() &&
         std::popcount(static_cast<const GraphicsPipeline*>(pipeline)->GetGraphicsKey().mrt_mask &
                       0xff) >= 5;
-    if (material_draw && !BbToggle::Disabled(BbToggle::SceneMipBias)) {
+    // Uncharted (velocity mode) draws its scene into one colour target, never five: its scene
+    // geometry is the draws with the scene depth (those the upscaler jitters). Without this the
+    // bias never applied there and the upscaled picture came out soft (Quality: render 2288 for
+    // a 3440 output, bias -0.59 unused).
+    const bool scene_draw = !pipeline->IsCompute() && camera_motion->VelocityMode() &&
+                            db_desc.first && db_desc.first == camera_motion->Depth();
+    if ((material_draw || scene_draw) && !BbToggle::Disabled(BbToggle::SceneMipBias)) {
         sampler_lod_bias = upscaler->SceneMipBias();
         static float reported = 0.0f;
         if (sampler_lod_bias != reported) {
