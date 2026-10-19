@@ -214,14 +214,18 @@ void Store(std::atomic<T>& target, T value, bool changed) {
     }
 }
 
+// The widget runs before Store: as one call's arguments, `v` could be copied (clang: is)
+// before the widget changes it, and a click stored the old value.
 void Checkbox(const char* label, std::atomic<bool>& value) {
     bool v = value;
-    Store(value, v, ImGui::Checkbox(label, &v));
+    const bool changed = ImGui::Checkbox(label, &v);
+    Store(value, v, changed);
 }
 
 void Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
     float v = value;
-    Store(value, v, ImGui::SliderFloat(label, &v, lo, hi, "%.2f"));
+    const bool changed = ImGui::SliderFloat(label, &v, lo, hi, "%.2f");
+    Store(value, v, changed);
 }
 
 void Hint(const char* text) {
