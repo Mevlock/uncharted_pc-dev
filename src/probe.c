@@ -868,6 +868,59 @@ static void patch_collection_skip(uint64_t image_size) {
     memcpy(image+jump+1,&rel,4);
     printf("Collection menu: skipped once, U1's front end opens first\n");
 }
+/* Idle job workers sleep (all three games). From BilalReloaded's Uncharted port
+ * (github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port, GPL-2.0-or-later,
+ * tools/probe_uncharted.py JOB_SLEEP_PATCHES), with the 1.00 encodings added. The engine's six
+ * job worker threads spin on their queues unless the job manager's sleep flag (byte +0x59, the
+ * engine's own SetSleepMode) is set; with it, an idle worker waits on the manager's condition
+ * variable after 1000 spins (10 ms timeout) and each job submission wakes them. On the PS4 every
+ * worker owns a core and the flag stays off; on a PC the spinning workers take cores from the
+ * GPU command thread. The flag is treated as set in the worker loop, its re-check before
+ * waiting and the submission path: all three or none. BB_JOB_SLEEP=0 keeps the original. */
+struct masked_pattern { const char *hex; int at; int len; const unsigned char *with; };
+static int64_t find_masked(const char *hex, uint64_t size) {
+    unsigned char bytes[64], mask[64];
+    int n=0;
+    for (const char *p=hex; *p && n<64;) {
+        if (*p==' ') { ++p; continue; }
+        if (p[0]=='?') { bytes[n]=0; mask[n++]=0; p+=2; continue; }
+        unsigned v; sscanf(p,"%2x",&v); bytes[n]=(unsigned char)v; mask[n++]=1; p+=2;
+    }
+    int64_t found=-1;
+    for (uint64_t i=0; i+n<=size; ++i) {
+        if (image[i]!=bytes[0]) continue;
+        int k=1;
+        while (k<n && (!mask[k] || image[i+k]==bytes[k])) ++k;
+        if (k<n) continue;
+        if (found>=0) return -2; /* not unique */
+        found=(int64_t)i;
+    }
+    return found;
+}
+static void patch_job_sleep(uint64_t image_size) {
+    const char *env=getenv("BB_JOB_SLEEP");
+    if (env && env[0]=='0') return;
+    static const unsigned char nop2[]={0x66,0x90}, nop6[]={0x66,0x0f,0x1f,0x44,0x00,0x00};
+    /* Each site: alternatives (1.00, 1.02); the first one found exactly once is used. */
+    static const struct masked_pattern sites[3][2]={
+        {{"80 7f 59 00 74 ?? 49 81 f8 e8 03 00 00",4,2,nop2}, {0}},                   /* worker loop */
+        {{"80 78 59 00 74 ?? 48 89 c7 48 83 ef 80",4,2,nop2}, {0}},                   /* re-check */
+        {{"80 7f 59 00 74 ?? 48 83 c7 60 be ff ff ff ff e8",4,2,nop2},                 /* submission, 1.00 */
+         {"80 78 59 00 0f 84 ?? ?? 00 00 48 83 c0 60",4,6,nop6}},                      /* submission, 1.02 */
+    };
+    int64_t at[3];
+    const struct masked_pattern *use[3];
+    for (int s=0; s<3; ++s) {
+        at[s]=-1;
+        for (int a=0; a<2 && sites[s][a].hex && at[s]<0; ++a) {
+            const int64_t f=find_masked(sites[s][a].hex,image_size);
+            if (f>=0) { at[s]=f; use[s]=&sites[s][a]; }
+        }
+        if (at[s]<0) { printf("Job workers: site %d not found, they keep spinning\n",s); return; }
+    }
+    for (int s=0; s<3; ++s) memcpy(image+at[s]+use[s]->at,use[s]->with,(size_t)use[s]->len);
+    printf("Job workers: idle ones sleep (0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ")\n",at[0],at[1],at[2]);
+}
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
  * released before the new process opens its own. */
@@ -1151,6 +1204,7 @@ int main(int argc, char **argv) {
         install_game_callbacks(segments, ns, image_end);
         patch_eop_tick_wait(image_end);
         patch_collection_skip(image_end);
+        patch_job_sleep(image_end);
         patch_rdtsc(image_end);
         /* Ultrawide and field of view (runtime_ultrawide.c): the code segment at address 0. */
         for (uint64_t s=0;s<ns;++s)
