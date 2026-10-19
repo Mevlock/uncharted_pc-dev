@@ -78,6 +78,8 @@ jobs:
 
       - name: DLSS SDK
         shell: bash
+        env:
+          MSYS_NO_PATHCONV: 1  # Git Bash would turn the /include/ patterns into Windows paths
         run: |
           git clone --depth 1 --branch "$DLSS_SDK_TAG" --filter=blob:none --sparse \
               https://github.com/NVIDIA/DLSS.git dlss-sdk
