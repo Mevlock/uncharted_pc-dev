@@ -480,7 +480,7 @@ static float aim_stick(float rate) {
  * U1 (45 x^2 degrees/s up to x = 1, then about 54 x - 9; vertically `pitch` times that).
  * BB_AIM_STICK=<x>[,<y>]: fixed values while aiming, n times them at the n-th aim press (y up and
  * down in turn; measuring the aiming curve). */
-static void aim_pad_sticks(float *pad, float pitch) {
+static void aim_pad_sticks(float *pad, float pitch, float beyond) {
     if (aim_held) bbgpu_note_aiming(); /* BB_DOF=aim */
     if (!raw_aim_enabled() || !aim_held || !pad) return;
     const uint64_t now=now_us();
@@ -502,8 +502,16 @@ static void aim_pad_sticks(float *pad, float pitch) {
         x=test_x*(float)presses; y=test_y*(float)(presses%2 ? presses : -presses);
     } else if (dt>0.0f) {
         const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity/dt;
-        x=aim_stick(dx*scale);
-        y=aim_stick((input.mouse_invert_y ? -dy : dy)*scale/pitch);
+        const float rx=dx*scale, ry=(input.mouse_invert_y ? -dy : dy)*scale/pitch;
+        x=aim_stick(rx);
+        y=aim_stick(ry);
+        /* `beyond` (US: 1/0.65): past full deflection the US aiming camera turns at 45 * x^0.65
+         * degrees/s (measured with BB_AIM_STICK: 46, 71, 111, 144, 174 at 1, 2, 4, 6, 8), so a rate
+         * r above 45 takes x = (r / 45)^(1/0.65). */
+        if (beyond!=1.0f) {
+            if (rx>45.0f || rx<-45.0f) x=rx>0.0f ? SDL_powf(rx/45.0f,beyond) : -SDL_powf(-rx/45.0f,beyond);
+            if (ry>45.0f || ry<-45.0f) y=ry>0.0f ? SDL_powf(ry/45.0f,beyond) : -SDL_powf(-ry/45.0f,beyond);
+        }
     }
     if (mouse_debug()) printf("Mouse: aim sticks t=%.4f dt=%.4f dx=%.1f x=%.3f pad %.3f %.3f %.3f %.3f\n",now*1e-6,dt,dx,x,
                               pad[2],pad[3],pad[6],pad[7]);
@@ -512,7 +520,7 @@ static void aim_pad_sticks(float *pad, float pitch) {
 /* U2: the pad update at image+0x251420 ends at image+0x251be8 with its input in r14. */
 static void __attribute__((ms_abi)) u2_pad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t sticks) {
     (void)unused0; (void)unused1; (void)image;
-    aim_pad_sticks((float *)(uintptr_t)sticks,0.66f);
+    aim_pad_sticks((float *)(uintptr_t)sticks,0.66f,1.0f);
 }
 /* U2 US 1.02 (CUSA02320, as CUSA02344): the pad update at image+0x565d30 fills the two pads in a
  * loop that moves its output pointer (rdi at the start), so its start notes the output and its end
@@ -524,7 +532,7 @@ static void __attribute__((ms_abi)) u2_pad_update_us(uint64_t sticks, uint64_t u
 }
 static void __attribute__((ms_abi)) u2_pad_sticks_us(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
     (void)unused0; (void)unused1; (void)image; (void)r14;
-    aim_pad_sticks((float *)(uintptr_t)u2_pad_output_us,0.66f);
+    aim_pad_sticks((float *)(uintptr_t)u2_pad_output_us,0.66f,1.0f/0.65f);
 }
 /* U3: the pad update at image+0x741a30 keeps its input (rdi) in r13; at its end (image+0x74231e)
  * the input is the one its start saw. */
@@ -535,7 +543,7 @@ static void __attribute__((ms_abi)) u3_pad_update(uint64_t sticks, uint64_t unus
 }
 static void __attribute__((ms_abi)) u3_pad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
     (void)unused0; (void)unused1; (void)image; (void)r14;
-    aim_pad_sticks((float *)(uintptr_t)u3_pad_input,0.66f);
+    aim_pad_sticks((float *)(uintptr_t)u3_pad_input,0.66f,1.0f);
 }
 static const unsigned char u3_pad_update_code[]={
     0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xb8,0x00,0x00,0x00,
@@ -570,6 +578,29 @@ static const unsigned char u1_pad_update_us_code[]={
     0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xb8,0x00,0x00,0x00,
     0x49,0x89,0xfe,0x4c,0x8b,0x2d,0xe2,0x37,0x83,0x00,0x49,0x8b,
 };
+/* U2 US 1.02: the aiming camera (UpdateCameraDirection, player-aiming-machine3.cpp, inlined) gives
+ * each stick axis its response, sign(x) * |x|^0.65, and clamps it to [-1, 1] before storing it
+ * (+0xc88, +0xc8c), where EU passes values beyond full deflection on: aiming stopped at stick speed
+ * (~45 degrees/s). The clamps go (the x block's load of -1 stays: the y block uses it). A stick
+ * never exceeds 1, so only the mouse's larger values (raw aim) change anything. */
+static const unsigned char u2_aim_clamp_x_us_code[]={ /* image+0x71ac4c */
+    0xc5,0xf2,0x59,0xc0,0xc5,0xfa,0x10,0x0d,0xf4,0x8e,0x74,0x00,0xc5,0xfa,0x5f,0xc1,0xc5,0xfa,0x5d,0x05,
+    0xc8,0x8e,0x74,0x00,
+};
+static const unsigned char u2_aim_unclamped_x_us[]={
+    0xc5,0xf2,0x59,0xc0,                          /* vmulss xmm0, xmm1, xmm0 (the sign) */
+    0xc5,0xfa,0x10,0x0d,0xf4,0x8e,0x74,0x00,      /* vmovss xmm1, [-1] (kept) */
+    0x66,0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00,0x0f,0x1f,0x00, /* no clamp */
+};
+static const unsigned char u2_aim_clamp_y_us_code[]={ /* image+0x71acb1 */
+    0xc5,0xf2,0x59,0xc0,0xc5,0xfa,0x5f,0x05,0x8f,0x8e,0x74,0x00,0xc5,0xfa,0x5d,0x05,0x67,0x8e,0x74,0x00,
+};
+static const unsigned char u2_aim_unclamped_y_us[]={
+    0xc5,0xf2,0x59,0xc0,                          /* vmulss xmm0, xmm1, xmm0 (the sign) */
+    0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00,0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00, /* no clamp */
+};
+_Static_assert(sizeof(u2_aim_unclamped_x_us)==sizeof(u2_aim_clamp_x_us_code),"same size");
+_Static_assert(sizeof(u2_aim_unclamped_y_us)==sizeof(u2_aim_clamp_y_us_code),"same size");
 /* U3 US 1.02: the follow camera at image+0x4e7970 (string id 0xf34acb0c; the camera in rdi and its
  * direction at +0x78c0, as in EU). */
 static const unsigned char u3_follow_camera_us_code[]={
@@ -768,6 +799,10 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 follow camera (mouse, US)",0x4e7970,u3_follow_camera_us_code,sizeof(u3_follow_camera_us_code),6,u3_follow_camera,NULL},
     {"U2 pad update (raw aim, US)",0x565d30,u2_pad_update_us_code,sizeof(u2_pad_update_us_code),6,u2_pad_update_us,NULL},
     {"U2 pad sticks (raw aim, US)",0x56668e,u2_pad_sticks_us_code,sizeof(u2_pad_sticks_us_code),7,u2_pad_sticks_us,NULL},
+    {"U2 aiming stick x unclamped (raw aim, US)",0x71ac4c,u2_aim_clamp_x_us_code,sizeof(u2_aim_clamp_x_us_code),
+     sizeof(u2_aim_unclamped_x_us),NULL,u2_aim_unclamped_x_us},
+    {"U2 aiming stick y unclamped (raw aim, US)",0x71acb1,u2_aim_clamp_y_us_code,sizeof(u2_aim_clamp_y_us_code),
+     sizeof(u2_aim_unclamped_y_us),NULL,u2_aim_unclamped_y_us},
     {"U2 camera focus NaN reset",0x33ba13,u2_focus_assert_code,sizeof(u2_focus_assert_code),
      sizeof(u2_focus_reset),NULL,u2_focus_reset},
     {"U2 leg IK NaN delta",0x8ec618,u2_leg_ik_assert_code,sizeof(u2_leg_ik_assert_code),

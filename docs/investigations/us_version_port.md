@@ -21,7 +21,7 @@ Status: [ ] to do, [x] done, [-] not needed.
    `0x11784e`.
 8. [x] (done 2026-10-20: US follow camera image+0x42c690) **U2 mouse camera**: follow camera `0x171fe0`.
 9. [x] (done 2026-10-20: US follow camera image+0x4e7970; scripted sweep 45.8/184.5/720.5 deg/s vs EU 45.6/184.7/722.6) **U3 mouse camera**: follow camera `0x121b90`.
-10. [ ] (parked 2026-10-20: pad update hooked at US 0x565d30/0x56668e, but aiming stays at stick speed, ~45 deg/s: US inlines its own stick pipeline into UpdateCameraDirection (player-aiming-machine3.cpp, 0x71a581) with several caps; removing the magnitude cap at 0x71a5f1 changed nothing. Next idea: turn the aiming camera directly, as the follow camera does) **U2 raw aim**: camera input `0x16d920`, pad sticks `0x251be8`.
+10. [x] (done 2026-10-20: US clamps each aiming axis to [-1, 1] after its sign(x)*|x|^0.65 response (0x71ac4c, 0x71acb1): clamps removed, and past full deflection the port feeds x = (r/45)^(1/0.65) (US turns at 45*x^0.65, measured). 300/1200/4800 px/s: 45.6/181.4/714.8 deg/s, EU 45.9/178.9/782.5) **U2 raw aim**: camera input `0x16d920`, pad sticks `0x251be8`.
 11. [ ] (parked 2026-10-20 with 10: US U3 also has the extra length-limited stick pipeline EU lacks (0x9291a7), so the pad-stick approach will stop at stick speed there too; camera input applied via CUSA02344 0x4e42f0) **U3 raw aim**: camera input `0x11d4e0`, pad update `0x741a30`, pad sticks `0x74231e`.
 12. [x] (done 2026-10-20: the callback is found by its code, EU 0x65d540, US 0x6734a0) **U1 straight from the launcher** (skip the trilogy screen; probe.c `0x65d540`, `0x14ae00`).
 13. [x] **Render resolution and ultrawide** (done 2026-10-20). Resolution was off because none of the
