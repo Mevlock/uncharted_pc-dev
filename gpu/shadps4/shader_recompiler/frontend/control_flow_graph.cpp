@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "shader_recompiler/frontend/control_flow_graph.h"
@@ -44,6 +46,21 @@ static IR::Condition MakeCondition(const GcnInst& inst) {
     default:
         return IR::Condition::True;
     }
+}
+
+// bbport (from zorde23/Uncharted_Collection_PC 4a8395ea, GOW3_SCOPE_SPLIT_SCALAR): a scalar
+// instruction the game's compiler placed between the vector instructions of a divergence scope
+// runs for the whole wave, as on GCN (the waterfall loops of the light shaft cs e34f5e2c need the
+// SCC of their s_andn2 for every lane; without it lanes leave the loop early: black wedges and
+// white specks in the fog of light cones). When only movrel instructions come before it in the
+// scope, it moves to the start of the scope; otherwise the scope ends before it and reopens after
+// it. BB_SCOPE_SPLIT_SCALAR=0 turns it off (part of the shader cache version).
+bool ScopeSplitScalar() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_SCOPE_SPLIT_SCALAR");
+        return !(env && env[0] == '0');
+    }();
+    return enabled;
 }
 
 static bool IgnoresExecMask(const GcnInst& inst) {
@@ -183,12 +200,73 @@ void CFG::SplitDivergenceScopes() {
                (inst.opcode == Opcode::S_ANDN2_B64 && inst.dst[0].field == OperandField::ExecLo);
     };
 
+    // bbport: a scalar instruction between the vector instructions of a scope, which must run
+    // for the whole wave (ScopeSplitScalar). The scope ends before it and reopens after it.
+    const auto splits_scope = [&](const Block& blk, size_t index, s32 curr_begin) {
+        const auto& inst = inst_list[index];
+        if (!ScopeSplitScalar() || curr_begin == -1 || index >= blk.end_index ||
+            (inst.category != InstCategory::ScalarALU &&
+             inst.category != InstCategory::ScalarMemory)) {
+            return false;
+        }
+        for (u32 i = 0; i < inst.dst_count; i++) {
+            if (const auto& dst = inst.dst[i];
+                dst.field == OperandField::ExecLo || dst.field == OperandField::ExecHi) {
+                return false;
+            }
+        }
+        const auto first = inst_list.begin();
+        if (std::all_of(first + curr_begin + 1, first + index, IgnoresExecMask)) {
+            return false;
+        }
+        for (size_t next = index + 1; next <= blk.end_index; next++) {
+            const auto& later = inst_list[next];
+            if (is_close_scope(later) || is_open_scope(later)) {
+                return false;
+            }
+            if (!IgnoresExecMask(later)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // bbport: whether the scalar instruction at index can run before the scope's instructions
+    // that precede it: they are all movrel (VGPRs and M0 in, VGPRs out) and it does not write M0.
+    const auto can_hoist = [&](size_t index, s32 curr_begin) {
+        const auto& inst = inst_list[index];
+        for (u32 i = 0; i < inst.dst_count; i++) {
+            if (inst.dst[i].field == OperandField::M0) {
+                return false;
+            }
+        }
+        for (size_t prev = curr_begin + 1; prev < index; prev++) {
+            if (inst_list[prev].inst_class != InstClass::VectorMovRel) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    s32 reopen_at = -1;
     for (auto blk = blocks.begin(); blk != blocks.end(); blk++) {
         auto next_blk = std::next(blk);
         s32 curr_begin = -1;
+        if (reopen_at != -1 && static_cast<s32>(blk->begin_index) == reopen_at) {
+            // bbport: the rest of a scope split at a scalar instruction.
+            curr_begin = reopen_at - 1;
+            reopen_at = -1;
+        }
         for (size_t index = blk->begin_index; index <= blk->end_index; index++) {
             const auto& inst = inst_list[index];
-            const bool is_close = is_close_scope(inst);
+            bool split = splits_scope(*blk, index, curr_begin);
+            if (split && can_hoist(index, curr_begin)) {
+                // The program's instruction list, which the CFG only reads otherwise.
+                auto* first = const_cast<GcnInst*>(inst_list.data());
+                std::rotate(first + curr_begin + 1, first + index, first + index + 1);
+                split = false;
+            }
+            const bool is_close = is_close_scope(inst) || split;
             if ((is_close || index == blk->end_index) && curr_begin != -1) {
                 // If there are no instructions inside scope don't do anything.
                 if (index - curr_begin == 1 && is_close) {
@@ -235,6 +313,9 @@ void CFG::SplitDivergenceScopes() {
                         epi_block->branch_false = blk->branch_false;
                         epi_block->num_predecessors = 2;
                         blocks.insert_before(next_blk, *epi_block);
+                        if (split) {
+                            reopen_at = curr_end + 1;
+                        }
 
                         // Have divergence block always jump to epilogue block.
                         block->cond = IR::Condition::True;

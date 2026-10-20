@@ -51,6 +51,9 @@ struct Block : Hook {
     bool is_dummy{};
 };
 
+// bbport: BB_SCOPE_SPLIT_SCALAR (see control_flow_graph.cpp); part of the shader cache version.
+bool ScopeSplitScalar();
+
 class CFG {
     using Label = u32;
     using BlockList = boost::intrusive::set<Block>;

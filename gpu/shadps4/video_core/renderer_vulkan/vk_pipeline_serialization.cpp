@@ -14,6 +14,7 @@
 #include "common/serdes.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
+#include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -25,9 +26,14 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 14u; // bbport: motion shaders hold address stand-ins
+static constexpr u32 ShaderBinaryVersion = 15u; // bbport: divergence scope fix (ScopeSplitScalar)
 static constexpr u32 ShaderMetaVersion = 11u; // bbport: HwVertexRuntimeInfo::ui_squeeze_bits
 static constexpr u32 PipelineKeyVersion = 6u; // bbport: GraphicsPipelineKey::ui_squeeze
+// bbport: translator options that change the shaders it produces are part of the stored version,
+// so switching one retranslates the shaders instead of reusing the cached ones.
+static u32 TranslatedBinaryVersion() {
+    return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0u : 0x10000u);
+}
 } // namespace Serialization
 
 namespace Vulkan {
@@ -88,7 +94,7 @@ void RegisterShaderMeta(const Shader::Info& info,
     Serialization::Writer meta{ar};
 
     meta.Write(Serialization::ShaderMetaVersion);
-    meta.Write(Serialization::ShaderBinaryVersion);
+    meta.Write(Serialization::TranslatedBinaryVersion());
 
     meta.Write(perm_hash);
     meta.Write(perm_idx);
@@ -123,7 +129,7 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
 
     u32 binary_version{};
     meta.Read(binary_version);
-    if (binary_version != Serialization::ShaderBinaryVersion) {
+    if (binary_version != Serialization::TranslatedBinaryVersion()) {
         return false;
     }
 
