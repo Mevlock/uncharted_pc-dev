@@ -1,6 +1,6 @@
 # US version (CUSA02320 1.02): what needs its own addresses
 
-CUSA02344 (EU/Russian) runs the same 1.02 code as US, so everything here covers it too.
+The hooks also matched code first written for CUSA02344, which suggests it shares this code; untested.
 
 The user's US dump: `E:\Emulation\ps4\Games\CUSA02320` (UP9000-CUSA02320_00-UNCHARTEDTRILOGY,
 APP_VER 01.02). Its executables differ from the EU ones (big3 25.9 MB vs 22.9 MB, big2 18.4 MB vs
