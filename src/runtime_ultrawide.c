@@ -483,13 +483,76 @@ static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_
     return known;
 }
 
+/* BB_RES_SHADOW=first-last (diagnosis): the display config object holds the render size the
+ * patch raises (+0x08/+0x0c, set by the startup function whose block is stored through rax). Code
+ * that loads its address (lea r64, [rip + object]; indices in address order, the startup
+ * function's own left out) is pointed at a copy instead, kept equal to the object by a thread
+ * but with 1920x1080: finds the reader that sizes something by the render size. */
+static volatile uint8_t *res_shadow_from;
+static uint8_t *res_shadow_copy;
+#ifdef _WIN32
+static DWORD WINAPI res_shadow_thread(LPVOID unused) {
+    (void)unused;
+    for (;;) {
+        memcpy(res_shadow_copy, (const void *)res_shadow_from, 0x100);
+        const uint32_t w = 1920, h = 1080;
+        memcpy(res_shadow_copy + 8, &w, 4);
+        memcpy(res_shadow_copy + 12, &h, 4);
+        Sleep(5);
+    }
+    return 0;
+}
+#endif
+static void res_shadow(uint8_t *code, uint64_t size, const uint8_t *init_block) {
+    const char *env = getenv("BB_RES_SHADOW");
+    if (!env || !init_block) return;
+    char *end;
+    const int first = (int)strtol(env, &end, 10), last = *end == '-' ? (int)strtol(end + 1, NULL, 10) : first;
+    const uint8_t *object = NULL, *init_lea = NULL;
+    for (const uint8_t *q = init_block - 7; q > init_block - 0x40; --q)
+        if (q[0] == 0x48 && q[1] == 0x8d && q[2] == 0x05) {
+            int32_t d;
+            memcpy(&d, q + 3, 4);
+            object = q + 7 + d;
+            init_lea = q;
+            break;
+        }
+    if (!object) { printf("Render resolution: BB_RES_SHADOW: object not found\n"); return; }
+    uint8_t *copy = (uint8_t *)alloc_near(code, size);
+    if (!copy) return;
+    res_shadow_from = (volatile uint8_t *)object;
+    res_shadow_copy = copy;
+    int index = 0, patched = 0;
+    for (uint64_t i = 0; i + 7 < size; ++i) {
+        uint8_t *q = code + i;
+        if ((q[0] != 0x48 && q[0] != 0x4c) || q[1] != 0x8d || (q[2] & 0xc7) != 0x05) continue;
+        int32_t d;
+        memcpy(&d, q + 3, 4);
+        if (q + 7 + d != object || q == init_lea) continue;
+        if (index >= first && index <= last) {
+            const int32_t rel = (int32_t)((intptr_t)copy - (intptr_t)(q + 7));
+            memcpy(q + 3, &rel, 4);
+            printf("Render resolution: BB_RES_SHADOW %d at %#llx\n", index, (unsigned long long)i);
+            ++patched;
+        }
+        ++index;
+    }
+#ifdef _WIN32
+    if (patched) CreateThread(NULL, 0, res_shadow_thread, NULL, 0, NULL);
+#endif
+    printf("Render resolution: BB_RES_SHADOW=%s: %d of %d readers use a 1920x1080 copy (object %#llx)\n", env, patched,
+           index, (unsigned long long)(object - code));
+}
+
 void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) {
     unsigned width, height;
     if (!render_resolution(code, size, image_end, &width, &height)) return;
     float *floats = NULL;
     int blocks = 0, sizes = 0, loads = 0, limits = 0;
+    const uint8_t *init_block = NULL;
     /* BB_RENDER_RES_SKIP (diagnosis): pieces left at 1920x1080. 1/2/3 the render size pairs at
-     * +0x08/+0x18/+0x24, q the eighth/quarter size, o the output size, v the view setup, m movies. */
+     * +0x08/+0x18/+0x24, q the eighth/quarter size, o the output size, v the view setup, m movies,
+     * x the aiming crosshair. */
     const char *skip = getenv("BB_RENDER_RES_SKIP");
     if (!skip) skip = "";
     if (*skip) printf("Render resolution: BB_RENDER_RES_SKIP=%s\n", skip);
@@ -498,6 +561,7 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         const uint8_t m = code[i + 1];
         if ((m != 0x47 && m != 0x40) || !match_mode_block(code + i, m)) continue;
         uint8_t *p = code + i;
+        if (m == 0x40) init_block = p;
         const uint32_t w8 = width / 8, h4 = height / 4;
         if (!strchr(skip, '1')) { memcpy(p + 7 * 0 + 3, &width, 4); memcpy(p + 7 * 1 + 3, &height, 4); }
         if (!strchr(skip, '2')) { memcpy(p + 7 * 3 + 3, &width, 4); memcpy(p + 7 * 4 + 3, &height, 4); }
@@ -757,6 +821,30 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
 #endif
         }
     }
+    /* U3's aiming crosshair is scaled by width * 2/3 / 1280 and height * 2/3 / 720 from the
+     * display config's render size: 1 at 1080p, an oval 1.8 x 1.3 too big above it. Its lea of
+     * the config points at a fixed 1920x1080 instead (only +0x08/+0x0c are read through it).
+     * EU and US; BB_RENDER_RES_SKIP=x leaves it. */
+    static const uint8_t crosshair[] = {0x8b, 0x48, 0x08, 0x8b, 0x40, 0x0c, 0xc5, 0xf8, 0x57, 0xc0, 0xc4, 0xe1, 0xfa,
+                                        0x2a, 0xc9, 0xc5, 0xfa, 0x10, 0x15};
+    int crosshairs = 0;
+    uint32_t *fixed_size = NULL;
+    for (uint64_t i = 0; i + 40 < size && !strchr(skip, 'x'); ++i) {
+        uint8_t *q = code + i;
+        if (q[0] != 0x48 || q[1] != 0x8d || q[2] != 0x05 || memcmp(q + 7, crosshair, sizeof(crosshair))) continue;
+        int32_t d;
+        memcpy(&d, q + 26, 4);
+        const float *scale = (const float *)(q + 30 + d);
+        if (scale[0] < 0.666f || scale[0] > 0.667f || scale[1] != 1280.0f || scale[2] != 720.0f) continue;
+        if (!fixed_size && !(fixed_size = (uint32_t *)alloc_near(code, size))) break;
+        fixed_size[2] = 1920;
+        fixed_size[3] = 1080;
+        const int32_t rel = (int32_t)((intptr_t)fixed_size - (intptr_t)(q + 7));
+        memcpy(q + 3, &rel, 4);
+        ++crosshairs;
+    }
+    if (crosshairs) printf("Render resolution: aiming crosshair kept at its 1080p size (%d)\n", crosshairs);
+    res_shadow(code, size, init_block);
     runtime_render_resolution = blocks > 0;
     if (runtime_render_resolution) {
         runtime_render_width = width;
