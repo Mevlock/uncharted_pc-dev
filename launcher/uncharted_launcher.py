@@ -101,7 +101,7 @@ ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'),
 # The games' field of view in percent (BB_FOV), on every screen.
 FIELDS_OF_VIEW = [('100', "100% (the games' own)"), ('110', '110%'), ('120', '120%'), ('130', '130%')]
 SCALERS = [('fsr1', 'FSR 1 (AMD FidelityFX, sharp)'), ('bilinear', 'Smooth (bilinear)')]
-# The games' depth of field (BB_DOF): Uncharted 2 blurs the whole view while aiming.
+# The games' depth of field (BB_DOF): Uncharted 2 and 3 blur the background while aiming.
 DEPTH_OF_FIELD = [('1', "On (the games' own)"), ('aim', 'Off while aiming'), ('0', 'Off')]
 # Anisotropic filtering of scene textures (BB_ANISO; 0 = the game's own).
 ANISOTROPY = [('0', "Off (the game's own)"), ('4', '4x'), ('8', '8x'), ('16', '16x')]
@@ -1185,9 +1185,9 @@ class Launcher:
                    _('The soft glow around bright lights and glints (all three games share the effect); '
                      'turn it off for a crisper, flatter picture.'))
         self.row(f, _('Depth of field'), self.choice(f, 'depth_of_field', DEPTH_OF_FIELD, 34),
-                 _('The blur of what is out of focus. Uncharted 2 blurs the whole view while aiming; '
+                 _('The blur of what is out of focus. Uncharted 2 and 3 blur the background while aiming; '
                    '"Off while aiming" keeps it sharp there and leaves cutscenes as they are. '
-                   'Only Uncharted 2 so far.'))
+                   'Uncharted 2 and 3 only.'))
         self.row(f, _('Upscaling'), self.choice(f, 'scaler', SCALERS, 34),
                  _('FSR 1 keeps edges sharp when the image is enlarged; bilinear is softer.'))
         self.row(f, _('Sharpening'), self.choice(f, 'sharpening', SHARPENING, 34),

@@ -2153,8 +2153,8 @@ static u32 ForceUploadVs(bool index) {
 
 // bbport: BB_DOF=0 leaves out the game's depth of field, BB_DOF=aim only while the player aims
 // (bbgpu_note_aiming, until 0.4 s after the aiming camera stops: the game fades its blur out).
-// Uncharted 2's is a separable blur of the half-size scene (compute 8b10b4cb, 1c3672c5); the
-// composite then blends in the unblurred image left in its target.
+// Uncharted 2 and 3 share it: a separable blur of the half-size scene (compute 8b10b4cb,
+// 1c3672c5); the composite then blends in the unblurred image left in its target.
 static std::atomic<double> last_aiming{0.0};
 extern "C" void bbgpu_note_aiming(void) {
     last_aiming.store(std::chrono::duration<double>(
