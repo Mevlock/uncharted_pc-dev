@@ -1,6 +1,15 @@
 # Uncharted 3: flashlight light drops out while the camera turns
 
-Status (20 Oct 2026, 03:45): cause narrowed down, not fixed yet.
+Status: FIXED 20 Oct 2026 (Depth arrays keep all their layers, PadDepthLayers).
+
+## Cause (found with RenderDoc)
+The shadow maps are one 16-layer depth array at 0x114bb88000. On a size switch the texture cache
+made the array one layer at a time, re-creating and copying it for each layer drawn (ten times in the
+bad frame, each from VK_IMAGE_LAYOUT_UNDEFINED), losing the layers already drawn. RenderDoc showed
+"UNDEFINED IMG" over the lit wall. Fix: a depth image at an address that held a deeper array is made
+with all those layers at once; lookups for fewer layers of the same size take it.
+
+## Earlier notes
 
 ## Symptom
 At a wall lit only by the flashlight (save `uncharted_saves/uc3/2026-10-20_flashlight-wall`), while the
