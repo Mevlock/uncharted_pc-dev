@@ -217,6 +217,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
     // If an image in the cache has less slices we need to expand it
     bool recreate = cache_image.info.resources < requested_info.resources;
 
+
     switch (binding) {
     case BindingType::Texture:
         // The guest requires a depth sampled texture, but cache can offer only Rxf. Need to
@@ -692,6 +693,20 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     if (view_slice > 0) {
         desc.view_info.range.base.layer = view_slice;
     }
+    // bbport diagnosis: BB_IMAGE_MISMATCH_LOG=1 reports a request answered with an image of
+    // another size at the same address (first 200 cases).
+    static const bool mismatch_log = std::getenv("BB_IMAGE_MISMATCH_LOG") != nullptr;
+    if (mismatch_log && image.info.guest_address == info.guest_address &&
+        !(image.info.size == info.size)) {
+        static int logged = 0;
+        if (logged++ < 200) {
+            std::printf("Image mismatch: %#llx asked %ux%u %s (binding %d), got %ux%u %s\n",
+                        static_cast<unsigned long long>(info.guest_address), info.size.width,
+                        info.size.height, vk::to_string(info.pixel_format).c_str(),
+                        static_cast<int>(desc.type), image.info.size.width,
+                        image.info.size.height, vk::to_string(image.info.pixel_format).c_str());
+        }
+    }
 
     cached = FindImageCacheEntry{
         .address = info.guest_address,
@@ -914,6 +929,16 @@ void TextureCache::RefreshImage(Image& image) {
     if (image_copies.empty()) {
         image.flags &= ~ImageFlagBits::Dirty;
         return;
+    }
+    // bbport diagnosis: BB_DEPTH_REFRESH_LOG=1 reports depth images uploaded from guest memory
+    // (a GPU-drawn depth buffer has nothing useful there).
+    static const bool depth_refresh_log = std::getenv("BB_DEPTH_REFRESH_LOG") != nullptr;
+    if (depth_refresh_log && image.info.props.is_depth) {
+        std::printf("Depth refresh: %#llx %ux%u %s gpu_modified=%d gpu_dirty=%d cpu_dirty=%d\n",
+                    static_cast<unsigned long long>(image.info.guest_address),
+                    image.info.size.width, image.info.size.height,
+                    vk::to_string(image.info.pixel_format).c_str(), int(is_gpu_modified),
+                    int(is_gpu_dirty), int(True(image.flags & ImageFlagBits::CpuDirty)));
     }
 
     scheduler.EndRendering();

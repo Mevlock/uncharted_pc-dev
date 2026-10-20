@@ -31,7 +31,18 @@ image: the light vanishes. The next frame it reads data laid out for the other s
 - COND_EXEC: read only one byte of its condition (fixed in 15eab75), but U3 issues no COND_EXEC at the wall.
 - Intel red-zone corruption (upstream PR #403): doesn't happen on this Ryzen 9800X3D (the PR's own test).
 
-## Next steps
+## 20 Oct, afternoon
+- Confirmed: the 1024 and 1280 shadow maps share the guest address 0x114bb88000 (draw log with image
+  addresses); switches at frames 1, 55 and 118 of a capture, in step with the dropouts.
+- The texture cache keeps two images there (one per size) and hands out the exact one every time
+  (BB_IMAGE_MISMATCH_LOG: no size mismatches). Each switch re-uploads the other image from guest
+  memory (BB_DEPTH_REFRESH_LOG: ~1 per switch), but skipping those uploads did not change the glitch.
+- No pass in the draw log samples the shadow map at that address (it is only a depth target); after
+  the shadow draws come target-less full-screen quads (ps 68d3a820), probably a depth resolve/copy
+  that the draw log can't see into. Next: a RenderDoc capture of a frame at the wall to find the pass
+  that applies the flashlight and what it reads.
+
+## Next steps (earlier plan)
 1. Capture again with the new draw log (image addresses now printed, commit 2f5ac63): confirm the
    1024 and 1280 shadow maps share a guest address.
 2. In the texture cache, follow what happens when a depth render target is found at an address that
