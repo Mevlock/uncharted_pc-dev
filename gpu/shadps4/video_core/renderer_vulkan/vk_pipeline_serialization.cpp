@@ -14,7 +14,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 14u; // bbport: shadPS4 phi folding + EXEC scope fixes (Oct 2026)
+static constexpr u32 ShaderBinaryVersion = 13u; // bbport: ultrawide UI squeeze (HwVertexRuntimeInfo)
 static constexpr u32 ShaderMetaVersion = 11u; // bbport: HwVertexRuntimeInfo::ui_squeeze_bits
 static constexpr u32 PipelineKeyVersion = 6u; // bbport: GraphicsPipelineKey::ui_squeeze
 } // namespace Serialization
