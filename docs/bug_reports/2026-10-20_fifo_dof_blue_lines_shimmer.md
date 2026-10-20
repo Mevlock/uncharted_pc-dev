@@ -23,7 +23,7 @@ settings", but they didn't come through).
    cover. Next: find U3's aim blur pass (BB_SKIP_SHADERS / draw log while aiming) and add it.
 
 3. **Blue lines on one wall.**
-   Need: game, chapter, a screenshot or the save.
+   U3, just after the beginning of chapter 6. Need: a screenshot or the save.
 
 4. **Shimmering / moving objects came back on a later launch with the same settings; does the cache
    need clearing every launch?**
