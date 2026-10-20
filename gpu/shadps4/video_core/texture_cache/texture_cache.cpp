@@ -202,6 +202,30 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
     }
 }
 
+/// bbport: U3 keeps its shadow maps as one depth array (16 layers, one per light) at a fixed address
+/// and switches the whole array between 1024 and 1280 as the camera turns. A new image of the other
+/// size started with one layer and was made again, copied, for every further layer the game drew
+/// that frame (ten times in a frame): the layers drawn before were lost, so those lights lost their
+/// shadow maps (the flashlight's light vanished for a frame, then came back in blocky tiles).
+/// A depth image made at an address that has held a deeper array gets all those layers at once; the
+/// game draws each layer again every frame. BB_DEPTH_ARRAY_PAD=0: off.
+void TextureCache::PadDepthLayers(ImageInfo& info) {
+    static const bool pad = [] {
+        const char* env = std::getenv("BB_DEPTH_ARRAY_PAD");
+        return !(env && env[0] == '0');
+    }();
+    if (!pad || !info.props.is_depth) {
+        return;
+    }
+    auto& seen = depth_array_layers[info.guest_address];
+    if (info.resources.layers > seen) {
+        seen = info.resources.layers;
+    } else if (seen > info.resources.layers && seen > 1) {
+        info.resources.layers = seen;
+        info.UpdateSize();
+    }
+}
+
 ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, BindingType binding,
                                           ImageId cache_image_id) {
     auto& cache_image = slot_images[cache_image_id];
@@ -252,6 +276,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
+        PadDepthLayers(new_info);
         const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(new_image_id);
 
@@ -628,7 +653,14 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         if (cache_image.info.guest_address != info.guest_address) {
             continue;
         }
-        if (cache_image.info.guest_size != info.guest_size) {
+        // bbport: a depth array made with more layers (PadDepthLayers) answers a request for
+        // fewer layers of the same size and format.
+        const bool deeper_depth_array =
+            info.props.is_depth && cache_image.info.props.is_depth &&
+            cache_image.info.resources.levels == info.resources.levels &&
+            cache_image.info.resources.layers >= info.resources.layers &&
+            cache_image.info.guest_size >= info.guest_size;
+        if (cache_image.info.guest_size != info.guest_size && !deeper_depth_array) {
             continue;
         }
         if (cache_image.info.size != info.size) {
@@ -677,9 +709,13 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     // Create and register a new image
     if (!image_id) {
-        image_id = slot_images.insert(instance, runtime, slot_image_views, info);
+        auto new_info = info;
+        if (desc.type == BindingType::DepthTarget) {
+            PadDepthLayers(new_info);
+        }
+        image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(image_id);
-        NoteImageCreate(info, desc.type);
+        NoteImageCreate(new_info, desc.type);
     }
 
     Image& image = slot_images[image_id];

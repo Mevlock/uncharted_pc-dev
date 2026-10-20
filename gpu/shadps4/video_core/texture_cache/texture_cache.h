@@ -457,6 +457,9 @@ private:
         s32 clear_mask = -1;
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
+    /// bbport: most layers seen for a depth array at an address (PadDepthLayers).
+    tsl::robin_map<VAddr, u32> depth_array_layers;
+    void PadDepthLayers(ImageInfo& info);
 };
 
 } // namespace VideoCore
