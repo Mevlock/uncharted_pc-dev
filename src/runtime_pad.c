@@ -558,6 +558,12 @@ static const unsigned char u2_pad_update_us_code[]={
 static const unsigned char u2_pad_sticks_us_code[]={
     0x49,0x8b,0x16,0x48,0x3b,0x55,0xd0,0x75,0x16,0x01,0xc0,0x09,0xc8,0x48,0x81,0xc4,
 };
+/* U3 US 1.02: the follow camera at image+0x4e7970 (string id 0xf34acb0c; the camera in rdi and its
+ * direction at +0x78c0, as in EU). */
+static const unsigned char u3_follow_camera_us_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xb8,0x01,0x00,0x00,
+    0x45,0x89,0xcc,0x48,0x89,0x8d,0x68,0xfe,0xff,0xff,0x49,0x89,0xd6,0x49,0x89,0xfd,
+};
 /* U2 US 1.02: the follow camera at image+0x42c690 (the camera in rdi, as in EU). */
 static const unsigned char u2_follow_camera_us_code[]={
     0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x28,0x01,0x00,0x00,
@@ -744,6 +750,7 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 camera input (raw aim, CUSA02344)",0x4e42f0,u3_camera_input_02344_code,sizeof(u3_camera_input_02344_code),6,u3_camera_input,NULL},
     {"U2 camera input (raw aim, CUSA02344)",0x428f40,u2_camera_input_02344_code,sizeof(u2_camera_input_02344_code),6,u2_camera_input,NULL},
     {"U2 follow camera (mouse, US)",0x42c690,u2_follow_camera_us_code,sizeof(u2_follow_camera_us_code),6,u2_follow_camera,NULL},
+    {"U3 follow camera (mouse, US)",0x4e7970,u3_follow_camera_us_code,sizeof(u3_follow_camera_us_code),6,u3_follow_camera,NULL},
     {"U2 pad update (raw aim, US)",0x565d30,u2_pad_update_us_code,sizeof(u2_pad_update_us_code),6,u2_pad_update_us,NULL},
     {"U2 pad sticks (raw aim, US)",0x56668e,u2_pad_sticks_us_code,sizeof(u2_pad_sticks_us_code),7,u2_pad_sticks_us,NULL},
     {"U2 camera focus NaN reset",0x33ba13,u2_focus_assert_code,sizeof(u2_focus_assert_code),
