@@ -17,7 +17,7 @@ Status: [ ] to do, [x] done, [-] not needed.
 4. [x] (done 2026-10-20: US image+0x4713b9) **U2 leg IK NaN delta** (crash fix, `0x8ec618`).
 5. [ ] (sleep applied at all 3 sites; the 1 ms wait tweak not: "wait -1 ms") **Job sleep** (speed; pattern search, EU and CUSA02344 forms only, probe.c).
 6. [x] (found in all three games) **EOP tick wait** (frame pacing; pattern search that should accept US 1.02).
-7. [ ] (not applied) **U1 mouse camera**: follow camera `0xaecf0`, pad update `0x117200`, joypad sticks
+7. [x] (done 2026-10-20: US is the same code moved: follow camera 0xaede0, pad update 0x117350, joypad sticks 0x11799e; mouse look 45.5/180.6/716.6 deg/s vs EU 45.3/180.4/720.2. Fast aiming stops at stick speed on US, ~45 deg/s vs EU 176/778: the same US stick limit as U2/U3, parked with 10/11) **U1 mouse camera**: follow camera `0xaecf0`, pad update `0x117200`, joypad sticks
    `0x11784e`.
 8. [x] (done 2026-10-20: US follow camera image+0x42c690) **U2 mouse camera**: follow camera `0x171fe0`.
 9. [x] (done 2026-10-20: US follow camera image+0x4e7970; scripted sweep 45.8/184.5/720.5 deg/s vs EU 45.6/184.7/722.6) **U3 mouse camera**: follow camera `0x121b90`.

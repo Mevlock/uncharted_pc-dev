@@ -558,6 +558,18 @@ static const unsigned char u2_pad_update_us_code[]={
 static const unsigned char u2_pad_sticks_us_code[]={
     0x49,0x8b,0x16,0x48,0x3b,0x55,0xd0,0x75,0x16,0x01,0xc0,0x09,0xc8,0x48,0x81,0xc4,
 };
+/* U1 US 1.02 (eboot.bin): the same code as EU, moved (follow camera image+0xaede0, pad update
+ * image+0x117350); only their rip-relative operands differ. The joypad sticks match EU's bytes
+ * exactly at image+0x11799e. */
+static const unsigned char u1_follow_camera_us_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x28,0x01,0x00,0x00,
+    0x44,0x89,0x8d,0x00,0xff,0xff,0xff,0x49,0x89,0xcd,0x48,0x89,0xd3,0x49,0x89,0xf7,0x49,0x89,0xfc,
+    0x4c,0x8b,0x35,0x42,0xbd,0x89,0x00,0x49,0x8b,
+};
+static const unsigned char u1_pad_update_us_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xb8,0x00,0x00,0x00,
+    0x49,0x89,0xfe,0x4c,0x8b,0x2d,0xe2,0x37,0x83,0x00,0x49,0x8b,
+};
 /* U3 US 1.02: the follow camera at image+0x4e7970 (string id 0xf34acb0c; the camera in rdi and its
  * direction at +0x78c0, as in EU). */
 static const unsigned char u3_follow_camera_us_code[]={
@@ -740,6 +752,9 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U1 follow camera (mouse)",0xaecf0,u1_follow_camera_code,sizeof(u1_follow_camera_code),6,u1_follow_camera,NULL},
     {"U1 pad update (mouse)",0x117200,u1_pad_update_code,sizeof(u1_pad_update_code),6,u1_pad_update,NULL},
     {"U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
+    {"U1 follow camera (mouse, US)",0xaede0,u1_follow_camera_us_code,sizeof(u1_follow_camera_us_code),6,u1_follow_camera,NULL},
+    {"U1 pad update (mouse, US)",0x117350,u1_pad_update_us_code,sizeof(u1_pad_update_us_code),6,u1_pad_update,NULL},
+    {"U1 joypad sticks (mouse, US)",0x11799e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
     {"U2 follow camera (mouse)",0x171fe0,u2_follow_camera_code,sizeof(u2_follow_camera_code),6,u2_follow_camera,NULL},
     {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL},
     {"U3 camera input (raw aim)",0x11d4e0,u3_camera_input_code,sizeof(u3_camera_input_code),6,u3_camera_input,NULL},
