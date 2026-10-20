@@ -601,6 +601,49 @@ static const unsigned char u2_aim_unclamped_y_us[]={
 };
 _Static_assert(sizeof(u2_aim_unclamped_x_us)==sizeof(u2_aim_clamp_x_us_code),"same size");
 _Static_assert(sizeof(u2_aim_unclamped_y_us)==sizeof(u2_aim_clamp_y_us_code),"same size");
+/* U3 US 1.02: the pad update at image+0x10ddd90 (output in rdi, as U2 US's), its end at
+ * image+0x10de707; the aiming clamps at image+0x9297b9/0x92981f. U1 US: the clamps at
+ * image+0x277fcb/0x27802c. Same code shapes as U2 US (see there). */
+static uint64_t u3_pad_output_us;
+static void __attribute__((ms_abi)) u3_pad_update_us(uint64_t sticks, uint64_t unused, uint64_t image, uint64_t r14) {
+    (void)unused; (void)image; (void)r14;
+    u3_pad_output_us=sticks;
+}
+static void __attribute__((ms_abi)) u3_pad_sticks_us(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
+    (void)unused0; (void)unused1; (void)image; (void)r14;
+    aim_pad_sticks((float *)(uintptr_t)u3_pad_output_us,0.66f,1.0f/0.65f);
+}
+static const unsigned char u3_pad_update_us_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0x00,0x00,0x00,
+    0x49,0x89,0xfc,
+};
+static const unsigned char u3_pad_sticks_us_code[]={
+    0x49,0x8b,0x16,0x48,0x3b,0x55,0xd0,0x75,0x16,0x01,0xc0,0x09,0xc8,0x48,0x81,0xc4,
+};
+static const unsigned char u3_aim_clamp_x_us_code[]={
+    0xc5,0xf2,0x59,0xc0,0xc5,0xfa,0x10,0x0d,0x3f,0xc5,0xb1,0x00,0xc5,0xfa,0x5f,0xc1,0xc5,0xfa,0x5d,0x05,
+    0x0b,0xc5,0xb1,0x00,
+};
+static const unsigned char u3_aim_unclamped_x_us[]={
+    0xc5,0xf2,0x59,0xc0,0xc5,0xfa,0x10,0x0d,0x3f,0xc5,0xb1,0x00,
+    0x66,0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00,0x0f,0x1f,0x00,
+};
+static const unsigned char u3_aim_clamp_y_us_code[]={
+    0xc5,0xf2,0x59,0xc0,0xc5,0xfa,0x5f,0x05,0xd9,0xc4,0xb1,0x00,0xc5,0xfa,0x5d,0x05,0xa9,0xc4,0xb1,0x00,
+};
+static const unsigned char u1_aim_clamp_x_us_code[]={
+    0xc5,0xf2,0x59,0xc0,0xc5,0xfa,0x10,0x0d,0x11,0xa6,0x54,0x00,0xc5,0xfa,0x5f,0xc1,0xc5,0xfa,0x5d,0x05,
+    0x01,0xa6,0x54,0x00,
+};
+static const unsigned char u1_aim_unclamped_x_us[]={
+    0xc5,0xf2,0x59,0xc0,0xc5,0xfa,0x10,0x0d,0x11,0xa6,0x54,0x00,
+    0x66,0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00,0x0f,0x1f,0x00,
+};
+static const unsigned char u1_aim_clamp_y_us_code[]={
+    0xc5,0xf2,0x59,0xc0,0xc5,0xfa,0x5f,0x05,0xb0,0xa5,0x54,0x00,0xc5,0xfa,0x5d,0x05,0xa4,0xa5,0x54,0x00,
+};
+_Static_assert(sizeof(u3_aim_unclamped_x_us)==sizeof(u3_aim_clamp_x_us_code),"same size");
+_Static_assert(sizeof(u1_aim_unclamped_x_us)==sizeof(u1_aim_clamp_x_us_code),"same size");
 /* U3 US 1.02: the follow camera at image+0x4e7970 (string id 0xf34acb0c; the camera in rdi and its
  * direction at +0x78c0, as in EU). */
 static const unsigned char u3_follow_camera_us_code[]={
@@ -628,6 +671,7 @@ static void __attribute__((ms_abi)) u1_pad_update(uint64_t state, uint64_t unuse
                (unsigned long long)image,(unsigned long long)(state-image));
     joypad_state=state;
 }
+static int u1_us_curve; /* US 1.02: the aiming curve past full deflection is 45 * x^0.65 */
 static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
     (void)unused0; (void)unused1; (void)image;
     if (!joypad_state || r14-0x62!=joypad_state) return; /* pad 0 only */
@@ -662,6 +706,12 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
         x=curve(dx*scale+extra)+push;
         /* aiming turns vertically at about 0.45 times the horizontal rate for the same stick value */
         y=curve((input.mouse_invert_y ? -dy : dy)*scale/(aim_held ? 0.45f : 1.0f));
+        /* US 1.02: past full deflection the aiming camera turns at 45 * x^0.65 (as U2's) */
+        if (aim_held && u1_us_curve) {
+            const float rx=dx*scale, ry=(input.mouse_invert_y ? -dy : dy)*scale/0.45f;
+            if (rx>45.0f || rx<-45.0f) x=rx>0.0f ? SDL_powf(rx/45.0f,1.0f/0.65f) : -SDL_powf(-rx/45.0f,1.0f/0.65f);
+            if (ry>45.0f || ry<-45.0f) y=ry>0.0f ? SDL_powf(ry/45.0f,1.0f/0.65f) : -SDL_powf(-ry/45.0f,1.0f/0.65f);
+        }
     }
     if (mouse_debug()) printf("Mouse: aim t=%.4f dt=%.4f dx=%.1f x=%.3f game=%.3f\n",now*1e-6,dt,dx,x,pad[2]);
     if (x!=0.0f) { pad[2]+=x; pad[6]+=x; }
@@ -671,6 +721,10 @@ static const unsigned char u1_pad_update_code[]={
     0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xb8,0x00,0x00,0x00,
     0x49,0x89,0xfe,0x4c,0x8b,0x2d,0x92,0xf6,0x86,0x00,0x49,0x8b,
 };
+static void __attribute__((ms_abi)) u1_joypad_sticks_us(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
+    u1_us_curve=1;
+    u1_joypad_sticks(unused0,unused1,image,r14);
+}
 static const unsigned char u1_joypad_sticks_code[]={
     0x80,0x7c,0x01,0x6d,0x00,0x74,0x3b,0xc5,0xe2,0x59,0x64,0x01,0x40,0xc4,0xc1,0x7a,0x11,0x66,0xbe,0xc5,
     0xe2,0x59,0x64,0x01,
@@ -785,7 +839,17 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
     {"U1 follow camera (mouse, US)",0xaede0,u1_follow_camera_us_code,sizeof(u1_follow_camera_us_code),6,u1_follow_camera,NULL},
     {"U1 pad update (mouse, US)",0x117350,u1_pad_update_us_code,sizeof(u1_pad_update_us_code),6,u1_pad_update,NULL},
-    {"U1 joypad sticks (mouse, US)",0x11799e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
+    {"U1 joypad sticks (mouse, US)",0x11799e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks_us,NULL},
+    {"U1 aiming stick x unclamped (raw aim, US)",0x277fcb,u1_aim_clamp_x_us_code,sizeof(u1_aim_clamp_x_us_code),
+     sizeof(u1_aim_unclamped_x_us),NULL,u1_aim_unclamped_x_us},
+    {"U1 aiming stick y unclamped (raw aim, US)",0x27802c,u1_aim_clamp_y_us_code,sizeof(u1_aim_clamp_y_us_code),
+     sizeof(u2_aim_unclamped_y_us),NULL,u2_aim_unclamped_y_us},
+    {"U3 pad update (raw aim, US)",0x10ddd90,u3_pad_update_us_code,sizeof(u3_pad_update_us_code),6,u3_pad_update_us,NULL},
+    {"U3 pad sticks (raw aim, US)",0x10de707,u3_pad_sticks_us_code,sizeof(u3_pad_sticks_us_code),7,u3_pad_sticks_us,NULL},
+    {"U3 aiming stick x unclamped (raw aim, US)",0x9297b9,u3_aim_clamp_x_us_code,sizeof(u3_aim_clamp_x_us_code),
+     sizeof(u3_aim_unclamped_x_us),NULL,u3_aim_unclamped_x_us},
+    {"U3 aiming stick y unclamped (raw aim, US)",0x92981f,u3_aim_clamp_y_us_code,sizeof(u3_aim_clamp_y_us_code),
+     sizeof(u2_aim_unclamped_y_us),NULL,u2_aim_unclamped_y_us},
     {"U2 follow camera (mouse)",0x171fe0,u2_follow_camera_code,sizeof(u2_follow_camera_code),6,u2_follow_camera,NULL},
     {"U3 follow camera (mouse)",0x121b90,u3_follow_camera_code,sizeof(u3_follow_camera_code),6,u3_follow_camera,NULL},
     {"U3 camera input (raw aim)",0x11d4e0,u3_camera_input_code,sizeof(u3_camera_input_code),6,u3_camera_input,NULL},
