@@ -505,12 +505,26 @@ static void aim_pad_sticks(float *pad, float pitch) {
         x=aim_stick(dx*scale);
         y=aim_stick((input.mouse_invert_y ? -dy : dy)*scale/pitch);
     }
+    if (mouse_debug()) printf("Mouse: aim sticks t=%.4f dt=%.4f dx=%.1f x=%.3f pad %.3f %.3f %.3f %.3f\n",now*1e-6,dt,dx,x,
+                              pad[2],pad[3],pad[6],pad[7]);
     pad[2]+=x; pad[3]+=y; pad[6]+=x; pad[7]+=y;
 }
 /* U2: the pad update at image+0x251420 ends at image+0x251be8 with its input in r14. */
 static void __attribute__((ms_abi)) u2_pad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t sticks) {
     (void)unused0; (void)unused1; (void)image;
     aim_pad_sticks((float *)(uintptr_t)sticks,0.66f);
+}
+/* U2 US 1.02 (CUSA02320, as CUSA02344): the pad update at image+0x565d30 fills the two pads in a
+ * loop that moves its output pointer (rdi at the start), so its start notes the output and its end
+ * (image+0x56668e) turns pad 0's right stick, as in U3. */
+static uint64_t u2_pad_output_us;
+static void __attribute__((ms_abi)) u2_pad_update_us(uint64_t sticks, uint64_t unused, uint64_t image, uint64_t r14) {
+    (void)unused; (void)image; (void)r14;
+    u2_pad_output_us=sticks;
+}
+static void __attribute__((ms_abi)) u2_pad_sticks_us(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14) {
+    (void)unused0; (void)unused1; (void)image; (void)r14;
+    aim_pad_sticks((float *)(uintptr_t)u2_pad_output_us,0.66f);
 }
 /* U3: the pad update at image+0x741a30 keeps its input (rdi) in r13; at its end (image+0x74231e)
  * the input is the one its start saw. */
@@ -534,6 +548,20 @@ static const unsigned char u3_pad_sticks_code[]={
 static const unsigned char u2_pad_sticks_code[]={
     0x41,0x0f,0xb6,0x4f,0x6e,0x41,0x0f,0xb6,0x87,0xe2,0x00,0x00,0x00,0x49,0x8b,0x55,0x00,0x48,0x3b,0x55,
     0xd0,0x75,0x16,0x01,
+};
+/* U2 US 1.02: the pad update's start (push rbp; mov rbp, rsp; push r15 move) and its end (mov rdx,
+ * [r14]; cmp rdx, [rbp-0x30] move; the jne after it still sees the compare). */
+static const unsigned char u2_pad_update_us_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0x00,0x00,0x00,
+    0x49,0x89,0xfc,
+};
+static const unsigned char u2_pad_sticks_us_code[]={
+    0x49,0x8b,0x16,0x48,0x3b,0x55,0xd0,0x75,0x16,0x01,0xc0,0x09,0xc8,0x48,0x81,0xc4,
+};
+/* U2 US 1.02: the follow camera at image+0x42c690 (the camera in rdi, as in EU). */
+static const unsigned char u2_follow_camera_us_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x28,0x01,0x00,0x00,
+    0x45,0x89,0xcc,0x48,0x89,0x8d,0xf8,0xfe,0xff,0xff,0x49,0x89,0xd6,0x49,0x89,0xfd,
 };
 /* The follow camera's response to the right stick value (measured in U1): about 144 x^2 degrees/s up
  * to x = 0.5, then a speed that builds up over a second towards 240 degrees/s from x = 0.7 (and stays
@@ -708,6 +736,9 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 pad sticks (raw aim)",0x74231e,u3_pad_sticks_code,sizeof(u3_pad_sticks_code),5,u3_pad_sticks,NULL},
     {"U3 camera input (raw aim, CUSA02344)",0x4e42f0,u3_camera_input_02344_code,sizeof(u3_camera_input_02344_code),6,u3_camera_input,NULL},
     {"U2 camera input (raw aim, CUSA02344)",0x428f40,u2_camera_input_02344_code,sizeof(u2_camera_input_02344_code),6,u2_camera_input,NULL},
+    {"U2 follow camera (mouse, US)",0x42c690,u2_follow_camera_us_code,sizeof(u2_follow_camera_us_code),6,u2_follow_camera,NULL},
+    {"U2 pad update (raw aim, US)",0x565d30,u2_pad_update_us_code,sizeof(u2_pad_update_us_code),6,u2_pad_update_us,NULL},
+    {"U2 pad sticks (raw aim, US)",0x56668e,u2_pad_sticks_us_code,sizeof(u2_pad_sticks_us_code),7,u2_pad_sticks_us,NULL},
     {"U2 camera focus NaN reset",0x33ba13,u2_focus_assert_code,sizeof(u2_focus_assert_code),
      sizeof(u2_focus_reset),NULL,u2_focus_reset},
     {"U2 leg IK NaN delta",0x8ec618,u2_leg_ik_assert_code,sizeof(u2_leg_ik_assert_code),
