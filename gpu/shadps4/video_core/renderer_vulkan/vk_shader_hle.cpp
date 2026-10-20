@@ -326,10 +326,16 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
         // The 64-dword copy (U2) moves the mesh raycaster's results into its CPU-resident record
         // array (MeshRaycaster::HandleResults reads them in guest memory). Copied on the GPU only,
         // the records the game read were not the ones this copy made (an assertion in
-        // GetSubMeshInstance after a checkpoint). BB_SCALAR_COPY64_SYNC=0: off (A/B).
+        // GetSubMeshInstance after a checkpoint). Only Uncharted 2 (run.py's BB_EXE): U3 makes
+        // such copies too, and waiting for each one cost it about 10% (Cartagena, 93 -> 82 FPS).
+        // BB_SCALAR_COPY64_SYNC=1/0: on/off in every game (A/B).
         static const bool sync_64 = [] {
             const char* env = std::getenv("BB_SCALAR_COPY64_SYNC");
-            return !(env && env[0] == '0');
+            if (env && *env) {
+                return env[0] != '0';
+            }
+            const char* exe = std::getenv("BB_EXE");
+            return exe && std::strstr(exe, "big2") != nullptr;
         }();
         const bool sync = sync_all || (sync_64 && group_size == 64);
         const bool src_written = src_gpu && buffer_cache.IsRangeGpuWritten(src.base_address, size);
