@@ -1,5 +1,7 @@
 # US version (CUSA02320 1.02): what needs its own addresses
 
+CUSA02344 (EU/Russian) runs the same 1.02 code as US, so everything here covers it too.
+
 The user's US dump: `E:\Emulation\ps4\Games\CUSA02320` (UP9000-CUSA02320_00-UNCHARTEDTRILOGY,
 APP_VER 01.02). Its executables differ from the EU ones (big3 25.9 MB vs 22.9 MB, big2 18.4 MB vs
 16.4 MB, eboot 10.37 MB vs 10.62 MB), so fixed addresses don't carry over. Hooks check the original
@@ -11,8 +13,8 @@ Status: [ ] to do, [x] done, [-] not needed.
    alternatives matched). **Scan.** One launch of each game from the US folder; the log says which patches found
    their sites. Confirms the rest of this list.
 2. [ ] (not applied) **U3 heap free guard** (crash fix, runtime_pad.c `0x494a70`).
-3. [ ] (not applied) **U2 camera focus NaN reset** (crash fix, `0x33ba13`).
-4. [ ] (not applied) **U2 leg IK NaN delta** (crash fix, `0x8ec618`).
+3. [x] (done 2026-10-20: US image+0x72778f, same target slot [rbp-0x60]) **U2 camera focus NaN reset** (crash fix, `0x33ba13`).
+4. [x] (done 2026-10-20: US image+0x4713b9) **U2 leg IK NaN delta** (crash fix, `0x8ec618`).
 5. [ ] (sleep applied at all 3 sites; the 1 ms wait tweak not: "wait -1 ms") **Job sleep** (speed; pattern search, EU and CUSA02344 forms only, probe.c).
 6. [x] (found in all three games) **EOP tick wait** (frame pacing; pattern search that should accept US 1.02).
 7. [ ] (not applied) **U1 mouse camera**: follow camera `0xaecf0`, pad update `0x117200`, joypad sticks
