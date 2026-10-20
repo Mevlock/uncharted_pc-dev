@@ -578,8 +578,13 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     // bbport: compiler threads for graphics pipelines (from the God of War III port). A new
     // pipeline used to be built on the GPU thread while the game waited: a stutter at every
     // new effect. The draws that need it now skip for the frames it takes to build.
+    // Off by default (BB_ASYNC_SHADERS=1: on): a draw the game makes only once is lost if it
+    // lands while its pipeline builds. In U3's mine, with a cold shader cache, the flashlight's
+    // glow was missing for the whole session in 4 of 6 runs (0 of 4 with the threads off); the
+    // background preload and the draw-preparation workers keep the stutter away without them
+    // (same worst frames in those runs).
     const char* async_env = std::getenv("BB_ASYNC_SHADERS");
-    if (!(async_env && async_env[0] == '0') && instance.IsVertexInputDynamicState()) {
+    if (async_env && async_env[0] == '1' && instance.IsVertexInputDynamicState()) {
         const unsigned threads = std::max(1u, std::thread::hardware_concurrency());
         const unsigned count = std::clamp(threads / 2, 1u, 6u);
         for (unsigned i = 0; i < count; ++i) {
@@ -590,7 +595,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         compiler = std::make_unique<AsyncCompiler>(count, 64, [](unsigned index) {
             Common::SetCurrentThreadName(("bb:PipelineCompile" + std::to_string(index)).c_str());
         });
-        std::printf("Pipelines: built on %u compiler threads (BB_ASYNC_SHADERS=0: off)\n", count);
+        std::printf("Pipelines: built on %u compiler threads (BB_ASYNC_SHADERS=1)\n", count);
     }
 }
 
@@ -936,6 +941,21 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             });
             if (queued) {
                 pending_graphics.emplace(sel.graphics_key, std::move(build));
+            }
+        }
+        // bbport diagnosis: BB_ASYNC_LOG=1 prints every 2 s how many draws waited for a pipeline
+        // building on a compiler thread and how many builds are pending.
+        static const bool async_log = std::getenv("BB_ASYNC_LOG") != nullptr;
+        if (async_log) {
+            static u64 skipped = 0;
+            static auto last = std::chrono::steady_clock::now();
+            ++skipped;
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last > std::chrono::seconds(2)) {
+                std::printf("Pipelines: %llu draws waited for a compiler thread, %zu pending\n",
+                            static_cast<unsigned long long>(skipped), pending_graphics.size());
+                skipped = 0;
+                last = now;
             }
         }
         sel.fetch_shader.reset();
