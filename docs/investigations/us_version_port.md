@@ -21,7 +21,7 @@ Status: [ ] to do, [x] done, [-] not needed.
 9. [ ] (not applied) **U3 mouse camera**: follow camera `0x121b90`.
 10. [ ] (camera input applied via the CUSA02344 address 0x428f40; pad sticks not) **U2 raw aim**: camera input `0x16d920`, pad sticks `0x251be8`.
 11. [ ] (camera input applied via CUSA02344 0x4e42f0; pad update and pad sticks not) **U3 raw aim**: camera input `0x11d4e0`, pad update `0x741a30`, pad sticks `0x74231e`.
-12. [ ] ("Collection menu: not found") **U1 straight from the launcher** (skip the trilogy screen; probe.c `0x65d540`, `0x14ae00`).
+12. [x] (done 2026-10-20: the callback is found by its code, EU 0x65d540, US 0x6734a0) **U1 straight from the launcher** (skip the trilogy screen; probe.c `0x65d540`, `0x14ae00`).
 13. [x] **Render resolution and ultrawide** (done 2026-10-20). Resolution was off because none of the
     three movie patterns matched: US has the same code with other registers (first luma
     `mov ecx, ebx; mov r8d, r13d`, chroma at +0x5f/+0xe3, second luma `mov rcx, [rbp-0x2e0]` with a

@@ -860,20 +860,30 @@ static int is_patched_rdtsc(uintptr_t rip) {
     return lo<rdtsc_count && rdtsc_sites[lo]==off;
 }
 
+static int64_t find_masked(const char *hex, uint64_t size);
 static void patch_collection_skip(uint64_t image_size) {
     const char *skip=getenv("BB_SKIP_COLLECTION_MENU");
     if (!skip || skip[0]!='1') return;
-    static const unsigned char decide[]={ /* image+0x65d540 */
-        0x55,0x48,0x89,0xe5,0x48,0x8d,0x05,0x3d,0x6c,0x33,0x00,0x80,0xb8,0xc0,0x39,0x00,0x00,0x00,0x74,0x0a,
-        0x48,0x8b,0x07,0x5d,0xff,0xa0,0x90,0x00,0x00,0x00,0xe8,0x4d,0x54,0xae,0xff,0x48,0x89,0xc7,0x5d,
-        0xe9,0x44,0xdb,0xae,0xff,                       /* jmp image+0x14b0b0 (the collection) */
-    };
-    static const unsigned char open_u1[]={ /* image+0x14ae00 */
+    /* The menu callback, found by its code: push rbp; mov rbp, rsp; lea rax, [rip + ...];
+     * cmp byte [rax + 0x39c0], 0; je; mov rax, [rdi]; pop rbp; jmp [rax + 0x90]; call ...;
+     * mov rdi, rax; pop rbp; jmp (the collection). EU 1.02: image+0x65d540 (collection 0x14b0b0,
+     * U1 0x14ae00); US 1.02 (CUSA02320, as CUSA02344): image+0x6734a0 (0x14b570, 0x14b2c0). U1's
+     * front end is 0x2b0 bytes before the collection's in both. */
+    static const char decide[]="55 48 89 e5 48 8d 05 ?? ?? ?? ?? 80 b8 c0 39 00 00 00 74 0a 48 8b 07 5d ff a0 90 00 00 00 "
+                               "e8 ?? ?? ?? ?? 48 89 c7 5d e9 ?? ?? ?? ??";
+    static const unsigned char open_u1[]={
         0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x78,0x49,0x89,0xfd,
     };
-    const uint64_t at=0x65d540, jump=at+sizeof(decide)-5, collection=0x14b0b0, u1=0x14ae00;
-    if (at+sizeof(decide)>image_size || memcmp(image+at,decide,sizeof(decide)) ||
-        memcmp(image+u1,open_u1,sizeof(open_u1))) {
+    const int64_t at=find_masked(decide,image_size);
+    uint64_t jump=0, collection=0, u1=0;
+    if (at>=0) {
+        int32_t to;
+        jump=(uint64_t)at+44-5;
+        memcpy(&to,image+jump+1,4);
+        collection=jump+5+(uint64_t)(int64_t)to;
+        u1=collection-0x2b0;
+    }
+    if (at<0 || collection<0x2b0 || collection>=image_size || memcmp(image+u1,open_u1,sizeof(open_u1))) {
         printf("Collection menu: not found, the menu stays\n");
         return;
     }
