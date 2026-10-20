@@ -69,6 +69,7 @@ static SDL_Gamepad *gamepad;
 static size_t reads;
 static uint8_t connected_count;
 
+uint64_t runtime_guest_monotonic_us(void);
 static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
 static uint8_t axis(int16_t v) { int x=(v+32768)>>8; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
 static uint8_t trigger(int16_t v) { int x=v>>7; return (uint8_t)(x<0 ? 0 : x>255 ? 255 : x); }
@@ -687,7 +688,7 @@ static void sample_host(PadData *d) {
     d->left_x=d->left_y=d->right_x=d->right_y=128;
     d->orientation[3]=1.0f;
     d->connected=1; d->connected_count=connected_count ? connected_count : 1;
-    d->timestamp=now_us();
+    d->timestamp=runtime_guest_monotonic_us(); /* the game's clock (BB_TIME_SCALE) */
     static int loaded;
     if (!loaded) { load_input(); loaded=1; }
     SDL_Gamepad *g=current_gamepad();
@@ -703,7 +704,7 @@ static void sample_host(PadData *d) {
         scripted=file && *file && !(host && host[0]=='1');
     }
     if (scripted) { injected_mouse(&mdx,&mdy); captured=1; mouse=0; wheel=0; }
-    const uint64_t now=d->timestamp;
+    const uint64_t now=now_us();
     int rx=0, ry=0; /* the keyboard's right stick */
     if (!scripted) { /* the player's controller and keyboard */
         if (wheel>0) wheel_until_us[0]=now+80000;

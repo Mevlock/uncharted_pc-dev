@@ -809,10 +809,14 @@ static void patch_eop_tick_wait(uint64_t image_size) {
  * page: image+0x14b0b0); the carousel's U1 card later opens U1's (mode 1: image+0x14ae00). Its
  * final jump goes through a thunk that takes U1's front end the first time, so the collection's
  * title never shows; later calls open the collection as before. */
-/* BB_TIME_SCALE (runtime_kernel.c) slows the clocks the guest reads through the kernel; U3 also
- * reads the TSC itself. Its rdtsc instructions become ud2 (same length) and the fault handler
- * returns the scaled TSC (vectored_fault). All sites must match, else nothing is patched. */
+/* BB_TIME_SCALE (runtime_kernel.c) slows the clocks the guest reads through the kernel; U2 and U3
+ * also read the TSC themselves. Their rdtsc instructions become ud2 (same length) and the fault
+ * handler returns the scaled TSC (vectored_fault). All sites of a list must match, else nothing
+ * is patched. */
+#include "u2_rdtsc_sites.h"
 #include "u3_rdtsc_sites.h"
+static const uint32_t *rdtsc_sites;
+static size_t rdtsc_count;
 uint64_t runtime_guest_tsc(void);
 int runtime_time_scaled(void);
 static int rdtsc_patched;
@@ -824,27 +828,36 @@ static void patch_rdtsc(uint64_t image_size) {
     return; /* the ud2 handler is in the Windows exception handler only */
 #endif
     if (!runtime_time_scaled()) return;
-    const size_t count=sizeof(u3_rdtsc_sites)/sizeof(u3_rdtsc_sites[0]);
-    for (size_t i=0;i<count;++i) {
-        const uint32_t at=u3_rdtsc_sites[i];
-        if (at+2>image_size || image[at]!=0x0f || image[at+1]!=0x31) {
-            printf("Time scale: rdtsc site %#x not found, the game's own TSC reads stay unscaled\n",at);
-            return;
+    static const struct { const uint32_t *sites; size_t count; } lists[]={
+        {u3_rdtsc_sites,sizeof(u3_rdtsc_sites)/sizeof(u3_rdtsc_sites[0])},
+        {u2_rdtsc_sites,sizeof(u2_rdtsc_sites)/sizeof(u2_rdtsc_sites[0])},
+    };
+    for (size_t l=0;l<sizeof(lists)/sizeof(lists[0]) && !rdtsc_sites;++l) {
+        size_t i=0;
+        while (i<lists[l].count) {
+            const uint32_t at=lists[l].sites[i];
+            if (at+2>image_size || image[at]!=0x0f || image[at+1]!=0x31) break;
+            ++i;
         }
+        if (i==lists[l].count) { rdtsc_sites=lists[l].sites; rdtsc_count=lists[l].count; }
     }
-    for (size_t i=0;i<count;++i) image[u3_rdtsc_sites[i]+1]=0x0b; /* 0f 31 rdtsc -> 0f 0b ud2 */
+    if (!rdtsc_sites) {
+        printf("Time scale: this game's rdtsc sites are not known, its own TSC reads stay unscaled\n");
+        return;
+    }
+    for (size_t i=0;i<rdtsc_count;++i) image[rdtsc_sites[i]+1]=0x0b; /* 0f 31 rdtsc -> 0f 0b ud2 */
     rdtsc_patched=1;
-    printf("Time scale: %zu rdtsc instructions in the game scaled\n",count);
+    printf("Time scale: %zu rdtsc instructions in the game scaled\n",rdtsc_count);
 }
 static int is_patched_rdtsc(uintptr_t rip) {
     if (!rdtsc_patched || !image || rip<(uintptr_t)image) return 0;
     const uint64_t off=rip-(uintptr_t)image;
-    size_t lo=0, hi=sizeof(u3_rdtsc_sites)/sizeof(u3_rdtsc_sites[0]);
+    size_t lo=0, hi=rdtsc_count;
     while (lo<hi) {
         size_t mid=(lo+hi)/2;
-        if (u3_rdtsc_sites[mid]<off) lo=mid+1; else hi=mid;
+        if (rdtsc_sites[mid]<off) lo=mid+1; else hi=mid;
     }
-    return lo<sizeof(u3_rdtsc_sites)/sizeof(u3_rdtsc_sites[0]) && u3_rdtsc_sites[lo]==off;
+    return lo<rdtsc_count && rdtsc_sites[lo]==off;
 }
 
 static void patch_collection_skip(uint64_t image_size) {

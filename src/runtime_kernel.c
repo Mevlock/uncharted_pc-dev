@@ -12,6 +12,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <x86intrin.h>
 #ifndef _WIN32
 #include <sys/random.h>
@@ -93,10 +96,35 @@ static void *time_scale_watcher(void *path) {
     }
     return NULL;
 }
+#ifdef _WIN32
+/* BB_TIME_SCALE_KEY=1: the game starts at normal speed and F10 switches between that and
+ * BB_TIME_SCALE (default 0.25), e.g. for slowing just the moment of a glitch. */
+static double key_scale=0.25;
+static void *time_scale_key_watcher(void *unused) {
+    (void)unused;
+    for (int slow=0, held=0;;) {
+        const int down=(GetAsyncKeyState(VK_F10)&0x8000)!=0;
+        if (down && !held) { slow=!slow; set_time_scale(slow ? key_scale : 1.0); }
+        held=down;
+        compat_sleep_ns(20000000);
+    }
+    return NULL;
+}
+#endif
 static int time_scale_state;
 static void time_scale_init(void) {
     const char *v=getenv("BB_TIME_SCALE"), *file=getenv("BB_TIME_SCALE_FILE");
     const double scale=v && atof(v)>0 ? atof(v) : 1.0;
+#ifdef _WIN32
+    const char *key=getenv("BB_TIME_SCALE_KEY");
+    if (key && key[0]=='1') {
+        if (scale!=1.0) key_scale=scale;
+        time_scale_state=1;
+        static pthread_t watcher; pthread_create(&watcher,NULL,time_scale_key_watcher,NULL);
+        printf("Time scale: F10 switches between normal speed and %g\n",key_scale);
+        return;
+    }
+#endif
     time_scale_state=scale!=1.0 || (file && *file);
     if (scale!=1.0) set_time_scale(scale);
     if (file && *file) { static pthread_t watcher; pthread_create(&watcher,NULL,time_scale_watcher,(void *)file); }
@@ -176,6 +204,23 @@ static ABI uint64_t tsc_frequency(void) {
 }
 /* The guest's TSC as rdtsc instructions patched for BB_TIME_SCALE get it (probe.c). */
 uint64_t runtime_guest_tsc(void) { return read_tsc(); }
+/* The guest's monotonic clock in microseconds (pad timestamps) and its wall clock (gettimeofday),
+ * scaled like the kernel clocks under BB_TIME_SCALE. */
+uint64_t runtime_guest_monotonic_us(void) {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); scale_clock(&t,0);
+    return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u;
+}
+void runtime_guest_realtime(struct timespec *t) { scale_clock(t,1); }
+/* The GPU's 64-bit clock (EOP timestamps, pm4_cmds.h GetGpuClock64): host nanoseconds from any
+ * epoch, slowed from the first scaled reading on. */
+uint64_t runtime_guest_gpu_clock(uint64_t host_ns) {
+    if (!time_scale_setup()) return host_ns;
+    static uint64_t base;
+    uint64_t expected=0;
+    __atomic_compare_exchange_n(&base,&expected,host_ns,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
+    const uint64_t b=__atomic_load_n(&base,__ATOMIC_ACQUIRE);
+    return host_ns<b ? host_ns : b+(uint64_t)((double)(host_ns-b)*clocks.scale);
+}
 int runtime_time_scaled(void) { return time_scale_setup(); }
 double runtime_time_scale_now(void) { return time_scale_setup() ? clocks.scale : 1.0; }
 /* Shared with the GPU library so flip/label timestamps use the guest's clock. */

@@ -337,11 +337,14 @@ enum class InterruptSelect : u32 {
     IrqUndocumented = 3,
 };
 
+extern "C" u64 runtime_guest_gpu_clock(u64 host_ns);
+
 static u64 GetGpuClock64() {
     auto now = std::chrono::high_resolution_clock::now();
     auto duration = now.time_since_epoch();
     auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
-    return static_cast<u64>(ticks);
+    // bbport: slowed with the guest's other clocks under BB_TIME_SCALE.
+    return runtime_guest_gpu_clock(static_cast<u64>(ticks));
 }
 
 static u64 GetGpuPerfCounter() {

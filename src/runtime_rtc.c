@@ -62,8 +62,10 @@ static void from_tick(uint64_t tick, DateTime *t) {
     t->hour=(uint16_t)(us/3600000000u); t->minute=(uint16_t)(us/60000000u%60); t->second=(uint16_t)(us/1000000u%60);
     t->microsecond=(uint32_t)(us%1000000u);
 }
+void runtime_guest_realtime(struct timespec *t);
 static uint64_t now_utc(void) {
     struct timespec ts; clock_gettime(CLOCK_REALTIME,&ts);
+    runtime_guest_realtime(&ts); /* BB_TIME_SCALE */
     return UNIX_EPOCH_TICKS+(uint64_t)ts.tv_sec*1000000u+(uint64_t)ts.tv_nsec/1000u;
 }
 /* Offset of local time from UTC at the given UTC tick, in microseconds. */

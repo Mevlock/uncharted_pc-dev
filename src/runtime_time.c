@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+void runtime_guest_realtime(struct timespec *t);
 typedef struct { int64_t seconds, microseconds; } GuestTimeval;
 typedef struct { int32_t minuteswest, dsttime; } GuestTimezone;
 static ABI int guest_gettimeofday(GuestTimeval *value,GuestTimezone *zone) {
@@ -20,7 +21,11 @@ static ABI int guest_gettimeofday(GuestTimeval *value,GuestTimezone *zone) {
     }
     if (zone) { zone->minuteswest=z.tz_minuteswest; zone->dsttime=z.tz_dsttime; }
 #endif
-    if (value) { value->seconds=t.tv_sec; value->microseconds=t.tv_usec; }
+    if (value) {
+        struct timespec s={t.tv_sec,(long)t.tv_usec*1000};
+        runtime_guest_realtime(&s); /* BB_TIME_SCALE */
+        value->seconds=s.tv_sec; value->microseconds=s.tv_nsec/1000;
+    }
     return 0;
 }
 uintptr_t runtime_time_resolve(const char *name) {
