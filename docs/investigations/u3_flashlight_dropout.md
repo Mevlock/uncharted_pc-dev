@@ -26,6 +26,11 @@ When the shadow map changes size at the same memory, the emulated texture cache 
 at that address. The first frame after the switch the lighting reads an empty (all-shadowed) or wrong
 image: the light vanishes. The next frame it reads data laid out for the other size: blocky squares.
 
+## Ruled out (20 Oct, morning)
+- Occlusion queries: the emulator reports every query as fully visible, so a late result can't hide a light.
+- COND_EXEC: read only one byte of its condition (fixed in 15eab75), but U3 issues no COND_EXEC at the wall.
+- Intel red-zone corruption (upstream PR #403): doesn't happen on this Ryzen 9800X3D (the PR's own test).
+
 ## Next steps
 1. Capture again with the new draw log (image addresses now printed, commit 2f5ac63): confirm the
    1024 and 1280 shadow maps share a guest address.
