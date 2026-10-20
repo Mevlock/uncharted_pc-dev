@@ -3411,8 +3411,8 @@ std::string Rasterizer::DescribeImages() {
             continue;
         }
         const auto& image = texture_cache.GetImage(id);
-        out += fmt::format(" {}x{} {}", image.info.size.width, image.info.size.height,
-                           vk::to_string(image.info.pixel_format));
+        out += fmt::format(" {}x{} {}@{:x}", image.info.size.width, image.info.size.height,
+                           vk::to_string(image.info.pixel_format), image.info.guest_address);
     }
     return out + " ]";
 }
