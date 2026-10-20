@@ -227,8 +227,10 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
                 (void *)record->ExceptionInformation[1],where,GetCurrentThreadId());
     else
         fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
-    fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
-            c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
+    fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n"
+            "  r8=%016llx  r9=%016llx  r10=%016llx r11=%016llx\n  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
+            c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp,
+            c->R8,c->R9,c->R10,c->R11,c->R12,c->R13,c->R14,c->R15);
     if (gpu_enabled) bbgpu_dump_guest_writes(info);
     /* rbp chain (guest and host code keep frame pointers). */
     uintptr_t rbp=(uintptr_t)c->Rbp;
@@ -717,9 +719,10 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         if (used+256>4096) break;
         unsigned char *t=thunks+used, *f=image+c->offset;
         size_t k=0;
-        /* pushfq; push rax rcx rdx r8-r11 rbx; mov rbx, rsp; and rsp, -16; sub rsp, 0xa0 (works at
-         * a function's start and inside it) */
-        static const unsigned char save[]={0x9c,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,0x53,
+        /* lea rsp, [rsp-0x80] (a hook inside a leaf function must not touch the 128 bytes below rsp
+         * it keeps locals in; after drakolordx7, upstream PR #396); pushfq; push rax rcx rdx r8-r11 rbx;
+         * mov rbx, rsp; and rsp, -16; sub rsp, 0xa0 (works at a function's start and inside it) */
+        static const unsigned char save[]={0x48,0x8d,0x64,0x24,0x80,0x9c,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,0x53,
                                            0x48,0x89,0xe3,0x48,0x83,0xe4,0xf0,0x48,0x81,0xec,0xa0,0x00,0x00,0x00};
         memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
         for (int x=0;x<8;++x) {                                     /* movdqu [rsp+0x20+16x], xmmx */
@@ -739,9 +742,9 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
             t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x6f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
             memcpy(t+k,&disp,4); k+=4;
         }
-        /* mov rsp, rbx; pop rbx r11-r8 rdx rcx rax; popfq */
+        /* mov rsp, rbx; pop rbx r11-r8 rdx rcx rax; popfq; lea rsp, [rsp+0x80] */
         static const unsigned char restore[]={0x48,0x89,0xdc,0x5b,0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,
-                                              0x5a,0x59,0x58,0x9d};
+                                              0x5a,0x59,0x58,0x9d,0x48,0x8d,0xa4,0x24,0x80,0x00,0x00,0x00};
         memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
         memcpy(t+k,f,c->moved); k+=c->moved;                       /* the moved instructions */
         int32_t back=(int32_t)((int64_t)(uintptr_t)(f+c->moved)-(int64_t)(uintptr_t)(t+k+5));
