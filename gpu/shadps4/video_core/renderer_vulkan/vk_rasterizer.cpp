@@ -5381,11 +5381,13 @@ bool MenuBackdropShader(u64 ps_hash) {
 /// gameplay). Gameplay dips to ~180 in sparse scripted scenes (U3, 2026-10-19: 179 flipped a
 /// scripted sequence to 16:9) while menus reach ~150: one threshold has no room between them.
 /// Entering still needs SceneFrameDraws (menus never reach it); leaving goes through loading
-/// screens, fades or movies with almost no 3D draws. BB_ULTRAWIDE_EXIT_DRAWS overrides 100.
+/// screens, fades or movies with almost no 3D draws (U2: 0-3). Aiming with the face against a
+/// wall draws as few as 76 (U2 museum, 2026-10-20: 100 flipped it to 16:9), so leaving needs
+/// fewer than 20. BB_ULTRAWIDE_EXIT_DRAWS overrides 20.
 u32 SceneExitDraws() {
     static const u32 draws = [] {
         const char* env = std::getenv("BB_ULTRAWIDE_EXIT_DRAWS");
-        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 100u;
+        return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 20u;
     }();
     return draws;
 }
