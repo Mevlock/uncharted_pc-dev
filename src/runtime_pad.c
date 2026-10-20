@@ -657,6 +657,12 @@ static const unsigned char u3_heap_free_code[]={
     0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x28,0x49,0x89,0xf6,
     0x49,0x89,0xfc,0x48,0x8d,0x05,0xaa,0x3d,0xf6,0x00,
 };
+/* The same free in US 1.02 (CUSA02320, as CUSA02344): image+0xd9ce70, the block in rsi and its
+ * header at -0xc/-0x10 as in EU. */
+static const unsigned char u3_heap_free_us_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18,0x49,0x89,0xf4,
+    0x49,0x89,0xfe,0x48,0x8d,0x05,0x9a,0xa2,0x94,0x00,
+};
 static void __attribute__((ms_abi)) u3_heap_free(uint64_t heap, uint64_t data, uint64_t image, uint64_t r14) {
     (void)heap; (void)image; (void)r14;
     static int hook=-1; /* BB_U3_FREE_HOOK=0: off (A/B tests) */
@@ -724,6 +730,7 @@ static const unsigned char u2_leg_ik_zero_us[]={
 _Static_assert(sizeof(u2_leg_ik_zero_us)==sizeof(u2_leg_ik_assert_code_us),"same size");
 static const RuntimeGuestCallback guest_callbacks[]={
     {"U3 heap free (GPU data)",0x494a70,u3_heap_free_code,sizeof(u3_heap_free_code),6,u3_heap_free,NULL},
+    {"U3 heap free (GPU data, US)",0xd9ce70,u3_heap_free_us_code,sizeof(u3_heap_free_us_code),6,u3_heap_free,NULL},
     {"U1 follow camera (mouse)",0xaecf0,u1_follow_camera_code,sizeof(u1_follow_camera_code),6,u1_follow_camera,NULL},
     {"U1 pad update (mouse)",0x117200,u1_pad_update_code,sizeof(u1_pad_update_code),6,u1_pad_update,NULL},
     {"U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
