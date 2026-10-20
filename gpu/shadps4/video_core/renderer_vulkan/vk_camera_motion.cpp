@@ -20,6 +20,13 @@
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/texture_cache/texture_cache.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace Vulkan {
 
 namespace {
@@ -262,6 +269,84 @@ extern "C" int bbgpu_camera_yaw(float* yaw_degrees, double* age_seconds) {
     return 1;
 }
 
+/// bbport diagnosis (Windows, game started under RenderDoc): BB_RDOC_CUT=N[,delay] records N
+/// frames in a row, starting delay frames after the next camera cut once F11 has armed it. One-frame
+/// glitches just after a cut (U2's green haze in the museum) are too quick to catch with F12.
+extern "C" double runtime_time_scale_now(void);
+
+static void RenderDocOnCut(bool cut) {
+#ifdef _WIN32
+    static const std::pair<u32, u32> setting = [] {
+        const char* env = std::getenv("BB_RDOC_CUT");
+        if (!env) {
+            return std::pair<u32, u32>{0, 0};
+        }
+        char* end;
+        const u32 frames = static_cast<u32>(std::strtoul(env, &end, 10));
+        return std::pair<u32, u32>{frames, *end == ',' ? static_cast<u32>(std::atoi(end + 1)) : 0};
+    }();
+    if (!setting.first) {
+        return;
+    }
+    using TriggerMulti = void(__cdecl*)(u32);
+    static TriggerMulti trigger = [] {
+        // RENDERDOC_API_1_6_0: TriggerMultiFrameCapture is its 23rd function pointer.
+        const HMODULE module = GetModuleHandleA("renderdoc.dll");
+        using GetApi = int(__cdecl*)(int, void**);
+        auto get_api =
+            module ? reinterpret_cast<GetApi>(::GetProcAddress(module, "RENDERDOC_GetAPI"))
+                   : nullptr;
+        void** api = nullptr;
+        if (!get_api || get_api(10600, reinterpret_cast<void**>(&api)) != 1 || !api) {
+            std::printf("BB_RDOC_CUT: not running under RenderDoc\n");
+            return TriggerMulti{};
+        }
+        std::printf("BB_RDOC_CUT: press F11, then the next camera cut records %u frames\n",
+                    setting.first);
+        return reinterpret_cast<TriggerMulti>(api[22]);
+    }();
+    static bool armed = false;
+    static int countdown = -1;
+    static u64 frame = 0, last_cut = 0;
+    if (!trigger) {
+        return;
+    }
+    ++frame;
+    if (cut) {
+        last_cut = frame;
+    }
+    // Slow motion switched on (BB_TIME_SCALE_KEY: F10) arms it too.
+    static double last_scale = 1.0;
+    const double scale = runtime_time_scale_now();
+    if (scale < 1.0 && last_scale >= 1.0 && !armed && countdown < 0) {
+        armed = true;
+        std::printf("BB_RDOC_CUT: armed by slow motion\n");
+    }
+    last_scale = scale;
+    if (GetAsyncKeyState(0x7A) & 0x8000) { // F11 held
+        if (!armed && countdown < 0) {
+            std::printf("BB_RDOC_CUT: armed (%llu frames after the last cut)\n",
+                        static_cast<unsigned long long>(frame - last_cut));
+        }
+        armed = countdown < 0;
+    }
+    if (armed && cut) {
+        armed = false;
+        countdown = static_cast<int>(setting.second);
+        std::printf("BB_RDOC_CUT: camera cut, recording %u frames after %u\n", setting.first,
+                    setting.second);
+    }
+    if (countdown == 0) {
+        trigger(setting.first);
+    }
+    if (countdown >= 0) {
+        --countdown;
+    }
+#else
+    (void)cut;
+#endif
+}
+
 void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     // Uncharted's camera velocity pass (its pixel shader, read from the shader dump):
     //   z = c9 / (depth - c8), view = (z (c0 u + c2), z (c1 v + c3), z)
@@ -319,6 +404,7 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
             last_position = position;
             has_last_camera = true;
         }
+        RenderDocOnCut(camera.cut);
     }
     // The shown camera's heading for the mouse controls (bbgpu_camera_yaw: which game camera is on
     // screen), and with BB_CAMERA_LOG=1 its direction every frame, for measuring how the game turns
