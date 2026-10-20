@@ -302,11 +302,13 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
         printf("Ultrawide: only %d camera reads found, not applied\n", ns);
         return;
     }
-    /* Room for the stubs: the zero padding at the end of the code segment. */
+    /* Room for the stubs: the zero padding at the end of the code segment, whose last 0x80 bytes
+     * stay free for the render resolution's movie stubs. (US U2 has 6360 bytes of padding: the
+     * 8 KiB once asked for here left it without ultrawide.) */
     uint64_t pad = size;
     while (pad > 0 && code[pad - 1] == 0) --pad;
     const uint64_t cave = (pad + 0x100 + 0xff) & ~(uint64_t)0xff;
-    if (size - pad < 8192 || cave + 0x20 + (uint64_t)ns * 0x20 > size) {
+    if (cave + 0x20 + (uint64_t)ns * 0x20 + 0x80 > size) {
         printf("Ultrawide: no room at the end of the game code, not applied\n");
         return;
     }
@@ -414,6 +416,15 @@ static const uint8_t movie_first[7] = {0x44, 0x89, 0xf9, 0x4c, 0x89, 0xc3, 0xe8}
 static const uint8_t movie_second[15] = {0x48, 0x8b, 0x8d, 0x18, 0xfd, 0xff, 0xff, 0x4c,
                                          0x8b, 0x85, 0x10, 0xfd, 0xff, 0xff, 0xe8};
 static const uint8_t movie_chroma[11] = {0x41, 0x0f, 0xaf, 0xde, 0x83, 0xe3, 0xc0, 0x48, 0x03, 0x5d, 0x80};
+/* The same code in the US release (CUSA02320 1.02, as CUSA02344), compiled with other registers:
+ * mov r9d, 0x3d; mov ecx, ebx; mov r8d, r13d; call (first luma); mov rcx, [rbp - 0x2e0];
+ * mov r8d, r13d; call (second luma); imul esi, ecx; and rsi, rdx; add rsi, [rbp - 0xb0] (chroma
+ * offset). The chroma textures (mov ecx, r14d; mov r8d, ebx) are 0x5f and 0xe3 bytes after the
+ * first; all three games have the same layout. */
+static const uint8_t movie_first_us[12] = {0x41, 0xb9, 0x3d, 0, 0, 0, 0x89, 0xd9, 0x45, 0x89, 0xe8, 0xe8};
+static const uint8_t movie_second_us[11] = {0x48, 0x8b, 0x8d, 0x20, 0xfd, 0xff, 0xff, 0x45, 0x89, 0xe8, 0xe8};
+static const uint8_t movie_chroma_us[13] = {0x0f, 0xaf, 0xf1, 0x48, 0x21, 0xd6, 0x48,
+                                            0x03, 0xb5, 0x50, 0xff, 0xff, 0xff};
 
 /* A memory table entry like `want` (same id, parent and alignment) with a size from half to
  * twice `want`'s. */
@@ -439,6 +450,7 @@ static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_
         h &= ~7u; /* the bloom chain: a quarter-size height that halves again (844 gave a big glint) */
         if (w == 1920 && h == 1080) return 0;
         int blocks = 0, direct = 0, first = 0, second = 0, chroma = 0, entries = 0;
+        int first_us = 0, second_us = 0, chroma_us = 0;
         for (uint64_t i = 0; i + 200 < size; ++i) {
             const uint8_t *q = code + i;
             if (q[0] == 0xc7 && q[2] == 0x08 && (q[1] == 0x47 || q[1] == 0x40) && match_mode_block(q, q[1])) ++blocks;
@@ -446,7 +458,11 @@ static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_
             if (q[0] == 0x44 && !memcmp(q, movie_first, 7)) ++first;
             if (q[0] == 0x48 && !memcmp(q, movie_second, 15)) ++second;
             if (q[0] == 0x41 && !memcmp(q, movie_chroma, 11)) ++chroma;
+            if (q[0] == 0x41 && !memcmp(q, movie_first_us, 12)) ++first_us;
+            if (q[0] == 0x48 && !memcmp(q, movie_second_us, 11)) ++second_us;
+            if (q[0] == 0x0f && !memcmp(q, movie_chroma_us, 13)) ++chroma_us;
         }
+        if (first_us == 1 && second_us == 1 && chroma_us == 1) first = second = chroma = 1; /* US */
         const uint8_t *wanted[4] = {heap_a, heap_b, gpu_total, gpu_free};
         int matches[4] = {0, 0, 0, 0};
         for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end; i += 8)
@@ -600,6 +616,54 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
             memcpy(code + at_second, second_fixed, 14);
             static const uint8_t chroma_fixed[7] = {0xbb, 0x00, 0xe0, 0x1f, 0x00, 0x66, 0x90};
             memcpy(code + at_chroma, chroma_fixed, 7);
+            movies = 1;
+        }
+    }
+    /* The US release: the first luma's mov ecx, ebx; mov r8d, r13d (5 bytes), the two chroma
+     * textures' 6 bytes and the second luma's 10 (too short for both constants) each jump to a
+     * stub in the last 0x80 bytes of the padding; the chroma offset's imul esi, ecx;
+     * and rsi, rdx becomes mov esi, 1920 * 1088. */
+    if (!movies && !strchr(skip, 'm')) {
+        int64_t at_first = -1, at_second = -1, at_chroma = -1;
+        int n_first = 0, n_second = 0, n_chroma = 0;
+        for (uint64_t i = 0; i + 16 < size; ++i) {
+            if (code[i] == 0x41 && !memcmp(code + i, movie_first_us, 12)) at_first = (int64_t)i, ++n_first;
+            if (code[i] == 0x48 && !memcmp(code + i, movie_second_us, 11)) at_second = (int64_t)i, ++n_second;
+            if (code[i] == 0x0f && !memcmp(code + i, movie_chroma_us, 13)) at_chroma = (int64_t)i, ++n_chroma;
+        }
+        const uint64_t stubs = (size - 0x80) & ~(uint64_t)0xf;
+        int room = 1;
+        for (uint64_t i = stubs; i < stubs + 0x80; ++i) room &= code[i] == 0;
+        static const uint8_t chroma_size[6] = {0x44, 0x89, 0xf1, 0x41, 0x89, 0xd8}; /* mov ecx, r14d; mov r8d, ebx */
+        const int64_t at_luma = at_first + 6, at_chroma1 = at_first + 0x5f, at_chroma2 = at_first + 0xe3;
+        if (n_first == 1 && n_second == 1 && n_chroma == 1 && room && at_first + 0xf0 < (int64_t)size &&
+            !memcmp(code + at_chroma1, chroma_size, 6) && !memcmp(code + at_chroma2, chroma_size, 6)) {
+            static const uint8_t luma[11] = {0xb9, 0x80, 0x07, 0, 0,       /* mov ecx, 1920 */
+                                             0x41, 0xb8, 0x38, 0x04, 0, 0}; /* mov r8d, 1080 */
+            static const uint8_t chroma_args[11] = {0xb9, 0xc0, 0x03, 0, 0,       /* mov ecx, 960 */
+                                                    0x41, 0xb8, 0x1c, 0x02, 0, 0}; /* mov r8d, 540 */
+            /* A stub running `body`, then jumping back to after the `len` bytes at `site`. */
+            const struct {
+                int64_t site;
+                int len;
+                const uint8_t *body;
+            } detours[4] = {{at_luma, 5, luma}, {at_chroma1, 6, chroma_args}, {at_chroma2, 6, chroma_args},
+                            {at_second, 10, luma}};
+            for (int d = 0; d < 4; ++d) {
+                const uint64_t stub = stubs + 0x20 * (uint64_t)d;
+                uint8_t *c = code + stub;
+                memcpy(c, detours[d].body, 11);
+                c[11] = 0xe9;
+                int32_t rel = (int32_t)((detours[d].site + detours[d].len) - (int64_t)(stub + 16));
+                memcpy(c + 12, &rel, 4);
+                uint8_t *site = code + detours[d].site;
+                site[0] = 0xe9;
+                rel = (int32_t)((int64_t)stub - (detours[d].site + 5));
+                memcpy(site + 1, &rel, 4);
+                memset(site + 5, 0x90, (size_t)(detours[d].len - 5));
+            }
+            static const uint8_t chroma_fixed[6] = {0xbe, 0x00, 0xe0, 0x1f, 0x00, 0x90}; /* mov esi, 1920 * 1088 */
+            memcpy(code + at_chroma, chroma_fixed, 6);
             movies = 1;
         }
     }
