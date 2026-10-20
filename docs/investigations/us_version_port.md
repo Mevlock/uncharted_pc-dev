@@ -15,7 +15,7 @@ Status: [ ] to do, [x] done, [-] not needed.
 2. [x] (done 2026-10-20: US image+0xd9ce70, found by the heap marker 0x4ababeef) **U3 heap free guard** (crash fix, runtime_pad.c `0x494a70`).
 3. [x] (done 2026-10-20: US image+0x72778f, same target slot [rbp-0x60]) **U2 camera focus NaN reset** (crash fix, `0x33ba13`).
 4. [x] (done 2026-10-20: US image+0x4713b9) **U2 leg IK NaN delta** (crash fix, `0x8ec618`).
-5. [ ] (sleep applied at all 3 sites; the 1 ms wait tweak not: "wait -1 ms") **Job sleep** (speed; pattern search, EU and CUSA02344 forms only, probe.c).
+5. [x] (done 2026-10-20: US waits in microseconds, mov edx, 10000; now 1000 for 1 ms, log "wait 1 ms") **Job sleep** (speed; pattern search, EU and CUSA02344 forms only, probe.c).
 6. [x] (found in all three games) **EOP tick wait** (frame pacing; pattern search that should accept US 1.02).
 7. [x] (done 2026-10-20: US is the same code moved: follow camera 0xaede0, pad update 0x117350, joypad sticks 0x11799e; mouse look 45.5/180.6/716.6 deg/s vs EU 45.3/180.4/720.2. Fast aiming stops at stick speed on US, ~45 deg/s vs EU 176/778: the same US stick limit as U2/U3, parked with 10/11) **U1 mouse camera**: follow camera `0xaecf0`, pad update `0x117200`, joypad sticks
    `0x11784e`.
@@ -35,8 +35,8 @@ Status: [ ] to do, [x] done, [-] not needed.
     for the room actually used. U1/U3 widen every paired camera read; the lower counts are inlining
     (the unwidened ones are CreateOrthographicProjection and lone zoom reads, as in EU). Checked in
     game on US U3 (EU chapter 5 save copied to the US save folder).
-14. [ ] **Movie scaling and GPU memory sizes** (byte patterns).
-15. [ ] **Shader-hash fixes** (bloom clamp, U2 aiming DOF, HUD squeeze, movie shader, camera
+14. [x] (confirmed 2026-10-20: the same feature lines as EU in all three games) **Movie scaling and GPU memory sizes** (byte patterns).
+15. [x] (confirmed 2026-10-20: same lines as EU, incl. 16x filtering and camera motion) **Shader-hash fixes** (bloom clamp, U2 aiming DOF, HUD squeeze, movie shader, camera
     motion, light shaft fog): expected identical; confirm with the shader cache hashes.
 16. [x] (works) **Intro logo skip** (`sce-ndi-logos.bsf`): compare the file.
-17. [ ] **Slow motion clock lists** (U2/U3 rdtsc sites; diagnostic only).
+17. [x] (done 2026-10-20: u2_us/u3_us_rdtsc_sites.h, 235 and 295 reads) **Slow motion clock lists** (U2/U3 rdtsc sites; diagnostic only).

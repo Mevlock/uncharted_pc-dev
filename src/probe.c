@@ -815,6 +815,8 @@ static void patch_eop_tick_wait(uint64_t image_size) {
  * is patched. */
 #include "u2_rdtsc_sites.h"
 #include "u3_rdtsc_sites.h"
+#include "u2_us_rdtsc_sites.h"
+#include "u3_us_rdtsc_sites.h"
 static const uint32_t *rdtsc_sites;
 static size_t rdtsc_count;
 uint64_t runtime_guest_tsc(void);
@@ -831,6 +833,8 @@ static void patch_rdtsc(uint64_t image_size) {
     static const struct { const uint32_t *sites; size_t count; } lists[]={
         {u3_rdtsc_sites,sizeof(u3_rdtsc_sites)/sizeof(u3_rdtsc_sites[0])},
         {u2_rdtsc_sites,sizeof(u2_rdtsc_sites)/sizeof(u2_rdtsc_sites[0])},
+        {u2_us_rdtsc_sites,sizeof(u2_us_rdtsc_sites)/sizeof(u2_us_rdtsc_sites[0])},
+        {u3_us_rdtsc_sites,sizeof(u3_us_rdtsc_sites)/sizeof(u3_us_rdtsc_sites[0])},
     };
     for (size_t l=0;l<sizeof(lists)/sizeof(lists[0]) && !rdtsc_sites;++l) {
         size_t i=0;
@@ -960,9 +964,14 @@ static void patch_job_sleep(uint64_t image_size) {
      * re-check (mov edx, 10) is shortened to BB_JOB_SLEEP_MS (default 1, 10 the game's). */
     const char *ms_env=getenv("BB_JOB_SLEEP_MS");
     const int ms=ms_env ? atoi(ms_env) : 1;
+    /* EU: mov edx, 10 (milliseconds); US 1.02 (as CUSA02344): mov edx, 10000 (microseconds, another
+     * timed wait). */
     unsigned char *wait=image+at[1]+17;
-    const int is_wait=wait[0]==0xba && wait[1]==10 && !wait[2] && !wait[3] && !wait[4];
+    int32_t wait_value=0;
+    if (wait[0]==0xba) memcpy(&wait_value,wait+1,4);
+    const int is_wait=wait_value==10, is_wait_us=wait_value==10000;
     if (is_wait && ms>0 && ms<128) wait[1]=(unsigned char)ms;
+    if (is_wait_us && ms>0 && ms<128) { const int32_t us=ms*1000; memcpy(wait+1,&us,4); }
     /* A sleeping worker starts a job only once the host has woken it: work a frame does not wait for
      * could then miss it. BB_JOB_SLEEP_SPINS (default 50000, the game's 1000: cmp r8, 1000) keeps a
      * worker spinning through a frame's bursts of jobs; it sleeps when the game is idle. */
@@ -976,7 +985,8 @@ static void patch_job_sleep(uint64_t image_size) {
     int32_t now_spins=-1;
     if (is_spin) memcpy(&now_spins,spin+3,4);
     printf("Job workers: idle ones sleep (0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 "), wait %d ms after %d spins\n",
-           at[0],at[1],at[2],is_wait ? wait[1] : -1,(int)now_spins);
+           at[0],at[1],at[2],is_wait ? wait[1] : is_wait_us ? (int)(((uint32_t)wait[1]|(uint32_t)wait[2]<<8)/1000) : -1,
+           (int)now_spins);
 }
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
