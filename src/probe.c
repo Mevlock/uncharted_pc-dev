@@ -920,7 +920,29 @@ static void patch_job_sleep(uint64_t image_size) {
         if (at[s]<0) { printf("Job workers: site %d not found, they keep spinning\n",s); return; }
     }
     for (int s=0; s<3; ++s) memcpy(image+at[s]+use[s]->at,use[s]->with,(size_t)use[s]->len);
-    printf("Job workers: idle ones sleep (0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 ")\n",at[0],at[1],at[2]);
+    /* The worker then waits up to 10 ms without looking at the queue again: a job submitted after
+     * its last look (the wake-up already given) waited for the timeout, and a frame's work finished
+     * a frame late (U3's mine: the flashlight's light missing for a frame). The wait after the
+     * re-check (mov edx, 10) is shortened to BB_JOB_SLEEP_MS (default 1, 10 the game's). */
+    const char *ms_env=getenv("BB_JOB_SLEEP_MS");
+    const int ms=ms_env ? atoi(ms_env) : 1;
+    unsigned char *wait=image+at[1]+17;
+    const int is_wait=wait[0]==0xba && wait[1]==10 && !wait[2] && !wait[3] && !wait[4];
+    if (is_wait && ms>0 && ms<128) wait[1]=(unsigned char)ms;
+    /* A sleeping worker starts a job only once the host has woken it: work a frame does not wait for
+     * could then miss it. BB_JOB_SLEEP_SPINS (default 50000, the game's 1000: cmp r8, 1000) keeps a
+     * worker spinning through a frame's bursts of jobs; it sleeps when the game is idle. */
+    const char *spin_env=getenv("BB_JOB_SLEEP_SPINS");
+    const long spins=spin_env ? atol(spin_env) : 50000;
+    unsigned char *spin=image+at[0]+6;
+    int32_t old_spins=0;
+    memcpy(&old_spins,spin+3,4);
+    const int is_spin=spin[0]==0x49 && spin[1]==0x81 && spin[2]==0xf8 && old_spins==1000;
+    if (is_spin && spins>0 && spins<=0x7fffffff) { const int32_t v=(int32_t)spins; memcpy(spin+3,&v,4); }
+    int32_t now_spins=-1;
+    if (is_spin) memcpy(&now_spins,spin+3,4);
+    printf("Job workers: idle ones sleep (0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 "), wait %d ms after %d spins\n",
+           at[0],at[1],at[2],is_wait ? wait[1] : -1,(int)now_spins);
 }
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
