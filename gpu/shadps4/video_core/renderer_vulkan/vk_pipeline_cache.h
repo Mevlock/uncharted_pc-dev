@@ -89,6 +89,7 @@ struct DrawIndirectParams {
 
 namespace AmdGpu {
 union Regs;
+struct ComputeProgram;
 }
 
 namespace Vulkan {
@@ -105,6 +106,8 @@ struct PipelineSelection {
     bool motion = false;
     bool ui_squeeze = false; ///< bbport: ultrawide UI draw (UiSqueezeDraw)
     DrawIndirectParams draw_indirect_params{};
+    /// Compute program state of a worker's dispatch (the GPU thread reads its queue's own).
+    const AmdGpu::ComputeProgram* cs{};
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
 };
 
@@ -170,6 +173,10 @@ public:
     }
 
     const ComputePipeline* GetComputePipeline();
+
+    /// bbport: worker side of a dispatch: translates the compute program and builds its pipeline
+    /// when they do not exist yet, so the GPU thread finds them (sel.cs is the program state).
+    void PrepareComputePipeline(PipelineSelection& sel);
 
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,
                               std::optional<Shader::Gcn::FetchShaderData>, u64>;
