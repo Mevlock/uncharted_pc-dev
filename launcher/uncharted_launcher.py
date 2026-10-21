@@ -83,7 +83,9 @@ WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
                 ('5120x1440', '5120 × 1440 (32:9)')]
 # The size the games render at (BB_RENDER_RES): the game's display
 # mode, memory budget, camera and movies are patched in memory. Its GPU memory stays under 4 GiB,
-# which allows about 3440 x 1440 (RENDER_PIXELS_MAX); a larger size is scaled down to that.
+# which allows about 3440 x 1440 in Uncharted 1 (RENDER_PIXELS_MAX); Uncharted 2 and 3 move their
+# largest render target heap to the CPU area above that and go up to 3840 x 2160
+# (RENDER_PIXELS_MAX_BIG; runtime_ultrawide.c). A larger size is scaled down to the limit.
 # Native renders at the output size (the window, or the screen in fullscreen); the scaled modes
 # render below it and the anti-aliasing (DLSS, FSR) upscales the frame to it before the HUD
 # (BB_OUTPUT_RES), like DLSS's own modes.
@@ -94,6 +96,7 @@ RENDER_RESOLUTIONS = [('1080', "1920 × 1080 (the game's own)"),
                       ('performance', 'Performance: upscaled from 50%')]
 RENDER_SCALES = {'native': 1.0, 'quality': 1.5, 'balanced': 1.7, 'performance': 2.0}
 RENDER_PIXELS_MAX = 3440 * 1440
+RENDER_PIXELS_MAX_BIG = 3840 * 2160  # Uncharted 2 and 3
 # Wider than 16:9 (BB_ULTRAWIDE): the games' view is widened to the window, or the screen in
 # fullscreen, and the picture fills it; in memory, the game files are not changed.
 ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'),
@@ -358,9 +361,10 @@ def output_size(s):
         return 1920, 1080
 
 
-def render_sizes(s):
+def render_sizes(s, start=None):
     """('WxH', 'WxH'): the render size (BB_RENDER_RES) and the output size it is
     upscaled to (BB_OUTPUT_RES), or None for the game's own 1920 x 1080."""
+    limit = RENDER_PIXELS_MAX_BIG if (start or s.get('start')) in ('u2', 'u3') else RENDER_PIXELS_MAX
     choice = str(s.get('render_resolution') or '1080')
     out_w, out_h = output_size(s)
     if choice in RENDER_SCALES:
@@ -371,8 +375,8 @@ def render_sizes(s):
             width, height = (int(v) for v in choice.split('x'))  # an older fixed size
         except ValueError:
             return None
-    if width * height > RENDER_PIXELS_MAX:
-        shrink = (RENDER_PIXELS_MAX / (width * height)) ** 0.5
+    if width * height > limit:
+        shrink = (limit / (width * height)) ** 0.5
         width, height = width * shrink, height * shrink
     # The game asserts width % 16 == 0; its bloom chain needs a height that halves cleanly
     # (2016x848: its bloom downsample chain turned treasure glints into big white diamonds,
@@ -483,7 +487,7 @@ def game_environment(s, start=None):
     if cap:
         env['BB_FPS_LIMIT'] = str(cap)
     env['BB_WINDOW_SIZE'] = str(s.get('window_size') or '1920x1080')
-    sizes = render_sizes(s)
+    sizes = render_sizes(s, start)
     if sizes:
         # The upscaling hooks (BB_OUTPUT_RES) work in all three games: Uncharted 1 and 2 draw
         # their final composite, HUD-less frame and HUD with Uncharted 3's shaders. They are

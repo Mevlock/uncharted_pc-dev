@@ -409,6 +409,10 @@ static const uint8_t gpu_total[24] = {3, 0, 0, 0, 2, 0, 0, 0, 0x00, 0x00, 0xc0, 
                                       0x00, 0x00, 0x10, 0, 0, 0, 0, 0};
 static const uint8_t gpu_free[24] = {0x0e, 0, 0, 0, 6, 0, 0, 0, 0x00, 0x04, 0x0b, 0x0d, 0, 0, 0, 0,
                                      1,    0, 0, 0, 0, 0, 0, 0};
+/* The CPU context's total (entry 2, 1536 MiB in U3, 1600 MiB in U1/U2), the area heap 0x85 moves
+ * to when the GPU context can't hold the render targets (below). */
+static const uint8_t cpu_total[24] = {2, 0, 0, 0, 2, 0, 0, 0, 0x00, 0x00, 0x00, 0x60, 0, 0, 0, 0,
+                                      0x00, 0x00, 0x10, 0, 0, 0, 0, 0};
 /* The direct memory context's check: movabs rdx, 4608 MiB; xor ecx, ecx; mov rdi, rbx; call. */
 static const uint8_t direct_check[16] = {0x48, 0xba, 0, 0, 0, 0x20, 1, 0, 0, 0, 0x31, 0xc9, 0x48, 0x89, 0xdf, 0xe8};
 /* The movie textures' sizes in the render target setup and the movie's chroma offset (below). */
@@ -753,9 +757,64 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
     for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end; i += 8)
         for (int e = 0; e < 4; ++e)
             if (!entries[e] && match_entry(code + i, wanted[e])) entries[e] = code + i;
-    uint64_t grown = 0, heaps[2] = {0, 0}, total = 0, direct_total = 0, free_size = 0;
+    uint8_t *cpu_entry = NULL;
+    for (uint64_t i = size & ~(uint64_t)7; i + 24 <= image_end && !cpu_entry; i += 8)
+        if (match_entry(code + i, cpu_total)) cpu_entry = code + i;
+    uint64_t grown = 0, heaps[2] = {0, 0}, total = 0, direct_total = 0, free_size = 0, cpu_size = 0;
+    int moved = 0;
     const double ratio = (double)width * height / (1920.0 * 1080.0);
-    if (entries[0] && entries[1] && entries[2] && entries[3] && ratio > 1.0) {
+    /* Above about 3440x1440 the render target heaps don't fit under the GPU context's 4 GiB: heap
+     * 0x85, the larger one, moves to the CPU context, whose area has the room (as BilalReloaded's
+     * Uncharted port does; on a PC both are the same memory). The CPU context's area is mapped a
+     * little larger than its table entry, so it keeps 128 MiB below 4 GiB; the 10% margin
+     * shrinks to fit there too. Uncharted 2 and 3 only: Uncharted 1 (Bluepoint's code) keeps
+     * pointers relative to fixed 2 GiB windows of the CPU area, which the moved heap pushes its
+     * level heaps out of (an assert in BilalReloaded's port). BB_RENDER_MOVE_RT=0 keeps the old
+     * limit. */
+    const char *exe = getenv("BB_EXE");
+    if (exe && strstr(exe, "big") && entries[0] && entries[1] && entries[2] && entries[3] && cpu_entry && ratio > 1.0 &&
+        !(getenv("BB_RENDER_MOVE_RT") && getenv("BB_RENDER_MOVE_RT")[0] == '0')) {
+        const uint64_t cap = 4094ull << 20, cpu_cap = 3968ull << 20;
+        uint64_t a, b, gpu, free_now;
+        memcpy(&a, entries[0] + 8, 8);
+        memcpy(&b, entries[1] + 8, 8);
+        memcpy(&gpu, entries[2] + 8, 8);
+        memcpy(&free_now, entries[3] + 8, 8);
+        memcpy(&cpu_size, cpu_entry + 8, 8);
+        const double need = (a + b) * (ratio - 1.0);
+        const double fits = (double)(cap > gpu ? cap - gpu : 0) + (double)free_now - 4.0 * 1048576.0;
+        if (need > fits) {
+            /* Both areas keep their size modulo 64 MiB (an area that didn't crashed right after
+             * the CPU area was mapped, as BilalReloaded found): heap 0x85 grows in whole 64 MiB,
+             * and the GPU context's change, which 0x84 absorbs, is a multiple of 64 MiB too. */
+            const int64_t mib64 = 64ll << 20;
+            int64_t change = (int64_t)(a * (ratio - 1.0) * 1.1) - (int64_t)b;
+            change = (change + (change >= 0 ? mib64 - 1 : 0)) / mib64 * mib64;
+            const uint64_t grow_a = (uint64_t)((int64_t)b + change);
+            const uint64_t gpu_new = (uint64_t)((int64_t)gpu + change);
+            uint64_t b_new = 0;
+            for (double margin = 1.1; margin >= 0.999; margin -= 0.025) {
+                b_new = ((uint64_t)(b * (1.0 + (ratio - 1.0) * margin)) + (uint64_t)mib64 - 1) &
+                        ~((uint64_t)mib64 - 1);
+                if (cpu_size + b_new <= cpu_cap) break;
+            }
+            if (gpu_new <= cap && cpu_size + b_new <= cpu_cap) {
+                entries[1][4] = 5; /* parent: the CPU context */
+                heaps[0] = a + grow_a;
+                heaps[1] = b_new;
+                memcpy(entries[0] + 8, &heaps[0], 8);
+                memcpy(entries[1] + 8, &heaps[1], 8);
+                memcpy(entries[2] + 8, &gpu_new, 8);
+                cpu_size += b_new;
+                memcpy(cpu_entry + 8, &cpu_size, 8);
+                grown = gpu_new + b_new - gpu; /* what the direct memory gains */
+                total = gpu_new;
+                free_size = free_now;
+                moved = 1;
+            }
+        }
+    }
+    if (!moved && entries[0] && entries[1] && entries[2] && entries[3] && ratio > 1.0) {
         /* The engine keeps the GPU context's size in 32 bits (its arena wraps around past 4 GiB),
          * so the total stays below 4096 MiB: the 10% margin shrinks to fit, and growth beyond that
          * comes out of the free entry. Sizes in whole 2 MiB, the unit the areas are allocated in. */
@@ -799,7 +858,9 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         grown -= borrowed; /* the part that enlarges the context */
         total += grown;
         memcpy(entries[2] + 8, &total, 8);
-        /* The direct memory context holding it is checked against a constant in the memory map
+    }
+    if (grown) {
+        /* The direct memory context holding them is checked against a constant in the memory map
          * setup: movabs rdx, 4608 MiB; xor ecx, ecx; mov rdi, rbx; call ValidateContext, followed
          * by the next context's mov edx, 512 MiB. */
         for (uint64_t i = 0; i + 64 < size; ++i) {
@@ -851,7 +912,7 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         runtime_render_height = height;
     }
     printf("Render resolution: %ux%u (%d display modes, %d output sizes, %d view setups, %d limits patched, movies %s, "
-           "render target heaps %.1f + %.1f MiB, GPU memory %.1f MiB (%.1f free), direct %.1f MiB, BB_DMEM_MB %s)\n",
+           "render target heaps %.1f + %.1f MiB%s, GPU memory %.1f MiB (%.1f free), direct %.1f MiB, BB_DMEM_MB %s)\n",
            width, height, blocks, sizes, loads, limits, movies ? "1920x1080" : "not patched", heaps[0] / 1048576.0, heaps[1] / 1048576.0,
-           total / 1048576.0, free_size / 1048576.0, direct_total / 1048576.0, getenv("BB_DMEM_MB") ? getenv("BB_DMEM_MB") : "unset");
+           moved ? " (0x85 in the CPU context)" : "", total / 1048576.0, free_size / 1048576.0, direct_total / 1048576.0, getenv("BB_DMEM_MB") ? getenv("BB_DMEM_MB") : "unset");
 }
