@@ -21,6 +21,6 @@ Add a run with `tools/fps_history.py <user/last_run.log> --build <version> --com
 | 2026-10-21 | 0.3.6.12 |  | U2 museum | native, DLSS, FG off, no cap | 80.7 | 80.0–81.5 | 3 rounds, alternating with the row below |
 | 2026-10-21 | 0.3.6.13 candidate | 50c6f46 | U2 museum | native, DLSS, FG off, no cap | 90.7 | 89.5–91.3 | 3 rounds; +12%: the raycaster copy no longer waits for the GPU |
 | 2026-10-21 | 0.3.6.12 (release + local build) |  | U3 Cartagena square | native, DLSS, FG off, no cap | 88.8 | 86.0–91.3 | 2nd session; local build = release (88.9 vs 88.7) |
-| 2026-10-21 | 0.3.6.13 candidate | 50c6f46 | U3 Cartagena square | native, DLSS, FG off, no cap | 85.7 | 82.9–87.2 | 2nd session; with the raycaster fix off 88.2, prompts off 88.3: neither is the cost |
+| 2026-10-21 | 0.3.6.13 candidate | 50c6f46 | U3 Cartagena square | native, DLSS, FG off, no cap | 85.7 | 82.9–87.2 | 2nd session. In an A/B session before it (0.3.6.12 90.4, candidate 87.8): raycaster fix off 88.2, prompts off 88.3, so neither is the cost |
 | 2026-10-21 | 0.3.6.12 (local) |  | U3 Cartagena square | native, DLSS, FG off, no cap | 90.0 | 85.9–95.3 | 3rd session (bisect): prompts 89.7, raycaster 87.2, trophies 89.0, XeSS 87.3; no single step stands out |
 | 2026-10-21 | 0.3.6.13 candidate | 50c6f46 | U3 Cartagena square | native, DLSS, FG off, no cap | 88.6 | 83.5–92.8 | 3rd session |
