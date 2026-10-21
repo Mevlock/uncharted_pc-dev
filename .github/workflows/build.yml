@@ -106,6 +106,12 @@ jobs:
         # Windows' own curl: MSYS2's is updated with every run and once crashed (exit 139).
         run: CURL=/c/Windows/System32/curl.exe bash tools/fetch_fsr4_assets.sh
 
+      - name: Intel XeSS runtime
+        shell: msys2 {0}
+        # libxess.dll and its license from Intel's SDK release (checksum checked); package.sh
+        # ships them when present, and the launcher offers XeSS only with the DLL.
+        run: bash packaging/windows/fetch_xess.sh
+
       - name: Package
         shell: msys2 {0}
         env:

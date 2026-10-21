@@ -9,9 +9,11 @@ cd -- "$(dirname -- "$0")/../.."
 version=3.0.2
 sha256=88b8a373f30e33f3558a77a93e634f11b8132fc3047ea1a8edeead32b8471990
 url=https://github.com/intel/xess/releases/download/v$version/XeSS_SDK_$version.zip
-tmp=$(mktemp -d)
+# A folder under out/ (a relative path): Windows' curl and unzip, where they are the ones on PATH,
+# do not see MSYS2's /tmp.
+tmp=out/xess-download
+rm -rf "$tmp" && mkdir -p "$tmp"
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p out
 curl -fL --retry 3 -o "$tmp/sdk.zip" "$url"
 echo "$sha256  $tmp/sdk.zip" | sha256sum -c -
 unzip -q "$tmp/sdk.zip" bin/libxess.dll LICENSE.txt third-party-programs.txt -d "$tmp/sdk"

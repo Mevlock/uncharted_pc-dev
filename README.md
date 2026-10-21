@@ -157,6 +157,28 @@ renderer. Video decoding (Videodec2) and the DLSS bridge come from
 [IFreemz/shadPS4-Bloodborne-DLSS-FSR](https://github.com/IFreemz/shadPS4-Bloodborne-DLSS-FSR).
 Thanks to Mindro for the shadPS4 Uncharted build that showed which problems to look for.
 
+Fixes and features from other contributors (most of them sent to
+[SuperMedo's port](https://github.com/Supermedo/uncharted_pc) as pull requests):
+
+- [Umar](https://github.com/Umar-Qayyum-dev): keyboard and mouse button prompts, bindings that
+  follow the keyboard layout (#420).
+- [drakolordx7](https://github.com/drakolordx7/uncharted_pc): less stutter on first sight
+  (#389, #416), Uncharted 2 crash fixes (#397, #405, #406, #409), the cause of the exit-3 crash
+  (#396), Xbox button prompts on top of Umar's (#469), trophies (#472), Intel XeSS (#476).
+- [G3545](https://github.com/G3545): Uncharted 3's auto-exposure reaching the game (pumping
+  brightness, black weapon; #449).
+- [d4rksp4rt4n](https://github.com/d4rksp4rt4n): red-zone-safe stores, the Uncharted 1 crash at
+  0x63f5d0 and the exit-3 crash (#403).
+- [eduardoghi](https://github.com/eduardoghi): numpad keys in the launcher's bindings (#473).
+- [iannitram](https://github.com/iannitram): the memory leak in nested GPU command buffers
+  (#387, from shadPS4 #5258).
+- [spacepepperoni](https://github.com/spacepepperoni/uncharted_Linux): Uncharted 2's turret blur
+  (#381) and the Linux port.
+- [zorde23](https://github.com/zorde23/Uncharted_Collection_PC): light shaft fog (scalar
+  instructions in divergent code).
+- [BilalReloaded](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port):
+  idle game threads that sleep instead of spinning.
+
 Also used: [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) and the AMD FidelityFX SDK (FSR),
 FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX), the
 [NVIDIA DLSS SDK](https://github.com/NVIDIA/DLSS) (`nvngx_dlss.dll` under NVIDIA's license),
