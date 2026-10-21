@@ -77,6 +77,7 @@ FPS_LIMITS = [('0', 'Off (the frame rate above)'), ('30', '30 FPS'), ('45', '45 
 # to its size: FSR 1 (EASU) or bilinear, then RCAS sharpening (BB_RCAS_ATTENUATION, lower
 # is sharper).
 WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
+XESS = ('xess', 'Intel XeSS (Native AA, any GPU)')
                 ('1920x1080', "1920 × 1080 (the games' own)"), ('2560x1440', '2560 × 1440'),
                 ('3840x2160', '3840 × 2160 (4K)'), ('2560x1080', '2560 × 1080 (21:9)'),
                 ('3440x1440', '3440 × 1440 (21:9)'), ('3840x1600', '3840 × 1600 (21:9)'),
@@ -393,6 +394,14 @@ def fsr411_assets():
     """FSR 4.1.1 needs its model assets, built from AMD's DLL (docs/upscaler.md)."""
     return bool(os.environ.get('BB_FSR411_DIR')) or any(
         (folder / 'fsr4_411').is_dir() for folder in (PORT_DIR, DATA_DIR))
+
+
+def xess_available():
+    """Intel XeSS needs Intel's libxess.dll next to bb-probe.exe (packaging/windows/fetch_xess.sh)."""
+    override = os.environ.get('BB_XESS_DLL')
+    if override:
+        return Path(override).is_file()
+    return any((PORT_DIR / folder / 'libxess.dll').is_file() for folder in ('bin', 'out'))
 
 
 def input_ini_path():
@@ -1210,14 +1219,15 @@ class Launcher:
         self.row(f, _('Sharpening'), self.choice(f, 'sharpening', SHARPENING, 34),
                  _('AMD RCAS after FSR 1 (only while the image is enlarged).'))
         self.section(f, _('Anti-aliasing'))
-        modes = ANTI_ALIASING + ([FSR411] if fsr411_assets() else [])
+        modes = ANTI_ALIASING + ([FSR411] if fsr411_assets() else []) + ([XESS] if xess_available() else [])
         self.row(f, _('Anti-aliasing'), self.choice(f, 'anti_aliasing', modes, 34),
                  _('Temporal anti-aliasing with the games\' own motion vectors: smoother edges and less '
                    'shimmering than the games\' own. At Native render resolution DLSS is DLAA; with '
                    'Quality, Balanced or Performance DLSS or FSR also rebuilds the full size. DLSS needs '
                    'a GeForce RTX; FSR 4 runs best on a Radeon RX 7000/9000 or a GeForce RTX 40/50. The '
                    'first time FSR 4 starts (and after a graphics driver update) the game can pause for '
-                   'about 10 seconds while the driver prepares it.'))
+                   'about 10 seconds while the driver prepares it. Intel XeSS runs on any GPU (best on '
+                   'Intel Arc).'))
         self.row(f, _('DLSS model'), self.choice(f, 'dlss_model', DLSS_MODELS, 34),
                  _('With NVIDIA DLSS: the AI model it uses. K is NVIDIA\'s choice for this (DLAA) mode; '
                    'L and M are the newer DLSS 4.5 models, made for heavier upscaling. Compare them '

@@ -162,6 +162,7 @@ const char* UpscalerShortName(int upscaler) {
            : upscaler == BbSettings::UpscalerFsr411 ? "FSR4.1"
            : upscaler == BbSettings::UpscalerTaa    ? "TAA"
            : upscaler == BbSettings::UpscalerDlss   ? "DLSS"
+           : upscaler == BbSettings::UpscalerXess   ? "XeSS"
                                                     : "NoAA";
 }
 
@@ -286,13 +287,14 @@ void Menu() {
          "Quality, Balanced and Performance render smaller and let the anti-aliasing (DLSS or "
          "FSR) rebuild the full size: Uncharted 3 only.");
     static const char* upscalers[] = {"Off (the game's own)", "FSR 3.1", "FSR 4 (INT8)",
-                                     "FSR 4.1.1 (INT8)", "TAA", "DLSS (NVIDIA RTX)"};
+                                     "FSR 4.1.1 (INT8)", "TAA", "DLSS (NVIDIA RTX)", "XeSS (Intel)"};
     int upscaler = s.upscaler;
     if (ImGui::BeginCombo("Anti-aliasing", upscalers[upscaler])) {
         for (int i = 0; i < BbSettings::UpscalerCount; ++i) {
             const bool supported = i == BbSettings::UpscalerFsr4 ? s.fsr4_supported.load()
                 : i == BbSettings::UpscalerFsr411 ? s.fsr411_supported.load()
-                : i == BbSettings::UpscalerDlss   ? s.dlss_supported.load() : true;
+                : i == BbSettings::UpscalerDlss   ? s.dlss_supported.load()
+                : i == BbSettings::UpscalerXess   ? s.xess_supported.load() : true;
             ImGui::BeginDisabled(!supported);
             if (ImGui::Selectable(upscalers[i], i == upscaler)) {
                 Store(s.upscaler, i, true);
@@ -307,6 +309,9 @@ void Menu() {
     }
     if (const char* problem = s.dlss_problem.load(); problem && upscaler == BbSettings::UpscalerDlss) {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "DLSS: %s", problem);
+    }
+    if (const char* problem = s.xess_problem.load(); problem && upscaler == BbSettings::UpscalerXess) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "XeSS: %s", problem);
     }
     if (const char* problem = s.fsr4_problem.load()) {
         ImGui::PushTextWrapPos();
