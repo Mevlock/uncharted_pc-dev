@@ -1280,7 +1280,9 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
 /// of half the scene's size (856x352 at 1712x704), and without it that layer shook by the jitter
 /// every frame around the rifle and dunes of the title screen (only ~17 of ~200 depth-tested
 /// draws a frame were jittered). Half-size targets get half the shift (twice the pixel size);
-/// shadow maps and other sizes none.
+/// shadow maps and other sizes none. Other depth buffers of the scene's size get the full shift:
+/// U1 copies the scene depth to a second buffer and draws its decals against that (the soot on
+/// the boat's hatch at the start), and unjittered they z-fought the jittered floor in it.
 /// bbport (kj2223's fork, github.com/kj2223/uncharted_pc-fixes, GPL-2.0-or-later): full-screen
 /// passes that rebuild positions from the scene depth through an interpolated texture coordinate
 /// (BB_JITTER_PS=<pixel shader hash>,..., run.py: U1's sun shadow pass f614041e) get the scene's
@@ -1317,6 +1319,9 @@ std::array<float, 2> Rasterizer::SceneJitterFor(VideoCore::ImageId depth) {
     }
     const auto& scene = texture_cache.GetImage(scene_depth).info.size;
     const auto& size = texture_cache.GetImage(depth).info.size;
+    if (size.width == scene.width && size.height == scene.height) {
+        return jitter;
+    }
     if (size.width == scene.width / 2 && size.height == scene.height / 2) {
         return {jitter[0] * 0.5f, jitter[1] * 0.5f};
     }

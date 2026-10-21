@@ -1,7 +1,7 @@
 # U1 boat deck: black fan flickering on a hatch
 
-Status (2026-10-21, overnight): **cause found, not fixed.** It's z-fighting between a soot decal
-and the deck hatch. A fix needs a decision (see the end).
+Status (2026-10-21): **fixed** (see "Resolution" at the end). It was z-fighting between a soot
+decal and the deck hatch, caused by our anti-aliasing jitter missing the decal pass.
 
 ## The symptom
 
@@ -74,3 +74,26 @@ Captured with `user\RenderDoc U1.bat`. Frame 7333 has the fan, 7332 is clean; bo
 
 Diagnostic code is in git stashes "u1 hatch diag" and "u1 hatch diag 2". The tools are scratchpad
 scripts (rdtrigger, rdthumb, rdfan pixel history, rdevent, rdshadow, rdbufs, rddebug).
+
+## Resolution
+
+Only with the port's anti-aliasing (DLSS, FSR, TAA, XeSS): with Anti-aliasing **Off** the hatch
+is clean (0 of 60 frames, twice). Frame rate (30/60 caps, 60 Hz vblank) and render resolution
+(1080) made no difference.
+
+Everything the game feeds the two draws is static and identical: the hatch floor (vs 5211da72)
+and the decal (vs 0239b258) share the same object matrix (`3.6938 0.617 4.5923`) and the same
+camera matrices every frame, and the decal's vertices (cs 8f067540, identity palette, constant
+inputs) never change. The decal's PS4 depth state is what we set (Z32 float, LessEqual, no
+polygon offset).
+
+The difference was the jitter (`BB_JITTER_LOG`, diag stash "u1 hatch diag 3"): the floor draws got
+the upscaler's sub-pixel shift (e.g. -0.375, -0.056 px), the decal draws none. U1 copies the
+scene depth to a second buffer of the same size (0x11448f0000 next to the scene depth at
+0x113e608000) and draws the decals against the copy. `SceneJitterFor` only recognised the scene
+depth image itself (and half-size targets), so the decals were drawn unjittered against jittered
+depth, up to ~0.4 px off: the depth gap swung by hundreds of ulps from frame to frame and the
+decal won the test in some frames.
+
+Fix: depth buffers of the scene's size get the full jitter too. Hatch count with DLSS: 0 of 60
+(twice; 5 to 13 of 60 before), FPS unchanged.
