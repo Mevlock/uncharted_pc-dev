@@ -24,3 +24,5 @@ Add a run with `tools/fps_history.py <user/last_run.log> --build <version> --com
 | 2026-10-21 | 0.3.6.13 candidate | 50c6f46 | U3 Cartagena square | native, DLSS, FG off, no cap | 85.7 | 82.9–87.2 | 2nd session. In an A/B session before it (0.3.6.12 90.4, candidate 87.8): raycaster fix off 88.2, prompts off 88.3, so neither is the cost |
 | 2026-10-21 | 0.3.6.12 (local) |  | U3 Cartagena square | native, DLSS, FG off, no cap | 90.0 | 85.9–95.3 | 3rd session (bisect): prompts 89.7, raycaster 87.2, trophies 89.0, XeSS 87.3; no single step stands out |
 | 2026-10-21 | 0.3.6.13 candidate | 50c6f46 | U3 Cartagena square | native, DLSS, FG off, no cap | 88.6 | 83.5–92.8 | 3rd session |
+| 2026-10-21 | 0.3.6.13 |  | U3 Cartagena square | native, DLSS, FG off, no cap | 86.5 | 85.2–88.3 | 2 rounds, alternating with the row below |
+| 2026-10-21 | 0.3.6.14 candidate | fc72b1b | U3 Cartagena square | native, DLSS, FG off, no cap | 86.0 | 83.3–88.0 | 2 rounds; native 4K's memory move doesn't apply at 3440x1440 |
