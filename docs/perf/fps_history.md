@@ -26,3 +26,5 @@ Add a run with `tools/fps_history.py <user/last_run.log> --build <version> --com
 | 2026-10-21 | 0.3.6.13 candidate | 50c6f46 | U3 Cartagena square | native, DLSS, FG off, no cap | 88.6 | 83.5–92.8 | 3rd session |
 | 2026-10-21 | 0.3.6.13 |  | U3 Cartagena square | native, DLSS, FG off, no cap | 86.5 | 85.2–88.3 | 2 rounds, alternating with the row below |
 | 2026-10-21 | 0.3.6.14 candidate | fc72b1b | U3 Cartagena square | native, DLSS, FG off, no cap | 86.0 | 83.3–88.0 | 2 rounds; native 4K's memory move doesn't apply at 3440x1440 |
+| 2026-10-21 | dev (0.3.6.14) | 8748a41 | U3 Cartagena square | native, DLSS, FG off, no cap | 87.5 | 84.9–91.5 | 2 rounds, alternating with the row below |
+| 2026-10-21 | fork picks (exit fix, CE guard, ring reset, plain ELF, Pascal split off) | e0bace4 | U3 Cartagena square | native, DLSS, FG off, no cap | 88.6 | 85.1–92.3 | 2 rounds; all 4 runs closed cleanly |

@@ -16,6 +16,7 @@
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
+#include "shader_recompiler/cta_split.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
@@ -3250,8 +3251,11 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     const vk::Pipeline handle = pipeline->Handle();
     const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
+    // bbport: shaders compiled as two 512-thread workgroups (shader_recompiler/cta_split.h) cover
+    // the same index range only with twice as many workgroups.
+    const u32 groups_x = dim_x * Shader::CtaSplitFactor(cs.pgm_hash);
     if (FrameCapture::Active()) {
-        FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
+        FrameCapture::Dispatch(cs.pgm_hash, groups_x, dim_y, dim_z);
     }
     if (DrawLog::Active()) {
         DrawLog::Text(DescribeImages());
@@ -3264,7 +3268,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         const char* env = std::getenv("BB_FULL_BARRIER");
         return env ? std::atoi(env) : 0;
     }();
-    const void* checkpoint = NoteCheckpoint("dispatch", cs.pgm_hash, 0, dim_x, dim_y, dim_z, 0);
+    const void* checkpoint = NoteCheckpoint("dispatch", cs.pgm_hash, 0, groups_x, dim_y, dim_z, 0);
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         const vk::MemoryBarrier2 barrier = {
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -3283,7 +3287,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             cmdbuf.setCheckpointNV(checkpoint);
         }
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
-        cmdbuf.dispatch(dim_x, dim_y, dim_z);
+        cmdbuf.dispatch(groups_x, dim_y, dim_z);
         if (full_barrier >= 1) {
             cmdbuf.pipelineBarrier2(dependency);
         }
