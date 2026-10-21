@@ -18,6 +18,7 @@
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "shader_recompiler/cta_split.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -32,7 +33,9 @@ static constexpr u32 PipelineKeyVersion = 6u; // bbport: GraphicsPipelineKey::ui
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
 static u32 TranslatedBinaryVersion() {
-    return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0u : 0x10000u);
+    // The optional 512-thread CTA split (BB_PASCAL_CTA_SPLIT, cta_split.h) changes one shader.
+    return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0u : 0x10000u) |
+           (Shader::CtaSplitEnabled() ? 0x20000u : 0u);
 }
 } // namespace Serialization
 

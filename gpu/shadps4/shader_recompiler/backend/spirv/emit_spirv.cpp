@@ -12,6 +12,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+#include "shader_recompiler/cta_split.h"
 #include "shader_recompiler/frontend/translate/translate.h"
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/program.h"
@@ -392,7 +393,10 @@ void DefineEntryPoint(const Info& info, EmitContext& ctx, Id main) {
     spv::ExecutionModel execution_model{};
     switch (info.sw_stage) {
     case SwStage::Compute: {
-        const std::array<u32, 3> workgroup_size{ctx.runtime_info.hw.cs.workgroup_size};
+        std::array<u32, 3> workgroup_size{ctx.runtime_info.hw.cs.workgroup_size};
+        // bbport: a 1024-thread group takes Pascal's whole register file; emit two 512-thread
+        // groups instead and let the dispatcher double the grid (see cta_split.h).
+        workgroup_size[0] /= Shader::CtaSplitFactor(info.pgm_hash);
         execution_model = spv::ExecutionModel::GLCompute;
         ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, workgroup_size[0],
                              workgroup_size[1], workgroup_size[2]);

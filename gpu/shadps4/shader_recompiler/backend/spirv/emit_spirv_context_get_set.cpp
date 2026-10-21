@@ -6,6 +6,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "bbport_nan_guard.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+#include "shader_recompiler/cta_split.h"
 #include "shader_recompiler/ir/attribute.h"
 #include "shader_recompiler/ir/microinstruction.h"
 #include "shader_recompiler/ir/patch.h"
@@ -235,11 +236,32 @@ Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, u32 comp) {
         return ctx.OpLoad(ctx.U32[1], ctx.base_instance);
     case IR::Attribute::WorkgroupIndex:
         return ctx.workgroup_index_id;
-    case IR::Attribute::WorkgroupId:
-        return ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), comp);
-    case IR::Attribute::LocalInvocationId:
-        return ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.local_invocation_id),
-                                      comp);
+    case IR::Attribute::WorkgroupId: {
+        const Id wg =
+            ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), comp);
+        if (!Shader::IsSplitCtaProgram(ctx.info.pgm_hash) || comp != 0) {
+            return wg;
+        }
+        // bbport: physical groups 2n and 2n+1 are the two halves of logical group n.
+        return ctx.OpShiftRightLogical(ctx.U32[1], wg, ctx.ConstU32(1u));
+    }
+    case IR::Attribute::LocalInvocationId: {
+        const Id lid =
+            ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.local_invocation_id),
+                                   comp);
+        if (!Shader::IsSplitCtaProgram(ctx.info.pgm_hash) || comp != 0) {
+            return lid;
+        }
+        // bbport: the second physical group of a logical group continues at local index 512, so
+        // the shader's own wg*1024 + lid arithmetic still yields the same global index.
+        const Id wg =
+            ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), 0);
+        const Id half = ctx.OpBitwiseAnd(ctx.U32[1], wg, ctx.ConstU32(1u));
+        return ctx.OpIAdd(
+            ctx.U32[1], lid,
+            ctx.OpIMul(ctx.U32[1], half,
+                       ctx.ConstU32(ctx.runtime_info.hw.cs.workgroup_size[0] / 2)));
+    }
     case IR::Attribute::LocalInvocationIndex:
         return ctx.OpLoad(ctx.U32[1], ctx.local_invocation_index);
     case IR::Attribute::SampleIndex:
