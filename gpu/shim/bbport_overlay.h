@@ -6,6 +6,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -36,6 +37,10 @@ void NotePresent();
 /// Every new frame of the game's own (not generated, not shown again): the game's frame rate,
 /// lows and frame time graph of the FPS counter.
 void NoteGameFrame();
+
+/// Any thread: queues the notice of an earned trophy (grade 1 platinum .. 4 bronze, `png` the
+/// trophy's icon file or empty). Notices are shown at the top of the screen one after the other.
+void NotifyTrophy(int grade, std::string game, std::string name, std::vector<unsigned char> png);
 
 /// The menu is open or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();

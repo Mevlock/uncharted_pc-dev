@@ -47,6 +47,9 @@ void bbgpu_mouse_configure(int look);
  * it is; 0 before the first frame with a known camera. */
 int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds);
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
+/* In-game trophy notice (the overlay draws it for a few seconds, one at a time): grade 1 platinum,
+ * 2 gold, 3 silver, 4 bronze; png is the trophy's icon (a PNG file) or empty. */
+void bbgpu_trophy_notify(int grade, const char *game, const char *name, const void *png, uint64_t png_size);
 /* The player is aiming (called while the aiming camera runs): BB_DOF=aim leaves out the game's
  * depth of field until shortly after the last call. */
 void bbgpu_note_aiming(void);
