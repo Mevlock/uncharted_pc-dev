@@ -1717,6 +1717,7 @@ class Launcher:
             log_dir = Path(self.app.get('user_dir') or DATA_DIR / 'user')
             log_dir.mkdir(parents=True, exist_ok=True)
             log = open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1)
+            log.write(log_header(self.app))
         except OSError:
             pass
         for raw in iter(process.stdout.readline, b''):
@@ -2030,6 +2031,17 @@ def install_update(target, wait_pid):
     return 0
 
 
+def log_header(settings, start=None):
+    """The first line of last_run.log: which build, from which folder, started which game (the
+    first question about any report)."""
+    try:
+        commit = (PORT_DIR / 'commit.txt').read_text(encoding='utf-8').strip()
+    except OSError:
+        commit = ''
+    build = f'{VERSION} ({commit})' if commit else VERSION
+    return f'Port: {NAME} {build} in {PORT_DIR}, starting {start or settings.get("start")}\n'
+
+
 def play_without_window(settings):
     """--play [u1|u2|u3]: the game with the saved settings (shortcuts, Steam); output to the console
     when there is one and to <saves folder>/last_run.log."""
@@ -2037,6 +2049,7 @@ def play_without_window(settings):
     log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
     log_dir.mkdir(parents=True, exist_ok=True)
     with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
+        log.write(log_header(settings))
         process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, creationflags=NO_WINDOW)

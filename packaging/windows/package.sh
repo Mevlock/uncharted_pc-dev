@@ -59,6 +59,8 @@ ldd "$dest/bin/bb-probe.exe" "$dest/bin/bb-gpu-capabilities.exe" |
 cp scripts/prepare.py scripts/link_modules.py scripts/link_libc.py scripts/content_profile.py scripts/trophies.py "$dest/scripts/"
 cp patches/redzone.json "$dest/patches/"  # red-zone-safe guest stores (link_modules.py)
 cp run.py LICENSE "$dest/"
+# The commit this build is made from: the launcher writes it at the top of last_run.log.
+git rev-parse --short HEAD > "$dest/commit.txt" 2>/dev/null || rm -f "$dest/commit.txt"
 cp packaging/windows/README-Uncharted.txt "$dest/README.txt"
 mkdir -p "$dest/licenses"
 cp packaging/windows/licenses/*.txt "$dest/licenses/" 2>/dev/null || true
