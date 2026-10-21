@@ -440,6 +440,77 @@ static int match_entry(const uint8_t *p, const uint8_t *want) {
     return size >= wanted / 2 && size <= wanted * 2;
 }
 
+/* Uncharted 1 (Bluepoint's code) keeps pointers relative to fixed 2 GiB windows of the CPU area,
+ * and its CPU area hands out memory in the order it is asked for: the render target heap, moved
+ * there and allocated at boot, pushed the level heaps (allocated later) out of the window (an
+ * assert in GenerateOffset; BilalReloaded's port stopped there). The heap's allocation
+ * (AllocateEntry(0x85): mov edi, 0x85; xor edx, edx; mov rsi, r12; mov rcx, r12; call) is pointed
+ * at a stub that returns the tail of the CPU area instead: start + size - heap, read from the
+ * game's own area object. The area is mapped whole at boot and everything else in it is handed
+ * out from the start, so the tail stays the heap's and the level heaps keep their place. */
+static int u1_tail_heap(uint8_t *code, uint64_t size, uint64_t heap_bytes) {
+#ifdef _WIN32
+    static const uint8_t site[13] = {0xbf, 0x85, 0, 0, 0, 0x31, 0xd2, 0x4c, 0x89, 0xe6, 0x4c, 0x89, 0xe1};
+    uint8_t *call = NULL;
+    int sites = 0;
+    for (uint64_t i = 0; i + 32 < size; ++i)
+        if (code[i] == 0xbf && !memcmp(code + i, site, sizeof(site)) && code[i + 13] == 0xe8) {
+            call = code + i + 13;
+            ++sites;
+        }
+    /* The area getters: two of `lea rax, [rip + d]; mov rax, [rax]; ret`, then the CPU area's
+     * `lea rax, [rip + d]; ret`, 16 bytes apart. */
+    const uint8_t *area = NULL;
+    int getters = 0;
+    for (uint64_t i = 0; i + 0x30 < size; ++i) {
+        const uint8_t *q = code + i;
+        if (q[0] != 0x48 || q[1] != 0x8d || q[2] != 0x05 || q[7] != 0x48 || q[8] != 0x8b || q[9] != 0x00 ||
+            q[10] != 0xc3)
+            continue;
+        const uint8_t *r = q + 0x10, *t = q + 0x20;
+        if (r[0] != 0x48 || r[1] != 0x8d || r[2] != 0x05 || r[7] != 0x48 || r[8] != 0x8b || r[9] != 0x00 ||
+            r[10] != 0xc3 || t[0] != 0x48 || t[1] != 0x8d || t[2] != 0x05 || t[7] != 0xc3)
+            continue;
+        int32_t d;
+        memcpy(&d, t + 3, 4);
+        area = t + 7 + d;
+        ++getters;
+    }
+    if (sites != 1 || getters != 1) {
+        printf("Render resolution: Uncharted 1's render target heap patch not found (%d sites, %d getters)\n", sites,
+               getters);
+        return 0;
+    }
+    uint8_t *stub = (uint8_t *)alloc_near(code, size);
+    if (!stub) return 0;
+    /* lea rcx, [rip + area]; mov eax, [rcx]; shl rax, 20; add rax, [rcx + 8]; movabs rdx, heap;
+     * sub rax, rdx; ret */
+    uint8_t *w = stub;
+    *w++ = 0x48; *w++ = 0x8d; *w++ = 0x0d;
+    const int32_t to_area = (int32_t)((intptr_t)area - (intptr_t)(w + 4));
+    memcpy(w, &to_area, 4); w += 4;
+    *w++ = 0x8b; *w++ = 0x01;
+    *w++ = 0x48; *w++ = 0xc1; *w++ = 0xe0; *w++ = 0x14;
+    *w++ = 0x48; *w++ = 0x03; *w++ = 0x41; *w++ = 0x08;
+    *w++ = 0x48; *w++ = 0xba;
+    memcpy(w, &heap_bytes, 8); w += 8;
+    *w++ = 0x48; *w++ = 0x29; *w++ = 0xd0;
+    *w++ = 0xc3;
+    DWORD old;
+    VirtualProtect(stub, 4096, PAGE_EXECUTE_READ, &old);
+    const int32_t rel = (int32_t)((intptr_t)stub - (intptr_t)(call + 5));
+    memcpy(call + 1, &rel, 4);
+    printf("Render resolution: Uncharted 1's render target heap (%.0f MiB) takes the tail of the CPU area\n",
+           heap_bytes / 1048576.0);
+    return 1;
+#else
+    (void)code;
+    (void)size;
+    (void)heap_bytes;
+    return 0;
+#endif
+}
+
 /* The size BB_RENDER_RES asks for, when the loaded game is one the patch knows (U3: every piece it
  * changes is found, once where it must be unique); otherwise nothing is changed at all. */
 static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_end, unsigned *width,
@@ -767,12 +838,11 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
      * 0x85, the larger one, moves to the CPU context, whose area has the room (as BilalReloaded's
      * Uncharted port does; on a PC both are the same memory). The CPU context's area is mapped a
      * little larger than its table entry, so it keeps 128 MiB below 4 GiB; the 10% margin
-     * shrinks to fit there too. Uncharted 2 and 3 only: Uncharted 1 (Bluepoint's code) keeps
-     * pointers relative to fixed 2 GiB windows of the CPU area, which the moved heap pushes its
-     * level heaps out of (an assert in BilalReloaded's port). BB_RENDER_MOVE_RT=0 keeps the old
-     * limit. */
+     * shrinks to fit there too. Uncharted 1 takes the heap from the area's tail (u1_tail_heap).
+     * BB_RENDER_MOVE_RT=0 keeps the old limit. */
     const char *exe = getenv("BB_EXE");
-    if (exe && strstr(exe, "big") && entries[0] && entries[1] && entries[2] && entries[3] && cpu_entry && ratio > 1.0 &&
+    const int big = exe && strstr(exe, "big");
+    if (entries[0] && entries[1] && entries[2] && entries[3] && cpu_entry && ratio > 1.0 &&
         !(getenv("BB_RENDER_MOVE_RT") && getenv("BB_RENDER_MOVE_RT")[0] == '0')) {
         const uint64_t cap = 4094ull << 20, cpu_cap = 3968ull << 20;
         uint64_t a, b, gpu, free_now;
@@ -798,7 +868,9 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
                         ~((uint64_t)mib64 - 1);
                 if (cpu_size + b_new <= cpu_cap) break;
             }
-            if (gpu_new <= cap && cpu_size + b_new <= cpu_cap) {
+            /* Uncharted 1 takes the heap from the tail of the CPU area (u1_tail_heap); without
+             * the patch it keeps the old limit. */
+            if (gpu_new <= cap && cpu_size + b_new <= cpu_cap && (big || u1_tail_heap(code, size, b_new))) {
                 entries[1][4] = 5; /* parent: the CPU context */
                 heaps[0] = a + grow_a;
                 heaps[1] = b_new;

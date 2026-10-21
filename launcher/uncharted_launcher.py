@@ -83,8 +83,8 @@ WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
                 ('5120x1440', '5120 × 1440 (32:9)')]
 # The size the games render at (BB_RENDER_RES): the game's display
 # mode, memory budget, camera and movies are patched in memory. Its GPU memory stays under 4 GiB,
-# which allows about 3440 x 1440 in Uncharted 1 (RENDER_PIXELS_MAX); Uncharted 2 and 3 move their
-# largest render target heap to the CPU area above that and go up to 3840 x 2160
+# which allows about 3440 x 1440 (RENDER_PIXELS_MAX); above that the largest render target heap
+# moves to the CPU area (Uncharted 1: its tail) and the games go up to 3840 x 2160
 # (RENDER_PIXELS_MAX_BIG; runtime_ultrawide.c). A larger size is scaled down to the limit.
 # Native renders at the output size (the window, or the screen in fullscreen); the scaled modes
 # render below it and the anti-aliasing (DLSS, FSR) upscales the frame to it before the HUD
@@ -364,7 +364,9 @@ def output_size(s):
 def render_sizes(s, start=None):
     """('WxH', 'WxH'): the render size (BB_RENDER_RES) and the output size it is
     upscaled to (BB_OUTPUT_RES), or None for the game's own 1920 x 1080."""
-    limit = RENDER_PIXELS_MAX_BIG if (start or s.get('start')) in ('u2', 'u3') else RENDER_PIXELS_MAX
+    # The collection's menu (U1 started without skipping it) can start any game: the limit all
+    # three share since Uncharted 1's render target heap moved too.
+    limit = RENDER_PIXELS_MAX_BIG
     choice = str(s.get('render_resolution') or '1080')
     out_w, out_h = output_size(s)
     if choice in RENDER_SCALES:
@@ -1199,8 +1201,7 @@ class Launcher:
                  _('The size the game draws its picture at. Native draws at your window size (or your '
                    'screen in fullscreen) for the sharpest image. Quality, Balanced and Performance draw '
                    'a smaller picture and let DLSS or FSR rebuild it at full size, while the HUD stays '
-                   'sharp. Uncharted 1 is limited to about 3440 × 1440 by its memory; Uncharted 2 and 3 go up '
-                   'to 3840 × 2160 (above 3440 × 1440 experimental: only short tests so far). In busy '
+                   'sharp. Up to 3840 × 2160 (above 3440 × 1440 experimental: only short tests so far). In busy '
                    'scenes the CPU usually sets the frame rate, so a smaller size gains little there.'))
         self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
                  _('On a screen or window wider than 16:9 (21:9, 32:9) gameplay shows more at the sides '
