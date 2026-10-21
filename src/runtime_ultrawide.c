@@ -477,9 +477,48 @@ static int u1_tail_heap(uint8_t *code, uint64_t size, uint64_t heap_bytes) {
         ++getters;
     }
     if (sites != 1 || getters != 1) {
-        printf("Render resolution: Uncharted 1's render target heap patch not found (%d sites, %d getters)\n", sites,
-               getters);
-        return 0;
+        /* The US release (CUSA02320, as CUSA02344) inlines the entry lookup: cmp reg, 0x85; ...;
+         * lea rsi, [rsp + 0x80]; call Allocate. Its CPU area is the one named "Game Direct
+         * Onion" when it is set up (lea of the area object, then lea of the name). */
+        static const uint8_t alloc_us[9] = {0x48, 0x8d, 0xb4, 0x24, 0x80, 0, 0, 0, 0xe8};
+        static const char onion[] = "Game Direct Onion";
+        call = NULL;
+        area = NULL;
+        sites = getters = 0;
+        for (uint64_t i = 0; i + 0x60 < size; ++i) {
+            const uint8_t *q = code + i;
+            if (q[0] != 0x81 || q[1] < 0xf8 || memcmp(q + 2, "\x85\0\0\0", 4)) continue;
+            for (int k = 6; k < 0x50; ++k)
+                if (!memcmp(q + k, alloc_us, sizeof(alloc_us))) {
+                    call = code + i + k + 8;
+                    ++sites;
+                    break;
+                }
+        }
+        const uint8_t *name = NULL;
+        for (uint64_t i = 0; i + sizeof(onion) < size && !name; ++i)
+            if (code[i] == 'G' && !memcmp(code + i, onion, sizeof(onion))) name = code + i;
+        for (uint64_t i = 0; name && i + 7 < size; ++i) {
+            const uint8_t *q = code + i;
+            if ((q[0] != 0x48 && q[0] != 0x4c) || q[1] != 0x8d || (q[2] & 0xc7) != 0x05) continue;
+            int32_t d;
+            memcpy(&d, q + 3, 4);
+            if (q + 7 + d != name) continue;
+            for (const uint8_t *r = q - 7; r > q - 0x30; --r) /* the area object, loaded just before */
+                if ((r[0] == 0x48 || r[0] == 0x4c) && r[1] == 0x8d && (r[2] & 0xc7) == 0x05) {
+                    memcpy(&d, r + 3, 4);
+                    if (r + 7 + d != name) {
+                        area = r + 7 + d;
+                        ++getters;
+                        break;
+                    }
+                }
+        }
+        if (sites != 1 || getters != 1) {
+            printf("Render resolution: Uncharted 1's render target heap patch not found (%d sites, %d areas)\n",
+                   sites, getters);
+            return 0;
+        }
     }
     uint8_t *stub = (uint8_t *)alloc_near(code, size);
     if (!stub) return 0;
