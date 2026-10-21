@@ -77,7 +77,6 @@ FPS_LIMITS = [('0', 'Off (the frame rate above)'), ('30', '30 FPS'), ('45', '45 
 # to its size: FSR 1 (EASU) or bilinear, then RCAS sharpening (BB_RCAS_ATTENUATION, lower
 # is sharper).
 WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
-XESS = ('xess', 'Intel XeSS (Native AA, any GPU)')
                 ('1920x1080', "1920 × 1080 (the games' own)"), ('2560x1440', '2560 × 1440'),
                 ('3840x2160', '3840 × 2160 (4K)'), ('2560x1080', '2560 × 1080 (21:9)'),
                 ('3440x1440', '3440 × 1440 (21:9)'), ('3840x1600', '3840 × 1600 (21:9)'),
@@ -114,6 +113,7 @@ SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'
 ANTI_ALIASING = [('off', "Off (the game's own)"), ('taa', 'TAA'), ('fsr3', 'AMD FSR 3.1 (Native AA)'),
                  ('fsr4', 'AMD FSR 4 (Native AA)'), ('dlss', 'NVIDIA DLSS / DLAA (GeForce RTX)')]
 FSR411 = ('fsr411', 'AMD FSR 4.1.1 (Native AA)')
+XESS = ('xess', 'Intel XeSS (Native AA, any GPU)')
 # The DLSS model (BB_DLSS_PRESET): the driver's default for DLAA is preset K (DLSS 4);
 # L and M are the DLSS 4.5 models.
 DLSS_MODELS = [('default', "Driver default (K, DLSS 4)"), ('K', 'K (DLSS 4)'),
