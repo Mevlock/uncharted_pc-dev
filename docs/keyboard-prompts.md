@@ -29,6 +29,7 @@ back after PlayStation controller input. It also makes the bindings follow the k
 | `94d741f6b51815ee` | ○ tapping puck, 512x512 BC1 (sRGB) | U3 | image only |
 | `93b46ba81469882c` | ○ hold puck, 512x512 BC1 (sRGB) | U3 | image only |
 | `705083db743dd2f9` | weapon d-pad, 256x256 BC1 | U2 | image only |
+| `e8a2f49b992621fc` | weapon d-pad, 256x256 BC1 | U3 (EU and US) | yes (chapter 2 museum, next to the ship model) |
 
 The icon sheet has the same layout in all three games (`ps4_sheet` in `button_prompts.cpp`); it
 holds the face buttons, shoulder buttons, sticks, d-pad variants, OPTIONS and the touchpad, which
@@ -59,13 +60,17 @@ The keyboard pictures are built once per picture and mip count, on the GPU threa
 
 ## Xbox buttons
 
-The Xbox pictures are Kenney's [Input Prompts](https://kenney.nl/assets/input-prompts) (Xbox Series,
-CC0, licence in `packaging/windows/licenses/kenney-input-prompts-LICENSE.txt`), placed on the same
-pictures the keyboard version covers: A B X Y in the colours of the real buttons for ✕ ○ □ △, LB RB
-LT RT, the stick presses, Menu for OPTIONS, View for the touchpad, the sticks and the d-pad with its
-lit directions. The big prompts and the tapping and hold pucks get the A/B/X/Y picture, the U2
-weapon d-pad the Xbox d-pad. The white pictures get a soft dark halo, as the PlayStation ones have
-a glow.
+The Xbox pictures are drawn by `tools/xbox_prompts_domed.py` in a domed style close to the games'
+own button art: dark glossy buttons, A B X Y as coloured letters with a soft glow in the colours of
+the real buttons for ✕ ○ □ △, and the same dark finish for LB RB LT RT, the stick presses, Menu for
+OPTIONS, View for the touchpad, the sticks and the d-pad with its lit directions (shapes and
+Liberation Sans Bold, SIL OFL 1.1, in `tools/fonts`; nothing from the games). They are placed on the
+same pictures the keyboard version covers. The big prompts and the tapping and hold pucks get the
+A/B/X/Y picture. The weapon d-pads keep the game's picture with an Xbox controller: nothing on it is
+PlayStation's, and the game cuts it into four arms that no Xbox d-pad picture fits (keyboard mode
+still draws the bound keys on it). The first Xbox pictures, before 0.3.6.13's release, were Kenney's
+flat [Input Prompts](https://kenney.nl/assets/input-prompts) (CC0, licence in
+`packaging/windows/licenses/kenney-input-prompts-LICENSE.txt`).
 
 | | |
 |---|---|
@@ -74,9 +79,10 @@ a glow.
 | ![U2 pause menu with Xbox buttons](screenshots/xbox-prompts-u2-pause.webp) | ![U2 pause menu bar: Xbox, PlayStation, keyboard](screenshots/xbox-prompts-u2-switching.webp) |
 | U2 pause menu | the same bar after switching Xbox, PlayStation, keyboard in one run |
 
-`tools/make_xbox_prompts.py <unzipped pack>` packs the 21 pictures (128 px each) into
-`texture_cache/button_prompts_xbox.inc` (a zlib stream of the atlas, 15 KB; checked in, so the build
-needs neither Python nor the pack). Adding one is a name in that script and an entry in `XGlyph`.
+`tools/make_xbox_prompts.py` draws the 21 pictures (128 px each) and packs them into
+`texture_cache/button_prompts_xbox.inc` (a zlib stream of the atlas, about 170 KB; checked in, so the
+build needs no Python; `--kenney <unzipped pack>` packs Kenney's pictures instead). Adding one is a
+name in that script, a drawing in `xbox_prompts_domed.py` and an entry in `XGlyph`.
 
 ## Keyboard layouts
 
@@ -103,10 +109,11 @@ Still in the launcher: keys whose Tk keysym is not a plain letter or digit (AZER
 | `BB_BUTTON_PROMPTS=0` | keep the PlayStation buttons (also `off`, `playstation`) |
 | `BB_BUTTON_PROMPTS=keyboard` / `xbox` | always show that style (default `auto`: the device used last); the launcher's Controls page has the same choice |
 | `BB_BUTTON_PROMPTS_FILE=<path>` | the first word of that file (`ps`, `xbox`, `keyboard`) is the device used last, read twice a second: switching in runs without a controller (scripted runs ignore the real one) |
+| `BB_BUTTON_PROMPTS_LOG=1` | log every texture of a prompt picture's size and format that matched nothing (`Button prompts: unknown BC1 256x256, 9 mip levels, hash ...`), each once: the hash of a picture the table lacks; compare a run with the prompt on screen with one without |
 | `BB_ICON_COLLECT=1` | save every picture sampled by a pass that draws to the display to `user/button_icons/<hash>_<w>x<h>_<format>.dds` (uncompressed slots at most 4 times: a sheet can be empty at first) |
 | `BB_TEXTURE_DUMP=1` | F10 saves every texture of the next frame and the pass list to `user/texture_dump/<time>/` |
 
-The two tools are for development and off by default.
+The tools are for development and off by default.
 
 ## Adding a picture
 

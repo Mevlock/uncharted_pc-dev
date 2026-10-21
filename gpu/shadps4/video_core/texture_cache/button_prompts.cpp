@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <tuple>
 
@@ -106,6 +107,7 @@ const Picture pictures[] = {
     {0xc96e34fbb203279eull, 512, PressedPuck, Triangle, {55, 216, 104},
      "Uncharted 2 triangle hold prompt"},
     {0x705083db743dd2f9ull, 256, HudDPad, LitUp, {206, 185, 156}, "Uncharted 2 weapon d-pad"},
+    {0xe8a2f49b992621fcull, 256, HudDPad, LitUp, {206, 185, 156}, "Uncharted 3 weapon d-pad"},
     {0x94d741f6b51815eeull, 512, Puck, Circle, {222, 32, 32}, "Uncharted 3 circle tapping prompt"},
     {0x93b46ba81469882cull, 512, PressedPuck, Circle, {222, 32, 32}, "Uncharted 3 circle hold prompt"},
 };
@@ -802,10 +804,6 @@ void DrawHudDPad(Canvas& up, const Font& font, const Bindings& b, u8 lit) {
     }
 }
 
-/// The weapon switch d-pad as the Xbox d-pad, the lit direction in red.
-void DrawXboxHudDPad(Canvas& up, u8 lit) {
-    DrawGlyphFit(up, XboxGlyph(DPad | lit), 127.5f, 128.0f, 184.0f, 184.0f, 1.0f, false);
-}
 
 std::vector<Patch> BuildPicture(const Picture& picture, u32 levels, Style style) {
     const Bindings bindings = LoadBindings();
@@ -828,11 +826,7 @@ std::vector<Patch> BuildPicture(const Picture& picture, u32 levels, Style style)
         DrawPuck(up, font, bindings.keys[picture.icon], picture.shape == PressedPuck, xbox);
         break;
     case HudDPad:
-        if (style == Style::Xbox) {
-            DrawXboxHudDPad(up, picture.icon);
-        } else {
-            DrawHudDPad(up, font, bindings, picture.icon);
-        }
+        DrawHudDPad(up, font, bindings, picture.icon);
         break;
     }
     // Upside down like the game's pictures.
@@ -1147,9 +1141,23 @@ const std::vector<Patch>* Find(u64 hash, u32 width, u32 height, u32 levels, Form
     const Sheet* sheet = known_sheet();
     const Picture* picture = sheet ? nullptr : known_picture();
     if (!sheet && !picture) {
+        // BB_BUTTON_PROMPTS_LOG=1: candidates of a prompt picture's size that matched nothing
+        // (finds the hash of a picture the table lacks), each once.
+        static const bool log = [] {
+            const char* env = std::getenv("BB_BUTTON_PROMPTS_LOG");
+            return env && env[0] == '1';
+        }();
+        static std::set<u64> logged;
+        if (log && logged.insert(hash).second) {
+            std::printf("Button prompts: unknown %s %ux%u, %u mip levels, hash %#018llx\n",
+                        format == Format::Bc1 ? "BC1" : "RGBA8", width, height, levels,
+                        static_cast<unsigned long long>(hash));
+        }
         return nullptr;
     }
-    if (style == Style::Original) {
+    // The weapon d-pad keeps the game's picture with an Xbox controller: nothing on it is
+    // PlayStation's, and the game cuts it into four arms that no Xbox d-pad picture fits.
+    if (style == Style::Original || (style == Style::Xbox && picture && picture->shape == HudDPad)) {
         return &original; // a known picture, shown as the game drew it
     }
     const auto key = std::make_tuple(hash, levels, style);
