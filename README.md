@@ -45,8 +45,10 @@ tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
 ### Picture
 
 - **Render resolution** (Display page): all three games can render at your screen's resolution
-  instead of enlarging 1920×1080, up to about 3440×1440 (the games' memory limit). They can also
-  render below it and let DLSS or FSR rebuild the full size (Quality, Balanced, Performance).
+  instead of enlarging 1920×1080, up to about 3440×1440. They can also render below it and let
+  DLSS or FSR rebuild the full size (Quality, Balanced, Performance). Native 4K (3840×2160, or
+  3840×1600 for 21:9) is an experimental choice of its own: above 3440×1440 the games' largest
+  render target heap moves to their CPU memory, which has the room.
 - **Ultrawide** (21:9, 32:9): gameplay shows more at the sides and fills the screen; menus,
   loading screens and videos stay 16:9. **Field of view** setting.
 - **DLSS and FSR in Uncharted 3 fixed:** the upscaler's history was reset every frame, so it never
@@ -179,7 +181,8 @@ Fixes and features from other contributors (most of them sent to
 - [zorde23](https://github.com/zorde23/Uncharted_Collection_PC): light shaft fog (scalar
   instructions in divergent code).
 - [BilalReloaded](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port):
-  idle game threads that sleep instead of spinning.
+  idle game threads that sleep instead of spinning; moving the render target heap to the CPU
+  area, which native 4K builds on.
 
 Also used: [FSR-Vulkan](https://github.com/FireBurn/FSR-Vulkan) and the AMD FidelityFX SDK (FSR),
 FSR 4 assets from [FireBurn/Q2RTX](https://github.com/FireBurn/Q2RTX), the
