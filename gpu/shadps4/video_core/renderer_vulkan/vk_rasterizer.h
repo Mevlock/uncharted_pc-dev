@@ -144,8 +144,8 @@ public:
         scheduler.WaitDeferredSignals();
     }
     /// Runs `signal` after the guest memory copies issued so far, without waiting here.
-    void SignalAfterHostCopies(std::function<void()> signal) {
-        scheduler.SignalAfterHostCopies(std::move(signal));
+    void SignalAfterHostCopies(std::function<void()> signal, u64 landing_seq = 0) {
+        scheduler.SignalAfterHostCopies(std::move(signal), landing_seq);
     }
     /// bbport diagnosis (BB_GPU_FENCES=1): runs `signal` once the GPU has finished the work
     /// recorded so far.
