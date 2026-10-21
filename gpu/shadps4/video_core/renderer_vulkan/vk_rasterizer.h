@@ -134,9 +134,9 @@ public:
     /// Stage A: guest memory the recording thread will write for work handed to it (storage
     /// buffers, DMA, WriteData, fences); constants overlapping it are bound there, not copied here.
     void NotePendingGpuWrite(VAddr address, u64 size);
-    /// bbport: small buffers (up to 64 bytes) a compute shader writes are read by the game's CPU
-    /// code (the auto-exposure multiplier of Uncharted, among others). The dispatch notes them and
-    /// the next end-of-pipe event copies them to guest memory (BB_READBACK_SMALL_BUFFERS=0: off).
+    /// bbport: U3's auto-exposure value, a 16-byte buffer its compute shaders write and its CPU
+    /// code reads. The dispatch notes it and the next end-of-pipe event copies it to guest memory
+    /// without waiting (see SmallReadBackMode; BB_READBACK_SMALL_BUFFERS=0: off).
     void NoteSmallWrittenBuffers(const Shader::Info& stage);
     void ReadBackSmallWrittenBuffers();
     /// Before a guest-visible write: fences deferred earlier are written first.

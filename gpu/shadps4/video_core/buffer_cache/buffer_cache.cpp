@@ -1203,6 +1203,55 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
 }
 
+void BufferCache::ReadBackLater(VAddr device_addr, u32 size) {
+    if (!IsRegionGpuModified(device_addr, size)) {
+        return; // guest memory holds the latest data
+    }
+    // Copies still waiting are dropped past this many (the GPU ran far behind).
+    if (late_read_backs.size() >= 32) {
+        staging_pool.FreeDeferred(late_read_backs.front().staging);
+        late_read_backs.erase(late_read_backs.begin());
+    }
+    const u32 first_block = device_addr >> block_shift;
+    const u32 last_block = (device_addr + size - 1) >> block_shift;
+    const auto* arena = GetArena(first_block, last_block);
+    const auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostCached, 0, true);
+    const vk::BufferCopy copy{
+        .srcOffset = device_addr - arena->cpu_addr,
+        .dstOffset = staging.offset,
+        .size = size,
+    };
+    runtime.CopyBuffer(arena, staging.buffer, std::span(&copy, 1));
+    late_read_backs.push_back({staging, scheduler.CurrentTick(), device_addr, size});
+}
+
+void BufferCache::CompleteReadBacks() {
+    std::erase_if(late_read_backs, [this](const LateReadBack& entry) {
+        if (!scheduler.IsFree(entry.tick)) {
+            return false;
+        }
+        entry.staging.buffer->Invalidate(entry.staging.offset, entry.size);
+        // BB_READBACK_SMALL_LOG=1: the first values with what guest memory held before.
+        static const bool log = [] {
+            const char* env = std::getenv("BB_READBACK_SMALL_LOG");
+            return env && env[0] == '1';
+        }();
+        static int logged = 0;
+        if (log && logged < 12 && entry.size >= 16) {
+            ++logged;
+            float was[4], now[4];
+            std::memcpy(was, std::bit_cast<const void*>(entry.address), sizeof(was));
+            std::memcpy(now, entry.staging.mapped, sizeof(now));
+            std::printf("Late read-back: %#llx was %g %g %g %g, now %g %g %g %g\n",
+                        static_cast<unsigned long long>(entry.address), was[0], was[1], was[2],
+                        was[3], now[0], now[1], now[2], now[3]);
+        }
+        WriteBackGpuData(std::bit_cast<u8*>(entry.address), entry.staging.mapped, entry.size);
+        staging_pool.FreeDeferred(entry.staging);
+        return true;
+    });
+}
+
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;

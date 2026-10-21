@@ -17,6 +17,7 @@
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
+#include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -103,6 +104,12 @@ public:
 
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false);
+
+    /// bbport: GPU thread. Copies the GPU's `size` bytes at `device_addr` to staging without
+    /// waiting; CompleteReadBacks writes them into guest memory once that work has run (the
+    /// tracker state stays: for data the guest only reads, such as an auto-exposure value).
+    void ReadBackLater(VAddr device_addr, u32 size);
+    void CompleteReadBacks();
 
     /// Finds a buffer for the specified region.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
@@ -197,6 +204,13 @@ private:
     StreamBuffer stream_buffer;
     Buffer gds_buffer;
     RangeSet gpu_modified_ranges;
+    struct LateReadBack {
+        Vulkan::StagingBufferRef staging;
+        u64 tick;
+        VAddr address;
+        u32 size;
+    };
+    std::vector<LateReadBack> late_read_backs; ///< GPU thread only (ReadBackLater)
     /// bbport: GPU data into guest memory (the read-backs), leaving out the heap's own bytes of
     /// blocks U3 freed recently and that are still free (bbgpu_note_guest_free).
     void WriteBackGpuData(u8* dst, const u8* data, u64 size);

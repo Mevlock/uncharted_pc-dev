@@ -2934,12 +2934,31 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     scheduler.KickRecording();
 }
 
-void Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
-    static const bool enabled = [] {
+// bbport: small buffers compute shaders write that the game's CPU code reads (after G3545's
+// upstream PR #449): U3's auto-exposure value, 16 bytes written by cs 7095d6c2 then 04f81a8f and
+// read by the game besides the composite (stale in guest memory: the brightness pumped, Nate's
+// weapon drew black). Only those shaders' buffers, copied at the next end-of-pipe event without
+// waiting and written into guest memory once the GPU has run the copy (a frame later at most).
+// Copying every small written buffer and waiting for each (PR #449 as merged in 0.3.6.11) cost
+// about 10% in U3's Cartagena square (cloth solver counters among them).
+// BB_READBACK_SMALL_BUFFERS=0: off; =all: every buffer up to 64 bytes, read back at once (A/B).
+// BB_READBACK_SMALL_LOG=1: each shader that writes one, once.
+static int SmallReadBackMode() {
+    static const int mode = [] {
         const char* env = std::getenv("BB_READBACK_SMALL_BUFFERS");
-        return !(env && env[0] == '0');
+        return !env ? 1 : env[0] == '0' ? 0 : std::strcmp(env, "all") == 0 ? 2 : 1;
     }();
-    if (!enabled) {
+    return mode;
+}
+
+void Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
+    const int mode = SmallReadBackMode();
+    const u32 hash = static_cast<u32>(stage.pgm_hash);
+    static const bool log = [] {
+        const char* env = std::getenv("BB_READBACK_SMALL_LOG");
+        return env && env[0] == '1';
+    }();
+    if (!mode || (mode == 1 && !log && hash != 0x7095d6c2u && hash != 0x04f81a8fu)) {
         return;
     }
     for (const auto& desc : stage.buffers) {
@@ -2951,6 +2970,18 @@ void Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
         if (!sharp.base_address || size == 0 || size > 64) {
             continue;
         }
+        if (log) {
+            static std::mutex log_mutex;
+            static std::unordered_set<u64> seen;
+            std::scoped_lock lock{log_mutex};
+            if (seen.insert(stage.pgm_hash ^ (u64(size) << 56)).second) {
+                std::printf("Small written buffer: cs %08x writes %u bytes at %#llx\n", hash, size,
+                            static_cast<unsigned long long>(sharp.base_address));
+            }
+            if (mode == 1 && hash != 0x7095d6c2u && hash != 0x04f81a8fu) {
+                continue;
+            }
+        }
         std::scoped_lock lk{small_written_mutex};
         const std::pair<VAddr, u32> range{sharp.base_address, size};
         if (small_written_buffers.size() < 16 &&
@@ -2961,13 +2992,21 @@ void Rasterizer::NoteSmallWrittenBuffers(const Shader::Info& stage) {
 }
 
 void Rasterizer::ReadBackSmallWrittenBuffers() {
+    const int mode = SmallReadBackMode();
+    if (mode == 1) {
+        buffer_cache.CompleteReadBacks();
+    }
     std::vector<std::pair<VAddr, u32>> ranges;
     {
         std::scoped_lock lk{small_written_mutex};
         ranges.swap(small_written_buffers);
     }
     for (const auto& [address, size] : ranges) {
-        buffer_cache.ReadMemory(address, size, false, true);
+        if (mode == 1) {
+            buffer_cache.ReadBackLater(address, size);
+        } else {
+            buffer_cache.ReadMemory(address, size, false, true);
+        }
     }
 }
 
