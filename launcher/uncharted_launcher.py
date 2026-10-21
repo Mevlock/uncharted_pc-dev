@@ -78,7 +78,7 @@ FPS_LIMITS = [('0', 'Off (the frame rate above)'), ('30', '30 FPS'), ('45', '45 
 # is sharper).
 WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
                 ('1920x1080', "1920 × 1080 (the games' own)"), ('2560x1440', '2560 × 1440'),
-                ('3840x2160', '3840 × 2160 (4K, experimental)'), ('2560x1080', '2560 × 1080 (21:9)'),
+                ('3840x2160', '3840 × 2160 (4K)'), ('2560x1080', '2560 × 1080 (21:9)'),
                 ('3440x1440', '3440 × 1440 (21:9)'), ('3840x1600', '3840 × 1600 (21:9)'),
                 ('5120x1440', '5120 × 1440 (32:9)')]
 # The size the games render at (BB_RENDER_RES): the game's display
@@ -93,10 +93,15 @@ RENDER_RESOLUTIONS = [('1080', "1920 × 1080 (the game's own)"),
                       ('native', 'Native (the window, or the screen in fullscreen)'),
                       ('quality', 'Quality: upscaled from 67%'),
                       ('balanced', 'Balanced: upscaled from 58%'),
-                      ('performance', 'Performance: upscaled from 50%')]
+                      ('performance', 'Performance: upscaled from 50%'),
+                      ('3840x2160', '3840 × 2160 (4K, experimental)'),
+                      ('3840x1600', '3840 × 1600 (21:9 4K, experimental)')]
+# The 4K choices draw at that size whatever the window (scaled to it when presented); only they
+# go above RENDER_PIXELS_MAX, which Native and the scaled modes keep.
+RENDER_4K = {'3840x2160', '3840x1600'}
 RENDER_SCALES = {'native': 1.0, 'quality': 1.5, 'balanced': 1.7, 'performance': 2.0}
 RENDER_PIXELS_MAX = 3440 * 1440
-RENDER_PIXELS_MAX_BIG = 3840 * 2160  # Uncharted 2 and 3
+RENDER_PIXELS_MAX_BIG = 3840 * 2160  # the 4K choices
 # Wider than 16:9 (BB_ULTRAWIDE): the games' view is widened to the window, or the screen in
 # fullscreen, and the picture fills it; in memory, the game files are not changed.
 ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'),
@@ -364,11 +369,14 @@ def output_size(s):
 def render_sizes(s, start=None):
     """('WxH', 'WxH'): the render size (BB_RENDER_RES) and the output size it is
     upscaled to (BB_OUTPUT_RES), or None for the game's own 1920 x 1080."""
-    # The collection's menu (U1 started without skipping it) can start any game: the limit all
-    # three share since Uncharted 1's render target heap moved too.
-    limit = RENDER_PIXELS_MAX_BIG
     choice = str(s.get('render_resolution') or '1080')
+    limit = RENDER_PIXELS_MAX_BIG if choice in RENDER_4K else RENDER_PIXELS_MAX
     out_w, out_h = output_size(s)
+    if choice in RENDER_4K:
+        # Drawn at that size and output at it too: the presenter scales the frame to the window
+        # (above the window's size, supersampling). Exactly the sizes tested (2160 is not a
+        # multiple of 32, but its bloom chain was fine).
+        return choice, choice
     if choice in RENDER_SCALES:
         scale = RENDER_SCALES[choice]
         width, height = out_w / scale, out_h / scale
@@ -1201,7 +1209,8 @@ class Launcher:
                  _('The size the game draws its picture at. Native draws at your window size (or your '
                    'screen in fullscreen) for the sharpest image. Quality, Balanced and Performance draw '
                    'a smaller picture and let DLSS or FSR rebuild it at full size, while the HUD stays '
-                   'sharp. Up to 3840 × 2160 (above 3440 × 1440 experimental: only short tests so far). In busy '
+                   'sharp. These go up to about 3440 × 1440; the 4K choices draw at 3840 × 2160 or 3840 × 1600 '
+                   'whatever the window (experimental: only short tests so far). In busy '
                    'scenes the CPU usually sets the frame rate, so a smaller size gains little there.'))
         self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
                  _('On a screen or window wider than 16:9 (21:9, 32:9) gameplay shows more at the sides '

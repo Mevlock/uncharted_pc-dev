@@ -891,7 +891,9 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         memcpy(&free_now, entries[3] + 8, 8);
         memcpy(&cpu_size, cpu_entry + 8, 8);
         const double need = (a + b) * (ratio - 1.0);
-        const double fits = (double)(cap > gpu ? cap - gpu : 0) + (double)free_now - 4.0 * 1048576.0;
+        /* Staying may borrow from the GPU context's free entry, but not below 128 MiB: Uncharted 1
+         * at 3840x1600 fitted with 63 MiB left and an allocation failed later (assert pData). */
+        const double fits = (double)(cap > gpu ? cap - gpu : 0) + (double)free_now - 128.0 * 1048576.0;
         if (need > fits) {
             /* Both areas keep their size modulo 64 MiB (an area that didn't crashed right after
              * the CPU area was mapped, as BilalReloaded found): heap 0x85 grows in whole 64 MiB,
