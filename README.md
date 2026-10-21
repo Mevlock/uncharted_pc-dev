@@ -171,7 +171,9 @@ Fixes and features from other contributors (most of them sent to
   0x63f5d0 and the exit-3 crash (#403).
 - [eduardoghi](https://github.com/eduardoghi): numpad keys in the launcher's bindings (#473).
 - [iannitram](https://github.com/iannitram): the memory leak in nested GPU command buffers
-  (#387, from shadPS4 #5258).
+  (#387, from shadPS4 #5258), save mounts past the 11th (#496), flexible memory splits (#497).
+- [antikmewzik](https://github.com/antikmewzik/uncharted_pc_controls_qol): no rumble while the
+  keyboard is in use; the look the domed Xbox button pictures follow.
 - [spacepepperoni](https://github.com/spacepepperoni/uncharted_Linux): Uncharted 2's turret blur
   (#381) and the Linux port.
 - [zorde23](https://github.com/zorde23/Uncharted_Collection_PC): light shaft fog (scalar
