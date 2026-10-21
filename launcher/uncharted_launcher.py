@@ -78,7 +78,7 @@ FPS_LIMITS = [('0', 'Off (the frame rate above)'), ('30', '30 FPS'), ('45', '45 
 # is sharper).
 WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
                 ('1920x1080', "1920 × 1080 (the games' own)"), ('2560x1440', '2560 × 1440'),
-                ('3840x2160', '3840 × 2160 (4K)'), ('2560x1080', '2560 × 1080 (21:9)'),
+                ('3840x2160', '3840 × 2160 (4K, experimental)'), ('2560x1080', '2560 × 1080 (21:9)'),
                 ('3440x1440', '3440 × 1440 (21:9)'), ('3840x1600', '3840 × 1600 (21:9)'),
                 ('5120x1440', '5120 × 1440 (32:9)')]
 # The size the games render at (BB_RENDER_RES): the game's display
@@ -1199,8 +1199,9 @@ class Launcher:
                  _('The size the game draws its picture at. Native draws at your window size (or your '
                    'screen in fullscreen) for the sharpest image. Quality, Balanced and Performance draw '
                    'a smaller picture and let DLSS or FSR rebuild it at full size, while the HUD stays '
-                   'sharp. The games\' memory limits this to about 3440 × 1440. In busy scenes the CPU usually '
-                   'sets the frame rate, so a smaller size gains little there.'))
+                   'sharp. Uncharted 1 is limited to about 3440 × 1440 by its memory; Uncharted 2 and 3 go up '
+                   'to 3840 × 2160 (above 3440 × 1440 experimental: only short tests so far). In busy '
+                   'scenes the CPU usually sets the frame rate, so a smaller size gains little there.'))
         self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
                  _('On a screen or window wider than 16:9 (21:9, 32:9) gameplay shows more at the sides '
                    'and fills it. Menus, loading screens and cutscene videos stay 16:9; the in-game HUD '
