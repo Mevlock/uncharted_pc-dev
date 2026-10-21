@@ -188,7 +188,12 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     snprintf(point,sizeof(point),"/savedata%d",slot&15);
     memcpy(result->point.data,point,strlen(point)+1);
     result->status=exists ? 0 : 1; /* CREATED */
-    runtime_file_mount(result->point.data,host);
+    if (runtime_file_mount(result->point.data,host)) {
+        /* No mount behind it: say so rather than report a mount every file call would fail on. */
+        slots[slot].used=0;
+        pthread_mutex_unlock(&lock);
+        return ERR_MOUNT_FULL;
+    }
     ++mounts_done;
     pthread_mutex_unlock(&lock);
     printf("Runtime: save data '%s' mounted at %s (%s%s)\n",dir->data,result->point.data,

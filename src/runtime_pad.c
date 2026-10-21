@@ -83,6 +83,9 @@ static void touch_click(PadData *d, int right) {
 }
 
 /* Opens the first gamepad SDL knows about; called under lock. */
+/* The keyboard and mouse were used last (the prompts' device 0): the controller doesn't rumble
+ * (antikmewzik's controls fork). */
+static int keyboard_in_use;
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
     if (sdl_ready<0) return NULL;
@@ -996,6 +999,8 @@ static void sample_host(PadData *d) {
         if (device!=prompts_device) {
             prompts_device=device;
             bbgpu_prompts_controller(device);
+            keyboard_in_use=device==0;
+            if (keyboard_in_use && g) SDL_RumbleGamepad(g,0,0,0); /* the pad put down stops shaking */
         }
     }
         /* Keyboard and mouse, together with the controller. */
@@ -1266,7 +1271,7 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (!param) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=current_gamepad();
-    if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
+    if (g && !keyboard_in_use) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
     pthread_mutex_unlock(&lock);
     return 0;
 }
