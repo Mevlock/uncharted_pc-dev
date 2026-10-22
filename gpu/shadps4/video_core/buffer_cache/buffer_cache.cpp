@@ -905,6 +905,10 @@ bool BufferCache::ShareGpuPage(VAddr page, u64 length) {
 /// bbport diagnosis (BB_PERF_DIAG=1): landed shared pages, those the GPU wrote again after the
 /// landing's work, and of those the ones marked CPU-modified (an upload takes the whole page
 /// from guest memory, over the GPU's newer bytes), every 5 s. nullopt: a page not written again.
+/// bbport: video memory bound into the buffer arenas so far (never given back: diagnosis of
+/// memory growth over long sessions, printed with the shared landings).
+static std::atomic<u64> g_resident_buffer_bytes{0};
+
 static void NoteSharedRewrite(std::optional<bool> cpu_modified) {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_PERF_DIAG");
@@ -924,9 +928,10 @@ static void NoteSharedRewrite(std::optional<bool> cpu_modified) {
     }
     window = now;
     std::printf("Shared landings: %llu pages in 5 s, %llu written again by the GPU, %llu of them "
-                "CPU-modified\n",
+                "CPU-modified; buffer memory resident %llu MiB\n",
                 static_cast<unsigned long long>(landed), static_cast<unsigned long long>(rewritten),
-                static_cast<unsigned long long>(at_risk));
+                static_cast<unsigned long long>(at_risk),
+                static_cast<unsigned long long>(g_resident_buffer_bytes.load() >> 20));
     landed = rewritten = at_risk = 0;
 }
 
@@ -2438,6 +2443,8 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.memory = device_memory;
         backing.offset = memory_offset;
         resident_ranges.Add(backing);
+        g_resident_buffer_bytes.fetch_add((range.end - range.start) << block_shift,
+                                          std::memory_order_relaxed);
 
         LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
 
