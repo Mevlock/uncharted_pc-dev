@@ -4276,6 +4276,26 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                // bbport diagnosis: BB_GPU_WRITE_WATCH=<hex address>: the shaders whose written
+                // bindings cover its 64 KiB (U2 reads GPU results there every frame).
+                if (desc.is_written) {
+                    static const VAddr watch = [] {
+                        const char* env = std::getenv("BB_GPU_WRITE_WATCH");
+                        return env ? static_cast<VAddr>(std::strtoull(env, nullptr, 16)) : VAddr{0};
+                    }();
+                    static std::atomic<u32> shader_prints{0};
+                    if (watch && vsharp.base_address < watch + 0x10000 &&
+                        watch < vsharp.base_address + size &&
+                        shader_prints.fetch_add(1, std::memory_order_relaxed) < 40) {
+                        std::printf("GPU write watch: %s shader %016llx writes %#llx+%#llx "
+                                    "(binding %u, stride %u)\n",
+                                    stage.sw_stage == Shader::SwStage::Compute ? "compute" : "graphics",
+                                    static_cast<unsigned long long>(stage.pgm_hash),
+                                    static_cast<unsigned long long>(vsharp.base_address),
+                                    static_cast<unsigned long long>(size), buffer_index,
+                                    vsharp.GetStride());
+                    }
+                }
                 if (!desc.is_written && stage.sw_stage == Shader::SwStage::Vertex) {
                     SubmitCheckRead(vsharp.base_address, size);
                 }
