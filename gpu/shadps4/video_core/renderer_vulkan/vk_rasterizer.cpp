@@ -1934,9 +1934,113 @@ bool Rasterizer::FilterDrawPasses() const {
     return !(mode == Mode::Disable && (depth_copy || stencil_copy));
 }
 
+// bbport diagnosis: BB_NULL_PIPELINE_LOG=1: draws dropped because no pipeline was selected (a
+// shader the recompiler or the stage setup refuses, or one still compiling), by vertex and pixel
+// program address and index count, every 5 s. A draw dropped every frame shows up as a steady
+// count (U2: the carried gun skinned each frame but never drawn).
+void Rasterizer::NoteNullPipelineDraw() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_NULL_PIPELINE_LOG");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    const auto& regs = Regs();
+    const auto program = [&](u32 stage) -> u64 {
+        const auto* pgm = regs.ProgramForStage(stage);
+        return pgm ? reinterpret_cast<u64>(pgm->Address<u32*>()) : 0;
+    };
+    struct Key {
+        u64 vs, ps;
+        u32 indices, stages;
+        bool operator==(const Key&) const = default;
+    };
+    static std::vector<std::pair<Key, u64>> counts;
+    static u64 total = 0;
+    static auto window = std::chrono::steady_clock::now();
+    // ProgramForStage: 0 = pixel, 1 = vertex.
+    const Key key{program(1), program(0), regs.num_indices, regs.stage_enable.raw};
+    ++total;
+    auto it = std::ranges::find_if(counts, [&](const auto& c) { return c.first == key; });
+    if (it == counts.end()) {
+        if (counts.size() < 64) {
+            counts.push_back({key, 1});
+        }
+    } else {
+        ++it->second;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) {
+        return;
+    }
+    window = now;
+    std::ranges::sort(counts, std::greater{}, &std::pair<Key, u64>::second);
+    std::printf("Null pipeline: %llu draws dropped in 5 s\n", static_cast<unsigned long long>(total));
+    for (size_t i = 0; i < counts.size() && i < 12; ++i) {
+        const auto& [k, n] = counts[i];
+        std::printf("  %llu x vs %#llx ps %#llx, %u indices, stages %#x\n",
+                    static_cast<unsigned long long>(n), static_cast<unsigned long long>(k.vs),
+                    static_cast<unsigned long long>(k.ps), k.indices, k.stages);
+    }
+    counts.clear();
+    total = 0;
+}
+
+// bbport diagnosis: BB_DRAW_WATCH_INDICES=<n>[,<n>...]: draws the game issues with those index
+// counts, per 5 s, with their vertex/pixel program addresses (U2: is the carried gun's draw, 2991
+// indices like the picked-up Beretta's, issued at all?).
+static void WatchDrawIndices(const AmdGpu::Regs& regs) {
+    static const std::vector<u32> watch = [] {
+        std::vector<u32> out;
+        if (const char* env = std::getenv("BB_DRAW_WATCH_INDICES")) {
+            for (const char* p = env; *p;) {
+                char* end;
+                const unsigned long v = std::strtoul(p, &end, 10);
+                if (end == p) {
+                    break;
+                }
+                out.push_back(static_cast<u32>(v));
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+        return out;
+    }();
+    if (watch.empty() || std::ranges::find(watch, regs.num_indices) == watch.end()) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::vector<std::pair<std::array<u64, 3>, u64>> seen;
+    static auto window = std::chrono::steady_clock::now();
+    std::scoped_lock lk{mutex};
+    const auto program = [&](u32 stage) -> u64 {
+        const auto* pgm = regs.ProgramForStage(stage);
+        return pgm ? reinterpret_cast<u64>(pgm->Address<u32*>()) : 0;
+    };
+    const std::array<u64, 3> key{regs.num_indices, program(1), program(0)};
+    auto it = std::ranges::find_if(seen, [&](const auto& s) { return s.first == key; });
+    if (it == seen.end()) {
+        seen.push_back({key, 1});
+    } else {
+        ++it->second;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) {
+        return;
+    }
+    window = now;
+    for (const auto& [k, n] : seen) {
+        std::printf("Draw watch: %llu draws of %llu indices, vs %#llx ps %#llx (5 s)\n",
+                    static_cast<unsigned long long>(n), static_cast<unsigned long long>(k[0]),
+                    static_cast<unsigned long long>(k[1]), static_cast<unsigned long long>(k[2]));
+    }
+    seen.clear();
+}
+
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
     BbStats::draws.fetch_add(1, std::memory_order_relaxed);
+    WatchDrawIndices(Regs());
 
     // bbport: with the draw pipeline this thread only selects the pipeline and hands the draw
     // to the recording thread (DrawRecord there); draws FilterDraw handles itself run here.
@@ -1962,6 +2066,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
                          prepared->reg_checksum == liverpool->gfx_reg_checksum);
     }
     if (!pipeline) {
+        NoteNullPipelineDraw();
         return;
     }
     if (pipelined && FilterDrawPasses()) {
