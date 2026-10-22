@@ -50,7 +50,9 @@ tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
   3840×1600 for 21:9) is an experimental choice of its own: above 3440×1440 the games' largest
   render target heap moves to their CPU memory, which has the room.
 - **Ultrawide** (21:9, 32:9): gameplay shows more at the sides and fills the screen; menus,
-  loading screens and videos stay 16:9. **Field of view** setting.
+  loading screens and videos stay 16:9. **Field of view** setting. The fork widens the view by
+  scaling the game's camera; shadow cameras keep the game's own projection (before 0.3.6.15 the
+  torch in Uncharted 3 lit a hard-edged square above 1080p, a bug of this fork's resizing only).
 - **DLSS and FSR in Uncharted 3 fixed:** the upscaler's history was reset every frame, so it never
   built up detail and the sub-pixel jitter showed as a constant shake (the title screen's rifle and
   dunes). It now keeps its history: shimmering is basically gone. Textures keep their detail at
