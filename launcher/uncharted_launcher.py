@@ -1728,11 +1728,13 @@ class Launcher:
     def read_output(self, process):
         """Helper thread: the game's output to the Log page and to <saves folder>/last_run.log."""
         log = None
+        header = log_header(self.app)
+        self.output.put(header)  # also on the Log page: copied logs name the build too
         try:
             log_dir = Path(self.app.get('user_dir') or DATA_DIR / 'user')
             log_dir.mkdir(parents=True, exist_ok=True)
             log = open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1)
-            log.write(log_header(self.app))
+            log.write(header)
         except OSError:
             pass
         for raw in iter(process.stdout.readline, b''):
