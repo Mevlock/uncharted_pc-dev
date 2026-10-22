@@ -141,10 +141,8 @@ jobs:
               notes=release-notes.md
               echo "Unofficial fork build ($GITHUB_REF_NAME). The official port is SuperMedo's: https://github.com/Supermedo/uncharted_pc" > "$notes"
           fi
-          # Tags ending in -pre (v0.3.6.17-pre) are pre-releases: not marked latest.
-          kind=(--latest)
-          if [[ $GITHUB_REF_NAME == *-pre ]]; then
-              kind=(--prerelease --latest=false)
-          fi
-          gh release create "$GITHUB_REF_NAME" "$zip" --title "$GITHUB_REF_NAME" "${kind[@]}" \
+          # Every tag becomes the latest release, -pre ones too (their changelog carries the
+          # pre-release warning): GitHub shows a release flagged as a pre-release nowhere on the
+          # repository's front page.
+          gh release create "$GITHUB_REF_NAME" "$zip" --title "$GITHUB_REF_NAME" --latest \
               --notes-file "$notes"
