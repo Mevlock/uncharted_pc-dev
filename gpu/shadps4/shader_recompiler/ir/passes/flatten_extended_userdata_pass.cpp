@@ -728,7 +728,7 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         if (src_off_dw.IsImmediate()) {
             read_dw = std::max(read_dw, src_off_dw.U32() + (pass_info.GetUsesAsPointer(use) ? 2 : 1));
         } else {
-            read_dw = std::max(read_dw, ReadConstWindowDwords);
+            read_dw = std::max(read_dw, ReadConstWindowDwords());
         }
     }
     if (!PushPtr(c, pass_info, off_dw, read_dw * 4)) {
