@@ -2088,7 +2088,11 @@ struct StaleTracker {
         VAddr start, end;
         u32 stride, cs_hash;
         VAddr input; ///< the dispatch's first input buffer (the mesh it deforms)
+        bool read = false; ///< a draw this frame read it
     };
+    /// Outputs no draw read before the flip, by (cs hash, size), over the report window.
+    std::vector<std::pair<std::pair<u32, u64>, u64>> unread;
+    u64 slots_seen = 0;
     /// Draws: their first buffer outside the area (a fixed per-mesh stream) -> the input mesh of
     /// the slot they read, as first seen. A different pairing later is printed.
     std::unordered_map<VAddr, VAddr> pairing;
@@ -2132,9 +2136,13 @@ void CheckStaleRead(VAddr address, u64 size, u32 vs_hash) {
         return;
     }
     ++t.checked;
-    const bool found = std::ranges::any_of(t.slots, [address](const auto& slot) {
-        return address >= slot.start && address < slot.end;
-    });
+    bool found = false;
+    for (auto& slot : t.slots) {
+        if (address >= slot.start && address < slot.end) {
+            slot.read = true;
+            found = true;
+        }
+    }
     if (!found) {
         ++t.stale;
         if (t.printed++ < 300) {
@@ -5770,6 +5778,36 @@ void Rasterizer::OnGuestFlip() {
     if (StaleCheckEnabled()) {
         CheckComputeOutputs();
         auto& t = Stale();
+        // bbport diagnosis: compute outputs (U2/U3 skinning: deformed vertices) that no draw read
+        // this frame, every 5 s: an object deformed each frame but never drawn (U2's weapons
+        // carried into a chapter).
+        t.slots_seen += t.slots.size();
+        for (const auto& slot : t.slots) {
+            if (slot.read) {
+                continue;
+            }
+            const std::pair<u32, u64> key{slot.cs_hash, slot.end - slot.start};
+            auto it = std::ranges::find_if(t.unread, [&](const auto& u) { return u.first == key; });
+            if (it != t.unread.end()) {
+                ++it->second;
+            } else if (t.unread.size() < 256) {
+                t.unread.push_back({key, 1});
+            }
+        }
+        static auto unread_window = std::chrono::steady_clock::now();
+        if (const auto now = std::chrono::steady_clock::now(); now - unread_window >= std::chrono::seconds(5)) {
+            unread_window = now;
+            std::ranges::sort(t.unread, std::greater{}, &std::pair<std::pair<u32, u64>, u64>::second);
+            std::printf("Unread outputs: %zu kinds of %llu compute outputs no draw read (5 s)\n",
+                        t.unread.size(), static_cast<unsigned long long>(t.slots_seen));
+            for (size_t i = 0; i < t.unread.size() && i < 60; ++i) {
+                std::printf("  cs %08x %llu bytes: unread in %llu frames\n", t.unread[i].first.first,
+                            static_cast<unsigned long long>(t.unread[i].first.second),
+                            static_cast<unsigned long long>(t.unread[i].second));
+            }
+            t.unread.clear();
+            t.slots_seen = 0;
+        }
         t.slots.clear();
         ++t.frames;
     }
@@ -5798,7 +5836,7 @@ void Rasterizer::CheckComputeOutputs() {
     }
     // GPU-written vertices only exist on the GPU: copied back first (waits for the GPU).
     buffer_cache.ReadMemory(low, high - low, false, true);
-    for (const auto& [start, end, stride, cs_hash, input] : t.slots) {
+    for (const auto& [start, end, stride, cs_hash, input, read] : t.slots) {
         if (stride < 12) {
             continue;
         }
