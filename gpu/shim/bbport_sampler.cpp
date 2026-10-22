@@ -203,7 +203,12 @@ void Report(std::vector<Sampled>& threads, double seconds) {
                         100.0 * by_module[i].second / t.samples);
         }
         std::printf("\n");
-        for (size_t i = 0; i < top.size() && i < 30; ++i) {
+        // BB_SAMPLE_TOP=<n>: more addresses per thread (default 30), for summing by function.
+        static const size_t listed = [] {
+            const char* env = std::getenv("BB_SAMPLE_TOP");
+            return env ? static_cast<size_t>(std::strtoul(env, nullptr, 10)) : size_t{30};
+        }();
+        for (size_t i = 0; i < top.size() && i < listed; ++i) {
             std::printf("Sampler:   %5.2f%% %s\n", 100.0 * top[i].second / t.samples,
                         Describe(top[i].first).c_str());
         }
