@@ -59,7 +59,7 @@ tried: [docs/PERFORMANCE_2026-10-18.md](docs/PERFORMANCE_2026-10-18.md).
   the upscaled render sizes (texture LOD bias), the history resets at camera cuts (no streaks), and
   **Anti-aliasing sharpness** now works with DLSS. Uncharted 1's sun shadows no longer shimmer
   under DLSS, FSR and TAA (from [kj2223's fork](https://github.com/kj2223/uncharted_pc-fixes)).
-- **Bloom** on/off and **texture filtering** (anisotropic) settings.
+- **Bloom** on/off (the bloom glow works since 0.3.6.16) and **texture filtering** (anisotropic) settings.
 - **Frame rate limit**: caps the frames shown, generated ones included (for example 120 with frame
   generation).
 
