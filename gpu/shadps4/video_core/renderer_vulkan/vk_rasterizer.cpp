@@ -5555,6 +5555,7 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
 
 void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
     DrainDrawPipe();
+    buffer_cache.ForgetStreamCopies();
     ASSERT_MSG(address % 4 == 0 && num_bytes % 4 == 0,
                "FillBuffer address and size must be a multiple of 4 bytes");
     if (!is_gds) {
@@ -5576,6 +5577,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
     DrainDrawPipe();
+    buffer_cache.ForgetStreamCopies();
     if (static const char* qw = std::getenv("BB_QUEUE_WATCH"); qw && !dst_gds) {
         const VAddr watch = VAddr(std::strtoull(qw, nullptr, 16));
         static std::atomic<u32> prints{0};
