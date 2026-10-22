@@ -52,6 +52,10 @@ struct ImageInfo {
         return Extent2D{pitch >> dim, size.height >> dim};
     }
 
+    // bbport: on unless BB_MIP_FIX=0 (zorde23's UC_MIP_FIX): a render target placed exactly at one mip of a
+    // larger image is taken as that mip even when its pitch is the larger one (U3's bloom chain).
+    static bool MipFixEnabled();
+
     s32 MipOf(const ImageInfo& info) const;
     s32 SliceOf(const ImageInfo& info, s32 mip) const;
 

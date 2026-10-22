@@ -328,6 +328,18 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
     // Equal address
     if (image_info.guest_address == cache_image.info.guest_address) {
+        // bbport (BB_MIP_FIX): a single-level request that is exactly mip 0 of a multi-level image
+        // at the same address (U3's bloom mip 0: drawn with pitch 896, the 7-level image pads it to
+        // 1024) is that mip. The block-dimension check below calls them unrelated otherwise, so the
+        // draw got an image of its own and the bloom image stayed empty.
+        if (ImageInfo::MipFixEnabled() && image_info.resources.levels == 1 &&
+            cache_image.info.resources.levels > 1) {
+            if (const s32 mip = image_info.MipOf(cache_image.info); mip == 0) {
+                if (const s32 slice = image_info.SliceOf(cache_image.info, mip); slice >= 0) {
+                    return {cache_image_id, mip, slice};
+                }
+            }
+        }
         const u32 lhs_block_size = image_info.num_bits * image_info.num_samples;
         const u32 rhs_block_size = cache_image.info.num_bits * cache_image.info.num_samples;
         if (image_info.BlockDim() != cache_image.info.BlockDim() ||
@@ -651,6 +663,22 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         cached.levels == info.resources.levels && cached.layers == info.resources.layers &&
         !BbToggle::Disabled(BbToggle::FindImageCache)) {
         Image& image = slot_images[cached.image_id];
+        // bbport diagnosis (BB_MIP_LOG): the fast path handing back a single-level image that lies
+        // inside a multi-level one (the merge below never runs for it then).
+        static const bool fast_log = std::getenv("BB_MIP_LOG") != nullptr;
+        if (fast_log && image.info.resources.levels == 1 && info.size.width >= 200) {
+            static int fast_logged = 0;
+            ForEachImageInRegion(info.guest_address, info.guest_size, [&](ImageId id, Image& other) {
+                if (id != cached.image_id && other.info.resources.levels > 1 && fast_logged < 40) {
+                    ++fast_logged;
+                    std::printf("Mip log: fast path returned %#llx %ux%u pitch %u binding %d (levels 1) over %#llx %ux%u levels %u\n",
+                                static_cast<unsigned long long>(info.guest_address), info.size.width,
+                                info.size.height, info.pitch, static_cast<int>(desc.type),
+                                static_cast<unsigned long long>(other.info.guest_address),
+                                other.info.size.width, other.info.size.height, other.info.resources.levels);
+                }
+            });
+        }
         image.tick_accessed_last = scheduler.CurrentTick();
         TouchImage(image);
         if (cached.view_mip > 0) {
@@ -700,14 +728,90 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // Try to resolve overlaps (if any)
     int view_mip{-1};
     int view_slice{-1};
+
+    // bbport (BB_MIP_FIX, from zorde23's port): a single-level image that is exactly one mip of a
+    // larger image in the cache (drawn on its own, often before the larger one existed) is copied
+    // into that mip and dropped, so the draw writes the larger image's mip and samplers see it.
+    // bbport diagnosis: BB_MIP_LOG=1 prints single-level requests that lie inside a multi-level
+    // image, with both layouts and what MipOf/SliceOf say (first 80).
+    static const bool mip_log = std::getenv("BB_MIP_LOG") != nullptr;
+    if (mip_log && info.size.width >= 200) {
+        static int logged = 0;
+        for (const auto& cache_id : image_ids) {
+            const auto& p = slot_images[cache_id].info;
+            if (cache_id == image_id || (p.resources.levels <= 1 && info.resources.levels <= 1) || logged >= 120) {
+                continue;
+            }
+            const s32 mip = info.MipOf(p);
+            ++logged;
+            std::printf("Mip log: %#llx %ux%u pitch %u fmt %d mode %d in %#llx %ux%u pitch %u levels %u "
+                        "mode %d compatible %d: mip %d slice %d; mips",
+                        static_cast<unsigned long long>(info.guest_address), info.size.width,
+                        info.size.height, info.pitch, static_cast<int>(info.pixel_format),
+                        static_cast<int>(info.array_mode),
+                        static_cast<unsigned long long>(p.guest_address), p.size.width,
+                        p.size.height, p.pitch, p.resources.levels, static_cast<int>(p.array_mode),
+                        info.IsCompatible(p), mip, mip >= 0 ? info.SliceOf(p, mip) : -9);
+            for (u32 m = 0; m < std::min<u32>(p.resources.levels, 4); ++m) {
+                std::printf(" %u:+%#x pitch %u", m, p.mips_layout[m].offset, p.mips_layout[m].pitch);
+            }
+            std::printf(" (found %d, request levels %u, binding %d)\n", image_id ? 1 : 0,
+                        info.resources.levels, static_cast<int>(desc.type));
+        }
+    }
+    if (image_id && info.resources.levels == 1 && ImageInfo::MipFixEnabled()) {
+        for (const auto& cache_id : image_ids) {
+            if (cache_id == image_id) {
+                continue;
+            }
+            auto& parent = slot_images[cache_id];
+            if (parent.info.resources.levels <= 1 || parent.info.guest_address > info.guest_address) {
+                continue;
+            }
+            const s32 mip = info.MipOf(parent.info);
+            if (mip < 0) {
+                continue;
+            }
+            const s32 slice = info.SliceOf(parent.info, mip);
+            if (slice < 0) {
+                continue;
+            }
+            auto& single = slot_images[image_id];
+            runtime.CopyMip(&single, &parent, mip, slice);
+            if (single.binding.is_bound || single.binding.is_target) {
+                single.binding.needs_rebind = 1u;
+            }
+            FreeImage(image_id);
+            image_id = cache_id;
+            view_mip = mip;
+            view_slice = slice;
+            break;
+        }
+    }
+
     if (!image_id) {
         for (const auto& cache_id : image_ids) {
             view_mip = -1;
             view_slice = -1;
 
             const auto& merged_info = image_id ? slot_images[image_id].info : info;
+            const auto before = slot_images[cache_id].info;
             auto [overlap_image_id, overlap_view_mip, overlap_view_slice] =
                 ResolveOverlap(merged_info, desc.type, cache_id, image_id);
+            if (mip_log && info.size.width >= 200 && (before.resources.levels > 1 || info.resources.levels > 1)) {
+                static int overlap_logged = 0;
+                if (overlap_logged++ < 60) {
+                    std::printf("Mip log: overlap %#llx %ux%u pitch %u levels %u binding %d with %#llx %ux%u "
+                                "pitch %u levels %u -> %s mip %d slice %d\n",
+                                static_cast<unsigned long long>(info.guest_address), info.size.width,
+                                info.size.height, info.pitch, info.resources.levels, static_cast<int>(desc.type),
+                                static_cast<unsigned long long>(before.guest_address), before.size.width,
+                                before.size.height, before.pitch, before.resources.levels,
+                                overlap_image_id ? (overlap_image_id == cache_id ? "that image" : "other image")
+                                                 : "none",
+                                overlap_view_mip, overlap_view_slice);
+                }
+            }
             if (overlap_image_id) {
                 image_id = overlap_image_id;
                 view_mip = overlap_view_mip;
@@ -742,6 +846,51 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(image_id);
         NoteImageCreate(new_info, desc.type);
+        if (std::getenv("BB_MIP_LOG") && new_info.resources.levels == 1 && new_info.size.width >= 200) {
+            static int made_logged = 0;
+            ForEachImageInRegion(new_info.guest_address, new_info.guest_size, [&](ImageId id, Image& other) {
+                if (id != image_id && other.info.resources.levels > 1 && made_logged < 30) {
+                    ++made_logged;
+                    std::printf("Mip log: new single %#llx %ux%u pitch %u binding %d over %#llx %ux%u levels %u\n",
+                                static_cast<unsigned long long>(new_info.guest_address), new_info.size.width,
+                                new_info.size.height, new_info.pitch, static_cast<int>(desc.type),
+                                static_cast<unsigned long long>(other.info.guest_address), other.info.size.width,
+                                other.info.size.height, other.info.resources.levels);
+                }
+            });
+        }
+        // bbport (BB_MIP_FIX): a new multi-level image takes in the single-level images that are
+        // exactly one of its mips (drawn before it existed, U3's bloom mips 0 and 1) and frees them.
+        // Otherwise FindImage's fast path keeps handing those back to the draws that write the
+        // mips, and the multi-level image the game samples stays empty (no bloom at all).
+        if (new_info.resources.levels > 1 && ImageInfo::MipFixEnabled()) {
+            ImageIds singles;
+            ForEachImageInRegion(new_info.guest_address, new_info.guest_size,
+                                 [&](ImageId id, Image& other) {
+                                     if (id != image_id && other.info.resources.levels == 1) {
+                                         singles.push_back(id);
+                                     }
+                                 });
+            for (const ImageId single_id : singles) {
+                auto& single = slot_images[single_id];
+                const s32 mip = single.info.MipOf(new_info);
+                const s32 slice = mip >= 0 ? single.info.SliceOf(new_info, mip) : -1;
+                if (slice < 0) {
+                    continue;
+                }
+                if (std::getenv("BB_MIP_LOG")) {
+                    std::printf("Mip log: merged %#llx %ux%u pitch %u into mip %d of the new %ux%u levels %u\n",
+                                static_cast<unsigned long long>(single.info.guest_address),
+                                single.info.size.width, single.info.size.height, single.info.pitch, mip,
+                                new_info.size.width, new_info.size.height, new_info.resources.levels);
+                }
+                runtime.CopyMip(&single, &slot_images[image_id], mip, slice);
+                if (single.binding.is_bound || single.binding.is_target) {
+                    single.binding.needs_rebind = 1u;
+                }
+                FreeImage(single_id);
+            }
+        }
         if (new_info.props.is_depth && new_info.resources.layers > 1) {
             HtileLog("depth image %#llx %ux%u layers %u made (binding %d, %zu overlapping)\n",
                      static_cast<unsigned long long>(new_info.guest_address), new_info.size.width,
