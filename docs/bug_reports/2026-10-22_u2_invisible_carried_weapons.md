@@ -73,11 +73,12 @@ screenshots). They reproduce the empty hands.
   preparation off; `BB_SCALAR_COPY64_DEFER=0`; `BB_TIGHT_WRITES=0`; ordered faults, pipelined copy
   and shared writes off.
 
-- **Exact GPU reads can't be tested yet:** `BB_READBACKS=2` freezes U2 at launch and also when
-  switched on in gameplay (`BB_READBACKS_DELAY=60`, new), most likely a read waiting for GPU
-  work that waits for the reading thread. Both ports share the shadPS4 video core, so a stale
-  GPU result read by the game is still possible on both; it needs exact reads that don't
-  deadlock (a stack dump at the freeze would show which read waits on what).
+- **Not a stale GPU result read by the game:** with exact read-backs from boot
+  (`BB_READBACKS=2`: every game read of GPU-written memory gets the GPU's data), the carried gun
+  is still invisible. `BB_READBACKS=2` used to freeze U2: the Vulkan recording thread's own guest
+  copies hit read-protected pages and waited for the GPU command thread, which was draining the
+  draw pipe, whose recording thread waited for those copies. The port's worker threads now read
+  guest memory as it is (`runtime_thread_is_guest`). Found with an lldb stack dump at the freeze.
 
 ## Remaining theory
 
