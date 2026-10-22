@@ -59,6 +59,10 @@ screenshots). They reproduce the empty hands.
 - **The read probe and write watch were inconclusive.** With `BB_READBACKS=2 BB_READ_PROBE=1`
   plus `BB_GPU_WRITE_WATCH`, the game memcpy-reads pages next to the skinning output each frame,
   but those pages also hold the game's own data. `BB_READBACKS=2` alone freezes U2 at launch.
+- **Not Umar's fixes:** Umar-Qayyum-dev's full build (0.3.6 plus his patches, including the
+  read-back of the scalar copy destinations into guest memory before each fence, his U2
+  floating-NPC fix) shows the same empty hands on the same save. Tested by the user,
+  2026-10-22, from the test install `github/uncharted_test_umar`.
 - **The "not found" weapon effect packs are irrelevant.** `effect1/*-pistol.bin` is not found for
   every weapon, including the drawn Beretta.
 
