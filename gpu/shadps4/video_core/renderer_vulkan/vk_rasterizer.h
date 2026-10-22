@@ -411,6 +411,9 @@ private:
         std::array<u64, 4> sharp{};
         u32 flags = ~0u;
         VideoCore::TextureCache::ImageDesc desc;
+        /// The image lies in GPU memory (ImageInPlausibleMemory); a T# read from a resource
+        /// table the game had not finished writing can describe gigabytes of unmapped memory.
+        bool plausible = true;
         // Memoized FindImage for bindings without mip overrides (TextureBindingMemo).
         u64 found_generation = ~0ULL;
         VideoCore::ImageId found_id{};
@@ -453,6 +456,7 @@ private:
                                           const Parts&... parts);
     /// The prepared draw whose pipeline the current Draw uses (its sharps are valid), or null.
     const PreparedDraw* bind_prepared = nullptr;
+    bool ImageInPlausibleMemory(const VideoCore::ImageInfo& info);
     /// `hash` is ImageDescHash(sharp, res), computed by a draw-preparation worker or here.
     ImageDescCacheEntry& CachedImageDescEntry(const AmdGpu::Image& sharp,
                                               const Shader::ImageResource& res, u64 hash);

@@ -3493,7 +3493,7 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
         const auto& entry =
             prepared ? CachedImageDescEntry(tsharp, image_desc, prepared->image_hashes[image_index])
                      : CachedImageDescEntry(tsharp, image_desc);
-        if (entry.found_generation != generation) {
+        if (entry.found_generation != generation || !entry.plausible) {
             return false;
         }
         VideoCore::ImageId image_id = entry.found_id;
@@ -4393,8 +4393,31 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
         entry.flags = flags;
         entry.found_generation = ~0ULL;
         entry.view_memo = {};
+        entry.plausible = ImageInPlausibleMemory(entry.desc.info);
+    } else if (!entry.plausible) {
+        // The memory may have been mapped since.
+        entry.plausible = ImageInPlausibleMemory(entry.desc.info);
     }
     return entry;
+}
+
+// bbport: an image larger than any texture a PS4 game can hold, or starting in unmapped
+// memory, comes from a garbage T#. Creating it tracked and uploaded gigabytes of unmapped
+// memory and crashed (U3 chapter 2, leaving the museum: a 2.7 GB image at 0x117802c000).
+bool Rasterizer::ImageInPlausibleMemory(const VideoCore::ImageInfo& info) {
+    static constexpr u64 MaxImageBytes = 1_GB;
+    if (info.guest_size <= MaxImageBytes && IsMapped(info.guest_address, 4096)) {
+        return true;
+    }
+    static std::atomic<u32> reported{0};
+    if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+        std::printf("Textures: rejected an image at %#llx of %llu MiB (%ux%u): not in GPU "
+                    "memory\n",
+                    static_cast<unsigned long long>(info.guest_address),
+                    static_cast<unsigned long long>(info.guest_size >> 20), info.size.width,
+                    info.size.height);
+    }
+    return false;
 }
 
 void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* prepared,
@@ -4556,6 +4579,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         auto& desc_entry =
             prepared ? CachedImageDescEntry(tsharp, image_desc, prepared->image_hashes[image_index])
                      : CachedImageDescEntry(tsharp, image_desc);
+        if (!desc_entry.plausible) {
+            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
+            image_binding_entries.push_back(nullptr);
+            binding_proxy_ok.push_back(false);
+            image_descriptor_array_sizes.push_back(1);
+            set_ok = false;
+            continue;
+        }
         // BB_SCENE_DEBUG: proxied scene targets this binding reads at the native size, and why.
         const auto debug_native = [&](const VideoCore::Image& image) {
             if (!scene_debug_frame || proxy_candidate || !image.scene_proxy) return;
