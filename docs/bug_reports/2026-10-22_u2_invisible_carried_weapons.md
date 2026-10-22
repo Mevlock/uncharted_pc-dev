@@ -66,7 +66,22 @@ screenshots). They reproduce the empty hands.
 - **The "not found" weapon effect packs are irrelevant.** `effect1/*-pistol.bin` is not found for
   every weapon, including the drawn Beretta.
 
+- **Not port code at all, most likely:** BilalReloaded's port, a completely separate port with
+  no shared code, also shows the empty hands on the same save (US copy CUSA02320, the save
+  copied into its slot; seen by the user, 2026-10-22).
+- **Port switches change nothing** (automated, aim screenshot each): `BB_DRAW_PIPE=0`; draw
+  preparation off; `BB_SCALAR_COPY64_DEFER=0`; `BB_TIGHT_WRITES=0`; ordered faults, pipelined copy
+  and shared writes off.
+
 ## Remaining theory
+
+Two unrelated ports show the same thing, so the cause is most likely in the save, or in the game
+itself on this path, not in either port. The save is a completed game from a Spanish-language
+console, continued through chapter select. Next: check whether a weapon carried over a chapter
+boundary also vanishes in a save made from a fresh EU game, and look for the same thing in PS4
+footage of a chapter-select replay.
+
+Earlier theory, now unlikely:
 
 The game itself decides not to draw weapons that were carried into the chapter. Possible reasons:
 - a streaming or residency state, or a visibility state, set at chapter start;
