@@ -838,6 +838,7 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
             memo.access == u32(access)) {
             return;
         }
+        ++inserts_since_flush;
         barrier_tracker.InsertRange(range, access);
         ++tracked_inserts;
         memo = {range.resource, range.range_start, range.range_end, access_epoch, u32(access)};
@@ -901,6 +902,7 @@ void Runtime::FlushBarriers() {
     barrier_tracker.Clear();
     tracked_inserts = 0;
     ++access_epoch;
+    inserts_since_flush = 0;
 }
 
 } // namespace Vulkan

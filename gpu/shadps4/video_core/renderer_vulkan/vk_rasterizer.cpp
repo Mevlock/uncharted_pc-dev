@@ -3384,7 +3384,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             window = now;
         }
     }
-    if (needs_barrier) {
+    if (needs_barrier || runtime.TrackerFull()) {
         runtime.FlushBarriers();
     }
 
