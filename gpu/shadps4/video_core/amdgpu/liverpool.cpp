@@ -140,14 +140,50 @@ void Liverpool::ProcessCommands() {
     if (!num_commands) {
         return;
     }
+    // Ordered commands go to the draw recording thread, behind the draws handed to it so far
+    // (in the order queued; RunInOrder runs them here after a drain when the pipe is off).
+    while (true) {
+        Common::UniqueFunction<void> callback{};
+        {
+            std::scoped_lock lk{submit_mutex};
+            if (ordered_queue.empty()) {
+                break;
+            }
+            callback = std::move(ordered_queue.front());
+            ordered_queue.pop();
+            --num_commands;
+        }
+        if (!rasterizer) {
+            callback();
+            continue;
+        }
+        auto* task = new Common::UniqueFunction<void>(std::move(callback));
+        rasterizer->RunInOrder(
+            [](Vulkan::Rasterizer&, const u8* data) {
+                Common::UniqueFunction<void>* run;
+                std::memcpy(&run, data, sizeof(run));
+                (*run)();
+                delete run;
+            },
+            &task, sizeof(task));
+    }
+    {
+        std::scoped_lock lk{submit_mutex};
+        if (command_queue.empty()) {
+            return;
+        }
+    }
     if (rasterizer) {
         rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
     }
     // Process incoming commands with high priority
-    while (num_commands) {
+    while (true) {
         Common::UniqueFunction<void> callback{};
         {
             std::scoped_lock lk{submit_mutex};
+            if (command_queue.empty()) {
+                break;
+            }
             callback = std::move(command_queue.front());
             command_queue.pop();
             --num_commands;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Zlib
 
 #include <bit>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
@@ -10,6 +11,37 @@
 namespace Vulkan {
 
 namespace {
+// BB_BARRIER_STATS=1 (diagnosis): how the block index is used, every 5 s.
+struct BlockStats {
+    u64 inserts, insert_blocks, insert_scanned, contained, finds, find_blocks, find_scanned,
+        large_scanned, all_scans, clears, items_at_clear, large_at_clear, heads_at_clear;
+};
+BlockStats g_stats{};
+const bool g_stats_on = [] {
+    const char* env = std::getenv("BB_BARRIER_STATS");
+    return env && env[0] == '1';
+}();
+void ReportStats() {
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(5)) {
+        return;
+    }
+    last = now;
+    auto& s = g_stats;
+    const auto per = [](u64 a, u64 b) { return b ? double(a) / double(b) : 0.0; };
+    std::printf("Barrier stats (5 s): %llu inserts (%.2f blocks, %.2f items scanned, %.0f%% "
+                "contained), %llu finds (%.2f blocks, %.2f items scanned, %.2f large scanned, %llu "
+                "full scans); %llu clears: %.0f items, %.1f large, %.0f heads each\n",
+                (unsigned long long)s.inserts, per(s.insert_blocks, s.inserts),
+                per(s.insert_scanned, s.insert_blocks), 100.0 * per(s.contained, s.insert_blocks),
+                (unsigned long long)s.finds, per(s.find_blocks, s.finds),
+                per(s.find_scanned, s.finds), per(s.large_scanned, s.finds),
+                (unsigned long long)s.all_scans, (unsigned long long)s.clears,
+                per(s.items_at_clear, s.clears), per(s.large_at_clear, s.clears),
+                per(s.heads_at_clear, s.clears));
+    s = {};
+}
 bool Overlap(u64 a_start, u64 a_end, const AddressRange& b) {
     return a_end >= b.range_start && a_start <= b.range_end;
 }
@@ -60,6 +92,10 @@ BarrierTracker::BlockHead* BarrierTracker::FindHead(u64 resource, u64 block, u32
 }
 
 bool BarrierTracker::BlockFind(const AddressRange& range, Access access) const {
+    if (g_stats_on) {
+        ++g_stats.finds;
+        g_stats.large_scanned += large.size();
+    }
     for (const u32 index : large) {
         const auto& item = items[index];
         if (item.resource == range.resource && item.access == u32(access) &&
@@ -70,6 +106,9 @@ bool BarrierTracker::BlockFind(const AddressRange& range, Access access) const {
     const u64 first = range.range_start >> BlockShift;
     const u64 last = range.range_end >> BlockShift;
     if (last - first >= MaxBlocksPerRange) {
+        if (g_stats_on) {
+            ++g_stats.all_scans;
+        }
         for (size_t index = 1; index < items.size(); ++index) {
             const auto& item = items[index];
             if (item.resource == range.resource && item.access == u32(access) &&
@@ -82,7 +121,13 @@ bool BarrierTracker::BlockFind(const AddressRange& range, Access access) const {
     auto& self = const_cast<BarrierTracker&>(*this);
     for (u64 block = first; block <= last; ++block) {
         const BlockHead* head = self.FindHead(range.resource, block, u32(access), false);
+        if (g_stats_on) {
+            ++g_stats.find_blocks;
+        }
         for (u32 index = head ? head->first : 0; index; index = items[index].next) {
+            if (g_stats_on) {
+                ++g_stats.find_scanned;
+            }
             if (Overlap(items[index].start, items[index].end, range)) {
                 return true;
             }
@@ -92,6 +137,10 @@ bool BarrierTracker::BlockFind(const AddressRange& range, Access access) const {
 }
 
 void BarrierTracker::BlockInsert(const AddressRange& range, Access access) {
+    if (g_stats_on) {
+        ++g_stats.inserts;
+        ReportStats();
+    }
     const u64 first = range.range_start >> BlockShift;
     const u64 last = range.range_end >> BlockShift;
     const auto add_large = [&] {
@@ -110,8 +159,29 @@ void BarrierTracker::BlockInsert(const AddressRange& range, Access access) {
         }
         bool contained = false;
         for (u32 index = head->first; index && !contained; index = items[index].next) {
-            contained = items[index].start <= range.range_start &&
-                        items[index].end >= range.range_end;
+            auto& item = items[index];
+            if (g_stats_on) {
+                ++g_stats.insert_scanned;
+            }
+            contained = item.start <= range.range_start && item.end >= range.range_end;
+            // An item overlapping or touching the range grows to cover it when that keeps it
+            // within the blocks it is listed in: the same overlaps, fewer items to scan (reads
+            // come in neighbouring 4 KiB pages, writes in runs).
+            if (!contained && item.end + 1 >= range.range_start &&
+                item.start <= range.range_end + 1) {
+                const u64 start = std::min(item.start, range.range_start);
+                const u64 end = std::max(item.end, range.range_end);
+                if (start >> BlockShift == item.start >> BlockShift &&
+                    end >> BlockShift == item.end >> BlockShift) {
+                    item.start = start;
+                    item.end = end;
+                    contained = true;
+                }
+            }
+        }
+        if (g_stats_on) {
+            ++g_stats.insert_blocks;
+            g_stats.contained += contained;
         }
         if (contained) {
             continue;
@@ -216,6 +286,12 @@ void BarrierTracker::InsertRange(const AddressRange& range, Access access_type) 
 
 void BarrierTracker::Clear() {
     if (block_mode) {
+        if (g_stats_on) {
+            ++g_stats.clears;
+            g_stats.items_at_clear += items.size() - 1;
+            g_stats.large_at_clear += large.size();
+            g_stats.heads_at_clear += heads_used;
+        }
         if (++epoch == 0) {
             // Wrapped: no slot may still carry the new epoch.
             for (auto& head : heads) {

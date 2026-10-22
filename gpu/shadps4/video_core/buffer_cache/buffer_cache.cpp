@@ -1623,8 +1623,14 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             const char* env = std::getenv("BB_ASYNC_SIDE_DOWNLOAD");
             return env && env[0] == '1';
         }();
+        static const bool ordered = [] {
+            const char* env = std::getenv("BB_ORDERED_FAULTS");
+            return !(env && env[0] == '0');
+        }();
         if (assume_locks) {
             resolve();
+        } else if (!async_side && ordered) {
+            liverpool->SendOrderedCommand(std::move(resolve));
         } else if (!async_side) {
             liverpool->SendCommand<true>(std::move(resolve));
         } else {

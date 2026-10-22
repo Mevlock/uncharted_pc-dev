@@ -168,6 +168,25 @@ public:
         }
     }
 
+    /// bbport: like SendCommand<true>, for work that may run in order with the draws on the
+    /// draw recording thread (guest write faults into GPU data, BufferCache::InvalidateMemory):
+    /// the command processor hands it over instead of waiting for that thread to run dry first
+    /// (~500 times a second in U3's Cartagena square, ~7% of the command processor).
+    /// BB_ORDERED_FAULTS=0: SendCommand<true>.
+    void SendOrderedCommand(auto&& func) {
+        std::binary_semaphore sem{0};
+        {
+            std::scoped_lock lk{submit_mutex};
+            ordered_queue.emplace([&sem, &func] {
+                func();
+                sem.release();
+            });
+            ++num_commands;
+            submit_cv.notify_one();
+        }
+        sem.acquire();
+    }
+
     void ReserveCopyBufferSpace() {
         GpuQueue& gfx_queue = mapped_queues[GfxQueueId];
         std::scoped_lock lk(gfx_queue.m_access);
@@ -300,6 +319,7 @@ private:
     std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
+    std::queue<Common::UniqueFunction<void>> ordered_queue{}; ///< SendOrderedCommand
     static inline thread_local bool on_processor_thread = false;
     std::thread::id gpu_id;
 #if defined(__linux__) || defined(_WIN32)
