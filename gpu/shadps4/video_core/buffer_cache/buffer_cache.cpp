@@ -784,6 +784,42 @@ struct BufferCache::Landing {
     std::vector<u8> before;
 };
 
+// bbport: a shared page's guest and GPU bytes are told apart by comparing with the guest's
+// bytes at the handover, and a rewritten value can match them in some bytes: merged byte by
+// byte, a pointer or T# came out half the guest's, half the GPU's (U3 chapter 2, leaving the
+// museum: texture addresses with a stray top byte, then a crash). They are not mixed within
+// an aligned 32-byte block (a T#; V#s, pointers and matrix rows fit too): a block with any
+// byte changed is the guest's. Calls f(offset, bytes) for each run of blocks whose state is
+// `changed`.
+template <typename F>
+static void ForEachSharedBlockRun(VAddr base, const u8* now, const u8* before, u64 size,
+                                  bool changed, F&& f) {
+    static constexpr u64 Block = 32;
+    const auto block_end = [&](u64 at) {
+        return std::min<u64>(size, Common::AlignUp(base + at + 1, Block) - base);
+    };
+    const auto differs = [&](u64 at, u64 end) {
+        return std::memcmp(now + at, before + at, end - at) != 0;
+    };
+    for (u64 at = 0; at < size;) {
+        const u64 end = block_end(at);
+        if (differs(at, end) != changed) {
+            at = end;
+            continue;
+        }
+        u64 run_end = end;
+        while (run_end < size) {
+            const u64 next = block_end(run_end);
+            if (differs(run_end, next) != changed) {
+                break;
+            }
+            run_end = next;
+        }
+        f(at, run_end - at);
+        at = run_end;
+    }
+}
+
 static bool SharedWritesEnabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_SHARED_WRITES");
@@ -1088,20 +1124,10 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
             const u8* before = landing.before.data() + landing.copies[i].dstOffset;
             now.resize(size);
             memory->CopySparseMemory(target, now.data(), size);
-            bool guest_kept = false;
-            for (u64 at = 0; at < size;) {
-                if (now[at] != before[at]) {
-                    guest_kept = true;
-                    ++at;
-                    continue;
-                }
-                u64 run = at + 1;
-                while (run < size && now[run] == before[run]) {
-                    ++run;
-                }
-                memory->TryWriteBacking(reinterpret_cast<void*>(target + at), gpu + at, run - at);
-                at = run;
-            }
+            const bool guest_kept = std::memcmp(now.data(), before, size) != 0;
+            ForEachSharedBlockRun(target, now.data(), before, size, false, [&](u64 at, u64 bytes) {
+                memory->TryWriteBacking(reinterpret_cast<void*>(target + at), gpu + at, bytes);
+            });
             done.ranges.push_back({target, target + size, guest_kept});
         }
         std::scoped_lock lk{shared_landed_mutex};
@@ -2444,18 +2470,8 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
                     now.resize(to - from);
                     memory->CopySparseMemory(from, now.data(), to - from);
                     const u8* before = it->second.data() + (from - it->first);
-                    for (u64 at = 0; at < to - from;) {
-                        if (now[at] == before[at]) {
-                            ++at;
-                            continue;
-                        }
-                        u64 run = at + 1;
-                        while (run < to - from && now[run] != before[run]) {
-                            ++run;
-                        }
-                        add(from + at, run - at);
-                        at = run;
-                    }
+                    ForEachSharedBlockRun(from, now.data(), before, to - from, true,
+                                          [&](u64 at, u64 bytes) { add(from + at, bytes); });
                 }
             });
             return;
