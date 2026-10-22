@@ -55,6 +55,9 @@ void bbgpu_trophy_notify(int grade, const char *game, const char *name, const vo
 void bbgpu_note_aiming(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
+/* Set by the host before bbgpu_init: prints every thread's stack (the GPU stall report calls it
+ * once, so a deadlock between the port's threads shows where each one waits). */
+extern void (*bbgpu_thread_stack_dump)(const char *reason);
 #ifdef __cplusplus
 }
 #endif

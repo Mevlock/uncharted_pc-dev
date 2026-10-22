@@ -93,6 +93,7 @@ struct GpuBusy {
 std::mutex Scheduler::submit_mutex;
 
 extern void (*g_gpu_stall_report)();
+extern "C" void (*bbgpu_thread_stack_dump)(const char* reason); // bbgpu.cpp
 bool (*g_draw_pipe_busy)() = nullptr;
 /// bbport: runs the draws handed to the recording thread so far (set by the rasterizer).
 void (*g_drain_draw_pipe)() = nullptr;
@@ -137,6 +138,11 @@ void Scheduler::ReportStall() {
         std::printf("\n");
     }
     std::fflush(stdout);
+    // bbport: a tick nobody submits means the port's threads wait for each other: their stacks
+    // name the cycle (once a session; bbgpu_thread_stack_dump, set by the host).
+    if (bbgpu_thread_stack_dump) {
+        bbgpu_thread_stack_dump("GPU stall");
+    }
 }
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)

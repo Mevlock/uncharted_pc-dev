@@ -20,6 +20,7 @@ uint64_t runtime_guest_tsc(void);
 #endif
 #ifdef _WIN32
 #include <windows.h>
+#include <tlhelp32.h>
 #else
 #include <sys/mman.h>
 #include <malloc.h>
@@ -219,6 +220,96 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
         return;
     }
     snprintf(out,size,"%p",(void *)address);
+}
+/* Every thread's stack into the log, once a session: called when the GPU stall report fires (a
+ * wait for a tick nobody submits is a deadlock between the port's threads; a player's log then
+ * shows which threads wait where). Each thread is suspended only while its registers and frames
+ * are collected, without allocating or printing (it may hold the heap or stdout lock); frames
+ * with unwind data are unwound by RtlVirtualUnwind, guest code by its frame-pointer chain. */
+enum { DUMP_THREADS=192, DUMP_FRAMES=40 };
+typedef struct { DWORD tid; char name[64]; int frames; DWORD64 pc[DUMP_FRAMES]; } ThreadStack;
+static int dump_readable(DWORD64 address, size_t size) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!address || !VirtualQuery((const void *)(uintptr_t)address,&mbi,sizeof(mbi))) return 0;
+    if (mbi.State!=MEM_COMMIT || (mbi.Protect&(PAGE_NOACCESS|PAGE_GUARD))) return 0;
+    return address+size<=(DWORD64)(uintptr_t)mbi.BaseAddress+mbi.RegionSize;
+}
+static void dump_walk(CONTEXT c, ThreadStack *t) {
+    t->frames=0;
+    while (t->frames<DUMP_FRAMES && c.Rip) {
+        t->pc[t->frames++]=c.Rip;
+        const int guest=image && c.Rip-(DWORD64)(uintptr_t)image<0x20000000;
+        DWORD64 base=0;
+        PRUNTIME_FUNCTION function=guest ? NULL : RtlLookupFunctionEntry(c.Rip,&base,NULL);
+        if (function) {
+            void *handler_data; DWORD64 frame;
+            RtlVirtualUnwind(UNW_FLAG_NHANDLER,base,c.Rip,function,&c,&handler_data,&frame,NULL);
+        } else if (guest) {
+            if (!dump_readable(c.Rbp,16)) break;
+            const DWORD64 *fp=(const DWORD64 *)(uintptr_t)c.Rbp;
+            if (fp[0]<=c.Rbp) { if (t->frames<DUMP_FRAMES) t->pc[t->frames++]=fp[1]; break; }
+            c.Rsp=c.Rbp+16; c.Rip=fp[1]; c.Rbp=fp[0];
+        } else {                                       /* a leaf function: return address at rsp */
+            if (!dump_readable(c.Rsp,8)) break;
+            c.Rip=*(const DWORD64 *)(uintptr_t)c.Rsp; c.Rsp+=8;
+        }
+    }
+}
+void runtime_dump_thread_stacks(const char *reason) {
+    static LONG done;
+    if (InterlockedExchange(&done,1)) return;
+    static ThreadStack stacks[DUMP_THREADS];
+    int count=0;
+    typedef HRESULT (WINAPI *GetDescription)(HANDLE,PWSTR *);
+    const GetDescription describe=(GetDescription)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"),"GetThreadDescription");
+    const DWORD self=GetCurrentThreadId(), pid=GetCurrentProcessId();
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0);
+    THREADENTRY32 entry={.dwSize=sizeof(entry)};
+    for (BOOL ok=Thread32First(snapshot,&entry); ok && count<DUMP_THREADS; ok=Thread32Next(snapshot,&entry)) {
+        if (entry.th32OwnerProcessID!=pid) continue;
+        ThreadStack *t=&stacks[count];
+        t->tid=entry.th32ThreadID; t->name[0]=0; t->frames=0;
+        if (t->tid==self) {
+            CONTEXT c; RtlCaptureContext(&c);
+            dump_walk(c,t);
+            snprintf(t->name,sizeof(t->name),"(reporting thread)");
+            ++count;
+            continue;
+        }
+        HANDLE thread=OpenThread(THREAD_SUSPEND_RESUME|THREAD_GET_CONTEXT|THREAD_QUERY_LIMITED_INFORMATION,FALSE,t->tid);
+        if (!thread) continue;
+        PWSTR description=NULL;                        /* before suspending: it allocates */
+        if (describe && SUCCEEDED(describe(thread,&description)) && description) {
+            WideCharToMultiByte(CP_UTF8,0,description,-1,t->name,sizeof(t->name),NULL,NULL);
+            LocalFree(description);
+        }
+        if (SuspendThread(thread)!=(DWORD)-1) {
+            CONTEXT c={.ContextFlags=CONTEXT_FULL};
+            if (GetThreadContext(thread,&c)) dump_walk(c,t);
+            ResumeThread(thread);
+        }
+        CloseHandle(thread);
+        ++count;
+    }
+    CloseHandle(snapshot);
+    printf("Thread stacks (%s): %d threads\n",reason,count);
+    for (int i=0;i<count;++i) {
+        const ThreadStack *t=&stacks[i];
+        printf("  thread %lu '%s':",t->tid,t->name);
+        for (int f=0;f<t->frames;++f) {
+            char where[MAX_PATH+64];
+            describe_address(where,sizeof(where),(uintptr_t)t->pc[f]);
+            printf(" %s%s",where,f+1<t->frames ? " <" : "");
+        }
+        printf("\n");
+    }
+    fflush(stdout);
+}
+static DWORD WINAPI stack_dump_after(void *unused) {
+    (void)unused;
+    Sleep((DWORD)(strtoul(getenv("BB_STACK_DUMP_AFTER"),NULL,10)*1000u));
+    runtime_dump_thread_stacks("BB_STACK_DUMP_AFTER");
+    return 0;
 }
 static int fatal_reported;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
@@ -1295,6 +1386,11 @@ int main(int argc, char **argv) {
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
         BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
+#ifdef _WIN32
+        bbgpu_thread_stack_dump=runtime_dump_thread_stacks;
+        /* BB_STACK_DUMP_AFTER=<seconds> (diagnosis): the thread stacks once, that long after start. */
+        if (getenv("BB_STACK_DUMP_AFTER")) CloseHandle(CreateThread(NULL,0,stack_dump_after,NULL,0,NULL));
+#endif
         if (bbgpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,bbgpu_symbol_count());
     }

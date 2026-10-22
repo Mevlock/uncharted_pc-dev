@@ -344,6 +344,8 @@ extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
     return handled ? 1 : 0;
 }
 
+extern "C" void (*bbgpu_thread_stack_dump)(const char* reason) = nullptr;
+
 extern "C" unsigned bbgpu_symbol_count(void) {
     return unsigned(g_symbols.size());
 }
