@@ -84,7 +84,8 @@ void TextureCache::ProcessDownloadImages() {
 }
 
 /// bbport (spacepepperoni's Linux fork, upstream PR #381): BB_READBACK_SMALL (default 1; 0 off):
-/// render targets of at most 8x8 pixels go back to guest memory after the GPU writes them.
+/// render targets and storage images of at most 8x8 pixels go back to guest memory after the
+/// GPU writes them.
 /// Uncharted 2 reduces the scene depth to a 1x1 focus distance the CPU reads for the turret's
 /// depth of field; without it the focus stays stale and the whole picture blurs.
 static bool ReadbackSmallTargets() {
@@ -982,6 +983,12 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
+        } else if (ReadbackSmallTargets() && image.info.size.width <= 8 &&
+                   image.info.size.height <= 8 && image.info.guest_address != 0) {
+            // Written by a compute shader rather than rendered (after Umar-Qayyum-dev's tiny
+            // read-back): the CPU reads such results the same way.
+            std::unique_lock lk{download_images_mutex};
+            small_download_images.emplace(image_id);
         }
     }
     if (refresh) {
