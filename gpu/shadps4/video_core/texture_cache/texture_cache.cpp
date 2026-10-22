@@ -278,6 +278,11 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
         PadDepthLayers(new_info);
+        HtileLog("depth overlap %#llx: %ux%u layers %u remade as %ux%u layers %u (binding %d)\n",
+                 static_cast<unsigned long long>(cache_image.info.guest_address),
+                 cache_image.info.size.width, cache_image.info.size.height,
+                 cache_image.info.resources.layers, new_info.size.width, new_info.size.height,
+                 new_info.resources.layers, static_cast<int>(binding));
         const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(new_image_id);
 
@@ -287,7 +292,22 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         new_image.flags &= ~ImageFlagBits::Dirty;
         // When creating a depth buffer through overlap resolution don't clear it on first use.
         new_image.info.meta_info.htile_clear_mask = 0;
-        runtime.CopyColorAndDepth(&cache_image, &new_image);
+        // bbport: the new image takes over the old one's HTILE record as it stands, so a fast
+        // clear the game made before is still applied to the slices not bound since. Freeing the
+        // old image erased it and the new one started with no slice cleared: U3 grows its point
+        // light shadow array a layer at a time (512x512 x 48 above 1080p), so the cubes in layers
+        // 12 and up kept a depth of 0 and shadowed everything (the hand torch lit a trapezoid).
+        Image& old_image = slot_images[cache_image_id];
+        const VAddr old_htile = old_image.info.meta_info.htile_addr;
+        if (old_htile &&
+            (!new_image.info.meta_info.htile_addr || new_image.info.meta_info.htile_addr == old_htile)) {
+            new_image.info.meta_info.htile_addr = old_htile;
+            old_image.info.meta_info.htile_addr = 0;
+            if (const auto it = surface_metas.find(old_htile); it != surface_metas.end()) {
+                it.value().owner = new_image_id;
+            }
+        }
+        runtime.CopyColorAndDepth(&old_image, &new_image);
 
         // Free the cache image.
         FreeImage(cache_image_id);
@@ -703,6 +723,11 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             image_id = {};
         } else if (image_resolved.info.resources < info.resources) {
             // The image was clearly picked up wrong.
+            HtileLog("overlap resolve failed at %#llx: %ux%u layers %u freed for %ux%u layers %u\n",
+                     static_cast<unsigned long long>(image_resolved.info.guest_address),
+                     image_resolved.info.size.width, image_resolved.info.size.height,
+                     image_resolved.info.resources.layers, info.size.width, info.size.height,
+                     info.resources.layers);
             FreeImage(image_id);
             image_id = {};
             LOG_WARNING(Render_Vulkan, "Image overlap resolve failed");
@@ -717,6 +742,12 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(image_id);
         NoteImageCreate(new_info, desc.type);
+        if (new_info.props.is_depth && new_info.resources.layers > 1) {
+            HtileLog("depth image %#llx %ux%u layers %u made (binding %d, %zu overlapping)\n",
+                     static_cast<unsigned long long>(new_info.guest_address), new_info.size.width,
+                     new_info.size.height, new_info.resources.layers, static_cast<int>(desc.type),
+                     image_ids.size());
+        }
     }
 
     Image& image = slot_images[image_id];
@@ -861,9 +892,17 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 
     // Register meta data for this depth buffer
     if (desc.info.meta_info.htile_addr) {
-        surface_metas.emplace(desc.info.meta_info.htile_addr,
-                              MetaDataInfo{.type = MetaType::HTile,
-                                           .clear_mask = image.info.meta_info.htile_clear_mask});
+        const auto [meta, added] = surface_metas.emplace(
+            desc.info.meta_info.htile_addr,
+            MetaDataInfo{.type = MetaType::HTile, .clear_mask = image.info.meta_info.htile_clear_mask});
+        meta.value().owner = image_id;
+        if (added && image.info.resources.layers > 1) {
+            HtileLog("htile %#llx registered for %#llx %ux%u layers %u, clear mask %#x\n",
+                     static_cast<unsigned long long>(desc.info.meta_info.htile_addr),
+                     static_cast<unsigned long long>(image.info.guest_address), image.info.size.width,
+                     image.info.size.height, image.info.resources.layers,
+                     static_cast<u32>(image.info.meta_info.htile_clear_mask));
+        }
         image.info.meta_info.htile_addr = desc.info.meta_info.htile_addr;
     }
 
@@ -1427,7 +1466,10 @@ void TextureCache::DeleteImage(ImageId image_id) {
         surface_metas.erase(meta_info.fmask_addr);
     }
     if (meta_info.htile_addr) {
-        surface_metas.erase(meta_info.htile_addr);
+        const auto it = surface_metas.find(meta_info.htile_addr);
+        if (it != surface_metas.end() && (!it->second.owner || it->second.owner == image_id)) {
+            surface_metas.erase(it);
+        }
     }
 
     {

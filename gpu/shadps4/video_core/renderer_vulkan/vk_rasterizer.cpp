@@ -4,6 +4,7 @@
 #include <map>
 #include <deque>
 #include <set>
+#include <tuple>
 #include <cmath>
 #include <ctime>
 #include <filesystem>
@@ -5129,6 +5130,19 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
              regs.depth_control.depth_write_enable) ||
             texture_cache.IsMetaCleared(htile_address, slice);
         const bool is_stencil_clear = regs.depth_render_control.stencil_clear_enable;
+        if (image.info.resources.layers > 1 && VideoCore::TextureCache::HtileLogOn()) {
+            // Each (surface, slice, clear) combination once.
+            static std::set<std::tuple<VAddr, u32, bool, u32>> seen;
+            if (seen.emplace(image.info.guest_address, slice, is_depth_clear, image.info.size.width).second) {
+                VideoCore::TextureCache::HtileLog(
+                    "depth bind %#llx %ux%u layers %u slice %u htile %#llx: %s (meta %s)\n",
+                    static_cast<unsigned long long>(image.info.guest_address), image.info.size.width,
+                    image.info.size.height, image.info.resources.layers, slice,
+                    static_cast<unsigned long long>(htile_address),
+                    is_depth_clear ? "cleared" : "kept",
+                    texture_cache.IsMeta(htile_address) ? "registered" : "none");
+            }
+        }
         texture_cache.TouchMeta(htile_address, slice, false);
         ASSERT(desc.view_info.range.extent.levels == 1 && !image.binding.needs_rebind);
 
