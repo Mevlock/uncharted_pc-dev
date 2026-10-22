@@ -902,6 +902,34 @@ bool BufferCache::ShareGpuPage(VAddr page, u64 length) {
     return true;
 }
 
+/// bbport diagnosis (BB_PERF_DIAG=1): landed shared pages, those the GPU wrote again after the
+/// landing's work, and of those the ones marked CPU-modified (an upload takes the whole page
+/// from guest memory, over the GPU's newer bytes), every 5 s. nullopt: a page not written again.
+static void NoteSharedRewrite(std::optional<bool> cpu_modified) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_PERF_DIAG");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static u64 landed = 0, rewritten = 0, at_risk = 0;
+    static auto window = std::chrono::steady_clock::now();
+    ++landed;
+    rewritten += cpu_modified.has_value();
+    at_risk += cpu_modified.value_or(false);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) {
+        return;
+    }
+    window = now;
+    std::printf("Shared landings: %llu pages in 5 s, %llu written again by the GPU, %llu of them "
+                "CPU-modified\n",
+                static_cast<unsigned long long>(landed), static_cast<unsigned long long>(rewritten),
+                static_cast<unsigned long long>(at_risk));
+    landed = rewritten = at_risk = 0;
+}
+
 void BufferCache::DrainSharedLandings() {
     if (!shared_landed_pending.load(std::memory_order_acquire)) {
         return;
@@ -916,18 +944,24 @@ void BufferCache::DrainSharedLandings() {
         for (const auto& [start, end, guest_kept] : done.ranges) {
             shared_gpu_ranges.Subtract(start, end - start);
             shared_before.erase(start);
-            // Guest bytes kept over the GPU's: an upload since the handover left them out.
-            if (guest_kept) {
-                memory_tracker->MarkRegionAsCpuModified(start, end - start);
-            }
             for (VAddr page = Common::AlignDown(start, TRACKER_BYTES_PER_PAGE); page < end;
                  page += TRACKER_BYTES_PER_PAGE) {
                 // The GPU wrote the page again after the landing's work: its data stays the GPU's.
+                // Not marked CPU-modified either: uploads take whole pages, and guest memory
+                // holds the landing's older GPU bytes (the guest's own writes there reached the
+                // GPU through the shared uploads, or fault again).
                 if (memory_tracker->LatestGpuWriteTick(page, TRACKER_BYTES_PER_PAGE) > done.tick) {
+                    NoteSharedRewrite(
+                        memory_tracker->IsRegionCpuModified(page, TRACKER_BYTES_PER_PAGE));
                     continue;
                 }
+                NoteSharedRewrite(std::nullopt);
                 const VAddr lo = std::max(start, page);
                 const VAddr hi = std::min<VAddr>(end, page + TRACKER_BYTES_PER_PAGE);
+                // Guest bytes kept over the GPU's: an upload since the handover left them out.
+                if (guest_kept) {
+                    memory_tracker->MarkRegionAsCpuModified(lo, hi - lo);
+                }
                 gpu_modified_ranges.Subtract(lo, hi - lo);
                 if (!gpu_modified_ranges.Intersects(page, TRACKER_BYTES_PER_PAGE)) {
                     memory_tracker->UnmarkRegionAsGpuModified(page, TRACKER_BYTES_PER_PAGE);
