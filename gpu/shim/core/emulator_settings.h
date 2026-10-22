@@ -3,6 +3,8 @@
 #pragma once
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include "common/types.h"
@@ -29,7 +31,29 @@ public:
     int GetRcasAttenuation() { static const auto value = int(Number("BB_RCAS_ATTENUATION", 250)); return value; }
     // bbport: Relaxed by default: without readbacks FaceGen reads stale GPU-written vertices
     // (vertex explosions); in Hunter's Nightmare it costs no measurable frame rate.
-    u32 GetReadbacksMode() { static const auto value = u32(Number("BB_READBACKS", GpuReadbacksMode::Relaxed)); return value; }
+    // BB_READBACKS_DELAY=<seconds> with BB_READBACKS=2 (diagnosis): Relaxed until that many
+    // seconds after the first query, then Precise. Precise from the start froze Uncharted 2 at
+    // launch; switched on in gameplay, the CPU's reads of GPU results are served exactly (pages
+    // the GPU rewrites become read-protected at their next GPU write).
+    u32 GetReadbacksMode() {
+        static const auto value = u32(Number("BB_READBACKS", GpuReadbacksMode::Relaxed));
+        static const long delay = Number("BB_READBACKS_DELAY", 0);
+        if (value != GpuReadbacksMode::Precise || delay <= 0) {
+            return value;
+        }
+        static const auto start = std::chrono::steady_clock::now();
+        static std::atomic<bool> switched{false};
+        if (switched.load(std::memory_order_relaxed)) {
+            return GpuReadbacksMode::Precise;
+        }
+        if (std::chrono::steady_clock::now() - start < std::chrono::seconds(delay)) {
+            return GpuReadbacksMode::Relaxed;
+        }
+        if (!switched.exchange(true)) {
+            std::printf("Readbacks: precise from now on (BB_READBACKS_DELAY=%ld)\n", delay);
+        }
+        return GpuReadbacksMode::Precise;
+    }
     // bbport: BB_VBLANK_HZ=0 (uncapped presets): vblank runs at 480 Hz so a finished frame is
     // shown within ~2 ms instead of waiting for the next display-rate vblank (below the display
     // rate frames alternated 10/20 ms at 100 Hz: judder), and GetFrameLimit() caps the rate at

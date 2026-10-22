@@ -73,6 +73,12 @@ screenshots). They reproduce the empty hands.
   preparation off; `BB_SCALAR_COPY64_DEFER=0`; `BB_TIGHT_WRITES=0`; ordered faults, pipelined copy
   and shared writes off.
 
+- **Exact GPU reads can't be tested yet:** `BB_READBACKS=2` freezes U2 at launch and also when
+  switched on in gameplay (`BB_READBACKS_DELAY=60`, new), most likely a read waiting for GPU
+  work that waits for the reading thread. Both ports share the shadPS4 video core, so a stale
+  GPU result read by the game is still possible on both; it needs exact reads that don't
+  deadlock (a stack dump at the freeze would show which read waits on what).
+
 ## Remaining theory
 
 Two unrelated ports show the same thing, so the cause is most likely in the save, or in the game
