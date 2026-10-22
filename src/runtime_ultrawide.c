@@ -308,7 +308,7 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     uint64_t pad = size;
     while (pad > 0 && code[pad - 1] == 0) --pad;
     const uint64_t cave = (pad + 0x100 + 0xff) & ~(uint64_t)0xff;
-    if (cave + 0x20 + (uint64_t)ns * 0x20 + 0x80 > size) {
+    if (cave + 0x20 + (uint64_t)ns * 0x40 + 0x80 > size) {
         printf("Ultrawide: no room at the end of the game code, not applied\n");
         return;
     }
@@ -343,13 +343,45 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
             printf("Ultrawide: camera read %d at %#llx%s\n", s, (unsigned long long)sites[s].at,
                    s >= skip_first && s <= skip_last ? " (skipped)" : "");
     }
+    /* Square cameras keep the game's projection: every camera goes through the same projection
+     * code (render-camera.h), and the point light shadow cubes (inverse aspect 1), scaled like
+     * the screen, were drawn with another projection than the lighting reads them with (U3's
+     * hand torch lit one cube face, a trapezoid, above 1080p, where the inverse aspect and the
+     * zoom are scaled differently). A camera whose inverse aspect (the field, F) is 1 within
+     * 0.5% is left alone; the screen's views (inverse aspect 9/16 or the render buffer's) are
+     * widened as before. The check keeps the flags (pushfq/popfq): some reads sit between a
+     * compare and its jump. */
+    const float square_lo = 0.995f, square_hi = 1.005f;
+    uint32_t lo_bits, hi_bits;
+    memcpy(&lo_bits, &square_lo, 4);
+    memcpy(&hi_bits, &square_hi, 4);
+    const int screen_only = !getenv("BB_ULTRAWIDE_ALL_CAMERAS");
     for (int s = 0; s < ns; ++s) {
         if (s >= skip_first && s <= skip_last) continue;
-        const uint64_t at = sites[s].at, stub = cave + 0x20 + (uint64_t)s * 0x20;
-        const uint8_t len = sites[s].op.len, reg = sites[s].op.reg;
+        const uint64_t at = sites[s].at, stub = cave + 0x20 + (uint64_t)s * 0x40;
+        const uint8_t len = sites[s].op.len, reg = sites[s].op.reg, base = sites[s].op.base;
         uint8_t *c = code + stub;
         memcpy(c, code + at, len);
         c += len;
+        uint8_t *apply_jump = NULL, *skip_jump = NULL;
+        if (screen_only) {
+            *c++ = 0x9c; /* pushfq */
+            for (int b = 0; b < 2; ++b) {
+                /* cmp dword [base + field], imm32: below 0.995 -> jb apply; up to 1.005 -> jbe
+                 * skip (positive floats order like their bits) */
+                if (base >= 8) *c++ = 0x41;
+                *c++ = 0x81;
+                *c++ = (uint8_t)(0xb8 | (base & 7));
+                memcpy(c, &field, 4);
+                memcpy(c + 4, b ? &hi_bits : &lo_bits, 4);
+                c += 8;
+                c[0] = b ? 0x76 : 0x72;
+                *(b ? &skip_jump : &apply_jump) = c + 1;
+                c += 2;
+            }
+            *apply_jump = (uint8_t)(c - (apply_jump + 1));
+            *c++ = 0x9d; /* apply: popfq */
+        }
         const float *constant =
             constants + ((uint32_t)sites[s].op.disp == field ? 0 : 2) + (sites[s].op.op == 0x5e ? 1 : 0);
         /* vmulss xmm(reg), xmm(reg), [rip + constant] */
@@ -363,6 +395,14 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
         c[0] = 0xe9; /* jmp back */
         rel = (int32_t)((int64_t)(at + len) - (int64_t)(c - code + 5));
         memcpy(c + 1, &rel, 4);
+        if (screen_only) {
+            c += 5;
+            *skip_jump = (uint8_t)(c - (skip_jump + 1));
+            *c++ = 0x9d; /* skip: popfq; jmp back */
+            c[0] = 0xe9;
+            rel = (int32_t)((int64_t)(at + len) - (int64_t)(c - code + 5));
+            memcpy(c + 1, &rel, 4);
+        }
         uint8_t *site = code + at;
         site[0] = 0xe9; /* jmp stub */
         rel = (int32_t)((int64_t)stub - (int64_t)(at + 5));

@@ -4,6 +4,8 @@
 #pragma once
 
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include "bbport_toggles.h"
 
@@ -283,9 +285,45 @@ public:
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             it.value().clear_mask = u32(-1);
+            if (HtileLogOn()) {
+                static std::unordered_set<VAddr> seen_matched;
+                if (seen_matched.insert(address).second) {
+                    HtileLog("meta clear %#llx: matched\n", static_cast<unsigned long long>(address));
+                }
+            }
             return true;
         }
+        if (HtileLogOn()) {
+            // The registered metadata surface just below the address, if any (a clear of part of one).
+            VAddr below = 0;
+            for (const auto& [meta_address, meta] : surface_metas) {
+                if (meta_address < address && meta_address > below) {
+                    below = meta_address;
+                }
+            }
+            static std::unordered_set<VAddr> seen_missed;
+            if (below && address - below < 0x4000000 && seen_missed.insert(address).second) {
+                HtileLog("meta clear %#llx: not registered, %#llx bytes past the surface at %#llx\n",
+                         static_cast<unsigned long long>(address),
+                         static_cast<unsigned long long>(address - below),
+                         static_cast<unsigned long long>(below));
+            }
+        }
         return false;
+    }
+
+    /// bbport diagnosis: BB_HTILE_LOG=1 prints depth metadata clears and layered depth binds
+    /// (first 400 lines).
+    static bool HtileLogOn() {
+        static const bool on = std::getenv("BB_HTILE_LOG") != nullptr;
+        return on;
+    }
+    template <typename... Args>
+    static void HtileLog(const char* format, Args... args) {
+        static std::atomic<int> lines{0};
+        if (HtileLogOn() && lines.fetch_add(1) < 3000) {
+            std::printf(format, args...);
+        }
     }
 
     /// Updates the state of a slice of the specified metadata surface.
@@ -460,6 +498,9 @@ private:
     struct MetaDataInfo {
         MetaType type;
         s32 clear_mask = -1;
+        /// bbport: the depth image that last bound this HTILE surface; only it erases the record
+        /// when deleted (an older image over the same memory doesn't).
+        ImageId owner{};
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
     /// bbport: most layers seen for a depth array at an address (PadDepthLayers).
