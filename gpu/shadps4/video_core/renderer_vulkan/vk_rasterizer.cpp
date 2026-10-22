@@ -4406,7 +4406,10 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
 // memory and crashed (U3 chapter 2, leaving the museum: a 2.7 GB image at 0x117802c000).
 bool Rasterizer::ImageInPlausibleMemory(const VideoCore::ImageInfo& info) {
     static constexpr u64 MaxImageBytes = 1_GB;
-    if (info.guest_size <= MaxImageBytes && IsMapped(info.guest_address, 4096)) {
+    // The page of its first byte (4 KiB from the start could run past the end of a mapping that
+    // holds a small image).
+    if (info.guest_size <= MaxImageBytes &&
+        IsMapped(Common::AlignDown(info.guest_address, 4_KB), 4_KB)) {
         return true;
     }
     static std::atomic<u32> reported{0};
