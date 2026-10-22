@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <map>
+
 #include "bbport_copy.h"
 
 #include <atomic>
@@ -268,12 +270,15 @@ private:
     /// for that work (U3's Cartagena square: 86 -> 97 FPS, the GPU thread waited ~3.5 ms for
     /// each of ~50 such writes a second); the GPU bytes land in guest memory once it has
     /// finished (a landing, so the labels written meanwhile wait for them), except where the
-    /// guest has rewritten them since, and uploads leave them out until then. A write on GPU
-    /// bytes already on their way back goes ahead too. False: the caller reads back as before.
+    /// guest has rewritten them since, and uploads take only the bytes the guest has changed
+    /// there until then. A write onto GPU bytes still being written goes ahead the same way
+    /// (once a frame in the square, 3.5 ms each). False: the caller reads back as before.
     bool ShareGpuPage(VAddr page, u64 length);
     /// GPU side: the shared pages whose GPU bytes have landed stop being GPU data.
     void DrainSharedLandings();
     RangeSet shared_gpu_ranges; ///< GPU bytes of shared pages not landed yet
+    /// The guest's bytes in each piece of shared_gpu_ranges when its page was shared (by start).
+    std::map<VAddr, std::vector<u8>> shared_before;
     struct SharedLanded {
         struct Range {
             VAddr start, end;

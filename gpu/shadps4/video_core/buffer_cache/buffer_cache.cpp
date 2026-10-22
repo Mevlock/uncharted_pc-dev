@@ -854,6 +854,8 @@ bool BufferCache::ShareGpuPage(VAddr page, u64 length) {
         landing_registered.store(landing->seq, std::memory_order_release);
         for (size_t i = 0; i < landing->copies.size(); ++i) {
             shared_gpu_ranges.Add(landing->targets[i], landing->copies[i].size);
+            const u8* before = landing->before.data() + landing->copies[i].dstOffset;
+            shared_before[landing->targets[i]].assign(before, before + landing->copies[i].size);
         }
         landing_queue.push_back(std::move(landing));
         if (!landing_thread.joinable()) {
@@ -877,6 +879,7 @@ void BufferCache::DrainSharedLandings() {
     for (const auto& done : landed) {
         for (const auto& [start, end, guest_kept] : done.ranges) {
             shared_gpu_ranges.Subtract(start, end - start);
+            shared_before.erase(start);
             // Guest bytes kept over the GPU's: an upload since the handover left them out.
             if (guest_kept) {
                 memory_tracker->MarkRegionAsCpuModified(start, end - start);
@@ -1576,13 +1579,13 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             const bool work_done =
                 scheduler.IsFree(memory_tracker->LatestGpuWriteTick(page, length));
             DrainSharedLandings();
-            // Shared: next to GPU bytes still being written, or on GPU bytes already on their
-            // way back (the landing keeps what the guest writes there).
+            // Shared: GPU bytes still being written, or on GPU bytes already on their way back
+            // (the landing keeps what the guest writes there and uploads take it).
             bool on_pending_only = true;
             gpu_modified_ranges.ForEachInRange(device_addr, size, [&](VAddr start, VAddr end) {
                 on_pending_only = on_pending_only && shared_gpu_ranges.Contains(start, end - start);
             });
-            if (on_pending_only && (on_gpu_bytes || !work_done) && ShareGpuPage(page, length)) {
+            if ((!work_done || (on_gpu_bytes && on_pending_only)) && ShareGpuPage(page, length)) {
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
                 NoteFaultSplit(false, false, std::chrono::steady_clock::now() - side_start, true);
                 return;
@@ -2410,11 +2413,44 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         if (ClobberCheckEnabled() && gpu_modified_ranges.Intersects(addr, size)) {
             ReportClobber("upload", addr, size, device_addr, size, is_written);
         }
-        // A shared page's GPU bytes are not uploaded before they have landed (ShareGpuPage).
+        // A shared page's GPU bytes are not uploaded before they have landed (ShareGpuPage),
+        // except those the guest has changed since: the GPU gets them now, as it got the whole
+        // page after a read-back.
         if (shared_gpu_ranges.Intersects(addr, size)) {
-            shared_gpu_ranges.ForEachNotInRange(addr, size, [&](VAddr lo, u64 part) {
+            const auto add = [&](VAddr lo, u64 part) {
                 copies.emplace_back(total_size_bytes, lo, part);
                 total_size_bytes += part;
+            };
+            shared_gpu_ranges.ForEachNotInRange(addr, size, add);
+            std::vector<u8> now;
+            shared_gpu_ranges.ForEachInRange(addr, size, [&](VAddr lo, VAddr hi) {
+                auto it = shared_before.upper_bound(lo);
+                if (it != shared_before.begin()) {
+                    --it;
+                }
+                for (; it != shared_before.end() && it->first < hi; ++it) {
+                    const VAddr piece_end = it->first + it->second.size();
+                    const VAddr from = std::max(lo, it->first);
+                    const VAddr to = std::min<VAddr>(hi, piece_end);
+                    if (from >= to) {
+                        continue;
+                    }
+                    now.resize(to - from);
+                    memory->CopySparseMemory(from, now.data(), to - from);
+                    const u8* before = it->second.data() + (from - it->first);
+                    for (u64 at = 0; at < to - from;) {
+                        if (now[at] == before[at]) {
+                            ++at;
+                            continue;
+                        }
+                        u64 run = at + 1;
+                        while (run < to - from && now[run] != before[run]) {
+                            ++run;
+                        }
+                        add(from + at, run - at);
+                        at = run;
+                    }
+                }
             });
             return;
         }
