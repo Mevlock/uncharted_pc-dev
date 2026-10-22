@@ -212,10 +212,9 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
      * than 16:9. The inverse aspect is scaled back by c = buffer aspect / (16/9) on every frame,
      * so the view is the 16:9 one stretched over the buffer like the UI (the presenter shows
      * those frames at 16:9) before any widening. */
-    float c = 1.0f, buffer_aspect = 16.0f / 9.0f;
+    float c = 1.0f;
     unsigned render_w, render_h;
     if (render_resolution(code, size, image_end, &render_w, &render_h)) {
-        buffer_aspect = (float)render_w / (float)render_h;
         c = (float)render_w / (float)render_h / (16.0f / 9.0f);
         if (c < 1.0f) c = 1.0f; /* narrower buffers: not handled (letterboxed by the game?) */
     }
@@ -344,17 +343,18 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
             printf("Ultrawide: camera read %d at %#llx%s\n", s, (unsigned long long)sites[s].at,
                    s >= skip_first && s <= skip_last ? " (skipped)" : "");
     }
-    /* Only the views drawn to the screen are widened: every camera goes through the same
-     * projection code (render-camera.h), and the point light shadow cubes (aspect 1) or other
-     * offscreen cameras scaled like the screen were drawn with another projection than the
-     * lighting reads them with (U3's hand torch lit one cube face, a trapezoid, above 1080p).
-     * A camera counts as a screen view when its aspect (the field, F) is the render buffer's,
-     * within 0.5%. The check keeps the flags (pushfq/popfq): some reads sit between a compare
-     * and its jump. */
-    float aspect_lo = buffer_aspect * 0.995f, aspect_hi = buffer_aspect * 1.005f;
+    /* Square cameras keep the game's projection: every camera goes through the same projection
+     * code (render-camera.h), and the point light shadow cubes (inverse aspect 1), scaled like
+     * the screen, were drawn with another projection than the lighting reads them with (U3's
+     * hand torch lit one cube face, a trapezoid, above 1080p, where the inverse aspect and the
+     * zoom are scaled differently). A camera whose inverse aspect (the field, F) is 1 within
+     * 0.5% is left alone; the screen's views (inverse aspect 9/16 or the render buffer's) are
+     * widened as before. The check keeps the flags (pushfq/popfq): some reads sit between a
+     * compare and its jump. */
+    const float square_lo = 0.995f, square_hi = 1.005f;
     uint32_t lo_bits, hi_bits;
-    memcpy(&lo_bits, &aspect_lo, 4);
-    memcpy(&hi_bits, &aspect_hi, 4);
+    memcpy(&lo_bits, &square_lo, 4);
+    memcpy(&hi_bits, &square_hi, 4);
     const int screen_only = !getenv("BB_ULTRAWIDE_ALL_CAMERAS");
     for (int s = 0; s < ns; ++s) {
         if (s >= skip_first && s <= skip_last) continue;
@@ -363,22 +363,24 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
         uint8_t *c = code + stub;
         memcpy(c, code + at, len);
         c += len;
-        uint8_t *skip_jumps[2] = {NULL, NULL};
+        uint8_t *apply_jump = NULL, *skip_jump = NULL;
         if (screen_only) {
             *c++ = 0x9c; /* pushfq */
             for (int b = 0; b < 2; ++b) {
-                /* cmp dword [base + field], imm32; jb / ja skip */
+                /* cmp dword [base + field], imm32: below 0.995 -> jb apply; up to 1.005 -> jbe
+                 * skip (positive floats order like their bits) */
                 if (base >= 8) *c++ = 0x41;
                 *c++ = 0x81;
                 *c++ = (uint8_t)(0xb8 | (base & 7));
                 memcpy(c, &field, 4);
                 memcpy(c + 4, b ? &hi_bits : &lo_bits, 4);
                 c += 8;
-                c[0] = b ? 0x77 : 0x72;
-                skip_jumps[b] = c + 1;
+                c[0] = b ? 0x76 : 0x72;
+                *(b ? &skip_jump : &apply_jump) = c + 1;
                 c += 2;
             }
-            *c++ = 0x9d; /* popfq */
+            *apply_jump = (uint8_t)(c - (apply_jump + 1));
+            *c++ = 0x9d; /* apply: popfq */
         }
         const float *constant =
             constants + ((uint32_t)sites[s].op.disp == field ? 0 : 2) + (sites[s].op.op == 0x5e ? 1 : 0);
@@ -395,7 +397,7 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
         memcpy(c + 1, &rel, 4);
         if (screen_only) {
             c += 5;
-            for (int b = 0; b < 2; ++b) *skip_jumps[b] = (uint8_t)(c - (skip_jumps[b] + 1));
+            *skip_jump = (uint8_t)(c - (skip_jump + 1));
             *c++ = 0x9d; /* skip: popfq; jmp back */
             c[0] = 0xe9;
             rel = (int32_t)((int64_t)(at + len) - (int64_t)(c - code + 5));
