@@ -732,13 +732,27 @@ bool Rasterizer::SyncSrtReads(const Shader::SrtReadLog& log) {
     // Stale pointers in the tables log addresses outside guest memory: the range set check
     // below is safe for any address (the page tracker is not).
     u32 written = 0;
+    bool pending = false;
     for (u32 i = 0; i < count; ++i) {
         const auto& read = log.reads[i];
         if (read.address && buffer_cache.IsRangeGpuWritten(read.address, read.bytes)) {
             ++written;
         }
+        // A write still queued for the recording thread (a copy shader run there on the CPU
+        // writes guest memory): the walk waits for it.
+        pending = pending || (read.address && PendingWriteOverlaps(read.address, read.bytes));
     }
     if (!written) {
+        if (pending) {
+            DrainDrawPipe();
+            for (u32 i = 0; i < count; ++i) {
+                const auto& read = log.reads[i];
+                if (read.address && buffer_cache.IsRangeGpuWritten(read.address, read.bytes)) {
+                    buffer_cache.ReadMemory(read.address, read.bytes, false, true);
+                }
+            }
+            return true;
+        }
         return false;
     }
     static const bool sync = [] {
@@ -3033,8 +3047,19 @@ void Rasterizer::DispatchDirect() {
     if (!pipeline) {
         return;
     }
+    // bbport: the copy shaders run on the CPU (ExecuteShaderHLE) went to this thread after a
+    // drain, ~2000 times a second in U3's Cartagena square (17% of this thread waiting). They
+    // run in order on the recording thread now, like the other dispatches; their destination is
+    // a written binding, so it is a pending write until then: constant ring copies leave it
+    // alone and resource table walks reading it drain first (SyncSrtReads).
+    // BB_PIPELINED_COPY_HLE=0: here after a drain, as before.
+    static const bool pipelined_hle = [] {
+        const char* env = std::getenv("BB_PIPELINED_COPY_HLE");
+        return !(env && env[0] == '0');
+    }();
     if (pipelined &&
-        !IsGuestMemoryShaderHLE(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
+        (pipelined_hle ||
+         !IsGuestMemoryShaderHLE(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash))) {
         PostDraw(pipeline, nullptr, false, 0, &CsRegs());
         return;
     }
