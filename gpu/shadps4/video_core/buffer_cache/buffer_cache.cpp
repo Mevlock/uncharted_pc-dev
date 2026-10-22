@@ -778,7 +778,125 @@ struct BufferCache::Landing {
     vk::Buffer buffer;
     boost::container::small_vector<vk::BufferCopy, 4> copies; ///< dstOffset: in the side staging
     boost::container::small_vector<VAddr, 4> targets;         ///< guest address of each copy
+    /// A shared page's GPU bytes (ShareGpuPage): the guest's bytes there when the page was
+    /// handed over (same layout as the staging); a byte that differs at landing is the guest's.
+    bool shared{false};
+    std::vector<u8> before;
 };
+
+static bool SharedWritesEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_SHARED_WRITES");
+        return !(env && env[0] == '0');
+    }();
+    return enabled;
+}
+
+bool BufferCache::ShareGpuPage(VAddr page, u64 length) {
+    if (!SharedWritesEnabled() || !side_queue || land_stopping.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const u64 first_block = page >> block_shift;
+    const u64 last_block = (page + length - 1) >> block_shift;
+    const Buffer* arena = GetArena(first_block, last_block);
+    if (!arena || page < arena->cpu_addr || page + length > arena->cpu_addr + arena->size_bytes) {
+        return false;
+    }
+    auto landing = std::make_shared<Landing>();
+    landing->buffer = arena->Handle();
+    landing->shared = true;
+    u64 total = 0;
+    gpu_modified_ranges.ForEachInRange(page, length, [&](VAddr start, VAddr end) {
+        // Bytes already on their way back (an earlier write into the page) are left out.
+        shared_gpu_ranges.ForEachNotInRange(start, end - start, [&](VAddr lo, u64 size) {
+            total = Common::AlignUp(total, 64);
+            landing->copies.push_back(vk::BufferCopy{
+                .srcOffset = lo - arena->cpu_addr,
+                .dstOffset = total,
+                .size = size,
+            });
+            landing->targets.push_back(lo);
+            total += size;
+        });
+    });
+    if (landing->copies.empty()) {
+        // Every GPU byte of the page is on its way back already.
+        return shared_gpu_ranges.Intersects(page, length);
+    }
+    if (total > SideQueue::StagingSize) {
+        return false;
+    }
+    // The landing waits on the timeline for the writing work, which must be submitted to signal
+    // it (as in BeginSideDownload).
+    const u64 tick = memory_tracker->LatestGpuWriteTick(page, length);
+    if (tick == 0) {
+        return false;
+    }
+    for (int flushes = 0; scheduler.CurrentTick() <= tick; ++flushes) {
+        if (flushes == 2) {
+            return false;
+        }
+        scheduler.Flush();
+    }
+    landing->tick = tick;
+    landing->before.resize(total);
+    for (size_t i = 0; i < landing->copies.size(); ++i) {
+        memory->CopySparseMemory(landing->targets[i],
+                                 landing->before.data() + landing->copies[i].dstOffset,
+                                 landing->copies[i].size);
+    }
+    {
+        std::scoped_lock lk{landing_mutex};
+        if (landing_stop) {
+            return false;
+        }
+        landing->seq = ++landing_registered_seq;
+        landing_registered.store(landing->seq, std::memory_order_release);
+        for (size_t i = 0; i < landing->copies.size(); ++i) {
+            shared_gpu_ranges.Add(landing->targets[i], landing->copies[i].size);
+        }
+        landing_queue.push_back(std::move(landing));
+        if (!landing_thread.joinable()) {
+            landing_thread = std::thread([this] { LandingWorker(); });
+        }
+    }
+    landing_cv.notify_one();
+    return true;
+}
+
+void BufferCache::DrainSharedLandings() {
+    if (!shared_landed_pending.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::vector<SharedLanded> landed;
+    {
+        std::scoped_lock lk{shared_landed_mutex};
+        landed.swap(shared_landed);
+        shared_landed_pending.store(false, std::memory_order_relaxed);
+    }
+    for (const auto& done : landed) {
+        for (const auto& [start, end, guest_kept] : done.ranges) {
+            shared_gpu_ranges.Subtract(start, end - start);
+            // Guest bytes kept over the GPU's: an upload since the handover left them out.
+            if (guest_kept) {
+                memory_tracker->MarkRegionAsCpuModified(start, end - start);
+            }
+            for (VAddr page = Common::AlignDown(start, TRACKER_BYTES_PER_PAGE); page < end;
+                 page += TRACKER_BYTES_PER_PAGE) {
+                // The GPU wrote the page again after the landing's work: its data stays the GPU's.
+                if (memory_tracker->LatestGpuWriteTick(page, TRACKER_BYTES_PER_PAGE) > done.tick) {
+                    continue;
+                }
+                const VAddr lo = std::max(start, page);
+                const VAddr hi = std::min<VAddr>(end, page + TRACKER_BYTES_PER_PAGE);
+                gpu_modified_ranges.Subtract(lo, hi - lo);
+                if (!gpu_modified_ranges.Intersects(page, TRACKER_BYTES_PER_PAGE)) {
+                    memory_tracker->UnmarkRegionAsGpuModified(page, TRACKER_BYTES_PER_PAGE);
+                }
+            }
+        }
+    }
+}
 
 bool BufferCache::DeferGuestCopy(VAddr src, VAddr dst, u64 size) {
     static const bool enabled = [] {
@@ -956,10 +1074,42 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
     }
     Vulkan::Check(side.device.resetFences(*slot->fence));
     slot->staging.Invalidate(0, total);
-    for (size_t i = 0; i < landing.copies.size(); ++i) {
-        memory->TryWriteBacking(reinterpret_cast<void*>(landing.targets[i]),
-                                slot->staging.mapped_data.data() + landing.copies[i].dstOffset,
-                                landing.copies[i].size);
+    if (landing.shared) {
+        // Only the bytes the guest has not rewritten since the page was handed over.
+        SharedLanded done{.tick = landing.tick};
+        std::vector<u8> now;
+        for (size_t i = 0; i < landing.copies.size(); ++i) {
+            const u64 size = landing.copies[i].size;
+            const VAddr target = landing.targets[i];
+            const u8* gpu = slot->staging.mapped_data.data() + landing.copies[i].dstOffset;
+            const u8* before = landing.before.data() + landing.copies[i].dstOffset;
+            now.resize(size);
+            memory->CopySparseMemory(target, now.data(), size);
+            bool guest_kept = false;
+            for (u64 at = 0; at < size;) {
+                if (now[at] != before[at]) {
+                    guest_kept = true;
+                    ++at;
+                    continue;
+                }
+                u64 run = at + 1;
+                while (run < size && now[run] == before[run]) {
+                    ++run;
+                }
+                memory->TryWriteBacking(reinterpret_cast<void*>(target + at), gpu + at, run - at);
+                at = run;
+            }
+            done.ranges.push_back({target, target + size, guest_kept});
+        }
+        std::scoped_lock lk{shared_landed_mutex};
+        shared_landed.push_back(std::move(done));
+        shared_landed_pending.store(true, std::memory_order_release);
+    } else {
+        for (size_t i = 0; i < landing.copies.size(); ++i) {
+            memory->TryWriteBacking(reinterpret_cast<void*>(landing.targets[i]),
+                                    slot->staging.mapped_data.data() + landing.copies[i].dstOffset,
+                                    landing.copies[i].size);
+        }
     }
     side.Release(slot);
     return true;
@@ -1156,6 +1306,40 @@ struct FaultEvent {
 constexpr u64 FaultHistorySize = 1u << 16;
 std::unique_ptr<FaultEvent[]> fault_history;
 std::atomic<u64> fault_events{0};
+
+/// bbport diagnosis (BB_PERF_DIAG=1): side queue read-backs of write faults split by whether the
+/// write lands on GPU-written bytes or only next to them, and whether the GPU work that wrote the
+/// page had finished at the fault.
+void NoteFaultSplit(bool on_gpu_bytes, bool work_done, std::chrono::steady_clock::duration waited,
+                    bool shared = false) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_PERF_DIAG");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    static std::array<u64, 5> count{}, ns{};
+    static auto window = std::chrono::steady_clock::now();
+    const u32 kind = shared ? 4 : (on_gpu_bytes ? 2 : 0) | (work_done ? 1 : 0);
+    ++count[kind];
+    ns[kind] += std::chrono::duration_cast<std::chrono::nanoseconds>(waited).count();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) {
+        return;
+    }
+    const double seconds = std::chrono::duration<double>(now - window).count();
+    window = now;
+    std::printf("Fault split: next to GPU bytes: work done %.0f/s %.1f ms/s, in flight %.0f/s "
+                "%.1f ms/s; on GPU bytes: work done %.0f/s %.1f ms/s, in flight %.0f/s %.1f ms/s; shared (no wait) %.0f/s "
+                "%.1f ms/s\n",
+                count[1] / seconds, ns[1] / 1e6 / seconds, count[0] / seconds,
+                ns[0] / 1e6 / seconds, count[3] / seconds, ns[3] / 1e6 / seconds,
+                count[2] / seconds, ns[2] / 1e6 / seconds, count[4] / seconds,
+                ns[4] / 1e6 / seconds);
+    count = {};
+    ns = {};
+}
 
 /// bbport diagnosis (BB_PERF_DIAG=1): every 5 s, the 64 KiB regions whose guest writes waited
 /// for a side queue read-back most often, with the time waited and how many guest frames ago the
@@ -1388,7 +1572,24 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             const u32 gpu_write = memory_tracker->LatestGpuWriteFrame(page, length);
             const u32 gpu_use = LastGpuUse(page, length);
             const auto side_start = std::chrono::steady_clock::now();
+            const bool on_gpu_bytes = gpu_modified_ranges.Intersects(device_addr, size);
+            const bool work_done =
+                scheduler.IsFree(memory_tracker->LatestGpuWriteTick(page, length));
+            DrainSharedLandings();
+            // Shared: next to GPU bytes still being written, or on GPU bytes already on their
+            // way back (the landing keeps what the guest writes there).
+            bool on_pending_only = true;
+            gpu_modified_ranges.ForEachInRange(device_addr, size, [&](VAddr start, VAddr end) {
+                on_pending_only = on_pending_only && shared_gpu_ranges.Contains(start, end - start);
+            });
+            if (on_pending_only && (on_gpu_bytes || !work_done) && ShareGpuPage(page, length)) {
+                memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+                NoteFaultSplit(false, false, std::chrono::steady_clock::now() - side_start, true);
+                return;
+            }
             if (DownloadOnSideQueue(page, length)) {
+                NoteFaultSplit(on_gpu_bytes, work_done,
+                               std::chrono::steady_clock::now() - side_start);
                 memory_tracker->MarkRegionAsCpuModified(device_addr, size);
                 BbStats::gpu_side_downloads.fetch_add(1, std::memory_order_relaxed);
                 NoteFault(page, length, frames, gpu_write, gpu_use, 4);
@@ -2204,9 +2405,18 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes{};
     const Buffer* src_buffer{};
+    DrainSharedLandings();
     const auto add_upload = [&](VAddr addr, u64 size) {
         if (ClobberCheckEnabled() && gpu_modified_ranges.Intersects(addr, size)) {
             ReportClobber("upload", addr, size, device_addr, size, is_written);
+        }
+        // A shared page's GPU bytes are not uploaded before they have landed (ShareGpuPage).
+        if (shared_gpu_ranges.Intersects(addr, size)) {
+            shared_gpu_ranges.ForEachNotInRange(addr, size, [&](VAddr lo, u64 part) {
+                copies.emplace_back(total_size_bytes, lo, part);
+                total_size_bytes += part;
+            });
+            return;
         }
         copies.emplace_back(total_size_bytes, addr, size);
         total_size_bytes += size;

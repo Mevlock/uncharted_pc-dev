@@ -263,6 +263,29 @@ private:
     bool WaitLandingTick(u64 tick);
     std::atomic<bool> landing_exited{false};
 
+    /// bbport (BB_SHARED_WRITES=0: off; after BilalReloaded's shared pages): a guest write next to
+    /// GPU-written bytes whose GPU work is still running goes ahead at once instead of waiting
+    /// for that work (U3's Cartagena square: 86 -> 97 FPS, the GPU thread waited ~3.5 ms for
+    /// each of ~50 such writes a second); the GPU bytes land in guest memory once it has
+    /// finished (a landing, so the labels written meanwhile wait for them), except where the
+    /// guest has rewritten them since, and uploads leave them out until then. A write on GPU
+    /// bytes already on their way back goes ahead too. False: the caller reads back as before.
+    bool ShareGpuPage(VAddr page, u64 length);
+    /// GPU side: the shared pages whose GPU bytes have landed stop being GPU data.
+    void DrainSharedLandings();
+    RangeSet shared_gpu_ranges; ///< GPU bytes of shared pages not landed yet
+    struct SharedLanded {
+        struct Range {
+            VAddr start, end;
+            bool guest_kept; ///< the guest had rewritten some of its bytes: they stay
+        };
+        boost::container::small_vector<Range, 4> ranges;
+        u64 tick;
+    };
+    std::mutex shared_landed_mutex;
+    std::vector<SharedLanded> shared_landed;
+    std::atomic<bool> shared_landed_pending{false};
+
     struct SideTicket;
     bool BeginSideDownload(VAddr page, u64 length, SideTicket& ticket);
     void WaitSideDownload(SideTicket& ticket);
