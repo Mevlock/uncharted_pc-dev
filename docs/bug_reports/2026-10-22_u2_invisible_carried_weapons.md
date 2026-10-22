@@ -111,3 +111,12 @@ The game itself decides not to draw weapons that were carried into the chapter. 
 - `BB_DRAW_WATCH_INDICES=n,...`
 - `BB_STALE_CHECK=<lo>:<hi>`, which now also lists compute outputs no draw read
   ("Unread outputs").
+
+## Possibly related: crash on a tranquilizer takedown (2026-10-22)
+
+Same save line (the complete save, then chapter select). In the museum, chapter 2 "Breaking and
+Entering", the game stopped on its own assertion when the user tranquilized a guard:
+`pAction != NULL` in `game\moveactioncontroller.cpp:40` (CreateAction). The port was healthy
+before it (about 130 fps, no faults). The game found no move action for the takedown. Missing
+weapon/action data from the carried-weapon state may be the same cause as the invisible weapons.
+Save and log: `uncharted_saves/uc2/2026-10-22_takedown-crash`.
