@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -225,7 +226,40 @@ private:
 
     StreamBuffer stream_buffer;
     Buffer gds_buffer;
-    RangeSet gpu_modified_ranges;
+    /// bbport: the GPU-written ranges, read by the GPU command thread (resource table walks,
+    /// SyncSrtReads) while the draw recording thread changes them (bindings that write, and
+    /// since fault resolves run there, read-backs and landings). Unlocked, a walk iterating
+    /// the tree while it was rebalanced looped forever (U3, chapter 1's pub: the game froze).
+    class LockedRangeSet {
+    public:
+        void Add(VAddr address, size_t size) {
+            std::unique_lock lock{mutex};
+            set.Add(address, size);
+        }
+        void Subtract(VAddr address, size_t size) {
+            std::unique_lock lock{mutex};
+            set.Subtract(address, size);
+        }
+        bool Intersects(VAddr address, size_t size) const {
+            std::shared_lock lock{mutex};
+            return set.Intersects(address, size);
+        }
+        bool Contains(VAddr address, size_t size) const {
+            std::shared_lock lock{mutex};
+            return set.Contains(address, size);
+        }
+        /// `func` must not change this set (the lock is held).
+        template <typename Func>
+        void ForEachInRange(VAddr address, size_t size, Func&& func) const {
+            std::shared_lock lock{mutex};
+            set.ForEachInRange(address, size, std::forward<Func>(func));
+        }
+
+    private:
+        mutable std::shared_mutex mutex;
+        RangeSet set;
+    };
+    LockedRangeSet gpu_modified_ranges;
     struct LateReadBack {
         Vulkan::StagingBufferRef staging;
         u64 tick;
