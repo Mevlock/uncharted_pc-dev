@@ -845,6 +845,42 @@ int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t s
     read_unlock();
     return ok;
 }
+/* Writes `data` only where guest memory still holds `expected`, per aligned 8-byte word (byte by
+ * byte at unaligned edges), each with a compare-exchange: a guest write that lands while the
+ * merge runs is kept, not overwritten (the GPU's landing of a shared page, buffer_cache.cpp). */
+static void merge_bytes(unsigned char *dst, const unsigned char *expected, const unsigned char *data,
+                        uint64_t n) {
+    uint64_t i=0;
+    for (; i<n && ((uintptr_t)(dst+i)&7); ++i) {
+        unsigned char want=expected[i];
+        __atomic_compare_exchange_n(dst+i,&want,data[i],0,__ATOMIC_SEQ_CST,__ATOMIC_RELAXED);
+    }
+    for (; i+8<=n; i+=8) {
+        uint64_t want, value;
+        memcpy(&want,expected+i,8);
+        memcpy(&value,data+i,8);
+        if (want!=value)
+            __atomic_compare_exchange_n((uint64_t *)(dst+i),&want,value,0,__ATOMIC_SEQ_CST,__ATOMIC_RELAXED);
+    }
+    for (; i<n; ++i) {
+        unsigned char want=expected[i];
+        __atomic_compare_exchange_n(dst+i,&want,data[i],0,__ATOMIC_SEQ_CST,__ATOMIC_RELAXED);
+    }
+}
+int runtime_memory_merge_backing(uintptr_t address, const void *expected, const void *data, uint64_t size) {
+    read_lock();
+    int ok=1;
+    for (uintptr_t at=address, end=address+size; at<end && ok;) {
+        size_t i=vma_index(at);
+        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { ok=0; break; }
+        uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
+        merge_bytes(backing_base+vmas[i].phys+(at-vmas[i].start),
+                    (const unsigned char *)expected+(at-address),(const unsigned char *)data+(at-address),n);
+        at+=n;
+    }
+    read_unlock();
+    return ok;
+}
 /* Per-thread cache of recently found regions for the GPU's per-draw queries:
  * entries hold for as long as the table generation they were read at. */
 typedef struct { uint64_t generation; uintptr_t start, end; int kind; } CachedRegion;

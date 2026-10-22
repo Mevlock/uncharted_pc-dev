@@ -19,6 +19,9 @@ public:
     u64 ClampRangeSize(VAddr virtual_addr, u64 size);
     void CopySparseMemory(VAddr source, u8* dest, u64 size);
     bool TryWriteBacking(void* address, const void* data, u64 size);
+    /// TryWriteBacking where guest memory still holds `expected` (per 8-byte word, atomically):
+    /// a guest write landing meanwhile is kept.
+    bool TryMergeBacking(void* address, const void* expected, const void* data, u64 size);
     /// CPU wrote guest memory outside page tracking (e.g. decoded video frames).
     void InvalidateMemory(VAddr address, u64 size);
     Vulkan::Rasterizer* GetRasterizer() const { return rasterizer; }

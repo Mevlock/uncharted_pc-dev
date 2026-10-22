@@ -1125,8 +1125,11 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
             now.resize(size);
             memory->CopySparseMemory(target, now.data(), size);
             const bool guest_kept = std::memcmp(now.data(), before, size) != 0;
+            // The guest keeps writing these pages: each word is replaced only if it still holds
+            // the handover's value (compared and written at once).
             ForEachSharedBlockRun(target, now.data(), before, size, false, [&](u64 at, u64 bytes) {
-                memory->TryWriteBacking(reinterpret_cast<void*>(target + at), gpu + at, bytes);
+                memory->TryMergeBacking(reinterpret_cast<void*>(target + at), before + at, gpu + at,
+                                        bytes);
             });
             done.ranges.push_back({target, target + size, guest_kept});
         }
