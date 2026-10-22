@@ -19,6 +19,7 @@
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/cta_split.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -27,16 +28,18 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 16u; // bbport: ReadConst windows of ReadConstWindowDwords()
+static constexpr u32 ShaderBinaryVersion = 17u; // bbport: LDS barriers for larger workgroups
 static constexpr u32 ShaderMetaVersion = 11u; // bbport: HwVertexRuntimeInfo::ui_squeeze_bits
 static constexpr u32 PipelineKeyVersion = 6u; // bbport: GraphicsPipelineKey::ui_squeeze
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
 static u32 TranslatedBinaryVersion() {
     // The optional 512-thread CTA split (BB_PASCAL_CTA_SPLIT, cta_split.h) changes one shader;
-    // the ReadConst window size (BB_READCONST_WINDOW_DWORDS) changes every shader with one.
+    // the ReadConst window size (BB_READCONST_WINDOW_DWORDS) changes every shader with one, and
+    // BB_WAVE_LDS_BARRIERS=0 the compute shaders of larger workgroups.
     return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0u : 0x10000u) |
            (Shader::CtaSplitEnabled() ? 0x20000u : 0u) |
+           (Shader::WaveLdsBarriers() ? 0u : 0x40000u) |
            ((Shader::ReadConstWindowDwords() >> 8) << 20);
 }
 } // namespace Serialization
