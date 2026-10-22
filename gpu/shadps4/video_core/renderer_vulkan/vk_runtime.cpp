@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
 #include <boost/container/small_vector.hpp>
 #include "bbport_toggles.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -478,7 +479,12 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
     const auto src_dim = src->info.props.is_block ? 2 : 0;
     ASSERT(mip_block_w == (src->info.size.width >> src_dim));
     ASSERT(mip_block_h == (src->info.size.height >> src_dim));
-    ASSERT(mip_block_p == (src->info.pitch >> src_dim));
+    // bbport (BB_MIP_FIX): a single-level target taken as a mip may lack the pow2 padding of the
+    // mipmapped image (pitch 896 for 1024); the host copy only needs width and height.
+    ASSERT(mip_block_p == (src->info.pitch >> src_dim) ||
+           (VideoCore::ImageInfo::MipFixEnabled() &&
+            (std::bit_ceil(src->info.pitch >> src_dim) == mip_block_p ||
+             (src->info.pitch >> src_dim) >= mip_block_p)));
 
     const auto [src_layers, dst_layers] =
         SanitizeCopyLayers(src->info, dst->info, src->info.size.depth);

@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
+#include <cstdlib>
+
 #include "common/assert.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/buffer.h"
@@ -200,6 +203,17 @@ void ImageInfo::UpdateSize() {
     }
 }
 
+// bbport: BB_MIP_FIX=1, ported from zorde23's Uncharted port (UC_MIP_FIX, 8a440468). U3 draws its
+// bloom downsample into mip 1 of the bloom image with that image's pitch; the strict pitch check
+// made it a separate image, so the bloom the tonemapper reads stayed black (no bloom at all).
+bool ImageInfo::MipFixEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_MIP_FIX");
+        return env && env[0] && env[0] != '0';
+    }();
+    return enabled;
+}
+
 s32 ImageInfo::MipOf(const ImageInfo& info) const {
     if (!IsCompatible(info)) {
         return -1;
@@ -226,7 +240,10 @@ s32 ImageInfo::MipOf(const ImageInfo& info) const {
         const u32 slice_size = mip_size / info.resources.layers;
         if (guest_address >= mip_base && guest_address < mip_end &&
             (guest_address - mip_base) % slice_size == 0 &&
-            (pitch >> this_dim) == (mip_pitch >> info_dim)) {
+            ((pitch >> this_dim) == (mip_pitch >> info_dim) ||
+             (MipFixEnabled() && guest_address == mip_base &&
+              ((pitch >> this_dim) >= (mip_pitch >> info_dim) ||
+               std::bit_ceil(pitch >> this_dim) == (mip_pitch >> info_dim))))) {
             mip = m;
             break;
         }
@@ -280,8 +297,18 @@ s32 ImageInfo::SliceOf(const ImageInfo& info, s32 mip) const {
     const auto this_w = std::max(size.width >> this_dim, 1u);
     const auto this_h = std::max(size.height >> this_dim, 1u);
     const auto this_p = std::max(pitch >> this_dim, 1u);
-    if ((this_w != mip_w) || (this_h != mip_h) || (this_p != mip_p)) {
+    const bool at_mip = guest_address == info.guest_address + info.mips_layout[mip].offset;
+    // A target at the mip whose pitch is larger, or only lacks the pow2 padding of a mipmapped
+    // image (U3 bloom mip 0: pitch 896 drawn, 1024 in the 7-level image), is that mip.
+    const bool pitch_ok = this_p == mip_p || (MipFixEnabled() && at_mip &&
+                                              (this_p >= mip_p || std::bit_ceil(this_p) == mip_p));
+    if ((this_w != mip_w) || (this_h != mip_h) || !pitch_ok) {
         return -1;
+    }
+    // bbport (BB_MIP_FIX): a target placed exactly at the mip is its first slice even when its own
+    // (non-pow2) size does not divide the parent's pow2-padded mip (U3 bloom mip 1).
+    if (MipFixEnabled() && at_mip) {
+        return 0;
     }
 
     // Check for size alignment.
