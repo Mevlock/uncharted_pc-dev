@@ -238,6 +238,10 @@ struct PassInfo {
 
     // Bumped during codegen to assign offsets to readconsts
     u16 dst_off_dw;
+    // bbport: dwords of a ReadConst window: ReadConstWindowDwords() in compute shaders (U2's tiled
+    // lighting reads up to 128 lights through one), the small size in graphics stages, where the
+    // copy goes with every draw and the large one cost ~4% in U3's Cartagena square.
+    u32 window_dwords = ReadConstSmallWindowDwords;
 
     PtrUserList* GetUsesAsPointer(IR::Inst* inst) {
         auto it = pointer_uses.find(inst);
@@ -728,7 +732,7 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         if (src_off_dw.IsImmediate()) {
             read_dw = std::max(read_dw, src_off_dw.U32() + (pass_info.GetUsesAsPointer(use) ? 2 : 1));
         } else {
-            read_dw = std::max(read_dw, ReadConstWindowDwords());
+            read_dw = std::max(read_dw, pass_info.window_dwords);
         }
     }
     if (!PushPtr(c, pass_info, off_dw, read_dw * 4)) {
@@ -772,8 +776,8 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     // window that would not leave room for the rest gets the small size (and its flag).
     if (!windowed.empty()) {
         const u32 start = pass_info.dst_off_dw;
-        const bool fits = start + ReadConstWindowDwords() + 4096u <= 0xFFFFu;
-        const u32 dwords = fits ? ReadConstWindowDwords() : ReadConstSmallWindowDwords;
+        const bool fits = start + pass_info.window_dwords + 4096u <= 0xFFFFu;
+        const u32 dwords = fits ? pass_info.window_dwords : ReadConstSmallWindowDwords;
         for (u32 i = 0; i < dwords; ++i) {
             c.mov(r10d, ptr[rdi + (i << 2)]);
             c.mov(ptr[rsi + ((start + i) << 2)], r10d);
@@ -903,6 +907,9 @@ void SimplifyReadConstAddressAdd(IR::Inst& inst) {
 void FlattenExtendedUserdataPass(IR::Program& program) {
     auto& post_order = program.post_order_blocks;
     PassInfo pass_info;
+    if (program.info.hw_stage == HwStage::Compute) {
+        pass_info.window_dwords = ReadConstWindowDwords();
+    }
 
     // traverse at end and assign offsets to duplicate readconsts, using
     // vn_to_inst as the source
