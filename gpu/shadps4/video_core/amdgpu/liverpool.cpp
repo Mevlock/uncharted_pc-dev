@@ -626,7 +626,9 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
 
 void Liverpool::NotePendingFences(const auto& event) {
     const u64 position = rasterizer->DrawPipeHead();
-    while (!pending_fences.empty() && rasterizer->DrawPipeReached(pending_fences.front().position)) {
+    while (!pending_fences.empty() &&
+           rasterizer->DrawPipeReached(pending_fences.front().position) &&
+           FenceWritten(pending_fences.front())) {
         pending_fences.pop_front();
     }
     constexpr bool is_eop = requires { event.SignalFence([](void*, u64, u32) {}, [] {}); };
@@ -653,9 +655,28 @@ void Liverpool::NotePendingWrite(const PM4CmdWriteData& write_data, u32 num_byte
         {write_data.Address<VAddr>(), data, num_bytes, rasterizer->DrawPipeHead()});
 }
 
+// bbport: a fence the draw recording thread has run may still wait on the Vulkan recording
+// thread for the copies queued before it (SignalAfterHostCopies): until memory holds its value it
+// counts as pending too, or a WAIT_REG_MEM on it spins across the queues until it lands (after
+// Umar-Qayyum-dev, 38ba5e0b: ~4 a frame in U2's museum, ~4.5 ms each). Toggle bit
+// DeferredFenceWaits: as before.
+bool Liverpool::FenceWritten(const PendingFence& fence) const {
+    if (!rasterizer->DeferredSignalsPending()) {
+        return true;
+    }
+    if (fence.num_bytes == sizeof(u32)) {
+        return *reinterpret_cast<const volatile u32*>(fence.address) == static_cast<u32>(fence.data);
+    }
+    if (fence.num_bytes == sizeof(u64)) {
+        return *reinterpret_cast<const volatile u64*>(fence.address) == fence.data;
+    }
+    return true;
+}
+
 bool Liverpool::PendingFenceValue(VAddr address, u32& value) {
     for (auto it = pending_fences.rbegin(); it != pending_fences.rend(); ++it) {
-        if (rasterizer->DrawPipeReached(it->position)) {
+        if (rasterizer->DrawPipeReached(it->position) &&
+            (BbToggle::Disabled(BbToggle::DeferredFenceWaits) || FenceWritten(*it))) {
             break; // written already: memory holds it (or a later write)
         }
         if (address >= it->address && address + sizeof(u32) <= it->address + it->num_bytes) {
@@ -1984,7 +2005,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                         task.packet.data_sel.Value() == DataSelect::Data32Low ? 4u : 8u;
                     const u64 value = bytes == 4 ? task.packet.DataDWord() : task.packet.DataQWord();
                     while (!pending_fences.empty() &&
-                           rasterizer->DrawPipeReached(pending_fences.front().position)) {
+                           rasterizer->DrawPipeReached(pending_fences.front().position) &&
+                           FenceWritten(pending_fences.front())) {
                         pending_fences.pop_front();
                     }
                     if (task.packet.data_sel.Value() == DataSelect::Data32Low ||

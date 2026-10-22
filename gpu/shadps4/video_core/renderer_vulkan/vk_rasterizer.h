@@ -141,6 +141,10 @@ public:
     void NoteSmallWrittenBuffers(const Shader::Info& stage);
     void ReadBackSmallWrittenBuffers();
     /// Before a guest-visible write: fences deferred earlier are written first.
+    /// bbport: fences deferred to the Vulkan recording thread not written yet.
+    [[nodiscard]] bool DeferredSignalsPending() const {
+        return scheduler.DeferredSignalsPending();
+    }
     void WaitDeferredSignals() {
         scheduler.WaitDeferredSignals();
     }

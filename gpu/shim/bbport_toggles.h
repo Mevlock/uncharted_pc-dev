@@ -73,6 +73,7 @@ enum : std::uint64_t {
     // when nothing moves. Static-camera flicker of railings/window bars p99.9 -45% (2026-10-03).
     TaaKeepNearerHistory = 1ull << 55,
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
+    DeferredFenceWaits = 1ull << 60, ///< WaitRegMem: fences run but not yet written count as pending
     SleepingWaits = 1ull << 62, ///< waits on atomics sleep (WaitOnAddress, bbport_wait.h)
     TrackerCap = 1ull << 63, ///< dispatches flush barriers once the tracker holds many ranges
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
