@@ -75,7 +75,6 @@ enum : std::uint64_t {
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
     DeferredFenceWaits = 1ull << 60, ///< WaitRegMem: fences run but not yet written count as pending
     SleepingWaits = 1ull << 62, ///< waits on atomics sleep (WaitOnAddress, bbport_wait.h)
-    TrackerCap = 1ull << 63, ///< dispatches flush barriers once the tracker holds many ranges
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {
