@@ -203,13 +203,14 @@ void ImageInfo::UpdateSize() {
     }
 }
 
-// bbport: BB_MIP_FIX=1, ported from zorde23's Uncharted port (UC_MIP_FIX, 8a440468). U3 draws its
-// bloom downsample into mip 1 of the bloom image with that image's pitch; the strict pitch check
-// made it a separate image, so the bloom the tonemapper reads stayed black (no bloom at all).
+// bbport: render targets drawn into a mip of a larger image (from zorde23's Uncharted port,
+// UC_MIP_FIX, 8a440468, extended). All three games draw their bloom chain into the mips of one
+// 7-level image; the strict checks made each target an image of its own, so the bloom the game
+// samples stayed black (no bloom at all). On by default; BB_MIP_FIX=0 turns it off.
 bool ImageInfo::MipFixEnabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_MIP_FIX");
-        return env && env[0] && env[0] != '0';
+        return !(env && env[0] == '0');
     }();
     return enabled;
 }
