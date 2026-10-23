@@ -60,7 +60,6 @@ static GuestThread *threads;
 static _Thread_local GuestThread *current;
 static _Thread_local int32_t guest_errno;
 static void apply_affinity(GuestThread *t,int current_thread);
-static void apply_priority(GuestThread *t,int current_thread);
 static const unsigned char *tls_template;
 static uint64_t tls_filesz, tls_memsz, tls_align=16;
 static size_t created, joined_count, exited;
@@ -288,7 +287,6 @@ static void *host_start(void *p) {
     attach(t);
     set_host_name(t->name);
     runtime_set_guest_fpu();
-    if (t->attr.prio!=DEFAULT_PRIO) apply_priority(t,1);
     if (t->attr.affinity!=0x7f) apply_affinity(t,1);
     if (!exit_setjmp(t)) t->result=t->entry(t->argument);
     runtime_thread_keys_cleanup();
@@ -364,53 +362,9 @@ static ABI int32_t thread_get_prio(GuestThread *t,int *prio) {
     if (!prio) return ERR(22);
     *prio=t->attr.prio; return 0;
 }
-/* PS4 priorities run from 256 (highest) to 767 (lowest); 700 is the default and what nearly every
- * game thread uses. The Nd job workers are created at 767 and the file I/O threads at 260-272.
- * Windows has fewer levels, so the guest range is cut into bands around NORMAL. Without this the
- * spinning idle workers ran at the same priority as the threads doing real work: with 4 cores
- * U2 failed its own check that a command buffer it reuses is idle (cmdBuf.m_bInUse, ndgi-orbis
- * Begin) within 7-21 deaths of a death loop, the GPU interrupt handler threads (699) that
- * release them falling behind. Applied with 8 hardware threads or fewer; BB_THREAD_PRIO=1/0
- * forces it on/off. By drakolordx7
- * (upstream PR #547, his community fork d07b7bdd). */
-static int host_priority(int prio) {
-#ifdef _WIN32
-    /* Only where cores are scarce (8 hardware threads or fewer): with plenty of them nothing
-     * starves, and the lowest-priority job workers cost U2's museum ~4% on 16 threads. */
-    static int enabled=-1;
-    if (enabled<0) {
-        const char *env=getenv("BB_THREAD_PRIO");
-        DWORD_PTR process=0, system=0;
-        const int threads=GetProcessAffinityMask(GetCurrentProcess(),&process,&system) && process
-                              ? __builtin_popcountll((unsigned long long)process) : 0;
-        enabled=env && env[0] ? env[0]!='0' : threads>0 && threads<=8;
-        printf("Runtime: guest thread priorities %s (%d hardware threads; BB_THREAD_PRIO=1/0 "
-               "forces them on/off)\n",
-               enabled ? "applied: I/O above normal, job workers lowest" : "not applied", threads);
-    }
-    if (!enabled) return THREAD_PRIORITY_NORMAL;
-    if (prio<=300) return THREAD_PRIORITY_ABOVE_NORMAL;
-    if (prio<720) return THREAD_PRIORITY_NORMAL;
-    if (prio<0x2f0) return THREAD_PRIORITY_BELOW_NORMAL;
-    return THREAD_PRIORITY_LOWEST;
-#else
-    (void)prio; return 0;
-#endif
-}
-static void apply_priority(GuestThread *t,int current_thread) {
-#ifdef _WIN32
-    if (t->finished) return;
-    HANDLE handle=current_thread ? GetCurrentThread() : (HANDLE)pthread_gethandle(t->host);
-    if (handle) SetThreadPriority(handle,host_priority(t->attr.prio));
-#else
-    (void)t; (void)current_thread;
-#endif
-}
 static ABI int32_t thread_set_prio(GuestThread *t,int prio) {
     if (!find_thread(t)) return ERR(3);
-    t->attr.prio=prio;
-    apply_priority(t,t==current);
-    return 0;
+    t->attr.prio=prio; return 0;
 }
 /* BB_AFFINITY=1: the guest's core masks are applied, PS4 core i on host logical processor 2*i
  * (one per physical core where SMT pairs neighbour). Off by default: the PS4 scheduler's
