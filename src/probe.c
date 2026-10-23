@@ -850,14 +850,18 @@ static unsigned char *near_image_memory(size_t size) {
 /* A thunk that calls `callback` (Microsoft x64: rdi, rsi, the image base, r14) with the guest's
  * registers and flags kept, runs the `moved` bytes of position-independent instructions from `f`
  * and jumps back; `f` jumps to it. 0 without thunk memory. */
+#define CALLBACK_THUNK_BYTES 16384 /* ~170 bytes per thunk (saves, red-zone step, xmm spills): about 90 hooks */
 static unsigned char *callback_thunks;
 static size_t callback_thunks_used;
 static int callback_thunk(unsigned char *f, size_t moved, const void *callback) {
-    if (!callback_thunks && !(callback_thunks=near_image_memory(4096))) {
+    if (!callback_thunks && !(callback_thunks=near_image_memory(CALLBACK_THUNK_BYTES))) {
         printf("Callbacks: no thunk memory\n");
         return 0;
     }
-    if (callback_thunks_used+256>4096) return 0;
+    if (callback_thunks_used+256>CALLBACK_THUNK_BYTES) {
+        printf("Callbacks: thunk memory full\n");
+        return 0;
+    }
     unsigned char *t=callback_thunks+callback_thunks_used;
     size_t k=0;
     /* lea rsp, [rsp-0x80] (a hook inside a leaf function must not touch the 128 bytes below rsp
