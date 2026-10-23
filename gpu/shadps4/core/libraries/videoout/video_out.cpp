@@ -1,7 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <condition_variable>
+#include <cstdio>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
 #include "common/assert.h"
+#include "common/thread.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -12,6 +20,7 @@
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 
@@ -351,6 +360,50 @@ s32 PS4_SYSV_ABI sceVideoOutGetBufferLabelAddress(s32 handle, uintptr_t* label_a
     return 16;
 }
 
+namespace {
+/// bbport: submits end-of-pipe flips raised on the Vulkan recording thread (see below), in the
+/// order they were raised. Started on first use.
+class EopFlipWorker {
+public:
+    static void Post(std::function<void()> work) {
+        static EopFlipWorker worker;
+        static std::atomic<u32> posted{0};
+        if (posted.fetch_add(1, std::memory_order_relaxed) == 0) {
+            std::printf("VideoOut: an end-of-pipe flip was raised on the Vulkan recording thread: "
+                        "submitted by its own thread\n");
+        }
+        {
+            std::scoped_lock lock{worker.mutex};
+            worker.queue.push_back(std::move(work));
+        }
+        worker.cv.notify_one();
+    }
+
+private:
+    EopFlipWorker() {
+        thread = std::jthread([this](std::stop_token token) {
+            Common::SetCurrentThreadName("bb:EopFlip");
+            while (true) {
+                std::function<void()> work;
+                {
+                    std::unique_lock lock{mutex};
+                    if (!cv.wait(lock, token, [this] { return !queue.empty(); })) {
+                        return;
+                    }
+                    work = std::move(queue.front());
+                    queue.pop_front();
+                }
+                work();
+            }
+        });
+    }
+    std::mutex mutex;
+    std::condition_variable_any cv;
+    std::deque<std::function<void()>> queue;
+    std::jthread thread;
+};
+} // namespace
+
 s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, void** unk) {
     auto* port = driver->GetPort(handle);
     if (!port) {
@@ -361,8 +414,21 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
             ASSERT_MSG(irq == Platform::InterruptId::GfxFlip, "An unexpected IRQ occured");
             ASSERT_MSG(port->buffer_labels[buf_id] == 1, "Out of order flip IRQ");
-            const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
-            ASSERT_MSG(result, "EOP flip submission failed");
+            const auto submit = [=] {
+                const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
+                ASSERT_MSG(result, "EOP flip submission failed");
+            };
+            // bbport: end-of-pipe fences (and this interrupt) may be signalled on the Vulkan
+            // recording thread (RecorderFences). The flip prepares a frame there, which waits
+            // for that same thread to go idle: it waited for itself and the game froze (players'
+            // U2 freezes on death and at cutscene/movie changes; stall report stacks). Such
+            // flips are submitted, in order, by a thread of their own, as the game's own
+            // sceVideoOutSubmitFlip calls are.
+            if (Vulkan::Scheduler::OnRecorderThread()) {
+                EopFlipWorker::Post(submit);
+            } else {
+                submit();
+            }
         });
 
     return ORBIS_OK;
