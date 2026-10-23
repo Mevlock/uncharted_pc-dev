@@ -189,7 +189,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'anisotropy': '0',
+                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'unlock_chapters': False, 'anisotropy': '0',
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
@@ -512,6 +512,8 @@ def game_environment(s, start=None):
     env['BB_DOF'] = str(s.get('depth_of_field') or '1')
     if s.get('skip_intro', False):
         env['BB_SKIP_INTRO'] = '1'
+    if s.get('unlock_chapters', False):
+        env['BB_UNLOCK_CHAPTERS'] = '1'
     env['BB_ANISO'] = str(s.get('anisotropy') or '0')
     env['BB_FSR1'] = '1' if s.get('scaler', 'fsr1') == 'fsr1' else '0'
     sharpening = str(s.get('sharpening') or 'off')
@@ -1185,6 +1187,10 @@ class Launcher:
         self.check(f, 'skip_intro', _('Skip intro logos'),
                    _('Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos '
                      'and their music (they cannot be skipped with a button). All three games.'))
+        self.check(f, 'unlock_chapters', _('Unlock all chapters'),
+                   _('Every chapter in Chapter Select and the Brutal difficulty from the start, in all three '
+                     'games. Saves and progress are not changed; turned off, the menus show your own progress. '
+                     'By BilalReloaded.'))
 
     def build_display(self):
         f = self.page('display', _('Display'), _('How the game window is shown.'))

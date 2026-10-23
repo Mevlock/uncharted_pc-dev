@@ -1147,6 +1147,59 @@ static void patch_collection_skip(uint64_t image_size) {
     memcpy(image+jump+1,&rel,4);
     printf("Collection menu: skipped once, U1's front end opens first\n");
 }
+/* Every chapter in Chapter Select and Brutal from the start (BB_UNLOCK_CHAPTERS=1, all three
+ * games). From BilalReloaded's Uncharted port (tools/probe_uncharted.py UNLOCK_PATCHES,
+ * GPL-2.0-or-later, made for CUSA02344 1.02); the EU release keeps the same code with other field
+ * offsets and two copies of it. The games keep Bluepoint's tweak flags "Crushing", "Brutal" and
+ * "Chapter Select" unlocked by default as three bytes; a constructor clears them (mov byte
+ * [rbx+F],1 / [rbx+F+1],0 / [rbx+F+2],0) and the tweak table read fills Crushing and Chapter
+ * Select (U2/U3: setne from [rax] and [rax+4]; U1: bytes [rax] and [rax+1]). Chapter Select is
+ * now set where the table is read, Brutal where it is cleared. Saves are not touched. */
+static int patch_unlock_one(int64_t at, unsigned field) {
+    /* Brutal: mov byte [rbx+field-1], 0 just after mov byte [rbx+field-2], 1 before the read. */
+    for (int64_t b=at-0x100; b<at; ++b) {
+        if (b<0 || image[b]!=0xc6 || image[b+1]!=0x83) continue;
+        uint32_t f0, f1;
+        memcpy(&f0,image+b+2,4); memcpy(&f1,image+b+9,4);
+        if (f0==field-2 && image[b+6]==1 && image[b+7]==0xc6 && image[b+8]==0x83 && f1==field-1 && image[b+13]==0) {
+            image[b+13]=1;
+            return 1;
+        }
+    }
+    return 0;
+}
+static void patch_unlock_chapters(uint64_t image_size) {
+    const char *on=getenv("BB_UNLOCK_CHAPTERS");
+    if (!on || on[0]!='1') return;
+    int chapters=0, brutal=0;
+    for (uint64_t i=0; i+27<=image_size; ++i) {
+        const unsigned char *p=image+i;
+        uint32_t field;
+        /* U2/U3: cmp dword [rax],0; setne [rbx+F-2]; cmp dword [rax+4],0; setne [rbx+F] */
+        if (p[0]==0x83 && p[1]==0x38 && p[2]==0 && p[3]==0x0f && p[4]==0x95 && p[5]==0x83 &&
+            !memcmp(p+10,"\x83\x78\x04\x00\x0f\x95\x83",7)) {
+            memcpy(&field,p+17,4);
+            uint32_t crushing; memcpy(&crushing,p+6,4);
+            if (crushing+2!=field) continue;
+            static const unsigned char set[11]={0xc6,0x83,0,0,0,0,1,0x0f,0x1f,0x40,0x00};
+            unsigned char *q=image+i+10;
+            memcpy(q,set,11); memcpy(q+2,&field,4);
+            ++chapters; brutal+=patch_unlock_one((int64_t)i,field);
+            continue;
+        }
+        /* U1: test rax,rax; je +0x11; mov cl,[rax]; mov [rbx+F-2],cl; mov al,[rax+1]; mov [rbx+F],al */
+        if (p[0]==0x48 && p[1]==0x85 && p[2]==0xc0 && p[3]==0x74 && p[4]==0x11 && p[5]==0x8a && p[6]==0x08 &&
+            p[7]==0x88 && p[8]==0x8b && !memcmp(p+13,"\x8a\x40\x01\x88\x83",5)) {
+            memcpy(&field,p+18,4);
+            uint32_t crushing; memcpy(&crushing,p+9,4);
+            if (crushing+2!=field) continue;
+            unsigned char *q=image+i+13;
+            q[0]=0xc6; q[1]=0x83; memcpy(q+2,&field,4); q[6]=1; q[7]=0x66; q[8]=0x90;
+            ++chapters; brutal+=patch_unlock_one((int64_t)i,field);
+        }
+    }
+    printf("Unlock all chapters: %d chapter select and %d Brutal flags set\n",chapters,brutal);
+}
 /* Idle job workers sleep (all three games). From BilalReloaded's Uncharted port
  * (github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port, GPL-2.0-or-later,
  * tools/probe_uncharted.py JOB_SLEEP_PATCHES, made for CUSA02344 1.02), with the EU release's
@@ -1747,6 +1800,7 @@ int main(int argc, char **argv) {
         install_job_idle_yield(image_end);
         patch_eop_tick_wait(image_end);
         patch_collection_skip(image_end);
+        patch_unlock_chapters(image_end);
         patch_job_sleep(image_end);
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
