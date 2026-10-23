@@ -22,11 +22,11 @@ export USERPROFILE=${USERPROFILE:-$(cygpath -w "/c/Users/$(id -un)")}
 if [[ ! -x out/pyenv/Scripts/python.exe ]]; then
     "$python" -m venv out/pyenv
 fi
-out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller pillow
+out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyinstaller pillow iced-x86
 # The scripts run inside Uncharted.exe (--script): the standard modules they import come along.
 hidden=()
 for module in argparse base64 bisect collections hashlib json re shutil struct tempfile zlib ctypes.wintypes \
-              uncharted_art uncharted_fonts uncharted_widgets bbport_steam PIL.ImageTk; do
+              uncharted_art uncharted_fonts uncharted_widgets bbport_steam PIL.ImageTk iced_x86; do
     hidden+=(--hidden-import "$module")
 done
 out/pyenv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN --windowed \
@@ -56,7 +56,7 @@ ldd "$dest/bin/bb-probe.exe" "$dest/bin/bb-gpu-capabilities.exe" |
         cp -u "$dll" "$dest/bin/"
     done
 # Only what run.py runs to prepare a game (Bloodborne's patch and mod tools stay out).
-cp scripts/prepare.py scripts/link_modules.py scripts/link_libc.py scripts/content_profile.py scripts/trophies.py "$dest/scripts/"
+cp scripts/prepare.py scripts/link_modules.py scripts/link_libc.py scripts/content_profile.py scripts/trophies.py scripts/isa_rewrite.py "$dest/scripts/"
 cp patches/redzone.json "$dest/patches/"  # red-zone-safe guest stores (link_modules.py)
 cp run.py LICENSE "$dest/"
 # The commit this build is made from: the launcher writes it at the top of last_run.log.

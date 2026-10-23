@@ -98,6 +98,32 @@ def prepare(game, exe, out):
     stamp.write_text(source, encoding='utf-8')
 
 
+def isa_rewrite_args(probe, out):
+    """['--isa-rewrite', table] when this CPU lacks instructions the game uses (Intel Sandy and Ivy Bridge:
+    BMI1, MOVBE, LZCNT, F16C), else []. bb-probe rewrites those instructions at load time from a table of
+    their places (scripts/isa_rewrite.py, needs the Python package iced-x86). BB_FORCE_LEGACY_CPU=1
+    does it on any CPU (tests)."""
+    check = subprocess.run([str(probe), '--cpu-features'], stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, errors='replace', creationflags=no_console())
+    if check.returncode:   # AVX, SSE4.2 or POPCNT missing: bb-probe has shown why
+        sys.stderr.write(check.stderr)
+        sys.exit(check.returncode)
+    missing = check.stdout.strip()
+    if not missing.startswith('CPU: missing'):
+        return []
+    print(f"{missing}; the game's instructions of those sets are rewritten at load time", flush=True)
+    table, linked = out / 'isa-rewrite.bin', out / 'boot-linked.bin'
+    if not table.is_file() or table.stat().st_mtime < max(linked.stat().st_mtime, (PORT / 'scripts' / 'isa_rewrite.py').stat().st_mtime):
+        try:
+            run_script('isa_rewrite.py', linked, '--out', out)
+        except SystemExit:
+            if missing == 'CPU: missing MOVBE' and not os.environ.get('BB_FORCE_LEGACY_CPU'):
+                return []   # AMD FX without iced-x86: bb-probe emulates its MOVBE in the fault handler, as before
+            fail(f'{missing}\nThe game needs its instructions rewritten for this processor, which needs the Python '
+                 'package iced-x86 (pip install iced-x86) in the Python that runs this script.')
+    return ['--isa-rewrite', table]
+
+
 def main():
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == '--after':
@@ -171,6 +197,7 @@ def main():
         env['BB_RESTART_COMMAND'] = subprocess.list2cmdline([sys.executable, *this, '--after', str(os.getpid()), *args])
         command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                    '--app0', str(game), '--user', str(user_dir), '--timeout', env.get('BB_TIMEOUT', '0')]
+        command += isa_rewrite_args(probe, out)
         if guest_argv:
             command += ['--guest-argv', str(guest_argv)]
         if key and (trophy_dir / 'trophies.txt').is_file():
