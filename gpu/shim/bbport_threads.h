@@ -38,13 +38,19 @@ inline unsigned Available() {
     return std::max(1u, std::thread::hardware_concurrency());
 }
 
-/// The calling thread stays out of the way of the game's own threads: below normal, so it
-/// still runs when the job workers (lowest, runtime_thread.c) and the rest of the game use all
-/// cores. At the idle level the draw preparation was starved by them and the GPU thread fell
-/// back to doing the work itself (by drakolordx7, with the guest priorities).
+/// The calling thread stays out of the way of the game's own threads. Where cores are scarce
+/// (8 hardware threads or fewer, or BB_THREAD_PRIO=1; the rule of the guest priorities in
+/// runtime_thread.c) below normal, so it still runs when the job workers (then lowest) and the
+/// rest of the game use all cores: at the idle level the draw preparation was starved by them
+/// and the GPU thread fell back to doing the work itself (by drakolordx7). Else idle.
 inline void MakeBackground() {
     background_thread = true;
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    static const bool scarce = [] {
+        const char* env = std::getenv("BB_THREAD_PRIO");
+        return env && env[0] ? env[0] != '0' : Available() <= 8;
+    }();
+    SetThreadPriority(GetCurrentThread(),
+                      scarce ? THREAD_PRIORITY_BELOW_NORMAL : THREAD_PRIORITY_IDLE);
 }
 
 /// bbport: hybrid CPUs (Intel 12th gen and later, Core Ultra: performance and efficiency cores).

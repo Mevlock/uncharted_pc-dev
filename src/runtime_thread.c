@@ -370,16 +370,23 @@ static ABI int32_t thread_get_prio(GuestThread *t,int *prio) {
  * spinning idle workers ran at the same priority as the threads doing real work: with 4 cores
  * U2 failed its own check that a command buffer it reuses is idle (cmdBuf.m_bInUse, ndgi-orbis
  * Begin) within 7-21 deaths of a death loop, the GPU interrupt handler threads (699) that
- * release them falling behind. BB_THREAD_PRIO=0 keeps every thread at normal. By drakolordx7
+ * release them falling behind. Applied with 8 hardware threads or fewer; BB_THREAD_PRIO=1/0
+ * forces it on/off. By drakolordx7
  * (upstream PR #547, his community fork d07b7bdd). */
 static int host_priority(int prio) {
 #ifdef _WIN32
+    /* Only where cores are scarce (8 hardware threads or fewer): with plenty of them nothing
+     * starves, and the lowest-priority job workers cost U2's museum ~4% on 16 threads. */
     static int enabled=-1;
     if (enabled<0) {
         const char *env=getenv("BB_THREAD_PRIO");
-        enabled=!(env && env[0]=='0');
-        printf("Runtime: guest thread priorities %s (BB_THREAD_PRIO=0: all normal)\n",
-               enabled ? "applied: I/O above normal, job workers lowest" : "not applied");
+        DWORD_PTR process=0, system=0;
+        const int threads=GetProcessAffinityMask(GetCurrentProcess(),&process,&system) && process
+                              ? __builtin_popcountll((unsigned long long)process) : 0;
+        enabled=env && env[0] ? env[0]!='0' : threads>0 && threads<=8;
+        printf("Runtime: guest thread priorities %s (%d hardware threads; BB_THREAD_PRIO=1/0 "
+               "forces them on/off)\n",
+               enabled ? "applied: I/O above normal, job workers lowest" : "not applied", threads);
     }
     if (!enabled) return THREAD_PRIORITY_NORMAL;
     if (prio<=300) return THREAD_PRIORITY_ABOVE_NORMAL;
