@@ -14,6 +14,7 @@
 #include <sys/resource.h>
 #endif
 #include "common/assert.h"
+#include "bbport_threads.h"
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
@@ -139,6 +140,7 @@ void VideoOutDriver::RunPresenter(std::function<void()> work, bool if_idle) {
 
 void VideoOutDriver::SwapThread(std::stop_token token) {
     Common::SetCurrentThreadName("bb:Present");
+    BbThreads::PreferPerformanceCores(); // bbport: hybrid CPUs
     while (true) {
         std::function<void()> work;
         {
@@ -744,6 +746,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                                                  EmulatorSettings.GetVblankFrequency());
 
     Common::SetCurrentThreadName("shadPS4:PresentThread");
+    BbThreads::PreferPerformanceCores(); // bbport: hybrid CPUs
     Common::SetCurrentThreadRealtime(vblank_period);
 
     Common::AccurateTimer timer{vblank_period};

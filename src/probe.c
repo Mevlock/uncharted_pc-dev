@@ -1388,6 +1388,13 @@ int main(int argc, char **argv) {
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
 #ifdef _WIN32
         bbgpu_thread_stack_dump=runtime_dump_thread_stacks;
+        /* Never in Windows' efficiency mode (EcoQoS): it slows and moves the threads of processes
+         * it judges to be in the background, onto efficiency cores on hybrid CPUs (BB_PCORES=0:
+         * left to Windows; bbport_threads.h keeps the render threads on performance cores). */
+        if (!getenv("BB_PCORES") || strcmp(getenv("BB_PCORES"),"0")) {
+            PROCESS_POWER_THROTTLING_STATE power={PROCESS_POWER_THROTTLING_CURRENT_VERSION,PROCESS_POWER_THROTTLING_EXECUTION_SPEED,0};
+            SetProcessInformation(GetCurrentProcess(),ProcessPowerThrottling,&power,sizeof(power));
+        }
         /* BB_STACK_DUMP_AFTER=<seconds> (diagnosis): the thread stacks once, that long after start. */
         if (getenv("BB_STACK_DUMP_AFTER")) CloseHandle(CreateThread(NULL,0,stack_dump_after,NULL,0,NULL));
 #endif
