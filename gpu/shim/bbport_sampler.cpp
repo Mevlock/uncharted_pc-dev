@@ -5,6 +5,8 @@
 // log gets each thread's busiest addresses as module+offset; the offsets of bb-probe.exe resolve
 // to functions with llvm-symbolizer on the unstripped build (image base 0x140000000).
 // BB_SAMPLE_THREADS=<name>,<name>: thread name prefixes instead of the GPU threads.
+// Each sample also notes its function and the three bb-probe.exe functions above it (unwind
+// tables), so the log shows time per function and the call paths into it, not only addresses.
 
 #ifdef _WIN32
 
@@ -32,10 +34,12 @@ struct Sampled {
     DWORD id = 0;
     u64 samples = 0;
     std::unordered_map<u64, u32> hits;
-    /// Samples outside bb-probe.exe (waits, system calls, the driver), by the first two
-    /// bb-probe.exe return addresses on the frame pointer chain.
+    /// Samples outside bb-probe.exe (waits, system calls, the driver).
     u64 outside = 0;
-    std::map<std::pair<u64, u64>, u32> callers;
+    /// Samples by function (start address) and by call path: the sampled function, then the
+    /// first three bb-probe.exe return addresses above it.
+    std::unordered_map<u64, u32> functions;
+    std::map<std::array<u64, 4>, u32> paths;
 };
 
 u64 image_begin = 0, image_end = 0;
@@ -70,16 +74,26 @@ bool StackBounds(HANDLE thread, u64& low, u64& high) {
     return ReadWord(teb + 0x08, high) && ReadWord(teb + 0x10, low) && low < high;
 }
 
-/// The first two bb-probe.exe return addresses above a suspended thread, by the unwind tables
-/// (through the system DLLs and the driver; stops at the game's code, which has none).
-std::pair<u64, u64> Callers(HANDLE thread, CONTEXT context) {
-    std::array<u64, 2> found{};
-    u32 count = 0;
+/// The start of the function holding an address (its unwind entry), else the address.
+u64 FunctionOf(u64 address) {
+    DWORD64 base = 0;
+    if (const auto* entry = RtlLookupFunctionEntry(address, &base, nullptr)) {
+        return base + entry->BeginAddress;
+    }
+    return address;
+}
+
+/// The sampled function, then the first three bb-probe.exe return addresses above a suspended
+/// thread, by the unwind tables (through the system DLLs and the driver; stops at the game's
+/// code, which has none).
+std::array<u64, 4> Callers(HANDLE thread, CONTEXT context) {
+    std::array<u64, 4> found{FunctionOf(context.Rip)};
+    u32 count = 1;
     u64 low = 0, high = 0;
     if (!StackBounds(thread, low, high)) {
-        return {};
+        return found;
     }
-    for (int depth = 0; depth < 48 && count < 2; ++depth) {
+    for (int depth = 0; depth < 48 && count < found.size(); ++depth) {
         if (context.Rsp < low || context.Rsp + 64 > high) {
             break;
         }
@@ -110,7 +124,7 @@ std::pair<u64, u64> Callers(HANDLE thread, CONTEXT context) {
             found[count++] = context.Rip;
         }
     }
-    return {found[0], found[1]};
+    return found;
 }
 
 std::string Narrow(const wchar_t* text) {
@@ -212,24 +226,32 @@ void Report(std::vector<Sampled>& threads, double seconds) {
             std::printf("Sampler:   %5.2f%% %s\n", 100.0 * top[i].second / t.samples,
                         Describe(top[i].first).c_str());
         }
-        if (t.outside) {
-            std::vector<std::pair<std::pair<u64, u64>, u32>> by_caller(t.callers.begin(),
-                                                                       t.callers.end());
-            std::ranges::sort(by_caller, std::greater{}, &std::pair<std::pair<u64, u64>, u32>::second);
-            std::printf("Sampler: '%s' outside the port (waits, system calls, driver) %.1f%%, by "
-                        "caller (bb-probe.exe offsets):\n",
-                        t.name.c_str(), 100.0 * t.outside / t.samples);
-            for (size_t i = 0; i < by_caller.size() && i < 20; ++i) {
-                const auto [first, second] = by_caller[i].first;
-                std::printf("Sampler:   %5.2f%% %#llx <- %#llx\n", 100.0 * by_caller[i].second / t.samples,
-                            static_cast<unsigned long long>(first ? first - image_begin : 0),
-                            static_cast<unsigned long long>(second ? second - image_begin : 0));
+        std::vector<std::pair<u64, u32>> by_function(t.functions.begin(), t.functions.end());
+        std::ranges::sort(by_function, std::greater{}, &std::pair<u64, u32>::second);
+        std::printf("Sampler: '%s' by function (outside the port: waits, system calls, driver "
+                    "%.1f%%):\n", t.name.c_str(), 100.0 * t.outside / t.samples);
+        for (size_t i = 0; i < by_function.size() && i < 25; ++i) {
+            std::printf("Sampler:   %5.2f%% %s\n", 100.0 * by_function[i].second / t.samples,
+                        Describe(by_function[i].first).c_str());
+        }
+        std::vector<std::pair<std::array<u64, 4>, u32>> by_path(t.paths.begin(), t.paths.end());
+        std::ranges::sort(by_path, std::greater{}, &std::pair<std::array<u64, 4>, u32>::second);
+        std::printf("Sampler: '%s' by call path (function <- bb-probe.exe return addresses):\n",
+                    t.name.c_str());
+        for (size_t i = 0; i < by_path.size() && i < 25; ++i) {
+            std::printf("Sampler:   %5.2f%% %s", 100.0 * by_path[i].second / t.samples,
+                        Describe(by_path[i].first[0]).c_str());
+            for (size_t f = 1; f < 4 && by_path[i].first[f]; ++f) {
+                std::printf(" <- %#llx",
+                            static_cast<unsigned long long>(by_path[i].first[f] - image_begin));
             }
+            std::printf("\n");
         }
         t.samples = 0;
         t.hits.clear();
         t.outside = 0;
-        t.callers.clear();
+        t.functions.clear();
+        t.paths.clear();
     }
 }
 
@@ -242,7 +264,7 @@ void BbSamplerStart() {
     }
     std::vector<std::string> prefixes;
     if (env[0] == '1' && !env[1]) {
-        prefixes = {"shadPS4:GpuCommandProcessor", "bb:DrawRec"};
+        prefixes = {"shadPS4:GpuCommandProcessor", "bb:DrawRec", "bb:VkRecorder"};
     } else {
         for (std::string list = env; !list.empty();) {
             const auto comma = list.find(',');
@@ -266,7 +288,7 @@ void BbSamplerStart() {
         auto window = std::chrono::steady_clock::now();
         auto last_scan = window - std::chrono::seconds(10);
         std::vector<u64> rips;
-        std::vector<std::pair<u64, u64>> callers;
+        std::vector<std::array<u64, 4>> callers;
         for (;;) {
             const auto now = std::chrono::steady_clock::now();
             if (now - last_scan >= std::chrono::seconds(2) && threads.size() < prefixes.size()) {
@@ -283,9 +305,7 @@ void BbSamplerStart() {
                 context.ContextFlags = CONTEXT_FULL;
                 if (GetThreadContext(threads[i].handle, &context)) {
                     rips[i] = context.Rip;
-                    if (!InImage(context.Rip)) {
-                        callers[i] = Callers(threads[i].handle, context);
-                    }
+                    callers[i] = Callers(threads[i].handle, context);
                 }
                 ResumeThread(threads[i].handle);
             }
@@ -293,9 +313,10 @@ void BbSamplerStart() {
                 if (rips[i]) {
                     ++threads[i].hits[rips[i]];
                     ++threads[i].samples;
+                    ++threads[i].functions[callers[i][0]];
+                    ++threads[i].paths[callers[i]];
                     if (!InImage(rips[i])) {
                         ++threads[i].outside;
-                        ++threads[i].callers[callers[i]];
                     }
                 }
             }
