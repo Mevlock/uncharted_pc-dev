@@ -1156,6 +1156,54 @@ static int64_t find_masked(const char *hex, uint64_t size) {
     }
     return found;
 }
+/* Sticky wake-ups (docs/investigations/sticky_wakeups.md). An idle worker checks the job queues,
+ * then takes the job manager's mutex and waits on its condition variable; a job submitted between
+ * the check and the wait signalled nobody, and the worker slept the whole timeout with work queued
+ * (a frame's work a frame late: U3's flashlight light missing for a frame). Both the submission's
+ * signal and the worker's wait run with the manager's mutex held: the signal now also sets a flag,
+ * and a worker about to wait while it is set clears it and returns at once instead (a spurious
+ * wake-up, which the worker loop allows: it looks at the queues again). */
+static volatile unsigned char job_signal_pending;
+static int install_job_sticky(int64_t recheck, int64_t submission) {
+    /* The wait: the first call after the re-check (EU: mov rsi, rax; call at +0x19). The signal: the
+     * call after "add rsi, 0x60" (rsi = the mutex at +0x60, rdi = the condition at +0x80). */
+    int64_t wait_call=-1, signal_call=-1;
+    for (int64_t o=recheck+6;o<recheck+48;++o) if (image[o]==0xe8) { wait_call=o; break; }
+    for (int64_t o=submission+6;o<submission+64;++o)
+        if (!memcmp(image+o,"\x48\x83\xc6\x60\xe8",5)) { signal_call=o+4; break; }
+    if (wait_call<0 || signal_call<0) {
+        printf("Job workers: sticky wake-ups not installed (%s call not found)\n",wait_call<0 ? "wait" : "signal");
+        return 0;
+    }
+    unsigned char *t=near_image_memory(64);
+    if (!t) { printf("Job workers: sticky wake-ups not installed (no thunk memory)\n"); return 0; }
+    int32_t rel;
+    memcpy(&rel,image+wait_call+1,4);
+    const uint64_t wait_fn=(uint64_t)(uintptr_t)(image+wait_call+5+rel);
+    memcpy(&rel,image+signal_call+1,4);
+    const uint64_t signal_fn=(uint64_t)(uintptr_t)(image+signal_call+5+rel);
+    const uint64_t flag=(uint64_t)(uintptr_t)&job_signal_pending;
+    size_t k=0;
+    /* wait: mov rax, &flag; xor ecx, ecx; xchg [rax], cl; test cl, cl; jz +3; xor eax, eax; ret;
+     * jmp [rip] wait */
+    unsigned char *wait_stub=t+k;
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&flag,8); k+=8;
+    t[k++]=0x31; t[k++]=0xc9; t[k++]=0x86; t[k++]=0x08; t[k++]=0x84; t[k++]=0xc9;
+    t[k++]=0x74; t[k++]=0x03; t[k++]=0x31; t[k++]=0xc0; t[k++]=0xc3;
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&wait_fn,8); k+=8;
+    /* signal: mov rax, &flag; mov byte [rax], 1; jmp [rip] signal */
+    unsigned char *signal_stub=t+k;
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&flag,8); k+=8;
+    t[k++]=0xc6; t[k++]=0x00; t[k++]=0x01;
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&signal_fn,8); k+=8;
+    rel=(int32_t)((int64_t)(uintptr_t)wait_stub-(int64_t)(uintptr_t)(image+wait_call+5));
+    memcpy(image+wait_call+1,&rel,4);
+    rel=(int32_t)((int64_t)(uintptr_t)signal_stub-(int64_t)(uintptr_t)(image+signal_call+5));
+    memcpy(image+signal_call+1,&rel,4);
+    printf("Job workers: sticky wake-ups (wait call 0x%" PRIx64 ", signal call 0x%" PRIx64 ")\n",
+           (uint64_t)wait_call,(uint64_t)signal_call);
+    return 1;
+}
 static void patch_job_sleep(uint64_t image_size) {
     const char *env=getenv("BB_JOB_SLEEP");
     if (env && env[0]=='0') return;
@@ -1182,8 +1230,12 @@ static void patch_job_sleep(uint64_t image_size) {
      * its last look (the wake-up already given) waited for the timeout, and a frame's work finished
      * a frame late (U3's mine: the flashlight's light missing for a frame). The wait after the
      * re-check (mov edx, 10) is shortened to BB_JOB_SLEEP_MS (default 1, 10 the game's). */
+    /* BB_JOB_STICKY=1: the wake-up is not lost instead (install_job_sticky below), so the worker can
+     * keep the game's 1000 spins and 10 ms wait. */
+    const char *sticky_env=getenv("BB_JOB_STICKY");
+    const int sticky=sticky_env && sticky_env[0]=='1' && install_job_sticky(at[1],at[2]);
     const char *ms_env=getenv("BB_JOB_SLEEP_MS");
-    const int ms=ms_env ? atoi(ms_env) : 1;
+    const int ms=ms_env ? atoi(ms_env) : sticky ? 10 : 1;
     /* EU: mov edx, 10 (milliseconds); US 1.02 (as CUSA02344): mov edx, 10000 (microseconds, another
      * timed wait). */
     unsigned char *wait=image+at[1]+17;
@@ -1196,7 +1248,7 @@ static void patch_job_sleep(uint64_t image_size) {
      * could then miss it. BB_JOB_SLEEP_SPINS (default 50000, the game's 1000: cmp r8, 1000) keeps a
      * worker spinning through a frame's bursts of jobs; it sleeps when the game is idle. */
     const char *spin_env=getenv("BB_JOB_SLEEP_SPINS");
-    const long spins=spin_env ? atol(spin_env) : 50000;
+    const long spins=spin_env ? atol(spin_env) : sticky ? 1000 : 50000;
     unsigned char *spin=image+at[0]+6;
     int32_t old_spins=0;
     memcpy(&old_spins,spin+3,4);
