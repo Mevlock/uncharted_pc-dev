@@ -85,7 +85,7 @@ def prepare(game, exe, out):
     linked = out / 'boot-linked.bin'
     # Which executable the files in out/ were made from: another folder (a per-game one) needs a new run.
     stamp, source = out / 'source.txt', str(game / exe)
-    sources = [game / exe, *(PORT / 'scripts').glob('*.py'), *(PORT / 'patches').glob('redzone.json'),
+    sources = [game / exe, *(PORT / 'scripts').glob('*.py'),
                *(game / 'sce_module').glob('*.prx')]
     if linked.is_file() and all(linked.stat().st_mtime >= s.stat().st_mtime for s in sources):
         if not stamp.is_file():
