@@ -341,6 +341,27 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
                              isa_kind_name(isa_table->sites[site].kind));
         isa_rewrite_report(isa_table,stderr);
     }
+    /* The code bytes around rip: shows a jump into the middle of an instruction or a stub. */
+    {
+        unsigned char code[64];
+        SIZE_T got=0;
+        if (ReadProcessMemory(GetCurrentProcess(),(void *)(uintptr_t)(c->Rip-48),code,sizeof(code),&got) && got==sizeof(code)) {
+            fprintf(stderr,"  code at rip-48:");
+            for (int i=0;i<64;++i) fprintf(stderr,"%s%02x",i==48?" |":" ",code[i]);
+            fprintf(stderr,"\n");
+        }
+    }
+    /* The stack words at rsp that point into code: a jump to a bad address leaves its caller's
+     * return address there, which the rbp chain below skips. */
+    for (int i=0;i<16;++i) {
+        uint64_t word=0;
+        SIZE_T got=0;
+        if (!ReadProcessMemory(GetCurrentProcess(),(void *)(uintptr_t)(c->Rsp+8*i),&word,8,&got) || got!=8) break;
+        if (image && word-(uint64_t)(uintptr_t)image<0x4000000) {
+            describe_address(where,sizeof(where),(uintptr_t)word);
+            fprintf(stderr,"  [rsp+%#x] %s\n",8*i,where);
+        }
+    }
     /* rbp chain (guest and host code keep frame pointers). */
     uintptr_t rbp=(uintptr_t)c->Rbp;
     for (int depth=0; depth<24 && rbp; ++depth) {
