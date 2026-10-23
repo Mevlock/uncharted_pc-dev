@@ -90,6 +90,11 @@ public:
         return graphics_queue;
     }
 
+    /// bbport: the queue for sparse binds (the graphics queue unless its family has none).
+    vk::Queue GetSparseQueue() const {
+        return sparse_queue;
+    }
+
     /// bbport: a queue beside the graphics queue for read-backs: a transfer-only family's (copy
     /// engine) or the graphics family's second; null when there is neither.
     vk::Queue GetSideQueue() const {
@@ -379,6 +384,11 @@ public:
         return vk11_props.subgroupSize;
     }
 
+    /// bbport: the most workgroups one dispatch may have along x.
+    u32 MaxComputeWorkGroupCountX() const {
+        return properties.limits.maxComputeWorkGroupCount[0];
+    }
+
     /// Returns the maximum size of compute shared memory.
     u32 MaxComputeSharedMemorySize() const {
         return properties.limits.maxComputeSharedMemorySize;
@@ -550,6 +560,8 @@ private:
     vk::Queue side_queue;
     u32 side_queue_family_index{};
     vk::Queue graphics_queue;
+    vk::Queue sparse_queue;
+    u32 sparse_queue_family_index{};
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;

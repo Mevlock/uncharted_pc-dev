@@ -431,20 +431,52 @@ bool Instance::CreateDevice() {
         }
     }
     const bool side_family = side_queue_family_index != queue_family_index;
+    // bbport: sparse binds (buffer arenas) need a queue family with sparse binding; some GPUs'
+    // graphics family has none. Another family is used then, not the side queue's when another
+    // has it (that queue is used from the read-back thread). By Hugo Borges (1b2c699d, via
+    // drakolordx7's community fork).
+    sparse_queue_family_index = queue_family_index;
+    if (!(family_properties[queue_family_index].queueFlags & vk::QueueFlagBits::eSparseBinding)) {
+        std::optional<u32> found;
+        for (u32 i = 0; i < family_properties.size(); ++i) {
+            if (family_properties[i].queueCount &&
+                (family_properties[i].queueFlags & vk::QueueFlagBits::eSparseBinding) &&
+                (!found || *found == side_queue_family_index)) {
+                found = i;
+            }
+        }
+        if (!found) {
+            LOG_CRITICAL(Render_Vulkan, "No queue supports sparse binding.");
+            return false;
+        }
+        sparse_queue_family_index = *found;
+        std::printf("GPU: sparse binds on queue family %u (the graphics family has none)\n",
+                    sparse_queue_family_index);
+    }
     const u32 graphics_queues =
         side_family ? 1u : std::min<u32>(2u, family_properties[queue_family_index].queueCount);
-    const std::array queue_infos = {
+    std::vector<vk::DeviceQueueCreateInfo> queue_infos = {
         vk::DeviceQueueCreateInfo{
             .queueFamilyIndex = queue_family_index,
             .queueCount = graphics_queues,
             .pQueuePriorities = queue_priorities.data(),
         },
-        vk::DeviceQueueCreateInfo{
+    };
+    if (side_family) {
+        queue_infos.push_back(vk::DeviceQueueCreateInfo{
             .queueFamilyIndex = side_queue_family_index,
             .queueCount = 1,
             .pQueuePriorities = queue_priorities.data(),
-        },
-    };
+        });
+    }
+    if (sparse_queue_family_index != queue_family_index &&
+        sparse_queue_family_index != side_queue_family_index) {
+        queue_infos.push_back(vk::DeviceQueueCreateInfo{
+            .queueFamilyIndex = sparse_queue_family_index,
+            .queueCount = 1,
+            .pQueuePriorities = queue_priorities.data(),
+        });
+    }
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
@@ -475,7 +507,7 @@ bool Instance::CreateDevice() {
     }
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = side_family ? 2u : 1u,
+            .queueCreateInfoCount = static_cast<u32>(queue_infos.size()),
             .pQueueCreateInfos = queue_infos.data(),
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
@@ -717,6 +749,7 @@ bool Instance::CreateDevice() {
     }
 
     graphics_queue = device->getQueue(queue_family_index, 0);
+    sparse_queue = device->getQueue(sparse_queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
     g_crash_queue = graphics_queue;
     if (side_queue_family_index != queue_family_index) {
@@ -798,6 +831,20 @@ void Instance::CollectDeviceParameters() {
     const std::string api_version = GetReadableVersion(properties.apiVersion);
     const std::string extensions = fmt::format("{}", fmt::join(available_extensions, ", "));
 
+    // bbport: the GPU, its VRAM and the driver in every log (LOG_INFO is filtered out by
+    // default), flushed so it is there even if the device is lost right after. From SuperMedo's
+    // 33e1b301 (idea from parsifal295), via drakolordx7's community fork.
+    u64 vram = 0;
+    const auto heaps = physical_device.getMemoryProperties();
+    for (u32 i = 0; i < heaps.memoryHeapCount; ++i) {
+        if (heaps.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+            vram = std::max<u64>(vram, heaps.memoryHeaps[i].size);
+        }
+    }
+    std::printf("GPU: %s%s, %llu MiB VRAM, driver %s, Vulkan %s\n", model_name.c_str(),
+                IsIntegrated() ? " (integrated)" : "", static_cast<unsigned long long>(vram >> 20),
+                driver_name.c_str(), api_version.c_str());
+    std::fflush(stdout);
     LOG_INFO(Render_Vulkan, "GPU_Vendor: {}", vendor_name);
     LOG_INFO(Render_Vulkan, "GPU_Model: {}", model_name);
     LOG_INFO(Render_Vulkan, "GPU_Integrated: {}", IsIntegrated() ? "Yes" : "No");
