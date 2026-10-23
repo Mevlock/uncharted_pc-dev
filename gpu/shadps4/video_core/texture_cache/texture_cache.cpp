@@ -6,6 +6,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
 #include <xxhash.h>
 
 #include "bbport_toggles.h"
@@ -30,6 +33,65 @@ namespace VideoCore {
 
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
+
+namespace {
+/// bbport diagnosis: BB_REFRESH_LOG=1. GPU-written images whose contents are hashed to check
+/// for CPU writes (RefreshImage), and the CPU writes that marked them dirty, every 5 s: a room
+/// of U2 chapter 9 spent most of the draw recording thread re-hashing whole images.
+const bool refresh_log = std::getenv("BB_REFRESH_LOG") != nullptr;
+struct RefreshStat {
+    u64 checks = 0, bytes = 0, unchanged = 0, writes = 0, small_writes = 0, page_checks = 0;
+    u64 write_min = ~0ull, write_max = 0;
+    u32 width = 0, height = 0, size = 0;
+    bool depth = false;
+    vk::Format format{};
+};
+std::mutex refresh_mutex;
+std::unordered_map<VAddr, RefreshStat> refresh_stats;
+std::chrono::steady_clock::time_point refresh_window = std::chrono::steady_clock::now();
+
+RefreshStat& RefreshStatOf(const Image& image) {
+    auto& stat = refresh_stats[image.info.guest_address];
+    stat.width = image.info.size.width;
+    stat.height = image.info.size.height;
+    stat.size = image.info.guest_size;
+    stat.depth = image.info.props.is_depth;
+    stat.format = image.info.pixel_format;
+    return stat;
+}
+
+void PrintRefreshStats() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - refresh_window < std::chrono::seconds(5)) {
+        return;
+    }
+    refresh_window = now;
+    std::vector<std::pair<VAddr, RefreshStat>> top(refresh_stats.begin(), refresh_stats.end());
+    refresh_stats.clear();
+    std::ranges::sort(top, std::greater{}, [](const auto& e) { return e.second.bytes; });
+    u64 total = 0;
+    for (const auto& [address, stat] : top) {
+        total += stat.bytes;
+    }
+    std::printf("Refresh checks: %.1f MiB hashed in 5 s over %zu images\n", total / 1048576.0,
+                top.size());
+    for (size_t i = 0; i < top.size() && i < 8; ++i) {
+        const auto& [address, s] = top[i];
+        std::printf("  %#llx %ux%u %s%s (%.1f MiB): %llu checks (%llu pages compared), %.1f MiB "
+                    "hashed, %llu unchanged; %llu CPU writes (%llu of 8 bytes) at offsets "
+                    "%#llx..%#llx\n",
+                    static_cast<unsigned long long>(address), s.width, s.height,
+                    vk::to_string(s.format).c_str(), s.depth ? " depth" : "", s.size / 1048576.0,
+                    static_cast<unsigned long long>(s.checks),
+                    static_cast<unsigned long long>(s.page_checks), s.bytes / 1048576.0,
+                    static_cast<unsigned long long>(s.unchanged),
+                    static_cast<unsigned long long>(s.writes),
+                    static_cast<unsigned long long>(s.small_writes),
+                    static_cast<unsigned long long>(s.writes ? s.write_min : 0),
+                    static_cast<unsigned long long>(s.write_max));
+    }
+}
+} // namespace
 
 TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                            Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
@@ -148,7 +210,45 @@ void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
     UntrackImage(image_id);
 }
 
-void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
+namespace {
+/// bbport: the part of the 4 KiB page holding addr that lies in the image, hashed.
+u64 HashImagePage(const Image& image, VAddr addr) {
+    const VAddr begin = std::max<VAddr>(addr & ~VAddr{0xfff}, image.info.guest_address);
+    const VAddr end =
+        std::min<VAddr>((addr & ~VAddr{0xfff}) + 0x1000, image.info.guest_address + image.info.guest_size);
+    return XXH3_64bits(std::bit_cast<const u8*>(begin), end - begin);
+}
+
+/// bbport: notes a CPU write to a GPU-written image (see Image::cpu_write_pages). Large images
+/// only: a whole check of a small one costs less than tracking pages (a U2 chapter 9 room wrote
+/// 8 bytes into a 1 GiB shadow map array each frame, and each write hashed all of it).
+void NoteCpuWrite(Image& image, VAddr addr, size_t size, bool before_write) {
+    constexpr u32 MinImageSize = 1u << 20;
+    constexpr size_t MaxPages = 8;
+    if (image.whole_check_needed) {
+        return;
+    }
+    const VAddr page = addr & ~VAddr{0xfff};
+    if (!before_write || BbToggle::Disabled2(BbToggle::CpuWritePageCheck) ||
+        image.info.guest_size < MinImageSize || ((addr + size - 1) & ~VAddr{0xfff}) != page ||
+        False(image.flags & ImageFlagBits::GpuModified)) {
+        image.whole_check_needed = true;
+        return;
+    }
+    for (const auto& [noted, hash] : image.cpu_write_pages) {
+        if (noted == page) {
+            return;
+        }
+    }
+    if (image.cpu_write_pages.size() == MaxPages) {
+        image.whole_check_needed = true;
+        return;
+    }
+    image.cpu_write_pages.emplace_back(page, HashImagePage(image, addr));
+}
+} // namespace
+
+void TextureCache::InvalidateMemory(VAddr addr, size_t size, bool before_write) {
     std::scoped_lock lock{mutex};
     const auto pages_start = PageManager::GetPageAddr(addr);
     const auto pages_end = PageManager::GetNextPageAddr(addr + size - 1);
@@ -158,7 +258,17 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
         if (image.Overlaps(addr, size)) {
             // Modified region overlaps image, so the image was definitely accessed by this fault.
             // Untrack the image, so that the range is unprotected and the guest can write freely.
+            NoteCpuWrite(image, addr, size, before_write);
             image.flags |= ImageFlagBits::CpuDirty;
+            if (refresh_log && True(image.flags & ImageFlagBits::GpuModified)) {
+                std::scoped_lock stats_lock{refresh_mutex};
+                auto& stat = RefreshStatOf(image);
+                const u64 offset = addr > image_begin ? addr - image_begin : 0;
+                ++stat.writes;
+                stat.small_writes += size <= 8;
+                stat.write_min = std::min(stat.write_min, offset);
+                stat.write_max = std::max(stat.write_max, offset + size);
+            }
             UntrackImage(image_id);
         } else if (pages_end < image_end) {
             // This page access may or may not modify the image.
@@ -1215,8 +1325,45 @@ void TextureCache::RefreshImage(Image& image) {
     const bool is_gpu_modified = True(image.flags & ImageFlagBits::GpuModified);
     const bool is_gpu_dirty = True(image.flags & ImageFlagBits::GpuDirty);
 
+    // bbport: only CPU write faults made this GPU-written image dirty: the pages they wrote
+    // decide. Unchanged (the game rewrote the same values), nothing is uploaded and no mip level
+    // is hashed. Writes to other pages between the first fault and now (the image is no longer
+    // write-protected) are not seen, as a whole check would; a page that changed falls back to it.
+    const auto write_pages = std::move(image.cpu_write_pages);
+    const bool whole_check_needed = std::exchange(image.whole_check_needed, false);
+    image.cpu_write_pages.clear();
+    if (is_gpu_modified && !is_gpu_dirty && !whole_check_needed && !write_pages.empty() &&
+        False(image.flags & ImageFlagBits::MaybeCpuDirty)) {
+        const bool unchanged = std::ranges::all_of(write_pages, [&](const auto& page) {
+            return HashImagePage(image, page.first) == page.second;
+        });
+        if (refresh_log) {
+            std::scoped_lock stats_lock{refresh_mutex};
+            auto& stat = RefreshStatOf(image);
+            ++stat.checks;
+            stat.unchanged += unchanged;
+            stat.page_checks += write_pages.size();
+            PrintRefreshStats();
+        }
+        if (unchanged) {
+            image.flags &= ~ImageFlagBits::Dirty;
+            return;
+        }
+    }
+
     BbStats::image_upload_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
     boost::container::small_vector<vk::BufferImageCopy, 14> image_copies;
+    u64 hashed_bytes = 0;
+    SCOPE_EXIT {
+        if (refresh_log && hashed_bytes) {
+            std::scoped_lock stats_lock{refresh_mutex};
+            auto& stat = RefreshStatOf(image);
+            ++stat.checks;
+            stat.bytes += hashed_bytes;
+            stat.unchanged += image_copies.empty();
+            PrintRefreshStats();
+        }
+    };
     for (u32 m = 0; m < num_mips; m++) {
         const u32 width = std::max(image.info.size.width >> m, 1u);
         const u32 height = std::max(image.info.size.height >> m, 1u);
@@ -1228,6 +1375,7 @@ void TextureCache::RefreshImage(Image& image) {
         if (is_gpu_modified && !is_gpu_dirty) {
             const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
             const u64 hash = XXH3_64bits(addr + mip_offset, mip_size);
+            hashed_bytes += mip_size;
             if (image.mip_hashes[m] == hash) {
                 continue;
             }

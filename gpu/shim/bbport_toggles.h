@@ -84,6 +84,7 @@ inline bool Disabled(std::uint64_t bit) {
 /// Toggles in the second number of BB_TOGGLE_FILE ("mask mask2"; the first 64 bits are used).
 enum : std::uint64_t {
     TextureSetExact = 1, ///< memoized texture sets of exact images survive (un)registrations
+    CpuWritePageCheck = 2, ///< CPU writes to big GPU-written images: only the written pages hashed
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;

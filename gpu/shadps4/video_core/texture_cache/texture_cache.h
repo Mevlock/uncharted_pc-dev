@@ -106,8 +106,9 @@ public:
         return tile_manager;
     }
 
-    /// Invalidates any image in the logical page range.
-    void InvalidateMemory(VAddr addr, size_t size);
+    /// Invalidates any image in the logical page range. before_write (bbport): a write fault,
+    /// the memory still holds what the CPU is about to overwrite.
+    void InvalidateMemory(VAddr addr, size_t size, bool before_write = false);
 
     /// Marks an image as dirty if it exists at the provided address.
     /// whole_range (bbport): the GPU wrote exactly [address, address + max_size), so every image

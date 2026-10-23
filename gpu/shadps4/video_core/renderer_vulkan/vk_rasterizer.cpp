@@ -5641,20 +5641,20 @@ u32 Rasterizer::ReadDataFromGds(u32 gds_offset) {
     return value;
 }
 
-bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
+bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks, bool before_write) {
     DrainDrawPipe();
     if (!IsMapped(addr, size)) {
         // Not GPU mapped memory, can skip invalidation logic entirely.
         return false;
     }
     buffer_cache.InvalidateMemory(addr, size, assume_locks);
-    texture_cache.InvalidateMemory(addr, size);
+    texture_cache.InvalidateMemory(addr, size, before_write);
     return true;
 }
 
 bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
     DrainDrawPipe();
-    if (!InvalidateMemory(addr, 8, assume_locks)) {
+    if (!InvalidateMemory(addr, 8, assume_locks, true)) {
         return false;
     }
     buffer_cache.ExtendWriteFault(addr);

@@ -190,6 +190,12 @@ public:
     boost::container::static_vector<u64, 16> mip_hashes{};
     u64 lru_id{};
     u64 hash{};
+    /// bbport: pages of a GPU-written image the CPU faulted on since its last refresh, with
+    /// hashes of their contents from before the write (TextureCache::InvalidateMemory).
+    /// RefreshImage compares these pages instead of hashing every mip level; whole_check_needed
+    /// when a write came another way or too many pages were written.
+    boost::container::small_vector<std::pair<VAddr, u64>, 4> cpu_write_pages;
+    bool whole_check_needed = false;
 
 private:
     static Common::IncrementalIdProvider<u64> global_image_uid;

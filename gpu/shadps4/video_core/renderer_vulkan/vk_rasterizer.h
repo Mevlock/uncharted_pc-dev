@@ -99,7 +99,9 @@ public:
     void FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds);
     void CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds);
     u32 ReadDataFromGds(u32 gsd_offset);
-    bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// before_write (bbport): a write fault, the CPU has not written yet (TextureCache).
+    bool InvalidateMemory(VAddr addr, u64 size, bool assume_locks = false,
+                          bool before_write = false);
     /// GPU thread, before a write the guest can observe (see Scheduler::WaitHostCopies).
     void WaitHostCopies() {
         DrainDrawPipe();
