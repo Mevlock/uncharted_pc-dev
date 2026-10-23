@@ -372,6 +372,7 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
                 if (base >= 8) *c++ = 0x41;
                 *c++ = 0x81;
                 *c++ = (uint8_t)(0xb8 | (base & 7));
+                if ((base & 7) == 4) *c++ = 0x24; /* rsp/r12 base: SIB byte (US U2 reads via r12) */
                 memcpy(c, &field, 4);
                 memcpy(c + 4, b ? &hi_bits : &lo_bits, 4);
                 c += 8;
