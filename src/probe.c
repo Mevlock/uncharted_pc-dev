@@ -865,6 +865,119 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         printf("Callbacks: %s at %#" PRIx64 "\n",c->name,c->offset);
     }
 }
+/* Render command contexts (ndgi): Begin and End are hooked to keep a per-thread flag, set while a
+ * job worker has a context open (runtime_ndgi_open), used by the job mutex patch below.
+ * bbport diagnosis: BB_NDGI_TRACE=1 also reports. With 4 cores U2 failed "cmdBuf.m_bInUse ==
+ * false" in a command context's Begin together with "m_workerThreadIndex ==
+ * GetCurrentWorkerThreadIndex()" in End: the context recorded one job worker at Begin
+ * (+0xe810) and found another at End. At End's index check (r14 = the context) this asks the
+ * game's own GetCurrentWorkerThreadIndex (0x650600, from the thread's TLS) and notes the host
+ * thread: one index on two host threads is a TLS fault of ours; a context ending on another
+ * worker's thread moved between workers (a job fiber resumed elsewhere). */
+#ifdef _WIN32
+static uint64_t ndgi_index_fn; /* GetCurrentWorkerThreadIndex, from the call after the site */
+extern _Thread_local int runtime_ndgi_open; /* runtime_fiber.c */
+static volatile LONG ndgi_owner[6];
+static volatile LONG ndgi_reports, ndgi_ends, ndgi_moved, ndgi_shared;
+static int ndgi_tracing;
+static void __attribute__((ms_abi)) ndgi_end_trace(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
+    (void)rdi; (void)rsi;
+    const uint64_t stored=*(const uint64_t *)(uintptr_t)(r14+0xe810);
+    (void)base;
+    runtime_ndgi_open=0;
+    if (!ndgi_tracing) return;
+    const uint64_t index=((uint64_t (__attribute__((sysv_abi)) *)(void))(uintptr_t)ndgi_index_fn)();
+    const LONG tid=(LONG)GetCurrentThreadId();
+    const LONG ends=InterlockedIncrement(&ndgi_ends);
+    if (index<6) {
+        const LONG owner=InterlockedCompareExchange(&ndgi_owner[index],tid,0);
+        if (owner && owner!=tid) {
+            InterlockedIncrement(&ndgi_shared);
+            if (InterlockedIncrement(&ndgi_reports)<=40)
+                printf("NDGI: worker index %llu on host thread %ld, first seen on thread %ld (end %ld)\n",
+                       (unsigned long long)index,tid,owner,ends);
+        }
+    }
+    if (stored!=index) {
+        InterlockedIncrement(&ndgi_moved);
+        if (InterlockedIncrement(&ndgi_reports)<=40)
+            printf("NDGI: context %#llx began on worker %llu (thread %ld) and ends on worker %llu (thread %ld), end %ld\n",
+                   (unsigned long long)r14,(unsigned long long)stored,
+                   stored<6 ? ndgi_owner[stored] : 0L,(unsigned long long)index,tid,ends);
+    }
+    if ((ends & 0xfffff)==0)
+        printf("NDGI: %ld ends, %ld moved between workers, %ld on a second thread for one index; threads %ld %ld %ld %ld %ld %ld\n",
+               ends,ndgi_moved,ndgi_shared,ndgi_owner[0],ndgi_owner[1],ndgi_owner[2],ndgi_owner[3],
+               ndgi_owner[4],ndgi_owner[5]);
+    fflush(stdout);
+}
+/* Begin (mov [r12+0xe810], rax: the worker index stored) marks the thread; a fiber switched out
+ * while it is marked clears it (the job left the thread) and, tracing, is reported with the guest
+ * return addresses (runtime_fiber.c). */
+static void __attribute__((ms_abi)) ndgi_begin_trace(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
+    (void)rdi; (void)rsi; (void)base; (void)r14;
+    runtime_ndgi_open=1;
+}
+void runtime_ndgi_yield(const char *how, uint64_t ret, uint64_t guest_rbp) {
+    static volatile LONG yields;
+    if (!ndgi_tracing) return;
+    const LONG n=InterlockedIncrement(&yields);
+    if (n>60) return;
+    char where[MAX_PATH+64], line[1024];
+    describe_address(where,sizeof(where),(uintptr_t)ret);
+    int k=snprintf(line,sizeof(line),"NDGI: fiber %s with a command context open (thread %lu, #%ld): %s",how,
+                   GetCurrentThreadId(),n,where);
+    /* The stack above the host frame: values that point into the guest image just after a call
+     * (e8 rel32, or ff /2 of 2-7 bytes) are return addresses of the yielding job's callers. */
+    const uint64_t lo=(uint64_t)(uintptr_t)image, hi=lo+guest_image_size;
+    int found=0;
+    for (uint64_t at=guest_rbp & ~7ull; found<12 && at<(guest_rbp & ~7ull)+0x2000 && k<(int)sizeof(line)-80; at+=8) {
+        if (!dump_readable(at,8)) break;
+        const uint64_t v=*(const uint64_t *)(uintptr_t)at;
+        if (v<lo+16 || v>=hi) continue;
+        const unsigned char *c=(const unsigned char *)(uintptr_t)v;
+        const int call=c[-5]==0xe8 || (c[-2]==0xff && (c[-1]&0x38)==0x10) || (c[-3]==0xff && (c[-2]&0x38)==0x10) ||
+                       (c[-6]==0xff && (c[-5]&0x38)==0x10);
+        if (!call) continue;
+        describe_address(where,sizeof(where),(uintptr_t)v);
+        k+=snprintf(line+k,sizeof(line)-k," < %s",where);
+        ++found;
+    }
+    printf("%s\n",line);
+    fflush(stdout);
+}
+static void install_ndgi_trace(uint64_t image_size) {
+    ndgi_tracing=getenv("BB_NDGI_TRACE")!=NULL;
+    const char *wait=getenv("BB_JOB_LOCK_WAIT_MS");
+    if (!ndgi_tracing && wait && wait[0]=='0' && !wait[1]) return; /* nothing uses the flag */
+    static const unsigned char begin[]={0x49,0x89,0x84,0x24,0x10,0xe8,0x00,0x00}; /* mov [r12+0xe810], rax */
+    int64_t begin_at=-1;
+    for (uint64_t at=0;at+16<=image_size;++at) {
+        if (image[at]!=0x49 || memcmp(image+at,begin,sizeof(begin))) continue;
+        if (begin_at>=0) { begin_at=-2; break; }
+        begin_at=(int64_t)at;
+    }
+    if (begin_at>=0 && callback_thunk(image+begin_at,8,(const void *)ndgi_begin_trace))
+        printf("Render contexts: begin hooked at %#" PRIx64 "\n",(uint64_t)begin_at);
+    else
+        printf("Render contexts: begin site %s\n",begin_at==-2 ? "not unique" : "not found");
+    /* End: mov rbx,[r14+0xe810]; call GetCurrentWorkerThreadIndex; cmp rbx,rax; je */
+    static const unsigned char head[]={0x49,0x8b,0x9e,0x10,0xe8,0x00,0x00,0xe8};
+    static const unsigned char tail[]={0x48,0x39,0xc3,0x74};
+    int64_t found=-1;
+    for (uint64_t at=0;at+16<=image_size;++at) {
+        if (image[at]!=0x49 || memcmp(image+at,head,sizeof(head)) || memcmp(image+at+12,tail,sizeof(tail))) continue;
+        if (found>=0) { printf("Render contexts: end site not unique\n"); return; }
+        found=(int64_t)at;
+    }
+    if (found<0) { printf("Render contexts: end site not found\n"); return; }
+    int32_t rel; memcpy(&rel,image+found+8,4);
+    ndgi_index_fn=(uint64_t)(uintptr_t)(image+found+12+rel);
+    if (callback_thunk(image+found,7,(const void *)ndgi_end_trace))
+        printf("Render contexts: end hooked at %#" PRIx64 " (worker index from %#" PRIx64 ")%s\n",
+               (uint64_t)found,(uint64_t)(found+12+rel),ndgi_tracing ? ", tracing (BB_NDGI_TRACE)" : "");
+}
+#endif
 /* Naughty Dog's job system: a worker with no job checks the queues again after a pause and only
  * sleeps (scePthreadCondTimedwait) when a flag of the scheduler allows it, which it does not here:
  * U2's museum, standing, 4-5 workers at 75-93 % CPU spun there on Umar's 4-core/8-thread PC
@@ -1139,6 +1252,78 @@ static void patch_job_sleep(uint64_t image_size) {
     printf("Job workers: idle ones sleep (0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 "), wait %d ms after %d spins\n",
            at[0],at[1],at[2],is_wait ? wait[1] : is_wait_us ? (int)(((uint32_t)wait[1]|(uint32_t)wait[2]<<8)/1000) : -1,
            (int)now_spins);
+}
+/* The job system's mutex (corelib job scheduling): a job worker that finds it taken suspends its
+ * job (SuspendJob) and retries when the job runs again, which may be on another worker; other
+ * threads sleep 1 ms and retry in place. On the PS4 each worker owns a core and a holder lets go
+ * within microseconds. With 4 cores Windows preempts holders, so jobs suspended there: U2's water
+ * Draw takes such a lock with a render command context open, resumed on another worker and failed
+ * "m_workerThreadIndex == GetCurrentWorkerThreadIndex()" (End) and "cmdBuf.m_bInUse == false"
+ * (Begin, on the worker it left) within 1-7 deaths of a 4-core death loop. A worker with a render
+ * context open (the Begin/End hooks above) now first retries in place (SwitchToThread, then 1 ms
+ * sleeps, up to BB_JOB_LOCK_WAIT_MS, default 250; 0: off) and suspends its job only after that, as
+ * before (a holder that is itself a suspended job still gets a free worker); other workers
+ * suspend at once. Lock: try(rdi=[rbx+0x20], rsi=r15, edx=r14d) -> al. */
+static uint64_t job_lock_try;
+static unsigned job_lock_wait_ms=250;
+static ABI int job_lock_wait(uint64_t lock, uint64_t a, uint32_t b) {
+    typedef int (ABI *Try)(uint64_t, uint64_t, uint32_t);
+    const Try try_lock=(Try)(uintptr_t)job_lock_try;
+#ifdef _WIN32
+    /* Without a render context open the job may move: suspend at once, as the game does (waiting
+     * in place for every taken lock starved the job system: 3.6 fps loading with 4 cores). */
+    if (!runtime_ndgi_open) return 0;
+    for (unsigned i=0;i<16;++i) {
+        if (try_lock(lock,a,b)&0xff) return 1;
+        SwitchToThread();
+    }
+    for (unsigned ms=0;ms<job_lock_wait_ms;++ms) {
+        if (try_lock(lock,a,b)&0xff) return 1;
+        Sleep(1);
+    }
+#else
+    for (unsigned i=0;i<job_lock_wait_ms*10;++i) {
+        if (try_lock(lock,a,b)&0xff) return 1;
+        usleep(100);
+    }
+#endif
+    return try_lock(lock,a,b)&0xff;
+}
+static void patch_job_lock_wait(uint64_t image_size) {
+    const char *env=getenv("BB_JOB_LOCK_WAIT_MS");
+    if (env) job_lock_wait_ms=(unsigned)strtoul(env,NULL,10);
+    if (!job_lock_wait_ms) { printf("Job lock: BB_JOB_LOCK_WAIT_MS=0, workers suspend at once\n"); return; }
+    /* mov rdi,[rbx+0x20]; mov rsi,r15; mov edx,r14d; call try; test al,al; jne done;
+     * test r12b,r12b; je not_a_worker; nop5; (suspend loop:) mov rdi,rbx; mov rsi,r15; mov edx,r14d; call SuspendJob */
+    const int64_t at=find_masked("488b7b20 4c89fe 4489f2 e8???????? 84c0 75?? 4584e4 74?? 0f1f440000 4889df 4c89fe 4489f2 e8????????",
+                                 image_size);
+    if (at<0) { printf("Job lock: %s\n",at==-2 ? "pattern not unique, not patched" : "pattern not found, not patched"); return; }
+    unsigned char *p=image+at;
+    int32_t rel; memcpy(&rel,p+11,4);
+    job_lock_try=(uint64_t)(uintptr_t)(p+15+rel);
+    const uint64_t done=(uint64_t)(uintptr_t)(p+19+(int8_t)p[18]);
+    const uint64_t not_worker=(uint64_t)(uintptr_t)(p+24+(int8_t)p[23]);
+    const uint64_t suspend_loop=(uint64_t)(uintptr_t)(p+29);
+    unsigned char *t=near_image_memory(4096);
+    if (!t) { printf("Job lock: no thunk memory, not patched\n"); return; }
+    size_t k=0;
+    const uintptr_t host=(uintptr_t)job_lock_wait;
+    static const unsigned char test_r12b[]={0x45,0x84,0xe4,0x75,0x0e};      /* test r12b,r12b; jnz worker */
+    memcpy(t+k,test_r12b,sizeof(test_r12b)); k+=sizeof(test_r12b);
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&not_worker,8); k+=8;  /* jmp [rip]: not a worker */
+    /* worker: */
+    static const unsigned char args[]={0x48,0x8b,0x7b,0x20,0x4c,0x89,0xfe,0x44,0x89,0xf2}; /* rdi=[rbx+0x20], rsi=r15, edx=r14d */
+    memcpy(t+k,args,sizeof(args)); k+=sizeof(args);
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;   /* movabs rax, job_lock_wait */
+    t[k++]=0xff; t[k++]=0xd0;                              /* call rax (rsp aligned as at the original calls) */
+    t[k++]=0x84; t[k++]=0xc0;                              /* test al,al */
+    t[k++]=0x74; t[k++]=0x0e;                              /* jz suspend */
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&done,8); k+=8;          /* jmp [rip]: acquired */
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&suspend_loop,8); k+=8;  /* jmp [rip]: suspend as before */
+    const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+19+5));
+    p[19]=0xe9; memcpy(p+20,&to,4);                        /* replaces test r12b,r12b; je */
+    printf("Job lock: workers retry a taken job mutex in place for up to %u ms before suspending their job (0x%" PRIx64 ")\n",
+           job_lock_wait_ms,(uint64_t)at);
 }
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
@@ -1438,10 +1623,14 @@ int main(int argc, char **argv) {
         uint64_t image_end=0;
         for (uint64_t s=0;s<ns;++s) if (segments[s].address+segments[s].size>image_end) image_end=segments[s].address+segments[s].size;
         install_game_callbacks(segments, ns, image_end);
+#ifdef _WIN32
+        install_ndgi_trace(image_end);
+#endif
         install_job_idle_yield(image_end);
         patch_eop_tick_wait(image_end);
         patch_collection_skip(image_end);
         patch_job_sleep(image_end);
+        patch_job_lock_wait(image_end);
         patch_rdtsc(image_end);
         /* Ultrawide and field of view (runtime_ultrawide.c): the code segment at address 0. */
         for (uint64_t s=0;s<ns;++s)
