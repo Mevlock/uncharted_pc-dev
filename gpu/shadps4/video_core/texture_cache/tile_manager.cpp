@@ -196,8 +196,9 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
 void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::DescriptorBufferInfo& tiled,
                                        const vk::DescriptorBufferInfo& linear,
                                        const vk::DescriptorBufferInfo& params, u32 dim_x) {
-    scheduler.Record([pipeline, layout = *pl_layout, tiled, linear, params,
-                      dim_x](vk::CommandBuffer cmdbuf) {
+    const u32 max_groups_x = instance.MaxComputeWorkGroupCountX();
+    scheduler.Record([pipeline, layout = *pl_layout, tiled, linear, params, dim_x,
+                      max_groups_x](vk::CommandBuffer cmdbuf) {
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
         const std::array<vk::WriteDescriptorSet, 3> set_writes = {{
             {
@@ -220,7 +221,14 @@ void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::Descript
             },
         }};
         cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, set_writes);
-        cmdbuf.dispatch(dim_x, 1, 1);
+        // bbport: large textures can need more groups than a GPU allows along x (65535 is the
+        // guaranteed minimum); only then rows of 32768 groups (tiling.comp skips texels past
+        // the buffer). By Hugo Borges (1b2c699d, via drakolordx7's community fork).
+        if (dim_x <= max_groups_x) {
+            cmdbuf.dispatch(dim_x, 1, 1);
+        } else {
+            cmdbuf.dispatch(32768u, dim_x / 32768u + u32(dim_x % 32768u != 0), 1);
+        }
     });
 }
 
