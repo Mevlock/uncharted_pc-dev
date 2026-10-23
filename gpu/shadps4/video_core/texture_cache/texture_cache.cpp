@@ -91,6 +91,39 @@ void PrintRefreshStats() {
                     static_cast<unsigned long long>(s.write_max));
     }
 }
+/// bbport diagnosis (BB_REFRESH_LOG): what binds of a huge image ask for, once per kind: a U2
+/// depth image came out 4096x4096 with 16 layers (1 GiB) while the game kept CPU data in it.
+void LogHugeBind(const char* kind, const Image& image, const TextureCache::ImageDesc& desc) {
+    constexpr u64 Huge = 256ull << 20;
+    if (!refresh_log || image.info.guest_size < Huge) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::vector<std::array<u64, 8>> seen;
+    const auto& i = desc.info;
+    const auto& r = desc.view_info.range;
+    const std::array<u64, 8> key{reinterpret_cast<u64>(kind), i.guest_address, i.guest_size,
+                                 i.resources.layers, u64(i.size.width) << 32 | i.size.height,
+                                 u64(r.base.layer) << 32 | r.extent.layers,
+                                 u64(r.base.level) << 32 | r.extent.levels, u64(i.type)};
+    std::scoped_lock lock{mutex};
+    if (std::ranges::find(seen, key) != seen.end() || seen.size() > 64) {
+        return;
+    }
+    seen.push_back(key);
+    std::printf("Huge image %#llx (%ux%u, %u layers, %.1f MiB): %s bind asks for %#llx %ux%u "
+                "pitch %u, type %d, %u layers x %u levels (%.1f MiB, %.1f MiB per layer), view "
+                "layers %u+%u levels %u+%u, %s\n",
+                static_cast<unsigned long long>(image.info.guest_address), image.info.size.width,
+                image.info.size.height, image.info.resources.layers,
+                image.info.guest_size / 1048576.0, kind,
+                static_cast<unsigned long long>(i.guest_address), i.size.width, i.size.height,
+                i.pitch, int(i.type), i.resources.layers, i.resources.levels,
+                i.guest_size / 1048576.0,
+                i.guest_size / 1048576.0 / std::max(1u, i.resources.layers), r.base.layer,
+                r.extent.layers, r.base.level, r.extent.levels,
+                vk::to_string(desc.view_info.format).c_str());
+}
 } // namespace
 
 TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
@@ -321,7 +354,11 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
 /// shadow maps (the flashlight's light vanished for a frame, then came back in blocky tiles).
 /// A depth image made at an address that has held a deeper array gets all those layers at once; the
 /// game draws each layer again every frame. BB_DEPTH_ARRAY_PAD=0: off.
-void TextureCache::PadDepthLayers(ImageInfo& info) {
+/// The padded array stays within twice the most bytes a request at the address covered: U2 kept
+/// a 16-layer array at an address that later held one 4096x4096 shadow map, padded to 16 layers
+/// (1 GiB) over memory the game used for other data, and its CPU writes there cost a whole check of
+/// the image each (60 -> 12 fps). U3's switch between 1024 and 1280 stays within it (x1.56).
+void TextureCache::PadDepthLayers(ImageInfo& info, const ImageInfo& requested) {
     static const bool pad = [] {
         const char* env = std::getenv("BB_DEPTH_ARRAY_PAD");
         return !(env && env[0] == '0');
@@ -330,10 +367,15 @@ void TextureCache::PadDepthLayers(ImageInfo& info) {
         return;
     }
     auto& seen = depth_array_layers[info.guest_address];
-    if (info.resources.layers > seen) {
-        seen = info.resources.layers;
-    } else if (seen > info.resources.layers && seen > 1) {
-        info.resources.layers = seen;
+    seen.layers = std::max(seen.layers, requested.resources.layers);
+    seen.bytes = std::max<u64>(seen.bytes, requested.guest_size);
+    const u64 slice = info.guest_size / std::max(1u, info.resources.layers);
+    const u32 fits = slice ? static_cast<u32>(std::min<u64>(2 * seen.bytes / slice, 2048)) : 0;
+    const u32 cap = std::max(requested.resources.layers, fits);
+    const u32 layers =
+        std::clamp(std::max(info.resources.layers, seen.layers), requested.resources.layers, cap);
+    if (layers != info.resources.layers) {
+        info.resources.layers = layers;
         info.UpdateSize();
     }
 }
@@ -388,7 +430,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
-        PadDepthLayers(new_info);
+        PadDepthLayers(new_info, requested_info);
         HtileLog("depth overlap %#llx: %ux%u layers %u remade as %ux%u layers %u (binding %d)\n",
                  static_cast<unsigned long long>(cache_image.info.guest_address),
                  cache_image.info.size.width, cache_image.info.size.height,
@@ -952,7 +994,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     if (!image_id) {
         auto new_info = info;
         if (desc.type == BindingType::DepthTarget) {
-            PadDepthLayers(new_info);
+            PadDepthLayers(new_info, info);
         }
         image_id = slot_images.insert(instance, runtime, slot_image_views, new_info);
         RegisterImage(image_id);
@@ -1087,6 +1129,7 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, ViewMemo* memo,
                                      bool refresh) {
     Image& image = slot_images[image_id];
+    LogHugeBind(desc.type == BindingType::Storage ? "storage" : "texture", image, desc);
     if (desc.type == BindingType::Storage) {
         image.flags |= ImageFlagBits::GpuModified;
         if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8) &&
@@ -1154,6 +1197,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
     image.usage.depth_target = 1u;
+    LogHugeBind("depth target", image, desc);
     UpdateImage(image_id);
 
     // Register meta data for this depth buffer

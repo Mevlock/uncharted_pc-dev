@@ -504,9 +504,14 @@ private:
         ImageId owner{};
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
-    /// bbport: most layers seen for a depth array at an address (PadDepthLayers).
-    tsl::robin_map<VAddr, u32> depth_array_layers;
-    void PadDepthLayers(ImageInfo& info);
+    /// bbport: most layers, and most bytes, a request for a depth array at an address asked for
+    /// (PadDepthLayers).
+    struct DepthArraySeen {
+        u32 layers = 0;
+        u64 bytes = 0;
+    };
+    tsl::robin_map<VAddr, DepthArraySeen> depth_array_layers;
+    void PadDepthLayers(ImageInfo& info, const ImageInfo& requested);
 };
 
 } // namespace VideoCore
