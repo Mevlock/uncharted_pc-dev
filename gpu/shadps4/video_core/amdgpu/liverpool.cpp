@@ -661,6 +661,17 @@ void Liverpool::NotePendingWrite(const PM4CmdWriteData& write_data, u32 num_byte
 // counts as pending too, or a WAIT_REG_MEM on it spins across the queues until it lands (after
 // Umar-Qayyum-dev, 38ba5e0b: ~4 a frame in U2's museum, ~4.5 ms each). Toggle bit
 // DeferredFenceWaits: as before.
+// Off by default (BB_DEFERRED_FENCE_WAITS=1: on): with 4 cores U2 failed its own check that a
+// command buffer it reuses is idle (cmdBuf.m_bInUse) at death 21 of a death loop; without it, 51
+// deaths passed (2026-10-22). Until the cause is found.
+static bool DeferredFenceWaitsOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_DEFERRED_FENCE_WAITS");
+        return env && env[0] == '1';
+    }();
+    return on && !BbToggle::Disabled(BbToggle::DeferredFenceWaits);
+}
+
 bool Liverpool::FenceWritten(const PendingFence& fence) const {
     if (!rasterizer->DeferredSignalsPending()) {
         return true;
@@ -677,7 +688,7 @@ bool Liverpool::FenceWritten(const PendingFence& fence) const {
 bool Liverpool::PendingFenceValue(VAddr address, u32& value) {
     for (auto it = pending_fences.rbegin(); it != pending_fences.rend(); ++it) {
         if (rasterizer->DrawPipeReached(it->position) &&
-            (BbToggle::Disabled(BbToggle::DeferredFenceWaits) || FenceWritten(*it))) {
+            (!DeferredFenceWaitsOn() || FenceWritten(*it))) {
             break; // written already: memory holds it (or a later write)
         }
         if (address >= it->address && address + sizeof(u32) <= it->address + it->num_bytes) {
