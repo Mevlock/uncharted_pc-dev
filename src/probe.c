@@ -1239,12 +1239,14 @@ static int64_t find_masked(const char *hex, uint64_t size) {
  * wake-up, which the worker loop allows: it looks at the queues again). */
 static volatile unsigned char job_signal_pending;
 static int install_job_sticky(int64_t recheck, int64_t submission) {
-    /* The wait: the first call after the re-check (EU: mov rsi, rax; call at +0x19). The signal: the
-     * call after "add rsi, 0x60" (rsi = the mutex at +0x60, rdi = the condition at +0x80). */
+    /* The wait: the first call after the re-check (mov rsi, rax; call at +0x19). The signal: EU, the
+     * call after "add rsi, 0x60" (rsi = the mutex at +0x60, rdi = the condition at +0x80), +0x22;
+     * US 1.02 (as CUSA02344), the call after "sub rdi, -0x80" (rdi = the condition), +0x9c, past the
+     * lock's inlined error checks. */
     int64_t wait_call=-1, signal_call=-1;
     for (int64_t o=recheck+6;o<recheck+48;++o) if (image[o]==0xe8) { wait_call=o; break; }
-    for (int64_t o=submission+6;o<submission+64;++o)
-        if (!memcmp(image+o,"\x48\x83\xc6\x60\xe8",5)) { signal_call=o+4; break; }
+    for (int64_t o=submission+6;o<submission+0x100;++o)
+        if (!memcmp(image+o,"\x48\x83\xc6\x60\xe8",5) || !memcmp(image+o,"\x48\x83\xef\x80\xe8",5)) { signal_call=o+4; break; }
     if (wait_call<0 || signal_call<0) {
         printf("Job workers: sticky wake-ups not installed (%s call not found)\n",wait_call<0 ? "wait" : "signal");
         return 0;
@@ -1304,10 +1306,10 @@ static void patch_job_sleep(uint64_t image_size) {
      * its last look (the wake-up already given) waited for the timeout, and a frame's work finished
      * a frame late (U3's mine: the flashlight's light missing for a frame). The wait after the
      * re-check (mov edx, 10) is shortened to BB_JOB_SLEEP_MS (default 1, 10 the game's). */
-    /* BB_JOB_STICKY=1: the wake-up is not lost instead (install_job_sticky below), so the worker can
-     * keep the game's 1000 spins and 10 ms wait. */
+    /* The wake-up is not lost instead (install_job_sticky below), so the worker can keep the game's
+     * 1000 spins and 10 ms wait. BB_JOB_STICKY=0: off (the 50000 spins and 1 ms waits). */
     const char *sticky_env=getenv("BB_JOB_STICKY");
-    const int sticky=sticky_env && sticky_env[0]=='1' && install_job_sticky(at[1],at[2]);
+    const int sticky=!(sticky_env && sticky_env[0]=='0') && install_job_sticky(at[1],at[2]);
     const char *ms_env=getenv("BB_JOB_SLEEP_MS");
     const int ms=ms_env ? atoi(ms_env) : sticky ? 10 : 1;
     /* EU: mov edx, 10 (milliseconds); US 1.02 (as CUSA02344): mov edx, 10000 (microseconds, another
