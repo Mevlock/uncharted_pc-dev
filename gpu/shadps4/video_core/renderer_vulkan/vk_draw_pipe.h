@@ -194,6 +194,7 @@ private:
                     available = published.load(std::memory_order_acquire);
                 }
             }
+            BbThreads::SampleCore(BbThreads::CoreDrawRecording);
             const auto* header = reinterpret_cast<const Header*>(ring.get() + at % Capacity);
             if (header->size == 0) {
                 at += Capacity - at % Capacity;

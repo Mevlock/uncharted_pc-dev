@@ -6,6 +6,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <thread>
 #ifdef _WIN32
@@ -96,6 +97,71 @@ inline const std::vector<ULONG>& PerformanceCpuSets() {
     return ids;
 }
 
+/// bbport diagnosis (frame stats): which kind of core each render thread runs on. Each thread
+/// notes its current logical processor about once a millisecond (SampleCore); the counts are
+/// printed and cleared with the frame stats on hybrid CPUs (and with BB_PCORES=test).
+enum CoreRole : int { CoreGpuCommand, CoreDrawRecording, CoreVulkanRecording, CorePresent, CoreRoles };
+inline std::atomic<unsigned> core_samples[CoreRoles][2]{}; // [role][on a performance core]
+
+/// Efficiency class per logical processor (group * 64 + index): 1 = performance core. Empty
+/// where every core is of one class (BB_PCORES=0 does not turn this off).
+inline const std::vector<unsigned char>& PerformanceProcessors() {
+    static const std::vector<unsigned char> table = [] {
+        std::vector<unsigned char> result;
+        const char* env = std::getenv("BB_PCORES");
+        const bool test = env && std::strcmp(env, "test") == 0;
+        ULONG length = 0;
+        GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
+        std::vector<unsigned char> buffer(length);
+        if (!length || !GetSystemCpuSetInformation(
+                           reinterpret_cast<SYSTEM_CPU_SET_INFORMATION*>(buffer.data()), length,
+                           &length, GetCurrentProcess(), 0)) {
+            return result;
+        }
+        struct Cpu { unsigned slot; BYTE cls; };
+        std::vector<Cpu> cpus;
+        BYTE lowest = 0xff, highest = 0;
+        for (ULONG at = 0; at < length;) {
+            const auto* e = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + at);
+            if (e->Type == CpuSetInformation) {
+                cpus.push_back({e->CpuSet.Group * 64u + e->CpuSet.LogicalProcessorIndex,
+                                e->CpuSet.EfficiencyClass});
+                lowest = std::min(lowest, e->CpuSet.EfficiencyClass);
+                highest = std::max(highest, e->CpuSet.EfficiencyClass);
+            }
+            at += e->Size;
+        }
+        if (lowest == highest && !test) {
+            return result;
+        }
+        for (size_t i = 0; i < cpus.size(); ++i) {
+            if (cpus[i].slot >= result.size()) {
+                result.resize(cpus[i].slot + 1);
+            }
+            result[cpus[i].slot] = test ? i < cpus.size() / 2 : cpus[i].cls == highest;
+        }
+        return result;
+    }();
+    return table;
+}
+
+inline void SampleCore(CoreRole role) {
+    thread_local ULONGLONG last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now == last) {
+        return;
+    }
+    last = now;
+    const auto& table = PerformanceProcessors();
+    if (table.empty()) {
+        return;
+    }
+    PROCESSOR_NUMBER number{};
+    GetCurrentProcessorNumberEx(&number);
+    const unsigned slot = number.Group * 64u + number.Number;
+    core_samples[role][slot < table.size() && table[slot]].fetch_add(1, std::memory_order_relaxed);
+}
+
 /// The calling thread prefers the performance cores of a hybrid CPU and is never
 /// power-throttled (see PerformanceCpuSets). Nothing changes on other CPUs.
 inline void PreferPerformanceCores() {
@@ -167,6 +233,8 @@ inline void MakeBackground() {
 /// Windows only (see above).
 inline void MakeRenderThread() {}
 inline void PreferPerformanceCores() {}
+enum CoreRole : int { CoreGpuCommand, CoreDrawRecording, CoreVulkanRecording, CorePresent, CoreRoles };
+inline void SampleCore(CoreRole) {}
 
 /// The calling thread yields to the game's own threads but is not starved by them.
 inline void MakeBelowNormal() {

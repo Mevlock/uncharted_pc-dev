@@ -142,6 +142,7 @@ void VideoOutDriver::SwapThread(std::stop_token token) {
     Common::SetCurrentThreadName("bb:Present");
     BbThreads::PreferPerformanceCores(); // bbport: hybrid CPUs
     while (true) {
+        BbThreads::SampleCore(BbThreads::CorePresent);
         std::function<void()> work;
         {
             std::unique_lock lock{swap_mutex};
@@ -522,6 +523,35 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
+            // bbport diagnosis: image view lookups (a view list that keeps growing slows every
+            // draw that binds the image), and on hybrid CPUs the core kind of each render thread.
+            {
+                const u64 searches = BbStats::view_searches.exchange(0);
+                const u64 searched = BbStats::view_entries_searched.exchange(0);
+                std::printf("Image views: %.0f searches/s over %.0f entries/s (%.1f each), %llu "
+                            "created; longest list %u views (image 0x%llx)\n",
+                            searches / window, searched / window,
+                            searches ? double(searched) / searches : 0.0,
+                            static_cast<unsigned long long>(BbStats::views_created.exchange(0)),
+                            BbStats::view_list_max.load(),
+                            static_cast<unsigned long long>(BbStats::view_list_max_address.load()));
+#ifdef _WIN32
+                if (!BbThreads::PerformanceProcessors().empty()) {
+                    static constexpr const char* names[BbThreads::CoreRoles] = {
+                        "GPU command", "draw recording", "Vulkan recording", "present"};
+                    std::string line;
+                    for (int r = 0; r < BbThreads::CoreRoles; ++r) {
+                        const unsigned e = BbThreads::core_samples[r][0].exchange(0);
+                        const unsigned p = BbThreads::core_samples[r][1].exchange(0);
+                        char part[96];
+                        std::snprintf(part, sizeof(part), "%s%s %.0f%%", r ? ", " : "", names[r],
+                                      e + p ? 100.0 * p / (e + p) : 0.0);
+                        line += part;
+                    }
+                    std::printf("Render threads on performance cores: %s\n", line.c_str());
+                }
+#endif
+            }
             // Where the compile time went (shader translation, SPIR-V, modules, pipelines).
             if (compiles) {
                 std::printf("Compile time: %u shaders translated %.1f ms, SPIR-V %.1f ms, modules "
@@ -782,6 +812,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     auto next_movie_vblank = std::chrono::steady_clock::now();
 
     while (!token.stop_requested()) {
+        BbThreads::SampleCore(BbThreads::CorePresent);
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
 

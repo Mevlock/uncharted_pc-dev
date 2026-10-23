@@ -134,6 +134,7 @@ Liverpool::~Liverpool() {
 }
 
 void Liverpool::ProcessCommands() {
+    BbThreads::SampleCore(BbThreads::CoreGpuCommand); // bbport diagnosis (frame stats)
     // bbport: commands touch the caches and record into the draw scheduler, so the draw
     // recording thread has to be idle first. A command queued after the check used to run
     // without the drain (both threads recorded into one command buffer: a crash in the driver).

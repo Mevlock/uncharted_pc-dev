@@ -251,6 +251,10 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
         return (*slot_image_views)[backing->image_view_ids[backing->last_view]];
     }
     const auto it = std::ranges::find(view_infos, view_info);
+    BbStats::view_searches.fetch_add(1, std::memory_order_relaxed);
+    BbStats::view_entries_searched.fetch_add(
+        it != view_infos.end() ? std::distance(view_infos.begin(), it) + 1 : view_infos.size(),
+        std::memory_order_relaxed);
     if (it != view_infos.end()) {
         backing->last_view = static_cast<u32>(std::distance(view_infos.begin(), it));
         const auto view_id = backing->image_view_ids[backing->last_view];
@@ -259,6 +263,12 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
     const auto view_id = slot_image_views->insert(runtime->GetInstance(), view_info, *this);
     backing->image_view_infos.emplace_back(view_info);
     backing->image_view_ids.emplace_back(view_id);
+    BbStats::views_created.fetch_add(1, std::memory_order_relaxed);
+    if (const u32 n = static_cast<u32>(backing->image_view_infos.size());
+        n > BbStats::view_list_max.load(std::memory_order_relaxed)) {
+        BbStats::view_list_max.store(n, std::memory_order_relaxed);
+        BbStats::view_list_max_address.store(info.guest_address, std::memory_order_relaxed);
+    }
     return (*slot_image_views)[view_id];
 }
 

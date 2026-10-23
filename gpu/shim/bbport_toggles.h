@@ -91,6 +91,12 @@ inline bool Disabled2(std::uint64_t bit) {
 } // namespace BbToggle
 
 namespace BbStats {
+/// bbport diagnosis (frame stats): Image::FindView lookups that missed the last view, the view
+/// entries they searched, views created, and the longest view list of one image (its address):
+/// a list that keeps growing makes every draw that binds the image slower.
+inline std::atomic<std::uint64_t> view_searches{0}, view_entries_searched{0}, views_created{0};
+inline std::atomic<std::uint32_t> view_list_max{0};
+inline std::atomic<std::uint64_t> view_list_max_address{0};
 /// Guest writes caught by page protection, and pages currently left unprotected as hot.
 inline std::atomic<std::uint64_t> tracker_faults{0};
 /// Guest writes to pages holding GPU data: the data dropped as dead (BB_DEAD_GPU_FRAMES) or read

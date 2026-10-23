@@ -429,6 +429,7 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
                 break;
             }
         }
+        BbThreads::SampleCore(BbThreads::CoreVulkanRecording);
         std::unique_ptr<RecordChunk> chunk;
         {
             std::unique_lock lk{recorder_mutex};
