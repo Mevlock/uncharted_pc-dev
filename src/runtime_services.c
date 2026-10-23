@@ -112,6 +112,11 @@ static ABI int32_t load_exec(const char *path, char *const *argv) {
     for (int i=0;argv && argv[i] && i<32;++i) fprintf(f,"%s\n",argv[i]);
     fclose(f);
     fflush(NULL);
+#ifdef _WIN32
+    /* The next game's window may take the focus from this one (else Windows opens it behind and
+     * it gets no input until clicked). */
+    AllowSetForegroundWindow(ASFW_ANY);
+#endif
     _exit(RUNTIME_LOADEXEC_EXIT);
 }
 static ABI int32_t launch_browser(void) { note("SystemService: web browser request ignored (offline)"); return 0; }

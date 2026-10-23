@@ -66,6 +66,12 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
+    // bbport: a game started from the collection menu (run.py sets BB_RAISE_WINDOW) opened behind
+    // other windows, as the menu's process had ended: no input until the window was clicked.
+    if (const char* raise = std::getenv("BB_RAISE_WINDOW"); raise && raise[0] == '1') {
+        SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");
+        SDL_RaiseWindow(window);
+    }
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);

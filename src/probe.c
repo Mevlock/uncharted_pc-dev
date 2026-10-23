@@ -1735,7 +1735,7 @@ int main(int argc, char **argv) {
     if (getenv("BB_WATCH")) CloseHandle(CreateThread(NULL,0,watch_thread,getenv("BB_WATCH"),0,NULL));
 #endif
     /* argv: the executable and, after sceSystemServiceLoadExec, the arguments it was given
-     * (--guest-argv: one per line, the guest path first). */
+     * as its argv (--guest-argv: one per line, argv[0] first). */
     struct { uint64_t argc; const char *argv[34]; } params = {1, {"/app0/eboot.bin", NULL}};
     if (guest_argv_file) {
         FILE *list=fopen(guest_argv_file,"rb");

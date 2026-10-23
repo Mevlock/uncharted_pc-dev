@@ -188,8 +188,14 @@ def main():
         exe = target
         # Back from U2/U3 the collection menu shows again (the skip is for the first start).
         env.pop('BB_SKIP_COLLECTION_MENU', None)
+        # The window of the game the player picked takes the focus (window.cpp).
+        env['BB_RAISE_WINDOW'] = '1'
+        # The arguments given to sceSystemServiceLoadExec are the whole argv, argv[0] included
+        # (the collection menu passes "eboot.bin", "ispartofuccollection"). Put after the path, the
+        # program name became U2's and U3's first argument, which they load as a level: a white
+        # screen. Without arguments the path is argv[0].
         guest_argv = out_root / 'guest-argv.txt'
-        guest_argv.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        guest_argv.write_text('\n'.join(lines[1:] or lines[:1]) + '\n', encoding='utf-8')
 
 
 if __name__ == '__main__':
