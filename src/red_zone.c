@@ -28,7 +28,7 @@
 #include <windows.h>
 
 /* Instructions per region, bytes a region's thunk may take, thunk memory per allocation. */
-enum { REGION_ITEMS=6, REGION_MAX=256, CHUNK=1<<20 };
+enum { REGION_ITEMS=6, REGION_MAX=256, CHUNK=1<<20, RESERVE=16<<20 };
 
 typedef struct { uint64_t start, end; int lsda; } Function;
 typedef struct { uint64_t thunk, end, site; unsigned char seen; } Region;
@@ -43,6 +43,11 @@ static size_t segment_count;
 static ZydisDecoder decoder;
 static unsigned char *chunk;
 static size_t chunk_used=CHUNK;
+/* Thunk memory reserved by red_zone_reserve right after the image was mapped, and chunks taken
+ * from it; thunks that could not be emitted for want of memory or of rel32 reach. */
+static unsigned char *reserved;
+static size_t reserved_used;
+static unsigned no_memory, out_of_reach;
 static Region *regions;
 static size_t region_count, region_capacity;
 static uint64_t faults_kept;
@@ -176,22 +181,45 @@ static Function *find_functions(size_t *count) {
     return functions;
 }
 
-/* Thunk memory: within rel32 reach of the whole image. */
-static unsigned char *near_image(size_t size) {
-    const uint64_t base=(uint64_t)(uintptr_t)image, start=(base+image_size+(64u<<20)+0xffff)&~(uint64_t)0xffff;
-    for (uint64_t at=start; at+size-base<UINT64_C(0x7ff00000); at+=1u<<16) {
-        void *p=VirtualAlloc((void *)(uintptr_t)at,size,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+/* Thunk memory: within rel32 reach of the whole image, as near to it as possible (thunks re-aim
+ * the image's RIP-relative operands and jump back into it: the farther away, the more of them
+ * fall out of reach). Above the image (64 MiB on, room for what grows after it), else below.
+ * bbport: a player's log had 616-2461 of ~3300 accesses left unprotected, a different number on
+ * each start: the GPU driver, started before this pass, had taken the address space just above
+ * the image, so the chunks landed far away or nowhere. */
+static unsigned char *near_image(size_t size, DWORD type) {
+    const uint64_t base=(uint64_t)(uintptr_t)image, end=base+image_size;
+    const DWORD protect=(type&MEM_COMMIT) ? PAGE_EXECUTE_READWRITE : PAGE_NOACCESS;
+    for (uint64_t at=(end+(64u<<20)+0xffff)&~(uint64_t)0xffff; at+size-base<UINT64_C(0x7ff00000); at+=1u<<16) {
+        void *p=VirtualAlloc((void *)(uintptr_t)at,size,type,protect);
         if (p) return p;
+    }
+    if (base<size+(16u<<20)) return NULL;
+    for (uint64_t at=(base-size-(16u<<20))&~(uint64_t)0xffff; end-at<UINT64_C(0x7ff00000); at-=1u<<16) {
+        void *p=VirtualAlloc((void *)(uintptr_t)at,size,type,protect);
+        if (p) return p;
+        if (at<(1u<<16)) break;
     }
     return NULL;
 }
 static unsigned char *thunk_reserve(void) {
     if (chunk_used+REGION_MAX>CHUNK) {
-        unsigned char *next=near_image(CHUNK);
+        unsigned char *next=NULL;
+        if (reserved && reserved_used+CHUNK<=RESERVE)
+            next=VirtualAlloc(reserved+reserved_used,CHUNK,MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+        if (next) reserved_used+=CHUNK;
+        else next=near_image(CHUNK,MEM_RESERVE|MEM_COMMIT);
         if (!next) return NULL;
         chunk=next; chunk_used=0;
     }
     return chunk+chunk_used;
+}
+
+void red_zone_reserve(unsigned char *base, uint64_t size) {
+    const char *mode=getenv("BB_RED_ZONE");
+    if (mode && !strcmp(mode,"0")) return;
+    image=base; image_size=size;
+    reserved=near_image(RESERVE,MEM_RESERVE);
 }
 
 static int is_rsp(ZydisRegister r) {
@@ -265,16 +293,16 @@ static int emit_item(Code *c, const Item *it) {
 static unsigned char *emit_thunk(const Item *items, size_t n) {
     static const unsigned char lower[]={0x48,0x8d,0x64,0x24,0x80}, raise[]={0x48,0x8d,0xa4,0x24,0x80,0,0,0};
     unsigned char *t=thunk_reserve();
-    if (!t) return NULL;
+    if (!t) { ++no_memory; return NULL; }
     Code c={t,0};
     int lowered=0;
     for (size_t i=0;i<n;++i) {
         if (items[i].access!=lowered) { if (lowered) put(&c,raise,sizeof(raise)); else put(&c,lower,sizeof(lower)); lowered=!lowered; }
-        if (!emit_item(&c,&items[i])) return NULL;
+        if (!emit_item(&c,&items[i])) { ++out_of_reach; return NULL; }
     }
     if (lowered) put(&c,raise,sizeof(raise));
     const int64_t rel=(int64_t)(uintptr_t)(image+items[n-1].at+items[n-1].in.length)-(int64_t)(uintptr_t)(t+c.n+5);
-    if (rel!=(int32_t)rel) return NULL;
+    if (rel!=(int32_t)rel) { ++out_of_reach; return NULL; }
     const unsigned char jmp=0xe9;
     const int32_t rel32=(int32_t)rel;
     put(&c,&jmp,1); put(&c,&rel32,4);
@@ -370,7 +398,7 @@ static void patch_function(const Function *f, const unsigned char *targets, Item
         }
         for (size_t k=a;k<b;++k) if (v[k].rsp) v[k].access=0;           /* moved, not under the lowered rsp */
         unsigned char *thunk=emit_thunk(v+a,b-a);
-        if (!thunk) { ++st->left; note_unprotected(v[i].at,v[i].at+v[i].in.length,"an access without thunk memory"); continue; }
+        if (!thunk) { ++st->left; note_unprotected(v[i].at,v[i].at+v[i].in.length,"an access without thunk memory or out of its reach"); continue; }
         unsigned char *site=image+v[a].at;
         const int32_t to=(int32_t)((int64_t)(uintptr_t)thunk-(int64_t)(uintptr_t)(site+5));
         site[0]=0xe9; memcpy(site+1,&to,4); memset(site+5,0xcc,length-5);
@@ -443,6 +471,13 @@ void red_zone_patch(unsigned char *base, uint64_t size, const RedZoneSegment *se
            "128 bytes lower (%u jumps, %u moved neighbours), %u left as they were; skipped: %u with calls, "
            "%u with indirect jumps, %u with exception tables, %u with data in their code\n",
            st.red,st.functions,st.accesses,st.jumps,st.moved,st.left,st.calls,st.indirect,st.lsda,st.undecodable);
+    {
+        const int64_t at=chunk ? (int64_t)(uintptr_t)chunk-(int64_t)(uintptr_t)image : 0;
+        printf("Red zone: thunks %s the image (%s%" PRId64 " MiB, %s); %u regions without thunk memory, "
+               "%u out of rel32 reach\n",
+               at<0 ? "below" : "above", at<0 ? "-" : "+", (at<0 ? -at : at)>>20,
+               reserved ? "reserved before the GPU started" : "not reserved early", no_memory, out_of_reach);
+    }
     free(items);
     free(targets);
     free(functions);

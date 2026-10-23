@@ -1373,6 +1373,9 @@ int main(int argc, char **argv) {
     }
     image = runtime_image_map(round_page(size), PROT_READ | PROT_WRITE);
     if (!image) image = allocate(round_page(size));
+#ifdef _WIN32
+    red_zone_reserve(image, size);
+#endif
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
     if (!cpu_only) {

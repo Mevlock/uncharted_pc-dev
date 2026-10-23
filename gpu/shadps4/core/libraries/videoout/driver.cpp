@@ -46,6 +46,7 @@ extern "C" double runtime_time_scale_now(void);
 namespace Vulkan {
 extern std::atomic<u64> g_flips;
 }
+extern "C" void (*bbgpu_thread_stack_dump)(const char* reason); // bbgpu.cpp
 
 namespace Libraries::VideoOut {
 
@@ -121,6 +122,39 @@ VideoOutDriver::VideoOutDriver(u32 width, u32 height) {
         swap_thread = std::jthread([&](std::stop_token token) { SwapThread(token); });
     }
     present_thread = std::jthread([&](std::stop_token token) { PresentThread(token); });
+    // bbport: a freeze where no GPU wait is stuck (a player's "not responding" in U2 chapter 10)
+    // left nothing in the log. When the game has shown no new frame for BB_FREEZE_DUMP_SECONDS
+    // (20; 0: off) after its first, every thread's stack goes into the log, once a session.
+    static const unsigned freeze_seconds = [] {
+        const char* env = std::getenv("BB_FREEZE_DUMP_SECONDS");
+        return env ? static_cast<unsigned>(std::strtoul(env, nullptr, 10)) : 20u;
+    }();
+    if (freeze_seconds) {
+        watchdog_thread = std::jthread([](std::stop_token token) {
+            Common::SetCurrentThreadName("bb:FreezeWatch");
+            u64 last = 0;
+            auto since = std::chrono::steady_clock::now();
+            while (!token.stop_requested()) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+                const u64 flips = Vulkan::g_flips.load(std::memory_order_relaxed);
+                const auto now = std::chrono::steady_clock::now();
+                if (flips != last || flips == 0) {
+                    last = flips;
+                    since = now;
+                    continue;
+                }
+                if (now - since >= std::chrono::seconds(freeze_seconds)) {
+                    std::printf("Freeze: no new frame for %u s (game flip %llu)\n", freeze_seconds,
+                                static_cast<unsigned long long>(flips));
+                    std::fflush(stdout);
+                    if (bbgpu_thread_stack_dump) {
+                        bbgpu_thread_stack_dump("no new frame");
+                    }
+                    return;
+                }
+            }
+        });
+    }
 }
 
 void VideoOutDriver::RunPresenter(std::function<void()> work, bool if_idle) {

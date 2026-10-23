@@ -145,6 +145,7 @@ private:
     VideoOutPort main_port{};
     std::jthread present_thread;
     std::queue<Request> requests;
+    std::jthread watchdog_thread; ///< bbport: stacks into the log when no frame comes (last: stopped first)
 };
 
 } // namespace Libraries::VideoOut
