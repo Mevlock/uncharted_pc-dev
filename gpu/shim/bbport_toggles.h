@@ -140,6 +140,11 @@ struct Timer {
 };
 /// Wall time the GPU command thread waited for guest submissions (ns).
 inline std::atomic<std::uint64_t> gpu_idle_ns{0};
+/// Guest write faults resolved in order with the draws (Liverpool::SendOrderedCommand): count,
+/// and the guest thread's wait split into queued until the command thread took it, then behind
+/// the draws until the draw recording thread ran it, then running.
+inline std::atomic<std::uint64_t> ordered_faults{0}, ordered_pickup_ns{0}, ordered_behind_ns{0},
+    ordered_run_ns{0};
 /// Draws recorded into the reduced scene targets, and draws after the scene started.
 inline std::atomic<std::uint64_t> reduced_draws{0}, scene_draws{0};
 /// Wall time spent blocked in the scheduler (ns): waiting for the recording thread to drain,

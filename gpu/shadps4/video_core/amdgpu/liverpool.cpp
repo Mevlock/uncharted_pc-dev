@@ -154,8 +154,21 @@ void Liverpool::ProcessCommands() {
             ordered_queue.pop();
             --num_commands;
         }
+        callback = [inner = std::move(callback), picked = std::chrono::steady_clock::now()] {
+            ordered_picked = picked;
+            inner();
+        };
         if (!rasterizer) {
             callback();
+            continue;
+        }
+        // BB_FAULT_JUMP=1 (experiment): ahead of the draws already queued.
+        static const bool jump = [] {
+            const char* env = std::getenv("BB_FAULT_JUMP");
+            return env && env[0] == '1';
+        }();
+        if (jump) {
+            rasterizer->RunNext(std::move(callback));
             continue;
         }
         auto* task = new Common::UniqueFunction<void>(std::move(callback));

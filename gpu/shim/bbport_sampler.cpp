@@ -287,11 +287,15 @@ void BbSamplerStart() {
         std::vector<Sampled> threads;
         auto window = std::chrono::steady_clock::now();
         auto last_scan = window - std::chrono::seconds(10);
+        const auto started = window;
         std::vector<u64> rips;
         std::vector<std::array<u64, 4>> callers;
         for (;;) {
             const auto now = std::chrono::steady_clock::now();
-            if (now - last_scan >= std::chrono::seconds(2) && threads.size() < prefixes.size()) {
+            // A prefix can match many threads (BB_SAMPLE_THREADS=g: for the game's threads): scan
+            // for 90 s, not only until each prefix found one, at most 64 threads.
+            if (now - last_scan >= std::chrono::seconds(2) && threads.size() < 64 &&
+                (threads.size() < prefixes.size() || now - started < std::chrono::seconds(90))) {
                 Discover(threads, prefixes);
                 last_scan = now;
             }

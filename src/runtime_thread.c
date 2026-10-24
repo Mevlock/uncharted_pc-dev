@@ -135,9 +135,11 @@ void runtime_thread_attach_host(const char *name) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"%s",name ? name : "host");
 }
+static void set_host_name(const char *name);
 void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"main");
+    set_host_name(t->name);
 }
 static GuestThread *find_thread(void *handle) {
     GuestThread *found=NULL;
@@ -255,6 +257,13 @@ static void set_host_name(const char *name) {
     char host[16]={0};
     memcpy(host,name,strnlen(name,sizeof(host)-1));
     pthread_setname_np(pthread_self(),host);
+#ifdef _WIN32
+    /* The Windows thread description, "g:<name>": profilers and BB_SAMPLE_THREADS=g: find the
+     * game's threads by it. */
+    wchar_t wide[48]=L"g:";
+    for (size_t i=0;name[i] && i+3<sizeof(wide)/sizeof(wide[0]);++i) wide[i+2]=(wchar_t)(unsigned char)name[i];
+    SetThreadDescription(GetCurrentThread(),wide);
+#endif
 }
 #ifdef _WIN32
 #define exit_setjmp(t) bb_setjmp((t)->exit_jump)

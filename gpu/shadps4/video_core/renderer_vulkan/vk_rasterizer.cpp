@@ -1722,11 +1722,54 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
     return true;
 }
 
+void Rasterizer::RunNext(Common::UniqueFunction<void> task) {
+    if (!UseDrawPipe()) {
+        DrainDrawPipe(DrawPipe::ReasonRasterizer);
+        task();
+        return;
+    }
+    draw_pipe->RunNext(std::move(task));
+}
+
+// bbport diagnosis (BB_FRAME_STATS, draw pipe line): packets and stage B cycles by packet kind.
+static std::array<std::atomic<u64>, 6> g_kind_packets{}, g_kind_cycles{};
+// Dispatches (BB_DISPATCH_STATS=1): before binding, binding, barriers and descriptor set, recording.
+static std::array<std::atomic<u64>, 4> g_dispatch_sections{};
+// Binding (BB_FRAME_STATS): ObtainBuffer read-only, written; InvalidateMemoryFromGPU; barrier find.
+static std::array<std::atomic<u64>, 4> g_bind_cycles{};
+// Tasks by function (BB_FRAME_STATS): function, count, stage B cycles.
+struct TaskSlot {
+    std::atomic<u64> fn{0}, count{0}, cycles{0};
+};
+static std::array<TaskSlot, 12> g_task_slots{};
+extern "C" char __ImageBase;
+
 void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
+    const u32 kind = std::min<u32>(u32(*reinterpret_cast<const PacketKind*>(data)), 5);
+    struct KindTimer {
+        u32 kind;
+        u64 start = __rdtsc();
+        ~KindTimer() {
+            g_kind_packets[kind].fetch_add(1, std::memory_order_relaxed);
+            g_kind_cycles[kind].fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+        }
+    } kind_timer{kind};
     auto& self = *static_cast<Rasterizer*>(context);
     if (*reinterpret_cast<const PacketKind*>(data) == PacketKind::Task) {
         const auto& task = *reinterpret_cast<const TaskPacket*>(data);
+        const u64 start = __rdtsc();
         task.task(self, data + sizeof(TaskPacket));
+        // Statistics by task function (stage B only writes; the report reads approximately).
+        for (auto& slot : g_task_slots) {
+            const u64 fn = reinterpret_cast<u64>(task.task);
+            u64 expected = 0;
+            if (slot.fn.load(std::memory_order_relaxed) == fn ||
+                slot.fn.compare_exchange_strong(expected, fn)) {
+                slot.count.fetch_add(1, std::memory_order_relaxed);
+                slot.cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+                break;
+            }
+        }
         return;
     }
     const auto& packet = *reinterpret_cast<const DrawPacket*>(data);
@@ -1835,6 +1878,51 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     } else if (cs) {
         stage_cs = cs;
         const auto* pipeline = static_cast<const ComputePipeline*>(packet.pipeline);
+        // bbport diagnosis: BB_DISPATCH_STATS=1, how repetitive dispatches are (every 5 s).
+        static const bool dispatch_stats = [] {
+            const char* env = std::getenv("BB_DISPATCH_STATS");
+            return env && env[0] == '1';
+        }();
+        if (dispatch_stats) {
+            static const Pipeline* last_pipeline = nullptr;
+            static u64 last_key = 0, last_full = 0, n = 0, same_pipe = 0, same_key = 0,
+                       same_full = 0;
+            static std::unordered_map<u64, u64> by_shader;
+            static auto window = std::chrono::steady_clock::now();
+            u64 key = reinterpret_cast<u64>(packet.pipeline);
+            for (u32 i = 0; i < packet.num_stages; ++i) {
+                const auto& s = Shader::Info::ud_snapshots[i];
+                for (u32 w = 0; w < s.user_data_size; ++w) key = (key ^ s.user_data[w]) * 0x100000001B3ull;
+                for (u32 w = 0; w < s.flat_size; ++w) key = (key ^ s.flat[w]) * 0x100000001B3ull;
+            }
+            const u64 full = (key ^ (u64(cs->dim_x) << 40 | u64(cs->dim_y) << 20 | cs->dim_z)) *
+                             0x9E3779B97F4A7C15ull;
+            ++n;
+            same_pipe += packet.pipeline == last_pipeline;
+            same_key += key == last_key;
+            same_full += full == last_full;
+            ++by_shader[pipeline->GetStage(Shader::SwStage::Compute).pgm_hash];
+            last_pipeline = packet.pipeline;
+            last_key = key;
+            last_full = full;
+            const auto now = std::chrono::steady_clock::now();
+            if (now - window >= std::chrono::seconds(5)) {
+                std::vector<std::pair<u64, u64>> top(by_shader.begin(), by_shader.end());
+                std::ranges::sort(top, std::greater{}, &std::pair<u64, u64>::second);
+                std::string list;
+                for (size_t i = 0; i < top.size() && i < 8; ++i) {
+                    list += fmt::format(" {:08x}={:.0f}%", u32(top[i].first),
+                                        100.0 * top[i].second / n);
+                }
+                std::printf("Dispatch stats: %.0f/s, %zu shaders; as the previous dispatch: "
+                            "pipeline %.0f%%, pipeline+resources %.0f%%, +groups %.0f%%; top:%s\n",
+                            n / 5.0, top.size(), 100.0 * same_pipe / n, 100.0 * same_key / n,
+                            100.0 * same_full / n, list.c_str());
+                n = same_pipe = same_key = same_full = 0;
+                by_shader.clear();
+                window = now;
+            }
+        }
         if (indirect) {
             self.DispatchIndirectRecord(pipeline, indirect->args, indirect->stride);
         } else {
@@ -1890,6 +1978,48 @@ void Rasterizer::PrintPipeStats() {
                             share);
             } else {
                 std::printf(" %s=%.0f (%.1f%%)", names[r - 256], n / seconds, share);
+            }
+        }
+    }
+    {
+        static constexpr const char* kinds[] = {"draw", "task", "dispatch", "special", "indirect",
+                                                "indirect dispatch"};
+        {
+            const u64 d0 = g_dispatch_sections[0].exchange(0), d1 = g_dispatch_sections[1].exchange(0),
+                      d2 = g_dispatch_sections[2].exchange(0), d3 = g_dispatch_sections[3].exchange(0);
+            if (d0 + d1 + d2 + d3) {
+                std::printf("\n  dispatches in stage B: before binding %.1f%%, binding %.1f%%, "
+                            "barriers+descriptor set %.1f%%, recording %.1f%%",
+                            100.0 * d0 / cycles, 100.0 * d1 / cycles, 100.0 * d2 / cycles,
+                            100.0 * d3 / cycles);
+            }
+        }
+        {
+            const u64 b0 = g_bind_cycles[0].exchange(0), b1 = g_bind_cycles[1].exchange(0),
+                      b2 = g_bind_cycles[2].exchange(0), b3 = g_bind_cycles[3].exchange(0);
+            std::printf("\n  buffer binding in stage B: obtain read-only %.1f%%, obtain written "
+                        "%.1f%%, image invalidation %.1f%%, barrier find %.1f%%",
+                        100.0 * b0 / cycles, 100.0 * b1 / cycles, 100.0 * b2 / cycles,
+                        100.0 * b3 / cycles);
+        }
+        std::printf("\n  tasks by function (exe offset):");
+        for (auto& slot : g_task_slots) {
+            const u64 fn = slot.fn.load(std::memory_order_relaxed);
+            const u64 n = slot.count.exchange(0), c = slot.cycles.exchange(0);
+            if (fn && n) {
+                std::printf(" %#llx %.0f/s %.1f%%",
+                            static_cast<unsigned long long>(
+                                fn - reinterpret_cast<u64>(&__ImageBase)),
+                            n / seconds, 100.0 * c / cycles);
+            }
+        }
+        std::printf("\n  stage B by packet kind:");
+        for (u32 k = 0; k < 6; ++k) {
+            const u64 n = g_kind_packets[k].exchange(0);
+            const u64 c = g_kind_cycles[k].exchange(0);
+            if (n) {
+                std::printf(" %s %.0f/s %.1f%% (%.2f us each)", kinds[k], n / seconds,
+                            100.0 * c / cycles, c / (cycles / seconds / 1e6) / n);
             }
         }
     }
@@ -3181,6 +3311,20 @@ void Rasterizer::DispatchDirect() {
 }
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
+    // bbport diagnosis (BB_DISPATCH_STATS=1): stage B time per dispatch by section.
+    struct DispatchTimer {
+        u64 last = __rdtsc();
+        void Section(u32 s) {
+            static const bool on = [] {
+                const char* env = std::getenv("BB_DISPATCH_STATS");
+                return env && env[0] == '1';
+            }();
+            if (!on) return;
+            const u64 now = __rdtsc();
+            g_dispatch_sections[s].fetch_add(now - last, std::memory_order_relaxed);
+            last = now;
+        }
+    } dispatch_timer;
     FrameCapture::Poll();
     gbuffer_draw = false;
 
@@ -3242,6 +3386,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         }
     }
 
+    dispatch_timer.Section(0);
     if (!BindResources(pipeline)) {
         return;
     }
@@ -3384,6 +3529,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             window = now;
         }
     }
+    dispatch_timer.Section(1);
     if (needs_barrier) {
         runtime.FlushBarriers();
     }
@@ -3391,6 +3537,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     scheduler.EndRendering();
     mark();
     pipeline->BindResources(set_writes, push_data);
+    dispatch_timer.Section(2);
 
     const vk::Pipeline handle = pipeline->Handle();
     const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
@@ -3439,6 +3586,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     ResetBindings(true);
     scheduler.KickRecording();
+    dispatch_timer.Section(3);
 }
 
 void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
@@ -4247,6 +4395,108 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             std::fflush(stdout);
         }
     }
+    // bbport: read-only buffers of one stage that lie close together in guest memory are streamed
+    // as one span: one copy, one stream reservation and one barrier range instead of one each.
+    // U3's skinning (cs 8f067540, ~1,550 dispatches a frame, ~80% of all) reads five inputs that
+    // lie back to back; binding was ~30% of the draw recording thread. BB_COALESCE_STREAMS=0: off.
+    struct {
+        VAddr lo = 0, hi = 0;
+        const VideoCore::Buffer* buffer = nullptr;
+        u64 offset = 0;
+        bool tracked = false;
+    } span;
+    static const bool coalesce = [] {
+        const char* env = std::getenv("BB_COALESCE_STREAMS");
+        return !(env && env[0] == '0');
+    }();
+    if (coalesce) {
+        // The candidates by address; the largest group of neighbours (gaps up to 4 KiB, 64 KiB
+        // at most) becomes the span. Others (a small constant block elsewhere) bind as before.
+        std::array<std::pair<VAddr, VAddr>, 16> ranges;
+        u32 count = 0;
+        for (u32 i = 0; i < stage.buffers.size() && count < ranges.size(); ++i) {
+            const auto& desc = stage.buffers[i];
+            if (desc.IsSpecial() || desc.is_written ||
+                (num_ring_stages && FindRingBinding(stage, i))) {
+                continue;
+            }
+            const auto vsharp = prepared ? prepared->buffer_sharps[i] : desc.GetSharp(stage);
+            const u64 size = vsharp.GetSize();
+            if (vsharp.base_address == 0 || size == 0 ||
+                size > VideoCore::BufferCache::STREAM_THRESHOLD) {
+                continue;
+            }
+            ranges[count++] = {vsharp.base_address, vsharp.base_address + size};
+        }
+        std::sort(ranges.begin(), ranges.begin() + count);
+        VAddr best_lo = 0, best_hi = 0;
+        u32 best = 0;
+        for (u32 i = 0; i < count;) {
+            VAddr lo = ranges[i].first, hi = ranges[i].second;
+            u32 j = i + 1;
+            while (j < count && ranges[j].first <= hi + 4_KB &&
+                   std::max(hi, ranges[j].second) - lo <= 64_KB) {
+                hi = std::max(hi, ranges[j].second);
+                ++j;
+            }
+            if (j - i > best) {
+                best = j - i;
+                best_lo = lo;
+                best_hi = hi;
+            }
+            i = j;
+        }
+        if (best >= 2 && memory->IsValidGpuMapping(best_lo, best_hi - best_lo) &&
+            memory->ClampRangeSize(best_lo, best_hi - best_lo) == best_hi - best_lo &&
+            !buffer_cache.IsRegionGpuModified(best_lo, best_hi - best_lo)) {
+            const auto [buffer, offset] =
+                buffer_cache.ObtainBuffer(best_lo, u32(best_hi - best_lo), false, false, 64_KB);
+            span = {best_lo, best_hi, buffer, offset, false};
+        }
+    }
+    // Written views that overlap (U3's skinning writes interleaved vertices through three views
+    // 12 and 20 bytes apart) are obtained once, as their union: one sync and one GPU-modified
+    // mark instead of one per view. Each view keeps its own barrier range (tight writes).
+    struct WrittenSpan {
+        VAddr lo, hi;
+        const VideoCore::Buffer* buffer;
+        u64 offset;
+    };
+    std::array<WrittenSpan, 4> written_spans;
+    u32 num_written_spans = 0;
+    if (coalesce) {
+        std::array<std::pair<VAddr, VAddr>, 16> ranges;
+        u32 count = 0;
+        for (u32 i = 0; i < stage.buffers.size() && count < ranges.size(); ++i) {
+            const auto& desc = stage.buffers[i];
+            if (desc.IsSpecial() || !desc.is_written) {
+                continue;
+            }
+            const auto vsharp = prepared ? prepared->buffer_sharps[i] : desc.GetSharp(stage);
+            if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
+                continue;
+            }
+            const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+            if (size == 0) {
+                continue;
+            }
+            ranges[count++] = {vsharp.base_address, vsharp.base_address + size};
+        }
+        std::sort(ranges.begin(), ranges.begin() + count);
+        for (u32 i = 0; i < count && num_written_spans < written_spans.size();) {
+            VAddr lo = ranges[i].first, hi = ranges[i].second;
+            u32 j = i + 1;
+            while (j < count && ranges[j].first < hi) {
+                hi = std::max(hi, ranges[j].second);
+                ++j;
+            }
+            if (j - i >= 2 && hi - lo <= 0xFFFFFFFFull) {
+                const auto [buffer, offset] = buffer_cache.ObtainBuffer(lo, u32(hi - lo), true);
+                written_spans[num_written_spans++] = {lo, hi, buffer, offset};
+            }
+            i = j;
+        }
+    }
     for (u32 buffer_index = 0; buffer_index < stage.buffers.size(); ++buffer_index) {
         const auto& desc = stage.buffers[buffer_index];
         const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, buffer_index) : nullptr;
@@ -4387,8 +4637,29 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     !desc.is_written) {
                     buffer_cache.ForceUpload(vsharp.base_address, size);
                 }
-                const auto [buffer, offset] = buffer_cache.ObtainBuffer(
-                    vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                const bool in_span = span.buffer && !desc.is_written &&
+                                     vsharp.base_address >= span.lo &&
+                                     vsharp.base_address + size <= span.hi;
+                const WrittenSpan* in_written = nullptr;
+                for (u32 w = 0; desc.is_written && w < num_written_spans; ++w) {
+                    if (vsharp.base_address >= written_spans[w].lo &&
+                        vsharp.base_address + size <= written_spans[w].hi) {
+                        in_written = &written_spans[w];
+                    }
+                }
+                const u64 t_obtain = __rdtsc();
+                const auto [buffer, offset] =
+                    in_span ? std::pair<const VideoCore::Buffer*, u64>{span.buffer,
+                                                            span.offset +
+                                                                (vsharp.base_address - span.lo)}
+                    : in_written
+                        ? std::pair<const VideoCore::Buffer*, u64>{in_written->buffer,
+                                                                   in_written->offset +
+                                                                       (vsharp.base_address -
+                                                                        in_written->lo)}
+                            : buffer_cache.ObtainBuffer(vsharp.base_address, size,
+                                                        desc.is_written, desc.is_formatted);
+                g_bind_cycles[desc.is_written ? 1 : 0].fetch_add(__rdtsc() - t_obtain, std::memory_order_relaxed);
                 // bbport diagnosis: BB_GPU_WRITE_WATCH=<hex address>: the shaders whose written
                 // bindings cover its 64 KiB (U2 reads GPU results there every frame).
                 if (desc.is_written) {
@@ -4454,17 +4725,30 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     }
                     return std::min<u64>(size, u64(stride) * (records - 1) + element);
                 }();
-                bound_buffers.emplace_back(buffer, offset, tracked_size, desc.is_written);
+                // A coalesced span is tracked once, as a whole.
+                const bool track = !in_span || !span.tracked;
+                const u64 track_offset = in_span ? span.offset : offset;
+                const u64 track_size = in_span ? span.hi - span.lo : tracked_size;
+                span.tracked |= in_span;
+                if (track) {
+                    bound_buffers.emplace_back(buffer, track_offset, track_size, desc.is_written);
+                }
                 if (g_gpu_checkpoints && num_checkpoint_buffers < std::size(checkpoint_buffers)) {
                     checkpoint_buffers[num_checkpoint_buffers++] = {
                         vsharp.base_address, static_cast<u32>(size), desc.is_written};
                 }
                 if (desc.is_written) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
+                    const u64 t_inv = __rdtsc();
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
+                    g_bind_cycles[2].fetch_add(__rdtsc() - t_inv, std::memory_order_relaxed);
                 }
-                needs_barrier |=
-                    runtime.IsBufferAccessed(buffer, offset, tracked_size, desc.is_written);
+                if (track) {
+                    const u64 t_find = __rdtsc();
+                    needs_barrier |= runtime.IsBufferAccessed(buffer, track_offset, track_size,
+                                                              desc.is_written);
+                    g_bind_cycles[3].fetch_add(__rdtsc() - t_find, std::memory_order_relaxed);
+                }
                 if (const VAddr watch = WatchedGpuWrite();
                     watch && desc.is_written && vsharp.base_address < watch + 0x1000 &&
                     watch < vsharp.base_address + size) {

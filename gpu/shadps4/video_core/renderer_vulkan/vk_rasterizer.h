@@ -119,6 +119,9 @@ public:
     /// Returns true when the task was handed to the recording thread (not run yet).
     bool RunInOrder(OrderedTask task, const void* data, u32 size,
                     u64 toggle = BbToggle::PipelinedTasks);
+    /// Runs `task` on the draw recording thread before the draws already queued for it (here
+    /// after a drain when the pipeline is off).
+    void RunNext(Common::UniqueFunction<void> task);
     /// Stage A: the draw pipe position after the last handed-over packet, and whether the
     /// recording thread has run everything before a position.
     [[nodiscard]] u64 DrawPipeHead() const {

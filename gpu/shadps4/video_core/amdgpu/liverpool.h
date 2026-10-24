@@ -23,6 +23,7 @@
 #include "common/unique_function.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/regs.h"
+#include "bbport_toggles.h"
 
 namespace Vulkan {
 class Rasterizer;
@@ -176,10 +177,21 @@ public:
     /// BB_ORDERED_FAULTS=0: SendCommand<true>.
     void SendOrderedCommand(auto&& func) {
         std::binary_semaphore sem{0};
+        const auto queued = std::chrono::steady_clock::now();
         {
             std::scoped_lock lk{submit_mutex};
-            ordered_queue.emplace([&sem, &func] {
+            ordered_queue.emplace([&sem, &func, queued] {
+                const auto start = std::chrono::steady_clock::now();
                 func();
+                const auto end = std::chrono::steady_clock::now();
+                const auto picked = ordered_picked < queued ? start : ordered_picked;
+                const auto ns = [](auto d) {
+                    return std::chrono::duration_cast<std::chrono::nanoseconds>(d).count();
+                };
+                BbStats::ordered_faults.fetch_add(1, std::memory_order_relaxed);
+                BbStats::ordered_pickup_ns.fetch_add(ns(picked - queued), std::memory_order_relaxed);
+                BbStats::ordered_behind_ns.fetch_add(ns(start - picked), std::memory_order_relaxed);
+                BbStats::ordered_run_ns.fetch_add(ns(end - start), std::memory_order_relaxed);
                 sem.release();
             });
             ++num_commands;
@@ -321,6 +333,8 @@ private:
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
     std::queue<Common::UniqueFunction<void>> ordered_queue{}; ///< SendOrderedCommand
+    /// When the command thread took the ordered command running on this thread (statistics).
+    static inline thread_local std::chrono::steady_clock::time_point ordered_picked{};
     static inline thread_local bool on_processor_thread = false;
     std::thread::id gpu_id;
 #if defined(__linux__) || defined(_WIN32)

@@ -2126,7 +2126,8 @@ void BufferCache::CheckStableBindings() {
 }
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
-                                                        bool is_written, bool is_texel_buffer) {
+                                                        bool is_written, bool is_texel_buffer,
+                                                        u64 stream_limit) {
     const bool stats = BufferStatsEnabled();
     if (stats) {
         PrintBufferStats();
@@ -2139,7 +2140,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         stable_bindings.try_emplace(device_addr, StableBinding{size, SampleHash(device_addr, size)});
     }
     // For read-only buffers use device local stream buffer to reduce renderpass breaks.
-    if (!is_written && size <= STREAM_THRESHOLD && !IsRegionGpuModified(device_addr, size)) {
+    if (!is_written && size <= stream_limit && !IsRegionGpuModified(device_addr, size)) {
         NoteAsyncAccess("stream buffer", device_addr, size, false, true);
         if (ClobberCheckEnabled() && gpu_modified_ranges.Intersects(device_addr, size)) {
             ReportClobber("stream copy", device_addr, size, device_addr, size, false);

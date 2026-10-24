@@ -20,12 +20,15 @@
 #include <chrono>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <thread>
+#include <vector>
 #include <x86intrin.h>
 
 #include "common/assert.h"
 #include "common/thread.h"
 #include "common/types.h"
+#include "common/unique_function.h"
 
 namespace Vulkan {
 
@@ -102,6 +105,20 @@ public:
     std::array<u64, NumReasons> drains_by_reason{};
     std::array<u64, NumReasons> cycles_by_reason{};
 
+    /// Any thread: `task` runs on stage B before its next packet (or as soon as it is idle),
+    /// ahead of the packets already queued (BB_FAULT_JUMP: guest write faults).
+    void RunNext(Common::UniqueFunction<void> task) {
+        {
+            std::scoped_lock lk{priority_mutex};
+            priority.push_back(std::move(task));
+            has_priority.store(true, std::memory_order_seq_cst);
+        }
+        if (sleeping.load(std::memory_order_seq_cst)) {
+            wake.fetch_add(1, std::memory_order_seq_cst);
+            BbWait::WakeOne(wake);
+        }
+    }
+
     /// Stage A: waits until stage B has run every committed packet.
     void Drain(u32 reason = ReasonRasterizer) {
         if (consumed.load(std::memory_order_acquire) == head) {
@@ -164,6 +181,7 @@ private:
         stage_b_tid.store(static_cast<u32>(gettid()), std::memory_order_release);
         u64 at = 0;
         while (true) {
+            RunPriority();
             // Packets follow each other within microseconds while a frame is decoded: spin,
             // and sleep only after a longer pause (between frames).
             u64 available = published.load(std::memory_order_acquire);
@@ -181,17 +199,24 @@ private:
                     if (stop.stop_requested()) {
                         return;
                     }
+                    if (has_priority.load(std::memory_order_acquire)) {
+                        break;
+                    }
                     __builtin_ia32_pause();
                     if (!(spins & 255) && std::chrono::steady_clock::now() >= spin_until) {
                         const u32 seen = wake.load(std::memory_order_seq_cst);
                         sleeping.store(true, std::memory_order_seq_cst);
                         if (published.load(std::memory_order_seq_cst) == at &&
+                            !has_priority.load(std::memory_order_seq_cst) &&
                             !stop.stop_requested()) {
                             BbWait::Wait(wake, seen);
                         }
                         sleeping.store(false, std::memory_order_relaxed);
                     }
                     available = published.load(std::memory_order_acquire);
+                }
+                if (available == at) {
+                    continue; // woken for a priority task
                 }
             }
             BbThreads::SampleCore(BbThreads::CoreDrawRecording);
@@ -209,7 +234,25 @@ private:
         }
     }
 
+    void RunPriority() {
+        if (!has_priority.load(std::memory_order_acquire)) {
+            return;
+        }
+        std::vector<Common::UniqueFunction<void>> tasks;
+        {
+            std::scoped_lock lk{priority_mutex};
+            tasks.swap(priority);
+            has_priority.store(false, std::memory_order_relaxed);
+        }
+        for (auto& task : tasks) {
+            task();
+        }
+    }
+
     static inline thread_local bool on_stage_b = false;
+    std::mutex priority_mutex;
+    std::vector<Common::UniqueFunction<void>> priority;
+    alignas(64) std::atomic<bool> has_priority{false};
     Handler handler;
     void* context;
     std::unique_ptr<u8[]> ring;

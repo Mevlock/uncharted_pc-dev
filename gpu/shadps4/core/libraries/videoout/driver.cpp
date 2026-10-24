@@ -558,6 +558,15 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
+            // bbport diagnosis: guest write faults resolved in order with the draws, and where the
+            // faulting game thread's wait went.
+            if (const u64 n = BbStats::ordered_faults.exchange(0)) {
+                std::printf("Fault waits: %.0f/s; per fault %.0f us until the command thread took "
+                            "it, %.0f us behind queued draws, %.0f us running\n",
+                            n / window, BbStats::ordered_pickup_ns.exchange(0) / 1e3 / n,
+                            BbStats::ordered_behind_ns.exchange(0) / 1e3 / n,
+                            BbStats::ordered_run_ns.exchange(0) / 1e3 / n);
+            }
             // bbport diagnosis: image view lookups (a view list that keeps growing slows every
             // draw that binds the image), and on hybrid CPUs the core kind of each render thread.
             {
