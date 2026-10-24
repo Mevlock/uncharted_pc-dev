@@ -3656,6 +3656,20 @@ u64 Rasterizer::Flush() {
     return current_tick;
 }
 
+void Rasterizer::FlushInOrder() {
+    if (!UseDrawPipe()) {
+        Flush();
+        return;
+    }
+    const u8 none = 0;
+    RunInOrder(
+        [](Rasterizer& self, const u8*) {
+            SubmitInfo info{};
+            self.scheduler.Flush(info);
+        },
+        &none, 0);
+}
+
 void Rasterizer::Finish() {
     DrainDrawPipe();
     scheduler.Finish();
@@ -4407,6 +4421,22 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         u64 offset = 0;
         bool tracked = false;
     } span;
+    // Each V# read once (the pre-passes below and the binding loop).
+    std::array<AmdGpu::Buffer, 32> sharps;
+    u32 sharps_read = 0;
+    const auto sharp_of = [&](u32 i) -> AmdGpu::Buffer {
+        if (prepared) {
+            return prepared->buffer_sharps[i];
+        }
+        if (i >= sharps.size()) {
+            return stage.buffers[i].GetSharp(stage);
+        }
+        if (!(sharps_read >> i & 1)) {
+            sharps[i] = stage.buffers[i].GetSharp(stage);
+            sharps_read |= 1u << i;
+        }
+        return sharps[i];
+    };
     static const bool coalesce = [] {
         const char* env = std::getenv("BB_COALESCE_STREAMS");
         return !(env && env[0] == '0');
@@ -4422,7 +4452,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 (num_ring_stages && FindRingBinding(stage, i))) {
                 continue;
             }
-            const auto vsharp = prepared ? prepared->buffer_sharps[i] : desc.GetSharp(stage);
+            const auto vsharp = sharp_of(i);
             const u64 size = vsharp.GetSize();
             if (vsharp.base_address == 0 || size == 0 ||
                 size > VideoCore::BufferCache::STREAM_THRESHOLD) {
@@ -4474,7 +4504,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             if (desc.IsSpecial() || !desc.is_written) {
                 continue;
             }
-            const auto vsharp = prepared ? prepared->buffer_sharps[i] : desc.GetSharp(stage);
+            const auto vsharp = sharp_of(i);
             if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
                 continue;
             }
@@ -4585,8 +4615,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 UNREACHABLE_MSG("Unexpected buffer type {}", u32(desc.buffer_type));
             }
         } else {
-            const auto vsharp =
-                prepared ? prepared->buffer_sharps[buffer_index] : desc.GetSharp(stage);
+            const auto vsharp = sharp_of(buffer_index);
             if (vsharp.GetSize() == 864 && gbuffer_draw &&
                 memory->IsValidGpuMapping(vsharp.base_address, 0)) {
                 camera_motion->OnConstants(reinterpret_cast<const float*>(vsharp.base_address));

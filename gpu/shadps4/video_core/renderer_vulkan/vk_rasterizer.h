@@ -119,6 +119,14 @@ public:
     /// Returns true when the task was handed to the recording thread (not run yet).
     bool RunInOrder(OrderedTask task, const void* data, u32 size,
                     u64 toggle = BbToggle::PipelinedTasks);
+    /// Stage A: a GPU write handed to the recording thread (fence, copy) may still change these
+    /// bytes.
+    bool HasPendingGpuWrite(VAddr address, u64 size) {
+        return PendingWriteOverlaps(address, size);
+    }
+    /// Submits the work recorded so far, in order with the draws handed to the recording thread
+    /// (no drain: stage A goes on decoding).
+    void FlushInOrder();
     /// Runs `task` on the draw recording thread before the draws already queued for it (here
     /// after a drain when the pipeline is off).
     void RunNext(Common::UniqueFunction<void> task);

@@ -280,9 +280,20 @@ void Liverpool::Process(std::stop_token stoken) {
                     }();
                     static u64 draws_at_flush = 0;
                     const u64 draws_now = BbStats::draws.load(std::memory_order_relaxed);
+                    // Submitted by the draw recording thread in order with the draws instead of
+                    // after a drain (a bubble in both stages, ~6 a frame). U3 square, 2 rounds:
+                    // 117.6 -> 119.1 FPS. BB_FLUSH_IN_ORDER=0: drain and submit here, as before.
+                    static const bool in_order = [] {
+                        const char* env = std::getenv("BB_FLUSH_IN_ORDER");
+                        return !(env && env[0] == '0');
+                    }();
                     if (flush_draws && rasterizer && draws_now - draws_at_flush >= flush_draws) {
                         draws_at_flush = draws_now;
-                        rasterizer->Flush();
+                        if (in_order) {
+                            rasterizer->FlushInOrder();
+                        } else {
+                            rasterizer->Flush();
+                        }
                     }
                 }
                 std::scoped_lock lock{queue.m_access};
@@ -1614,6 +1625,30 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 // Else the value may come from a fence that thread has yet to write: let it
                 // catch up before yielding to other queues.
+                // BB_WAITREGMEM_NODRAIN=1 (experiment): drain only while a write handed to that
+                // thread overlaps the label; the thread runs on regardless, so otherwise yield
+                // (the value usually comes from the compute queue, decoded on this thread).
+                static const bool no_drain = [] {
+                    const char* env = std::getenv("BB_WAITREGMEM_NODRAIN");
+                    return env && env[0] == '1';
+                }();
+                while (no_drain && !wait_reg_mem->Test(regs.reg_array)) {
+                    if (u32 value; wait_reg_mem->mem_space.Value() ==
+                                       PM4CmdWaitRegMem::MemSpace::Memory &&
+                                   PendingFenceValue(wait_reg_mem->Address<VAddr>(), value) &&
+                                   wait_reg_mem->TestValue(value)) {
+                        break;
+                    }
+                    if (rasterizer && !rasterizer->DrawPipeIdle() &&
+                        rasterizer->HasPendingGpuWrite(wait_reg_mem->Address<VAddr>(), 8)) {
+                        rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
+                        continue;
+                    }
+                    YIELD_GFX();
+                }
+                if (no_drain) {
+                    break;
+                }
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     if (rasterizer && !rasterizer->DrawPipeIdle()) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
