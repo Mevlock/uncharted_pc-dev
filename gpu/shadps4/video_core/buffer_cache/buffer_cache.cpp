@@ -417,6 +417,9 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
         const char* env = std::getenv("BB_PERF_DIAG");
         return env && env[0] == '1';
     }();
+    if (TryPrefetched(page, length)) {
+        return true;
+    }
     const auto t0 = std::chrono::steady_clock::now();
     const u64 tick_before = scheduler.CurrentTick();
     if (!BeginSideDownload(page, length, ticket)) {
@@ -429,6 +432,9 @@ bool BufferCache::DownloadOnSideQueue(VAddr page, u64 length) {
     const auto t2 = std::chrono::steady_clock::now();
     const u64 pages = ticket.pages.size(), bytes = ticket.total;
     const bool ok = FinishSideDownload(ticket, page, length); // nothing came in between here
+    if (ok && was_done) {
+        NotePrefetchCandidate(page, length);
+    }
     if (diag) {
         const auto t3 = std::chrono::steady_clock::now();
         static u64 n = 0, done = 0, flush_count = 0, page_count = 0, byte_count = 0;
@@ -766,6 +772,253 @@ bool BufferCache::FinishSideDownload(SideTicket& ticket, VAddr fault_page, u64 f
             .count(),
         std::memory_order_relaxed);
     return fault_ok;
+}
+
+/// bbport: one command buffer's copies of recurring read-back pages (PrefetchRecurringPages).
+struct BufferCache::PrefetchBatch {
+    static constexpr u64 StagingSize = 2_MB;
+    static constexpr u32 NumBatches = 8;
+
+    explicit PrefetchBatch(const Vulkan::Instance& instance)
+        : staging{instance, 0, StagingSize, MemoryType::HostCached, "Prefetched read-backs"} {}
+
+    struct Entry {
+        VAddr page;
+        boost::container::small_vector<std::pair<VAddr, VAddr>, 4> parts; ///< GPU bytes copied
+        u64 offset; ///< of the first part in staging; the others follow, 16-byte aligned
+    };
+    Buffer staging;
+    std::vector<Entry> entries;
+    u64 tick = 0; ///< the command buffer that copies them (0: unused)
+    bool invalidated = false;
+};
+
+static bool PrefetchEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_PREFETCH_READBACK");
+        return !(env && env[0] == '0');
+    }();
+    return enabled;
+}
+
+static std::atomic<u64> prefetch_served{0}, prefetch_missed{0}, prefetch_copied_pages{0},
+    prefetch_copied_bytes{0};
+
+/// GPU thread, after a side queue read-back of these pages: they count as recurring once seen
+/// twice within a few seconds.
+void BufferCache::NotePrefetchCandidate(VAddr page, u64 length) {
+    if (!PrefetchEnabled()) {
+        return;
+    }
+    std::scoped_lock lock{prefetch_mutex};
+    for (VAddr at = page; at < page + length; at += TRACKER_BYTES_PER_PAGE) {
+        if (prefetch_hits.size() >= 4096 && !prefetch_hits.contains(at)) {
+            break;
+        }
+        auto& hits = prefetch_hits[at];
+        hits = static_cast<u8>(std::min<u32>(hits + 1u, 8u));
+    }
+}
+
+/// Draw scheduler submission (Rasterizer::OnSubmit, the command buffer still open): copies the
+/// GPU bytes of the recurring pages written by this command buffer (or before it, not copied
+/// yet) to a staging buffer after all its work.
+void BufferCache::PrefetchRecurringPages() {
+    if (!PrefetchEnabled()) {
+        return;
+    }
+    static const bool diag = [] {
+        const char* env = std::getenv("BB_PERF_DIAG");
+        return env && env[0] == '1';
+    }();
+    std::scoped_lock lock{prefetch_mutex};
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= prefetch_decay_at) {
+        // Every 2 s the counts halve: pages that stopped faulting drop out.
+        prefetch_decay_at = now + std::chrono::seconds(2);
+        std::erase_if(prefetch_hits, [](auto& entry) {
+            entry.second >>= 1;
+            return entry.second == 0;
+        });
+        if (diag) {
+            static auto window = now;
+            if (now - window >= std::chrono::seconds(5)) {
+                const double s = std::chrono::duration<double>(now - window).count();
+                std::printf("Prefetched read-backs: %.0f/s served, %.0f/s missed; %.0f pages/s "
+                            "(%.0f KiB/s) copied; %zu recurring pages\n",
+                            prefetch_served.exchange(0) / s, prefetch_missed.exchange(0) / s,
+                            prefetch_copied_pages.exchange(0) / s,
+                            prefetch_copied_bytes.exchange(0) / 1024.0 / s, prefetch_hits.size());
+                window = now;
+            }
+        }
+    }
+    if (prefetch_hits.empty()) {
+        return;
+    }
+    // The command buffer being submitted signals this tick (the scheduler took the next one).
+    const u64 tick = scheduler.CurrentTick() - 1;
+    if (prefetch_batches.empty()) {
+        for (u32 i = 0; i < PrefetchBatch::NumBatches; ++i) {
+            prefetch_batches.push_back(std::make_unique<PrefetchBatch>(instance));
+        }
+    }
+    // The oldest batch whose copies the GPU has run (only the GPU thread reads them).
+    PrefetchBatch* batch = nullptr;
+    for (auto& candidate : prefetch_batches) {
+        if ((candidate->tick == 0 || scheduler.IsFree(candidate->tick)) &&
+            (!batch || candidate->tick < batch->tick)) {
+            batch = candidate.get();
+        }
+    }
+    if (!batch) {
+        return; // all in flight
+    }
+    for (const auto& entry : batch->entries) {
+        if (auto it = prefetch_latest.find(entry.page);
+            it != prefetch_latest.end() && it->second.batch == batch) {
+            prefetch_latest.erase(it);
+        }
+    }
+    batch->entries.clear();
+    batch->tick = 0;
+    batch->invalidated = false;
+
+    struct ArenaCopies {
+        const Buffer* arena;
+        boost::container::small_vector<vk::BufferCopy, 16> copies;
+    };
+    boost::container::small_vector<ArenaCopies, 4> by_arena;
+    u64 total = 0;
+    for (const auto& [page, hits] : prefetch_hits) {
+        if (hits < 2 || !memory_tracker->IsRegionGpuModified(page, TRACKER_BYTES_PER_PAGE)) {
+            continue;
+        }
+        const u64 write_tick = memory_tracker->LatestGpuWriteTick(page, TRACKER_BYTES_PER_PAGE);
+        if (write_tick > tick) {
+            continue; // marked for the next command buffer
+        }
+        if (auto it = prefetch_latest.find(page);
+            it != prefetch_latest.end() && it->second.batch->tick >= write_tick) {
+            continue; // a copy at least as new is on its way or ready
+        }
+        PrefetchBatch::Entry entry{.page = page, .parts = {}, .offset = total};
+        u64 size = 0;
+        gpu_modified_ranges.ForEachInRange(page, TRACKER_BYTES_PER_PAGE,
+                                           [&](VAddr start, VAddr end) {
+                                               entry.parts.emplace_back(start, end);
+                                               size += Common::AlignUp(end - start, 16);
+                                           });
+        if (entry.parts.empty() || total + size > PrefetchBatch::StagingSize) {
+            continue;
+        }
+        const u64 block = page >> block_shift;
+        const Buffer* arena = GetArena(block, block);
+        ArenaCopies* target = nullptr;
+        for (auto& candidate : by_arena) {
+            if (candidate.arena == arena) {
+                target = &candidate;
+            }
+        }
+        if (!target) {
+            target = &by_arena.emplace_back(ArenaCopies{arena, {}});
+        }
+        u64 dst = total;
+        for (const auto& [start, end] : entry.parts) {
+            target->copies.push_back(vk::BufferCopy{
+                .srcOffset = start - arena->cpu_addr,
+                .dstOffset = dst,
+                .size = end - start,
+            });
+            dst += Common::AlignUp(end - start, 16);
+        }
+        total = dst;
+        prefetch_latest[page] = PrefetchRef{batch, static_cast<u32>(batch->entries.size())};
+        batch->entries.push_back(std::move(entry));
+    }
+    if (batch->entries.empty()) {
+        return;
+    }
+    batch->tick = tick;
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    const vk::MemoryBarrier2 before = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &before});
+    for (const auto& [arena, copies] : by_arena) {
+        cmdbuf.copyBuffer(arena->Handle(), batch->staging.Handle(), copies);
+    }
+    const vk::MemoryBarrier2 to_host = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
+    prefetch_copied_pages.fetch_add(batch->entries.size(), std::memory_order_relaxed);
+    prefetch_copied_bytes.fetch_add(total, std::memory_order_relaxed);
+}
+
+/// GPU thread, a guest write fault on pages with GPU data: true when every such page has a
+/// finished copy newer than its last GPU write; their bytes are stored and they stop being GPU
+/// data. False: nothing changed, the side queue reads them back.
+bool BufferCache::TryPrefetched(VAddr page, u64 length) {
+    if (!PrefetchEnabled()) {
+        return false;
+    }
+    std::scoped_lock lock{prefetch_mutex};
+    boost::container::small_vector<std::pair<VAddr, PrefetchRef>, 4> found;
+    for (VAddr at = page; at < page + length; at += TRACKER_BYTES_PER_PAGE) {
+        if (!memory_tracker->IsRegionGpuModified(at, TRACKER_BYTES_PER_PAGE)) {
+            continue;
+        }
+        const auto it = prefetch_latest.find(at);
+        if (it == prefetch_latest.end()) {
+            if (prefetch_hits.contains(at)) {
+                prefetch_missed.fetch_add(1, std::memory_order_relaxed);
+            }
+            return false;
+        }
+        PrefetchBatch* batch = it->second.batch;
+        if (memory_tracker->LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE) > batch->tick ||
+            !scheduler.IsFree(batch->tick)) {
+            prefetch_missed.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        found.emplace_back(at, it->second);
+    }
+    if (found.empty()) {
+        return false;
+    }
+    for (const auto& [at, ref] : found) {
+        PrefetchBatch* batch = ref.batch;
+        if (!batch->invalidated) {
+            batch->staging.Invalidate(0, PrefetchBatch::StagingSize);
+            batch->invalidated = true;
+        }
+        const auto& entry = batch->entries[ref.entry];
+        const u8* staging = batch->staging.mapped_data.data();
+        u64 offset = entry.offset;
+        for (const auto& [start, end] : entry.parts) {
+            // Only the bytes that are still the GPU's: a part handed back meanwhile holds newer
+            // guest data.
+            gpu_modified_ranges.ForEachInRange(start, end - start, [&](VAddr s, VAddr e) {
+                WriteBackGpuData(std::bit_cast<u8*>(s), staging + offset + (s - start), e - s);
+            });
+            offset += Common::AlignUp(end - start, 16);
+        }
+        gpu_modified_ranges.Subtract(at, TRACKER_BYTES_PER_PAGE);
+        memory_tracker->UnmarkRegionAsGpuModified(at, TRACKER_BYTES_PER_PAGE);
+        prefetch_latest.erase(at);
+        auto& hits = prefetch_hits[at];
+        hits = static_cast<u8>(std::min<u32>(hits + 1u, 8u));
+    }
+    prefetch_served.fetch_add(found.size(), std::memory_order_relaxed);
+    return true;
 }
 
 // bbport: deferred raycaster copies (see landing_gate.h; after drakolordx7's upstream PR #397). The

@@ -3861,6 +3861,7 @@ void Rasterizer::OnSubmit() {
         fault_process_pending = false;
         buffer_cache.ProcessFaultBuffer();
     }
+    buffer_cache.PrefetchRecurringPages();
     texture_cache.ProcessDownloadImages();
     texture_cache.UpdateButtonPrompts();
     texture_cache.RunGarbageCollector();

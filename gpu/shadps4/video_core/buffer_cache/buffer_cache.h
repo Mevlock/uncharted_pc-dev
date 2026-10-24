@@ -9,6 +9,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -178,6 +179,10 @@ public:
     /// Processes the fault buffer.
     void ProcessFaultBuffer();
 
+    /// bbport: copies the GPU bytes of recurring read-back pages at the end of the command
+    /// buffer about to be submitted (Rasterizer::OnSubmit; see PrefetchBatch).
+    void PrefetchRecurringPages();
+
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
 
@@ -304,6 +309,25 @@ private:
     struct SideQueue;
     std::unique_ptr<SideQueue> side_queue;
     bool DownloadOnSideQueue(VAddr page, u64 length);
+
+    /// bbport (BB_PREFETCH_READBACK=0: off; idea from BilalReloaded's recurring read-back
+    /// pieces): pages the guest keeps faulting on after their GPU work is done (U3's Cartagena
+    /// square: ~600 a second, ~90 us each on the side queue) have their GPU bytes copied to host
+    /// memory at the end of each command buffer that wrote them. A fault on such a page whose
+    /// copy is complete and newer than the page's last GPU write stores that copy (a memcpy)
+    /// instead of a side queue round trip.
+    struct PrefetchBatch;
+    std::vector<std::unique_ptr<PrefetchBatch>> prefetch_batches;
+    struct PrefetchRef {
+        PrefetchBatch* batch;
+        u32 entry;
+    };
+    std::unordered_map<VAddr, u8> prefetch_hits;          ///< page -> recent side read-backs
+    std::unordered_map<VAddr, PrefetchRef> prefetch_latest; ///< page -> its newest copy
+    std::mutex prefetch_mutex;
+    std::chrono::steady_clock::time_point prefetch_decay_at{};
+    bool TryPrefetched(VAddr page, u64 length);
+    void NotePrefetchCandidate(VAddr page, u64 length);
 
     /// bbport: deferred raycaster copies (DeferGuestCopy).
     struct Landing;
