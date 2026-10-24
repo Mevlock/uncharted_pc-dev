@@ -71,6 +71,9 @@ FRAME_RATES = [('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FP
                ('165', '165 FPS (experimental)'), ('240', '240 FPS (experimental)')]
 # A cap on the frames shown per second (BB_FPS_LIMIT), apart from the rate the games run at:
 # 30 or 45 for a slower PC or a laptop on battery, 90 for a 90 Hz screen.
+# The game's idle job threads (BB_JOB_SLEEP): spinning keeps the camera smooth; sleeping saves CPU.
+JOB_THREADS = [('auto', 'Automatic (spin on CPUs with more than 8 threads)'), ('spin', 'Spin (smoothest camera)'),
+               ('sleep', 'Sleep (saves CPU, slight camera judder)')]
 FPS_LIMITS = [('0', 'Off (the frame rate above)'), ('30', '30 FPS'), ('45', '45 FPS'),
               ('60', '60 FPS'), ('90', '90 FPS'), ('120', '120 FPS'), ('144', '144 FPS')]
 # The games render 1920x1080; the window (or the screen in fullscreen) gets that image scaled
@@ -189,7 +192,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'unlock_chapters': False, 'anisotropy': '0',
+                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'anisotropy': '0',
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
@@ -514,6 +517,9 @@ def game_environment(s, start=None):
         env['BB_SKIP_INTRO'] = '1'
     if s.get('unlock_chapters', False):
         env['BB_UNLOCK_CHAPTERS'] = '1'
+    job_threads = str(s.get('job_threads') or 'auto')
+    if job_threads != 'auto':
+        env['BB_JOB_SLEEP'] = '0' if job_threads == 'spin' else '1'
     env['BB_ANISO'] = str(s.get('anisotropy') or '0')
     env['BB_FSR1'] = '1' if s.get('scaler', 'fsr1') == 'fsr1' else '0'
     sharpening = str(s.get('sharpening') or 'off')
@@ -1207,6 +1213,9 @@ class Launcher:
                  _('Shows at most this many frames per second, generated frames included. It only '
                    'lowers the rate: a limit at or above what the frame rate (and frame generation) give '
                    'changes nothing. Lower it for a steadier picture on a slower PC or to save power.'))
+        self.row(f, _('Idle game threads'), self.choice(f, 'job_threads', JOB_THREADS, 34),
+                 _('Spinning keeps the camera turn smooth but uses several CPU cores. Sleeping saves them '
+                   '(best for 4-8 thread CPUs) but the camera judders slightly when turning.'))
         self.section(f, _('Resolution'))
         self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
                  _('The window\'s size in windowed mode. With Render resolution at 1920 × 1080, a larger '

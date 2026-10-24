@@ -1298,7 +1298,27 @@ static int install_job_sticky(int64_t recheck, int64_t submission) {
 }
 static void patch_job_sleep(uint64_t image_size) {
     const char *env=getenv("BB_JOB_SLEEP");
-    if (env && env[0]=='0') return;
+    if (env && env[0]=='0') { printf("Job workers: idle ones spin (BB_JOB_SLEEP=0)\n"); return; }
+    /* Sleeping workers make the camera judder: U1-U3 run their camera and pad work in jobs, and
+     * the main thread waits for each job phase, so a frame's work starts late by a varying
+     * amount and the game, which times frames with the real clock, turns the camera unevenly per
+     * shown frame (a steady turn: every ~4th frame a third of the others; measured 2026-10-24
+     * with BB_CAMERA_LOG; mouse or stick alike). They spin unless the CPU is small: BB_JOB_SLEEP
+     * unset or "auto" sleeps up to 8 hardware threads (as SuperMedo's 0.3.7), 1 always. Spinning
+     * costs about 5 cores and 3-5% FPS on 16 threads (U3 square 120 -> 114-117). */
+    if (!env || !*env || !strcmp(env,"auto")) {
+        long threads=0;
+#ifdef _WIN32
+        DWORD_PTR mask=0, system_mask=0;
+        if (GetProcessAffinityMask(GetCurrentProcess(),&mask,&system_mask)) threads=__builtin_popcountll((unsigned long long)mask);
+#else
+        threads=sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+        if (threads>8) {
+            printf("Job workers: idle ones spin (%ld hardware threads; BB_JOB_SLEEP=1 sleeps)\n",threads);
+            return;
+        }
+    }
     static const unsigned char nop2[]={0x66,0x90}, nop6[]={0x66,0x0f,0x1f,0x44,0x00,0x00};
     /* Each site: alternatives (EU CUSA02343, CUSA02344); the first one found exactly once is used. */
     static const struct masked_pattern sites[3][2]={
@@ -1808,6 +1828,15 @@ int main(int argc, char **argv) {
         if (!getenv("BB_PCORES") || strcmp(getenv("BB_PCORES"),"0")) {
             PROCESS_POWER_THROTTLING_STATE power={PROCESS_POWER_THROTTLING_CURRENT_VERSION,PROCESS_POWER_THROTTLING_EXECUTION_SPEED,0};
             SetProcessInformation(GetCurrentProcess(),ProcessPowerThrottling,&power,sizeof(power));
+        }
+        /* BB_TIMER_RES=<100 ns units> (test, e.g. 5000 = 0.5 ms): the Windows timer resolution, so
+         * timed waits (the job workers' idle waits) end closer to when they should. */
+        if (getenv("BB_TIMER_RES")) {
+            typedef LONG (NTAPI *SetRes)(ULONG, BOOLEAN, PULONG);
+            const SetRes set=(SetRes)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"),"NtSetTimerResolution");
+            ULONG actual=0;
+            if (set) set((ULONG)strtoul(getenv("BB_TIMER_RES"),NULL,10),TRUE,&actual);
+            printf("Timer resolution: %.3f ms (BB_TIMER_RES)\n",actual/10000.0);
         }
         /* BB_STACK_DUMP_AFTER=<seconds> (diagnosis): the thread stacks once, that long after start. */
         if (getenv("BB_STACK_DUMP_AFTER")) CloseHandle(CreateThread(NULL,0,stack_dump_after,NULL,0,NULL));
