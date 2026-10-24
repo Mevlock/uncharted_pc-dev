@@ -370,7 +370,8 @@ private:
 
     struct Backing : public Interval {
         vk::DeviceMemory memory;
-        u64 offset;
+        u64 offset; ///< into `memory`, in blocks (like start and end: SubRange and CanMergeWith
+                    ///< mixed bytes and blocks and gave a release misaligned memory offsets)
         constexpr bool CanMergeWith(const Backing& other) const noexcept {
             return memory == other.memory && offset + (end - start) == other.offset;
         }

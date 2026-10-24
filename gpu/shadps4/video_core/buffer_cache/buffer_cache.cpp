@@ -2389,7 +2389,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
             .resourceOffset = (start - base_block) << block_shift,
             .size = (end - start) << block_shift,
             .memory = backing.memory,
-            .memoryOffset = backing.offset + ((start - backing.start) << block_shift),
+            .memoryOffset = (backing.offset + (start - backing.start)) << block_shift,
         });
     });
 
@@ -2501,7 +2501,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.start = range.start;
         backing.end = range.end;
         backing.memory = range.memory;
-        backing.offset = range.offset;
+        backing.offset = range.offset >> block_shift;
         resident_ranges.Add(backing);
         g_resident_buffer_bytes.fetch_add((range.end - range.start) << block_shift,
                                           std::memory_order_relaxed);
@@ -2929,7 +2929,7 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
             .resourceOffset = address - arena->cpu_addr,
             .size = size,
         });
-        quarantined_runs.push_back({piece.memory, piece.offset, piece.end - piece.start});
+        quarantined_runs.push_back({piece.memory, piece.offset << block_shift, piece.end - piece.start});
         // The guest copy is the only one now: the next use uploads it.
         memory_tracker->MarkRegionAsCpuModified(address, size);
         const u64 copy_size = (piece.end - piece.start) * sizeof(vk::DeviceAddress);
