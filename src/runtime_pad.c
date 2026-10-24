@@ -572,6 +572,7 @@ static void raw_aim(const char *game, uint64_t controller, const uint64_t *regs,
     static int aim_off=-1;        /* BB_AIM_DIRECT=0: the old stick aiming, for comparing */
     if (aim_scale<0.0f) { const char *e=getenv("BB_AIM_SCALE"); aim_scale=e ? (float)atof(e) : 1.0f; }
     if (aim_off<0) { const char *e=getenv("BB_AIM_DIRECT"); aim_off=e && e[0]=='0'; }
+    if (aim_held) bbgpu_note_aiming(); /* BB_DOF=aim: no depth of field while aiming (our aim hooks did this) */
     const uint64_t ret=regs[9+16]-image; /* (this port's thunk: 128-byte red-zone step before the return address) */
     float *dir=(float *)(uintptr_t)regs[6];
     static uint64_t other_logged;
