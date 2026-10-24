@@ -796,7 +796,7 @@ bool BufferCache::FinishSideDownload(SideTicket& ticket, VAddr fault_page, u64 f
 static bool PrefetchEnabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_PREFETCH_READBACK");
-        return !(env && env[0] == '0');
+        return env && env[0] == '1';
     }();
     return enabled;
 }
