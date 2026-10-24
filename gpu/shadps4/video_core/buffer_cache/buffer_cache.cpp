@@ -149,6 +149,25 @@ struct BufferCache::SideTicket {
     bool async = false; // BB_ASYNC_TRACE
 };
 
+/// bbport: one command buffer's copies of recurring read-back pages (PrefetchRecurringPages).
+struct BufferCache::PrefetchBatch {
+    static constexpr u64 StagingSize = 2_MB;
+    static constexpr u32 NumBatches = 8;
+
+    explicit PrefetchBatch(const Vulkan::Instance& instance)
+        : staging{instance, 0, StagingSize, MemoryType::HostCached, "Prefetched read-backs"} {}
+
+    struct Entry {
+        VAddr page;
+        boost::container::small_vector<std::pair<VAddr, VAddr>, 4> parts; ///< GPU bytes copied
+        u64 offset; ///< of the first part in staging; the others follow, 16-byte aligned
+    };
+    Buffer staging;
+    std::vector<Entry> entries;
+    u64 tick = 0; ///< the command buffer that copies them (0: unused)
+    bool invalidated = false;
+};
+
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                          Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
                          TextureCache& texture_cache_, PageManager& tracker)
@@ -773,25 +792,6 @@ bool BufferCache::FinishSideDownload(SideTicket& ticket, VAddr fault_page, u64 f
         std::memory_order_relaxed);
     return fault_ok;
 }
-
-/// bbport: one command buffer's copies of recurring read-back pages (PrefetchRecurringPages).
-struct BufferCache::PrefetchBatch {
-    static constexpr u64 StagingSize = 2_MB;
-    static constexpr u32 NumBatches = 8;
-
-    explicit PrefetchBatch(const Vulkan::Instance& instance)
-        : staging{instance, 0, StagingSize, MemoryType::HostCached, "Prefetched read-backs"} {}
-
-    struct Entry {
-        VAddr page;
-        boost::container::small_vector<std::pair<VAddr, VAddr>, 4> parts; ///< GPU bytes copied
-        u64 offset; ///< of the first part in staging; the others follow, 16-byte aligned
-    };
-    Buffer staging;
-    std::vector<Entry> entries;
-    u64 tick = 0; ///< the command buffer that copies them (0: unused)
-    bool invalidated = false;
-};
 
 static bool PrefetchEnabled() {
     static const bool enabled = [] {
