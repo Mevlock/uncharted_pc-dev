@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include "bbport_toggles.h"
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -85,10 +87,21 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
     cv_lock.notify_all();
 }
 
-static void WaitGpuIdle() {
+static void WaitGpuIdle(int site = 0) {
     HLE_TRACE;
-    std::unique_lock lock{m_wait_idle};
-    cv_lock.wait(lock, [] { return submission_lock == 0; });
+    // bbport diagnosis (BB_FRAME_STATS): the guest's waits here by caller (0 doorbell, 1 submit,
+    // 2 submit and flip, 3 submit done).
+    const auto start = std::chrono::steady_clock::now();
+    {
+        std::unique_lock lock{m_wait_idle};
+        cv_lock.wait(lock, [] { return submission_lock == 0; });
+    }
+    BbStats::gpu_idle_waits[site].fetch_add(1, std::memory_order_relaxed);
+    BbStats::gpu_idle_wait_ns[site].fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                             start)
+            .count(),
+        std::memory_order_relaxed);
 }
 
 // Write a special ending NOP packet with N DWs data block
@@ -300,7 +313,14 @@ void PS4_SYSV_ABI sceGnmDingDong(u32 gnm_vqid, u32 next_offs_dw) {
     }
 
     std::scoped_lock lk{m_submit_lock};
-    WaitGpuIdle();
+    // BB_SUBMIT_NO_IDLE_WAIT=2 (measurement only, unsafe): the doorbell does not wait either.
+    static const bool doorbell_no_wait = [] {
+        const char* env = std::getenv("BB_SUBMIT_NO_IDLE_WAIT");
+        return env && env[0] == '2';
+    }();
+    if (!doorbell_no_wait) {
+        WaitGpuIdle(0);
+    }
 
     if (DebugState.ShouldPauseInSubmit()) {
         DebugState.PauseGuestThreads();
@@ -2312,7 +2332,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     s32 result;
     {
         std::scoped_lock lk{m_submit_lock};
-        WaitGpuIdle();
+        WaitGpuIdle(2);
 
         const s32 patch_result = PatchFlipRequest(cmdbuf, size_dw, vo_handle, buf_idx, flip_mode,
                                                   flip_arg, nullptr /*unk*/);
@@ -2364,7 +2384,15 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
     }
 
     std::scoped_lock lk{m_submit_lock};
-    WaitGpuIdle();
+    // BB_SUBMIT_NO_IDLE_WAIT=1 (experiment): a submission does not wait for the previous
+    // frame to be done (5.2 ms a frame in U3's square); the PS4 does not wait here either.
+    static const bool no_idle_wait = [] {
+        const char* env = std::getenv("BB_SUBMIT_NO_IDLE_WAIT");
+        return env && (env[0] == '1' || env[0] == '2');
+    }();
+    if (!no_idle_wait) {
+        WaitGpuIdle(1);
+    }
 
     return PerformSubmit(count, const_cast<const u32**>(dcb_gpu_addrs), dcb_sizes_in_bytes,
                          const_cast<const u32**>(ccb_gpu_addrs), ccb_sizes_in_bytes);
@@ -2381,7 +2409,17 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
     std::scoped_lock lk{m_submit_lock};
-    WaitGpuIdle();
+    {
+        // bbport diagnosis (BB_FRAME_STATS): how long the guest waits here per frame.
+        const auto wait_start = std::chrono::steady_clock::now();
+        WaitGpuIdle(3);
+        BbStats::submit_done_wait_ns.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                 wait_start)
+                .count(),
+            std::memory_order_relaxed);
+        BbStats::submit_dones.fetch_add(1, std::memory_order_relaxed);
+    }
     if (!liverpool->IsGpuIdle()) {
         submission_lock = true;
     }

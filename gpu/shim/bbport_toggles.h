@@ -1,6 +1,7 @@
 // bbport: optimizations that can be switched off while the game runs (BB_TOGGLE_FILE,
 // see runtime_memory.c), to find which one changes rendering without restarting.
 #pragma once
+#include <array>
 #include <atomic>
 #include <csetjmp>
 #include <chrono>
@@ -143,6 +144,11 @@ inline std::atomic<std::uint64_t> gpu_idle_ns{0};
 /// Guest write faults resolved in order with the draws (Liverpool::SendOrderedCommand): count,
 /// and the guest thread's wait split into queued until the command thread took it, then behind
 /// the draws until the draw recording thread ran it, then running.
+/// sceGnmSubmitDone: calls, the guest's wait for GPU idle in them, and done markers run while the
+/// next frame was being decoded (BB_SUBMIT_MARKERS) or at the dry point.
+inline std::array<std::atomic<std::uint64_t>, 4> gpu_idle_waits{}, gpu_idle_wait_ns{};
+inline std::atomic<std::uint64_t> submit_dones{0}, submit_done_wait_ns{0}, markers_mid{0},
+    markers_dry{0};
 inline std::atomic<std::uint64_t> ordered_faults{0}, ordered_pickup_ns{0}, ordered_behind_ns{0},
     ordered_run_ns{0};
 /// Draws recorded into the reduced scene targets, and draws after the scene started.

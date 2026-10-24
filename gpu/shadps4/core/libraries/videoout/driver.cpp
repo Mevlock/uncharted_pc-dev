@@ -558,6 +558,26 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
+            // bbport diagnosis: the guest's wait in sceGnmSubmitDone for GPU idle per frame, and
+            // the done markers run mid-queue (BB_SUBMIT_MARKERS) or at the dry point.
+            if (const u64 n = BbStats::submit_dones.exchange(0)) {
+                std::printf("Submit done: %.0f/s, guest waits %.2f ms each; markers %llu mid, "
+                            "%llu dry\n",
+                            n / window, BbStats::submit_done_wait_ns.exchange(0) / 1e6 / n,
+                            static_cast<unsigned long long>(BbStats::markers_mid.exchange(0)),
+                            static_cast<unsigned long long>(BbStats::markers_dry.exchange(0)));
+                const char* names[4] = {"doorbell", "submit", "submit+flip", "submit done"};
+                std::string line;
+                for (u32 site = 0; site < 4; ++site) {
+                    const u64 waits = BbStats::gpu_idle_waits[site].exchange(0);
+                    const u64 ns = BbStats::gpu_idle_wait_ns[site].exchange(0);
+                    if (waits) {
+                        line += fmt::format(" {} {:.0f}/s {:.2f} ms/frame;", names[site],
+                                            waits / window, ns / 1e6 / std::max<u64>(n, 1));
+                    }
+                }
+                std::printf("GPU idle waits:%s\n", line.c_str());
+            }
             // bbport diagnosis: guest write faults resolved in order with the draws, and where the
             // faulting game thread's wait went.
             if (const u64 n = BbStats::ordered_faults.exchange(0)) {

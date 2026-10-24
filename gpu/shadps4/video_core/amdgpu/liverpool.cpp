@@ -2231,6 +2231,7 @@ bool Liverpool::RunDoneMarkers(bool signal) {
     if (!reached) {
         return false;
     }
+    (signal ? BbStats::markers_mid : BbStats::markers_dry).fetch_add(reached, std::memory_order_relaxed);
     VideoCore::EndCapture();
     if (rasterizer) {
         rasterizer->OnSubmit();
