@@ -156,20 +156,28 @@ static ABI int32_t cond_destroy(GuestCond **cond) {
     return orbis_error(e);
 }
 static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) {
+    runtime_wait_caller((uint64_t)(uintptr_t)__builtin_return_address(0), 0);
     int32_t e = ensure_cond(cond);
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3) return orbis_error(EINVAL);
     ++waits;
-    return orbis_error(pthread_cond_wait(&(*cond)->native, &(*mutex)->native));
+    const double t0 = runtime_wait_begin();
+    const int32_t r = orbis_error(pthread_cond_wait(&(*cond)->native, &(*mutex)->native));
+    runtime_wait_end("cond", t0);
+    return r;
 }
 static int32_t cond_wait_until(GuestCond **cond, GuestMutex **mutex, const struct timespec *end) {
     int32_t e = ensure_cond(cond);
     if (e) return e;
     if (!mutex || (uintptr_t)*mutex < 3 || !end) return orbis_error(EINVAL);
     ++waits;
-    return timed_error(pthread_cond_timedwait(&(*cond)->native, &(*mutex)->native, end));
+    const double t0 = runtime_wait_begin();
+    const int32_t r = timed_error(pthread_cond_timedwait(&(*cond)->native, &(*mutex)->native, end));
+    runtime_wait_end("cond timed", t0);
+    return r;
 }
 static ABI int32_t cond_timedwait(GuestCond **cond, GuestMutex **mutex, uint32_t usec) {
+    runtime_wait_caller((uint64_t)(uintptr_t)__builtin_return_address(0), usec);
     struct timespec end;
     if (deadline_after(&end, usec)) return orbis_error(EINVAL);
     return cond_wait_until(cond, mutex, &end);
@@ -187,6 +195,7 @@ static ABI int32_t cond_broadcast(GuestCond **cond) {
 /* PS4 struct timespec is {int64 sec, int64 nsec}, identical to Linux x86-64. */
 typedef struct { int64_t sec, nsec; } GuestTimespec;
 static ABI int32_t cond_abs_timedwait(GuestCond **cond, GuestMutex **mutex, const GuestTimespec *abs) {
+    runtime_wait_caller((uint64_t)(uintptr_t)__builtin_return_address(0), 1);
     if (!abs || abs->nsec < 0 || abs->nsec >= 1000000000) return orbis_error(EINVAL);
     struct timespec end = {.tv_sec = (time_t)abs->sec, .tv_nsec = (long)abs->nsec};
     return cond_wait_until(cond, mutex, &end);

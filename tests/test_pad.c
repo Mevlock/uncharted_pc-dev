@@ -6,6 +6,7 @@
 static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
 void bbgpu_mouse_configure(int look) { (void)look; }
+void bbgpu_mouse_rate(double window_s, float *rate_x, float *rate_y) { (void)window_s; *rate_x=*rate_y=0.0f; }
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel) {
     *dx=*dy=0; *buttons=0; *wheel=0;
     return 0;

@@ -279,6 +279,48 @@ static int camera_take(int queue, float *dx, float *dy) {
     }
     return 1;
 }
+/* Paced mouse (BB_MOUSE_PACE_MS, default 50; 0: off). The game reads the pad once a frame but at a
+ * point that drifts against its camera jobs, so "the movement since the last take" alternated
+ * between about one and two reads' worth: a steady mouse turned the shown camera 0.15-0.85 degrees
+ * per frame in a beat (measured 2026-10-24 with a scripted turn, BB_CAMERA_LOG + BB_PAD_TIMING).
+ * A paced take gives the mouse's rate over the last window (window thread, event times) times the
+ * camera's usual update period; the queue's own total still says whether this camera gets the
+ * mouse, and 10% of the difference is fed back each take, so the angle turned stays exact. */
+static volatile float scripted_rate[2]; /* scripted mx= my= (pixels/s): the rate in place of the window's */
+static float mouse_pace_seconds(void) {
+    static float v=-1.0f;
+    if (v<0.0f) { const char *e=getenv("BB_MOUSE_PACE_MS"); v=(e && *e ? (float)atof(e) : 50.0f)*0.001f; if (v<0.0f) v=0.0f; }
+    return v;
+}
+static void camera_take_paced(int queue, float *dx, float *dy, float *period_out) {
+    static uint64_t last_us[4], active_us[4];
+    static float period[4], debt_x[4], debt_y[4];
+    float ax, ay;
+    camera_take(queue,&ax,&ay);
+    *dx=ax; *dy=ay;
+    const float tau=mouse_pace_seconds();
+    const uint64_t now=now_us();
+    const float wall=last_us[queue] ? (float)(now-last_us[queue])*1e-6f : 0.0f;
+    last_us[queue]=now;
+    if (period_out) *period_out=wall>0.0005f && wall<0.05f ? wall : 1.0f/60.0f;
+    if (tau<=0.0f || queue<0 || queue>=4) return;
+    if (!(wall>0.0005f) || wall>0.1f) { debt_x[queue]=debt_y[queue]=0.0f; return; } /* a pause: as it is */
+    period[queue]=period[queue]>0.0f ? period[queue]+(wall-period[queue])*0.02f : wall; /* ~1 s average */
+    if (period_out) *period_out=period[queue];
+    if (ax!=0.0f || ay!=0.0f) active_us[queue]=now;
+    if (now-active_us[queue]>100000) { /* this camera has no mouse now: what is left, at once */
+        *dx=ax+debt_x[queue]; *dy=ay+debt_y[queue]; debt_x[queue]=debt_y[queue]=0.0f;
+        return;
+    }
+    float rx, ry;
+    if (scripted_rate[0]!=0.0f || scripted_rate[1]!=0.0f) { rx=scripted_rate[0]; ry=scripted_rate[1]; }
+    else bbgpu_mouse_rate(tau,&rx,&ry);
+    float ox=rx*period[queue], oy=ry*period[queue];
+    debt_x[queue]+=ax-ox; debt_y[queue]+=ay-oy;
+    ox+=debt_x[queue]*0.1f; oy+=debt_y[queue]*0.1f;
+    debt_x[queue]*=0.9f; debt_y[queue]*=0.9f;
+    *dx=ox; *dy=oy;
+}
 /* The follow camera's collision/position update runs once a frame with the camera object (U1
  * CUSA02343 1.00 and others with the same code; U2 and U3 have the same function, found by its
  * instructions): its horizontal direction (x, y, z) at +0x1310 (U2 +0x9ec0, U3 +0x78c0) and the
@@ -322,7 +364,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     float *dir=(float *)(uintptr_t)(camera+dir_offset);
     const float heading=heading_of(dir);
     float dx, dy;
-    camera_take(0,&dx,&dy);
+    camera_take_paced(0,&dx,&dy,NULL);
     if (aim_held) { follow_moved_us=0; follow_pending=0; return; } /* the aiming camera takes the mouse */
     if (follow_pending) {
         float kept=wrap_degrees(heading-follow_before)/wrap_degrees(follow_after-follow_before);
@@ -721,7 +763,9 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
     if (follow_test<0.0f) { const char *t=getenv("BB_MOUSE_FOLLOW_TEST"); follow_test=t ? (float)atof(t) : 0.0f; }
     if (follow_test>0.0f) { ((float *)(uintptr_t)joypad_state)[2]+=follow_test; ((float *)(uintptr_t)joypad_state)[6]+=follow_test; return; }
     float dx, dy;
-    camera_take(1,&dx,&dy);
+    float paced_period;
+    camera_take_paced(1,&dx,&dy,&paced_period);
+    if (mouse_pace_seconds()>0.0f) dt=paced_period; /* the stick is the paced movement over the usual period: the mouse's rate */
     if (aim_test<0.0f) { const char *t=getenv("BB_MOUSE_AIM_TEST"); aim_test=t ? (float)atof(t) : 0.0f; }
     float *pad=(float *)(uintptr_t)joypad_state;
     float x=0.0f, y=0.0f;
@@ -1073,6 +1117,7 @@ static void injected_mouse(float *dx, float *dy) {
     if (dt>0.1f) dt=0.1f;
     last=now;
     *dx=injected.mouse[0]*dt; *dy=injected.mouse[1]*dt;
+    scripted_rate[0]=injected.mouse[0]; scripted_rate[1]=injected.mouse[1];
 }
 static void read_inject(void) {
     static const char *path; static int checked; static uint64_t last_check; static struct timespec mtime;
@@ -1244,6 +1289,14 @@ static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     pthread_mutex_lock(&lock);
     sample(data); ++reads;
     pthread_mutex_unlock(&lock);
+    /* BB_PAD_TIMING=1 (diagnosis): every read with the same clock as BB_CAMERA_LOG (steady clock = QPC). */
+    static int timing=-1;
+    if (timing<0) timing=getenv("BB_PAD_TIMING")!=NULL;
+    if (timing) {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+        printf("PadRead: t=%.4f rx=%u\n",(double)ts.tv_sec+ts.tv_nsec*1e-9,data->right_x);
+        runtime_wait_print((double)ts.tv_sec+ts.tv_nsec*1e-9);
+    }
     return 0;
 }
 /* Buffered read: the port samples once per call, so one entry is returned. */

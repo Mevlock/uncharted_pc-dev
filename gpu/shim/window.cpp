@@ -1,4 +1,5 @@
 // bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+#include <array>
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
@@ -13,6 +14,15 @@ namespace {
 // the motion, buttons and wheel of its events; the pad sampling takes them (bbgpu_mouse_sample).
 std::mutex mouse_mutex;
 float mouse_dx{}, mouse_dy{};
+// The mouse's movement with the event times (SDL ns), for bbgpu_mouse_rate: the cameras take the
+// mouse's rate over a short window instead of whatever reached the last pad read.
+struct MouseMark {
+    u64 ns;
+    double x, y;
+};
+std::array<MouseMark, 512> mouse_marks{};
+size_t mouse_mark_next = 0, mouse_mark_count = 0;
+double mouse_cum_x = 0.0, mouse_cum_y = 0.0;
 int mouse_wheel{};
 u32 mouse_buttons{};
 std::atomic<bool> mouse_look{false}, mouse_captured{false};
@@ -32,6 +42,34 @@ u32 MouseBit(u8 button) {
 
 extern "C" void bbgpu_mouse_configure(int look) {
     mouse_look = look != 0;
+}
+
+// The mouse's movement over the last `window_s` seconds, per second (pixels/s), from the event times.
+extern "C" void bbgpu_mouse_rate(double window_s, float* rate_x, float* rate_y) {
+    std::scoped_lock lock{mouse_mutex};
+    *rate_x = *rate_y = 0.0f;
+    const u64 now = SDL_GetTicksNS();
+    const u64 from = now - static_cast<u64>(window_s * 1e9);
+    // the movement up to `from`: the newest mark at or before it (all marks newer: the ring's start)
+    double base_x = mouse_mark_count < mouse_marks.size() ? 0.0 : mouse_cum_x;
+    double base_y = mouse_mark_count < mouse_marks.size() ? 0.0 : mouse_cum_y;
+    bool found = false;
+    for (size_t i = 0; i < mouse_mark_count; ++i) { // newest first
+        const auto& m = mouse_marks[(mouse_mark_next + mouse_marks.size() - 1 - i) % mouse_marks.size()];
+        if (m.ns <= from) {
+            base_x = m.x;
+            base_y = m.y;
+            found = true;
+            break;
+        }
+    }
+    if (!found && mouse_mark_count == mouse_marks.size()) { // the ring is newer than the window: its oldest
+        const auto& m = mouse_marks[mouse_mark_next];
+        base_x = m.x;
+        base_y = m.y;
+    }
+    *rate_x = static_cast<float>((mouse_cum_x - base_x) / window_s);
+    *rate_y = static_cast<float>((mouse_cum_y - base_y) / window_s);
 }
 
 extern "C" int bbgpu_mouse_sample(float* dx, float* dy, uint32_t* buttons, int* wheel) {
@@ -193,6 +231,11 @@ bool WindowSDL::PollEvents() {
                 std::scoped_lock lock{mouse_mutex};
                 mouse_dx += event.motion.xrel;
                 mouse_dy += event.motion.yrel;
+                mouse_cum_x += event.motion.xrel;
+                mouse_cum_y += event.motion.yrel;
+                mouse_marks[mouse_mark_next] = {event.motion.timestamp, mouse_cum_x, mouse_cum_y};
+                mouse_mark_next = (mouse_mark_next + 1) % mouse_marks.size();
+                mouse_mark_count = std::min(mouse_mark_count + 1, mouse_marks.size());
             }
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:

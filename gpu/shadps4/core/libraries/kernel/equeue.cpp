@@ -490,8 +490,20 @@ int PS4_SYSV_ABI sceKernelDeleteEqueue(OrbisKernelEqueue eq) {
     return ORBIS_OK;
 }
 
+extern "C" double runtime_wait_begin(void);
+extern "C" void runtime_wait_end(const char* what, double start);
+static int WaitEqueueImpl(OrbisKernelEqueue eq, OrbisKernelEvent* ev, int num, int* out,
+                          OrbisKernelUseconds* timo);
+// bbport: BB_PAD_TIMING notes the wait (runtime_wait_begin / end)
 int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev, int num, int* out,
                                      OrbisKernelUseconds* timo) {
+    const double t0 = runtime_wait_begin();
+    const int r = WaitEqueueImpl(eq, ev, num, out, timo);
+    runtime_wait_end("equeue", t0);
+    return r;
+}
+static int WaitEqueueImpl(OrbisKernelEqueue eq, OrbisKernelEvent* ev, int num, int* out,
+                          OrbisKernelUseconds* timo) {
     HLE_TRACE;
     if (!kqueues.contains(eq)) {
         return ORBIS_KERNEL_ERROR_EBADF;

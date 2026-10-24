@@ -108,4 +108,10 @@ typedef struct {
     const unsigned char *patch;
 } RuntimeGuestCallback;
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
+/* BB_PAD_TIMING=1 (diagnosis): blocking waits noted per thread (name, start, duration); the pad
+ * read prints the ones since the last read. runtime_wait_begin returns 0 when off. */
+double runtime_wait_begin(void);
+void runtime_wait_end(const char *what, double start);
+void runtime_wait_print(double now);
+void runtime_wait_caller(uint64_t caller, uint64_t arg);
 #endif

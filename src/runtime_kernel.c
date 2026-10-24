@@ -236,12 +236,14 @@ static int sleep_ns(uint64_t ns) {
 #endif
     return 0;
 }
-static ABI int32_t kernel_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000); return 0; }
-static ABI int32_t posix_usleep(uint32_t usec) { sleep_ns((uint64_t)usec*1000); return 0; }
+static ABI int32_t kernel_usleep(uint32_t usec) { const double t0=runtime_wait_begin(); sleep_ns((uint64_t)usec*1000); runtime_wait_end("usleep",t0); return 0; }
+static ABI int32_t posix_usleep(uint32_t usec) { const double t0=runtime_wait_begin(); sleep_ns((uint64_t)usec*1000); runtime_wait_end("usleep",t0); return 0; }
 static ABI uint32_t posix_sleep(uint32_t seconds) { sleep_ns((uint64_t)seconds*1000000000); return 0; }
 static ABI int32_t posix_nanosleep(const GuestTimespec *rq,GuestTimespec *rem) {
     if (!rq || rq->nsec<0 || rq->nsec>=1000000000 || rq->sec<0) return fail_posix(EINVAL);
+    const double t0=runtime_wait_begin();
     sleep_ns((uint64_t)rq->sec*1000000000+(uint64_t)rq->nsec);
+    runtime_wait_end("nanosleep",t0);
     if (rem) { rem->sec=0; rem->nsec=0; }
     return 0;
 }

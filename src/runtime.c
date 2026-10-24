@@ -3,6 +3,7 @@
 #include "runtime.h"
 #include "gpu/bbgpu.h"
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
@@ -263,4 +264,33 @@ uintptr_t runtime_lookup(const RuntimeExport *table,size_t count,const char *nid
 const char *runtime_import_name(const char *name) {
     const char *symbol=runtime_symbol(name);
     return symbol ? symbol : "name not resolved; see analysis.json import_name_hints";
+}
+
+/* BB_PAD_TIMING: blocking waits per thread (runtime.h). */
+static int wait_timing=-1;
+static _Thread_local struct { const char *what; double start, dur; uint64_t caller, arg; } wait_notes[24];
+static _Thread_local int wait_note_count;
+static _Thread_local uint64_t wait_caller, wait_arg; /* the guest's return address and the wait's argument */
+void runtime_wait_caller(uint64_t caller, uint64_t arg) { wait_caller=caller; wait_arg=arg; }
+double runtime_wait_begin(void) {
+    if (wait_timing<0) wait_timing=getenv("BB_PAD_TIMING")!=NULL;
+    if (!wait_timing) return 0.0;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+    return (double)ts.tv_sec+ts.tv_nsec*1e-9;
+}
+void runtime_wait_end(const char *what, double start) {
+    if (start==0.0) return;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+    const double end=(double)ts.tv_sec+ts.tv_nsec*1e-9;
+    if (wait_note_count<24) {
+        wait_notes[wait_note_count].what=what; wait_notes[wait_note_count].start=start; wait_notes[wait_note_count].dur=end-start;
+        wait_notes[wait_note_count].caller=wait_caller; wait_notes[wait_note_count].arg=wait_arg; ++wait_note_count;
+    }
+    wait_caller=wait_arg=0;
+}
+void runtime_wait_print(double now) {
+    for (int i=0;i<wait_note_count;++i)
+        printf("  wait %s at -%.1f ms for %.2f ms (caller %#llx, arg %llu)\n",wait_notes[i].what,(now-wait_notes[i].start)*1000.0,
+               wait_notes[i].dur*1000.0,(unsigned long long)wait_notes[i].caller,(unsigned long long)wait_notes[i].arg);
+    wait_note_count=0;
 }
