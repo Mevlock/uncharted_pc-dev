@@ -137,7 +137,12 @@ bool Swapchain::Present() {
         .pImageIndices = &image_index,
     };
 
-    auto result = instance.GetPresentQueue().presentKHR(present_info);
+    WaitAsyncSubmits();
+    vk::Result result;
+    {
+        std::scoped_lock queue_lk{g_graphics_queue_mutex};
+        result = instance.GetPresentQueue().presentKHR(present_info);
+    }
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
     } else {

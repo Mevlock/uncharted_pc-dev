@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <atomic>
+#include <mutex>
 #include <span>
+#include <thread>
 #include <unordered_map>
 
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -19,6 +22,20 @@ struct WindowSystemInfo;
 VK_DEFINE_HANDLE(VmaAllocator)
 
 namespace Vulkan {
+
+/// bbport: one lock for every submission, sparse bind and present on the graphics queue (the
+/// Vulkan recording thread submits too with BB_ASYNC_SUBMIT=1).
+inline std::mutex g_graphics_queue_mutex;
+/// BB_ASYNC_SUBMIT=1: draw scheduler flushes handed to its recording thread, and those submitted.
+inline std::atomic<u64> g_async_submits_queued{0}, g_async_submits_done{0};
+/// Waits until the recording thread has submitted every flush handed to it so far, so a
+/// submission or present made elsewhere keeps its place in the queue order.
+inline void WaitAsyncSubmits() {
+    const u64 queued = g_async_submits_queued.load(std::memory_order_acquire);
+    while (g_async_submits_done.load(std::memory_order_acquire) < queued) {
+        std::this_thread::yield();
+    }
+}
 
 class Instance {
 public:

@@ -924,7 +924,10 @@ public:
     static std::mutex submit_mutex;
 
 private:
-    void AllocateWorkerCommandBuffers();
+    /// `invalidate_dynamic` false on the recording thread (the dynamic state is the caller's).
+    void AllocateWorkerCommandBuffers(bool invalidate_dynamic = true);
+    /// BB_ASYNC_SUBMIT=1: ends, submits and replaces the command buffer on the recording thread.
+    void SubmitOnRecorder(u64 signal_value);
 
     std::unique_ptr<RecordChunk> AcquireChunk();
 

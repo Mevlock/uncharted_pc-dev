@@ -568,7 +568,7 @@ void Scheduler::MarkSegment(u32 label) {
     });
 }
 
-void Scheduler::AllocateWorkerCommandBuffers() {
+void Scheduler::AllocateWorkerCommandBuffers(bool invalidate_dynamic) {
     const vk::CommandBufferBeginInfo begin_info = {
         .flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit,
     };
@@ -586,7 +586,9 @@ void Scheduler::AllocateWorkerCommandBuffers() {
     }
 
     // Invalidate dynamic state so it gets applied to the new command buffer.
-    dynamic_state.Invalidate();
+    if (invalidate_dynamic) {
+        dynamic_state.Invalidate();
+    }
 
 #if TRACY_GPU_ENABLED
     auto* profiler_ctx = instance.GetProfilerContext();
@@ -596,6 +598,38 @@ void Scheduler::AllocateWorkerCommandBuffers() {
         new (profiler_scope) tracy::VkCtxScope{profiler_ctx, &scope_loc, current_cmdbuf, true};
     }
 #endif
+}
+
+void Scheduler::SubmitOnRecorder(u64 signal_value) {
+    Check(current_cmdbuf.end());
+    const vk::Semaphore timeline = work_semaphore.Handle();
+    const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+        .signalSemaphoreValueCount = 1U,
+        .pSignalSemaphoreValues = &signal_value,
+    };
+    const vk::SubmitInfo submit_info = {
+        .pNext = &timeline_si,
+        .commandBufferCount = 1U,
+        .pCommandBuffers = &current_cmdbuf,
+        .signalSemaphoreCount = 1U,
+        .pSignalSemaphores = &timeline,
+    };
+    {
+        std::scoped_lock lk{g_recent_mutex};
+        g_recent[g_recent_count++ % g_recent.size()] = {this, timeline, signal_value, 0, {}, {}};
+    }
+    vk::Result submit_result;
+    {
+        std::scoped_lock queue_lk{g_graphics_queue_mutex};
+        submit_result = instance.GetGraphicsQueue().submit(submit_info, nullptr);
+    }
+    if (submit_result == vk::Result::eErrorDeviceLost) {
+        std::printf("Device lost during submit\n");
+        DeviceLost(instance.GetDevice());
+    }
+    g_async_submits_done.fetch_add(1, std::memory_order_release);
+    work_semaphore.Refresh();
+    AllocateWorkerCommandBuffers(false);
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
@@ -658,6 +692,37 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         // Until the next submission's first timestamp: mostly the GPU waiting for it.
         profiler->Mark(0x5B317ull, [] { return std::string{"(between submissions: GPU idle)"}; });
     }
+    // bbport: BB_ASYNC_SUBMIT=1: a plain flush of the draw scheduler (no semaphores, no fence)
+    // is ended and submitted by the Vulkan recording thread as its last command there, which
+    // then begins the next command buffer: the draw recording thread goes on instead of waiting
+    // for that thread to catch up and for the submission (~6% of its time in U3).
+    // =2: the recording thread also waits for the guest memory copies (the copy threads),
+    // which it reaches in order anyway.
+    static const int async_submit = [] {
+        const char* env = std::getenv("BB_ASYNC_SUBMIT");
+        return env && (env[0] == '1' || env[0] == '2') ? env[0] - '0' : 0;
+    }();
+    if (async_submit && on_submit && IsRecordingDeferred() && info.num_wait_semas == 0 &&
+        info.num_signal_semas == 0 && !info.fence && !GpuBusy::Get(instance)) {
+        if (async_submit == 2) {
+            BbCopy::FlushBatch();
+        } else {
+            WaitHostCopies();
+        }
+        g_async_submits_queued.fetch_add(1, std::memory_order_release);
+        // A chunk's commands all go to the command buffer current when it starts: the submit
+        // ends its chunk (the kick right after it).
+        Record([this, signal_value, copies = async_submit == 2](vk::CommandBuffer) {
+            if (copies) {
+                BbCopy::WaitAsync();
+            }
+            SubmitOnRecorder(signal_value);
+        });
+        KickRecording(true);
+        dynamic_state.Invalidate();
+        PopPendingOperations();
+        return;
+    }
     SyncRecording();
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
@@ -708,7 +773,12 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         }
     }
     ImGui::Core::TextureManager::Submit();
-    auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    WaitAsyncSubmits();
+    vk::Result submit_result;
+    {
+        std::scoped_lock queue_lk{g_graphics_queue_mutex};
+        submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    }
     if (submit_result == vk::Result::eErrorDeviceLost) {
         std::printf("Device lost during submit\n");
         DeviceLost(instance.GetDevice());
