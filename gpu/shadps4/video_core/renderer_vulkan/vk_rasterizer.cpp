@@ -706,6 +706,14 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     }
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
+        if (ConstantRing::CopierEnabled()) {
+            constant_ring->StartCopier(
+                [](void* context, u64 source, u8* destination, u64 size) {
+                    static_cast<Core::MemoryManager*>(context)->CopySparseMemory(
+                        VAddr(source), destination, size);
+                },
+                memory);
+        }
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
         draw_pipe->idle_context = this;
         draw_pipe->on_idle = [](void* self) { static_cast<Rasterizer*>(self)->scheduler.KickOwed(); };
@@ -1107,6 +1115,7 @@ struct DrawPacket {
     std::array<AmdGpu::CbDbExtent, AmdGpu::NUM_COLOR_BUFFERS> cb_extent;
     AmdGpu::CbDbExtent db_extent;
     u64 ring_end; ///< constant ring position after this packet's copies
+    u64 ring_copy_seq; ///< BB_RING_COPIER: the copier's sequence after this packet's copies
 };
 struct PacketStage {
     const Shader::Info* info;
@@ -1282,6 +1291,10 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         u8* dst = constant_ring->Data(*offset);
         if (source) {
             std::memcpy(dst, source, size);
+        } else if (ConstantRing::CopierEnabled()) {
+            constant_ring->QueueCopy(address, dst, size); // flushed by the copier
+            out.push_back({index, static_cast<u32>(size), *offset, address});
+            return;
         } else {
             memory->CopySparseMemory(address, dst, size);
         }
@@ -1644,6 +1657,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     packet.cb_extent = liverpool->last_cb_extent;
     packet.db_extent = liverpool->last_db_extent;
     packet.ring_end = constant_ring ? constant_ring->Position() : 0;
+    packet.ring_copy_seq = constant_ring ? constant_ring->CopySeq() : 0;
     out += sizeof(DrawPacket);
     std::memcpy(out, blocks.data(), num_blocks * sizeof(u16));
     out += AlignPacket(num_blocks * sizeof(u16));
@@ -1810,6 +1824,9 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         return;
     }
     const auto& packet = *reinterpret_cast<const DrawPacket*>(data);
+    if (packet.ring_copy_seq) {
+        self.constant_ring->WaitCopies(packet.ring_copy_seq);
+    }
     const u8* in = data + sizeof(DrawPacket);
     const auto* blocks = reinterpret_cast<const u16*>(in);
     in += AlignPacket(packet.num_blocks * sizeof(u16));

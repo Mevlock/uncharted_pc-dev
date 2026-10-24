@@ -12,9 +12,11 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <x86intrin.h>
 
 #include "common/assert.h"
+#include "common/thread.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -180,6 +182,106 @@ private:
     std::array<StampEntry, 1024> stamps{};
     alignas(64) std::atomic<u64> stamps_head{0}; ///< stage B writes
     alignas(64) std::atomic<u64> stamps_tail{0}; ///< stage A reads
+
+public:
+    /// bbport (BB_RING_COPIER=1): guest memory copies into the ring run on their own thread in
+    /// order, not on stage A (the command processor, the critical stage in U3); stage B waits
+    /// for a packet's copies (WaitCopies) before it records the packet, usually long done.
+    using CopyFn = void (*)(void* context, u64 source, u8* destination, u64 size);
+    static bool CopierEnabled() {
+        static const bool enabled = [] {
+            const char* env = std::getenv("BB_RING_COPIER");
+            return env && env[0] == '1';
+        }();
+        return enabled;
+    }
+    void StartCopier(CopyFn fn, void* context) {
+        copy_fn = fn;
+        copy_context = context;
+        copier = std::jthread([this](std::stop_token stop) { CopierLoop(stop); });
+    }
+    ~ConstantRing() {
+        if (copier.joinable()) {
+            copier.request_stop();
+            copy_wake.store(1, std::memory_order_seq_cst);
+            copy_wake.notify_one();
+            copier.join();
+        }
+    }
+    /// Stage A: queues a copy of guest memory into the ring; returns its sequence number.
+    u64 QueueCopy(u64 source, u8* destination, u64 size) {
+        const u64 at = copy_head.load(std::memory_order_relaxed);
+        while (at - copy_done.load(std::memory_order_acquire) >= copy_jobs.size()) {
+            _mm_pause(); // full: the copier is far behind
+        }
+        copy_jobs[at % copy_jobs.size()] = {source, destination, size};
+        copy_head.store(at + 1, std::memory_order_seq_cst);
+        if (copier_sleeping.load(std::memory_order_seq_cst)) {
+            copy_wake.store(1, std::memory_order_seq_cst);
+            copy_wake.notify_one();
+        }
+        return at + 1;
+    }
+    /// Stage A: the sequence number of the last queued copy.
+    [[nodiscard]] u64 CopySeq() const noexcept {
+        return copy_head.load(std::memory_order_relaxed);
+    }
+    /// Stage B: waits until the copies up to `seq` are in the ring.
+    void WaitCopies(u64 seq) {
+        if (copy_done.load(std::memory_order_acquire) >= seq) {
+            return;
+        }
+        ++copy_waits;
+        while (copy_done.load(std::memory_order_acquire) < seq) {
+            _mm_pause();
+        }
+    }
+
+private:
+    struct CopyJob {
+        u64 source;
+        u8* destination;
+        u64 size;
+    };
+    void CopierLoop(std::stop_token stop) {
+        Common::SetCurrentThreadName("bb:RingCopy");
+        u64 at = 0;
+        while (!stop.stop_requested()) {
+            const u64 head = copy_head.load(std::memory_order_acquire);
+            if (at < head) {
+                const auto& job = copy_jobs[at % copy_jobs.size()];
+                copy_fn(copy_context, job.source, job.destination, job.size);
+                buffer.Flush(u64(job.destination - buffer.mapped_data.data()), job.size);
+                ++at;
+                copy_done.store(at, std::memory_order_release);
+                continue;
+            }
+            // Spin briefly (the next copy usually follows within microseconds), then sleep.
+            bool more = false;
+            for (u32 i = 0; i < 4096 && !more; ++i) {
+                _mm_pause();
+                more = copy_head.load(std::memory_order_acquire) != head;
+            }
+            if (more) {
+                continue;
+            }
+            copy_wake.store(0, std::memory_order_seq_cst);
+            copier_sleeping.store(true, std::memory_order_seq_cst);
+            if (copy_head.load(std::memory_order_seq_cst) == head && !stop.stop_requested()) {
+                copy_wake.wait(0, std::memory_order_seq_cst);
+            }
+            copier_sleeping.store(false, std::memory_order_relaxed);
+        }
+    }
+    CopyFn copy_fn = nullptr;
+    void* copy_context = nullptr;
+    std::array<CopyJob, 65536> copy_jobs{};
+    alignas(64) std::atomic<u64> copy_head{0}; ///< stage A writes
+    alignas(64) std::atomic<u64> copy_done{0}; ///< the copier writes
+    alignas(64) std::atomic<bool> copier_sleeping{false};
+    std::atomic<u32> copy_wake{0};
+    u64 copy_waits = 0; ///< stage B
+    std::jthread copier;
 };
 
 } // namespace Vulkan
