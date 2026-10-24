@@ -2776,6 +2776,12 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     buffer_binds.reserve(pending_binds.size());
 
     for (const auto& binds : pending_binds) {
+        // bbport: ReclaimArenaMemory's TrimPendingUnbinds can empty an arena's list; a bind info
+        // with no binds is invalid and the driver dropped the whole submission with its signal:
+        // the graphics queue waited for it for ever (freeze, 2026-10-24).
+        if (binds.binds.empty()) {
+            continue;
+        }
         buffer_binds.emplace_back(vk::SparseBufferMemoryBindInfo{
             .buffer = binds.arena->Handle(),
             .bindCount = static_cast<u32>(binds.binds.size()),
@@ -2783,6 +2789,15 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
         });
     }
 
+    if (buffer_binds.empty()) {
+        pending_binds.clear();
+        if (has_pending_unbinds) {
+            has_pending_unbinds = false;
+            free_runs.insert(free_runs.end(), quarantined_runs.begin(), quarantined_runs.end());
+            quarantined_runs.clear();
+        }
+        return;
+    }
     const u64 signal_tick = memory_semaphore.NextTick();
     const auto signal_sema = memory_semaphore.Handle();
 
@@ -2814,6 +2829,10 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     if (submit_result == vk::Result::eErrorDeviceLost) {
         std::printf("Device lost during a sparse bind\n");
         Vulkan::DeviceLost(instance.GetDevice());
+    } else if (submit_result != vk::Result::eSuccess) {
+        std::printf("Arena: sparse bind failed (%s), %zu arenas\n",
+                    vk::to_string(submit_result).c_str(), buffer_binds.size());
+        std::fflush(stdout);
     }
     static const bool arena_log = [] {
         const char* env = std::getenv("BB_ARENA_LOG");
