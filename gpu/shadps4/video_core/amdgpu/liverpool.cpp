@@ -223,6 +223,9 @@ void Liverpool::Process(std::stop_token stoken) {
     while (!stoken.stop_requested()) {
         {
             const auto idle_start = std::chrono::steady_clock::now();
+            if (rasterizer) {
+                rasterizer->EndNativeRun(); // nothing more to decode: no batch waits for more
+            }
             std::unique_lock lk{submit_mutex};
             Common::CondvarWait(submit_cv, lk, stoken,
                                 [this] { return num_commands || num_submits || submit_done; });
@@ -1598,6 +1601,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // bbport: the CPU may write data for what follows once the wait is met.
                 if (rasterizer) {
+                    // A guest thread may wait for a fence a native batch holds back.
+                    if (rasterizer->native_run_open) {
+                        rasterizer->EndNativeRun();
+                    }
                     rasterizer->GetBufferCache().ForgetStreamCopies();
                 }
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);

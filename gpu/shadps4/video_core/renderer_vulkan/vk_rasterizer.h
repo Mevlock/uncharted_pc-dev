@@ -549,6 +549,10 @@ public:
     /// (BB_NATIVE_BATCH=1; BB_NATIVE_BATCH_SHADERS=<hex hash,...>, default U3's cs 8f067540).
     OrderedTask native_batch_deferrable = nullptr;
     static bool NativeBatchEnabled();
+    /// Stage A: a run of batchable dispatches may have ended (before a drain, a wait the guest
+    /// may hold, or going idle): the recording thread flushes its batch at this point.
+    void EndNativeRun();
+    bool native_run_open = false; ///< stage A: batchable dispatches handed over since the end
     static bool NativeBatchShader(u64 pgm_hash);
 
 private:
@@ -563,12 +567,17 @@ private:
         u32 stride = 0; ///< dwords per object: buffer offsets, user data, flat data
         std::vector<u32> table;          ///< [stride][object entries]
         std::vector<VAddr> addresses;    ///< per object, per buffer (0: special)
+        /// Read-only buffers are streamed per object at append: per object, per buffer, the
+        /// offset of its data in the stream buffer (one lap), and the batch's stream range.
+        std::vector<u64> stream_offsets;
+        u64 stream_lap = 0, stream_lo = 0, stream_hi = 0;
         std::vector<VAddr> lo, hi;       ///< per buffer: union over the objects
         std::vector<u8> written;         ///< per buffer
         std::vector<std::pair<OrderedTask, u32>> deferred; ///< held-back tasks, data offset
         std::vector<u8> deferred_data;
         u64 objects = 0, batches = 0, fences = 0; ///< statistics
-        std::array<u64, 8> flush_reasons{}; ///< idle, task, packet, dispatch, shape, full, span, hazard
+        std::array<u64, 16> span_binding{}; ///< span flushes by buffer index
+        std::array<u64, 8> flush_reasons{}; ///< end of run, task, packet, dispatch, shape, full, span, hazard
     };
     NativeBatch native_batch;
     /// Stage B, inside a dispatch packet: adds it to the open batch (true) or leaves it to

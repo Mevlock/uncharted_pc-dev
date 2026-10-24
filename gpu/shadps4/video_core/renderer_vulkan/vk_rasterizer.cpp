@@ -707,11 +707,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
         draw_pipe->idle_context = this;
-        draw_pipe->on_idle = [](void* self) {
-            auto& rasterizer = *static_cast<Rasterizer*>(self);
-            rasterizer.FlushNativeBatch(); // a guest may be waiting for one of its fences
-            rasterizer.scheduler.KickOwed();
-        };
+        draw_pipe->on_idle = [](void* self) { static_cast<Rasterizer*>(self)->scheduler.KickOwed(); };
     }
     // bbport: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
@@ -1094,6 +1090,9 @@ struct TaskPacket {
     u32 size;
     Rasterizer::OrderedTask task;
 };
+// Native batch: the end of a run (Rasterizer::EndNativeRun). The task does nothing; the recording
+// thread flushes its open batch before it runs.
+static void EndNativeRunTask(Rasterizer&, const u8*) {}
 struct DrawPacket {
     PacketKind kind;
     const Pipeline* pipeline;
@@ -1161,6 +1160,9 @@ std::unordered_map<const char*, std::unordered_map<u32, u64>> drain_sites;
 void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     if (!draw_pipe || !OnStageA()) {
         return;
+    }
+    if (native_run_open) {
+        EndNativeRun(); // the batch is recorded before stage A records on its own
     }
     static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
     if (!stats) {
@@ -1768,7 +1770,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
             if (self.DeferToNativeBatch(task.task, data + sizeof(TaskPacket), task.size)) {
                 return;
             }
-            self.FlushNativeBatch(1);
+            self.FlushNativeBatch(task.task == &EndNativeRunTask ? 0 : 1);
         }
         const u64 start = __rdtsc();
         task.task(self, data + sizeof(TaskPacket));
@@ -3309,8 +3311,9 @@ void Rasterizer::DispatchDirect() {
     }
     // Native batch: the batched variant of a batchable program is built here, once.
     if (pipelined && NativeBatchEnabled() &&
-        NativeBatchShader(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
-        pipeline_cache.GetBatchedComputePipeline(pipeline);
+        NativeBatchShader(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash) &&
+        pipeline_cache.GetBatchedComputePipeline(pipeline)) {
+        native_run_open = true;
     }
     // bbport: the copy shaders run on the CPU (ExecuteShaderHLE) went to this thread after a
     // drain, ~2000 times a second in U3's Cartagena square (17% of this thread waiting). They
@@ -6782,6 +6785,21 @@ bool Rasterizer::NativeBatchShader(u64 pgm_hash) {
     return std::ranges::find(shaders, u32(pgm_hash)) != shaders.end();
 }
 
+void Rasterizer::EndNativeRun() {
+    if (!native_run_open) {
+        return;
+    }
+    native_run_open = false;
+    if (!UseDrawPipe()) {
+        return;
+    }
+    const u32 total = sizeof(TaskPacket) + AlignPacket(1);
+    u8* out = draw_pipe->Begin(total);
+    *reinterpret_cast<TaskPacket*>(out) = {PacketKind::Task, 1, &EndNativeRunTask};
+    out[sizeof(TaskPacket)] = 0;
+    draw_pipe->Commit(total);
+}
+
 bool Rasterizer::DeferToNativeBatch(OrderedTask task, const u8* data, u32 size) {
     if (!native_batch.count || task != native_batch_deferrable) {
         return false;
@@ -6808,7 +6826,7 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
     const u32 num_ud = cs.ud_mask.NumRegs();
     const u32 stride = num_buffers + num_ud + static_cast<u32>(flat.size());
     constexpr u32 MaxObjects = 256;
-    constexpr u64 MaxSpan = 4_MB;
+    constexpr u64 MaxWrittenSpan = 16_MB;
 
     // This object's buffers; any buffer the batch cannot carry leaves it to DispatchRecord.
     std::array<VAddr, Shader::NUM_BUFFERS> address{};
@@ -6836,23 +6854,33 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
             }
         }
         if (!size[i] || (desc.is_written && size[i] <= 64) ||
-            (!desc.is_written && buffer_cache.IsRegionGpuModified(sharp.base_address, size[i]))) {
-            return false; // small read-back candidates and GPU data go the usual way
+            (!desc.is_written &&
+             (size[i] > VideoCore::BufferCache::STREAM_THRESHOLD ||
+              buffer_cache.IsRegionGpuModified(sharp.base_address, size[i])))) {
+            return false; // read-backs, GPU data and big inputs go the usual way
         }
         address[i] = sharp.base_address;
     }
-    // Another program or shape, a full batch, a span too wide, or a hazard with the objects
-    // already in the batch: the batch goes first.
-    u32 reason = !b.count ? 0 : b.base != pipeline || b.stride != stride ? 4 : b.count >= MaxObjects ? 5 : 0;
+    // Another program or shape, a full batch, a written span too wide, or a hazard with the
+    // objects already in the batch: the batch goes first.
+    u32 reason = !b.count                                       ? 0
+                 : b.base != pipeline || b.stride != stride      ? 4
+                 : b.count >= MaxObjects                         ? 5
+                                                                 : 0;
     bool fits = b.count && !reason;
     for (u32 i = 0; fits && i < num_buffers; ++i) {
         if (!address[i]) {
             continue;
         }
-        const VAddr lo = std::min(b.lo[i], address[i]);
-        const VAddr hi = std::max(b.hi[i], address[i] + size[i]);
-        fits = hi - lo <= MaxSpan;
-        reason = fits ? 0 : 6;
+        if (cs.buffers[i].is_written) {
+            const VAddr lo = std::min(b.lo[i], address[i]);
+            const VAddr hi = std::max(b.hi[i], address[i] + size[i]);
+            if (hi - lo > MaxWrittenSpan) {
+                fits = false;
+                reason = 6;
+                ++b.span_binding[std::min<u32>(i, 15)];
+            }
+        }
         for (u32 j = 0; fits && j < num_buffers; ++j) {
             // A write of this object over anything the batch uses, or a read of what it writes.
             if (b.lo[j] < b.hi[j] && address[i] < b.hi[j] && b.lo[j] < address[i] + size[i] &&
@@ -6862,27 +6890,82 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
             }
         }
     }
-    if (!fits) {
-        FlushNativeBatch(reason);
+    const auto start_batch = [&] {
         b.base = pipeline;
         b.batched = batched;
         b.num_buffers = num_buffers;
         b.stride = stride;
         b.table.assign(1, stride);
         b.addresses.clear();
+        b.stream_offsets.clear();
+        b.stream_lo = ~u64{0};
+        b.stream_hi = 0;
         b.lo.assign(num_buffers, ~VAddr{0});
         b.hi.assign(num_buffers, 0);
         b.written.assign(num_buffers, 0);
         for (u32 i = 0; i < num_buffers; ++i) {
             b.written[i] = cs.buffers[i].is_written;
         }
+    };
+    if (!fits) {
+        FlushNativeBatch(reason);
+        start_batch();
+    }
+    // The read-only inputs are streamed now, neighbours (gaps up to 4 KiB, 64 KiB at most) as
+    // one copy, as BindBuffers does: copies of consecutive objects lie side by side in the
+    // stream buffer, so one view of it serves every object of the batch.
+    std::array<u64, Shader::NUM_BUFFERS> stream_offset{};
+    {
+        std::array<u32, Shader::NUM_BUFFERS> order{};
+        u32 n = 0;
+        for (u32 i = 0; i < num_buffers; ++i) {
+            if (address[i] && !cs.buffers[i].is_written) {
+                order[n++] = i;
+            }
+        }
+        std::sort(order.begin(), order.begin() + n,
+                  [&](u32 x, u32 y) { return address[x] < address[y]; });
+        auto& stream = buffer_cache.GetStreamBuffer();
+        for (u32 k = 0; k < n;) {
+            VAddr lo = address[order[k]], hi = lo + size[order[k]];
+            u32 m = k + 1;
+            while (m < n && address[order[m]] <= hi + 4_KB &&
+                   std::max(hi, address[order[m]] + size[order[m]]) - lo <= 64_KB) {
+                hi = std::max(hi, address[order[m]] + size[order[m]]);
+                ++m;
+            }
+            const auto [buffer, offset] = buffer_cache.ObtainBuffer(lo, u32(hi - lo), false, false,
+                                                                    64_KB);
+            if (buffer != &stream) {
+                return false; // not streamed after all: the usual way (before any table entry)
+            }
+            // A new lap of the stream buffer: the batch so far goes first.
+            if (b.count && (stream.Laps() != b.stream_lap || offset < b.stream_lo)) {
+                FlushNativeBatch(6);
+                start_batch();
+            }
+            if (!b.count && b.stream_hi == 0) {
+                b.stream_lap = stream.Laps();
+            }
+            b.stream_lo = std::min(b.stream_lo, offset);
+            b.stream_hi = std::max(b.stream_hi, offset + (hi - lo));
+            for (u32 x = k; x < m; ++x) {
+                stream_offset[order[x]] = offset + (address[order[x]] - lo);
+            }
+            k = m;
+        }
     }
     for (u32 i = 0; i < num_buffers; ++i) {
-        if (address[i]) {
+        if (address[i] && cs.buffers[i].is_written) {
+            b.lo[i] = std::min(b.lo[i], address[i]);
+            b.hi[i] = std::max(b.hi[i], address[i] + size[i]);
+        } else if (address[i]) {
+            // Read ranges stay known for the hazard check against later writes.
             b.lo[i] = std::min(b.lo[i], address[i]);
             b.hi[i] = std::max(b.hi[i], address[i] + size[i]);
         }
         b.addresses.push_back(address[i]);
+        b.stream_offsets.push_back(stream_offset[i]);
         b.table.push_back(0); // the offset, at the flush
     }
     const auto ud = cs.UserData();
@@ -6908,32 +6991,36 @@ void Rasterizer::FlushNativeBatch(u32 reason) {
     ++b.flush_reasons[std::min<u32>(reason, 7)];
     FrameCapture::Poll();
     scheduler.PopPendingOperations();
-    // Clusters: buffers whose ranges over the batch overlap or lie close (inputs back to back
-    // in one ring) are obtained once. Written and read-only clusters stay apart.
+    set_write_index = 0;
+    set_writes.clear();
+    buffer_infos.clear();
+    image_infos.clear();
+    bound_images.clear();
+    const u64 alignment = instance.StorageMinAlignment();
+    // Read-only: one view of the stream buffer over every object's copies.
+    auto& stream = buffer_cache.GetStreamBuffer();
+    const u64 stream_aligned = Common::AlignDown(b.stream_lo, alignment);
+    const u64 stream_bytes = b.stream_hi > b.stream_lo ? b.stream_hi - stream_aligned : 0;
+    if (stream_bytes) {
+        needs_barrier |= runtime.IsBufferAccessed(&stream, b.stream_lo,
+                                                  b.stream_hi - b.stream_lo, false);
+        bound_buffers.emplace_back(&stream, b.stream_lo, b.stream_hi - b.stream_lo, false);
+    }
+    // Written: one cluster per group of overlapping or touching buffers.
     struct Cluster {
         VAddr lo, hi;
-        bool written;
         const VideoCore::Buffer* buffer;
         u64 offset;
     };
     boost::container::static_vector<Cluster, Shader::NUM_BUFFERS> clusters;
     std::array<u32, Shader::NUM_BUFFERS> cluster_of{};
-    std::array<u32, Shader::NUM_BUFFERS> order{};
-    u32 used = 0;
     for (u32 i = 0; i < b.num_buffers; ++i) {
-        if (b.lo[i] < b.hi[i]) {
-            order[used++] = i;
+        if (!b.written[i] || b.lo[i] >= b.hi[i]) {
+            continue;
         }
-    }
-    std::sort(order.begin(), order.begin() + used,
-              [&](u32 x, u32 y) { return b.lo[x] < b.lo[y]; });
-    for (u32 k = 0; k < used; ++k) {
-        const u32 i = order[k];
         Cluster* joined = nullptr;
         for (auto& c : clusters) {
-            const u64 gap = b.written[i] ? 0 : 64_KB;
-            if (c.written == bool(b.written[i]) && b.lo[i] <= c.hi + gap && c.lo <= b.hi[i] &&
-                std::max(c.hi, b.hi[i]) - std::min(c.lo, b.lo[i]) <= 4_MB) {
+            if (b.lo[i] <= c.hi && c.lo <= b.hi[i]) {
                 joined = &c;
                 break;
             }
@@ -6944,37 +7031,34 @@ void Rasterizer::FlushNativeBatch(u32 reason) {
             cluster_of[i] = u32(joined - clusters.data());
         } else {
             cluster_of[i] = u32(clusters.size());
-            clusters.push_back({b.lo[i], b.hi[i], bool(b.written[i]), nullptr, 0});
+            clusters.push_back({b.lo[i], b.hi[i], nullptr, 0});
         }
     }
-    set_write_index = 0;
-    set_writes.clear();
-    buffer_infos.clear();
-    image_infos.clear();
-    bound_images.clear();
-    const u64 alignment = instance.StorageMinAlignment();
     for (auto& c : clusters) {
         const u32 bytes = u32(c.hi - c.lo);
-        const auto [buffer, offset] = buffer_cache.ObtainBuffer(c.lo, bytes, c.written, false,
-                                                                c.written ? 0 : 4_MB);
+        const auto [buffer, offset] = buffer_cache.ObtainBuffer(c.lo, bytes, true);
         c.buffer = buffer;
         c.offset = offset;
-        if (c.written) {
-            texture_cache.InvalidateMemoryFromGPU(c.lo, bytes);
-        }
-        needs_barrier |= runtime.IsBufferAccessed(buffer, offset, bytes, c.written);
-        bound_buffers.emplace_back(buffer, offset, bytes, c.written);
+        texture_cache.InvalidateMemoryFromGPU(c.lo, bytes);
+        needs_barrier |= runtime.IsBufferAccessed(buffer, offset, bytes, true);
+        bound_buffers.emplace_back(buffer, offset, bytes, true);
     }
-    // Per object, per buffer: the byte offset of its range in its cluster's binding.
+    // Per object, per buffer: the byte offset of its data in its binding.
     for (u32 o = 0; o < b.count; ++o) {
         for (u32 i = 0; i < b.num_buffers; ++i) {
-            const VAddr address = b.addresses[o * b.num_buffers + i];
+            const u32 at = o * b.num_buffers + i;
+            const VAddr address = b.addresses[at];
             if (!address) {
                 continue;
             }
-            const auto& c = clusters[cluster_of[i]];
-            const u64 aligned = Common::AlignDown(c.offset, alignment);
-            b.table[1 + o * b.stride + i] = u32(address - c.lo + (c.offset - aligned));
+            u64 value;
+            if (b.written[i]) {
+                const auto& c = clusters[cluster_of[i]];
+                value = address - c.lo + (c.offset - Common::AlignDown(c.offset, alignment));
+            } else {
+                value = b.stream_offsets[at] - stream_aligned;
+            }
+            b.table[1 + o * b.stride + i] = u32(value);
         }
     }
     const auto& cs = b.batched->GetStage(Shader::SwStage::Compute);
@@ -6983,15 +7067,16 @@ void Rasterizer::FlushNativeBatch(u32 reason) {
     for (u32 i = 0; i < b.num_buffers; ++i) {
         const auto& desc = cs.buffers[i];
         if (desc.buffer_type == Shader::BufferType::Flatbuf) {
-            auto& stream = buffer_cache.GetStreamBuffer();
             const u32 bytes = u32(b.table.size() * sizeof(u32));
             const u64 offset = stream.Copy(b.table.data(), bytes, alignment);
             buffer_infos.emplace_back(stream.Handle(), offset, bytes);
-        } else {
+        } else if (b.written[i]) {
             const auto& c = clusters[cluster_of[i]];
             const u64 aligned = Common::AlignDown(c.offset, alignment);
             buffer_infos.emplace_back(c.buffer->Handle(), aligned,
                                       (c.hi - c.lo) + (c.offset - aligned));
+        } else {
+            buffer_infos.emplace_back(stream.Handle(), stream_aligned, std::max<u64>(stream_bytes, 4));
         }
         auto& write = set_writes[set_write_index++];
         write.dstSet = VK_NULL_HANDLE;
@@ -7022,6 +7107,7 @@ void Rasterizer::FlushNativeBatch(u32 reason) {
     b.deferred_data.clear();
     b.count = 0;
     b.base = nullptr;
+    b.stream_hi = 0;
     for (const auto& [task, at] : deferred) {
         task(*this, deferred_data.data() + at);
     }
@@ -7033,13 +7119,14 @@ void Rasterizer::FlushNativeBatch(u32 reason) {
                     static_cast<unsigned long long>(b.batches),
                     b.batches ? double(b.objects) / b.batches : 0.0,
                     static_cast<unsigned long long>(b.fences));
-        std::printf("Native batch flushes (5 s): idle %llu, task %llu, packet %llu, dispatch %llu, "
-                    "shape %llu, full %llu, span %llu, hazard %llu\n",
+        std::printf("Native batch flushes (5 s): end of run %llu, task %llu, packet %llu, "
+                    "dispatch %llu, shape %llu, full %llu, span %llu, hazard %llu\n",
                     (unsigned long long)b.flush_reasons[0], (unsigned long long)b.flush_reasons[1],
                     (unsigned long long)b.flush_reasons[2], (unsigned long long)b.flush_reasons[3],
                     (unsigned long long)b.flush_reasons[4], (unsigned long long)b.flush_reasons[5],
                     (unsigned long long)b.flush_reasons[6], (unsigned long long)b.flush_reasons[7]);
         b.flush_reasons = {};
+        b.span_binding = {};
         b.objects = b.batches = b.fences = 0;
         window = now;
     }
