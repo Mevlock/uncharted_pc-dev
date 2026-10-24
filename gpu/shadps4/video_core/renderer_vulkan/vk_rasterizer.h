@@ -571,13 +571,17 @@ private:
         /// offset of its data in the stream buffer (one lap), and the batch's stream range.
         std::vector<u64> stream_offsets;
         u64 stream_lap = 0, stream_lo = 0, stream_hi = 0;
+        /// Written buffers are obtained per object at append; all of a batch's in one buffer
+        /// (an arena), at these offsets (stream_offsets holds each object's offset too).
+        const VideoCore::Buffer* written_buffer = nullptr;
+        u64 written_lo = 0, written_hi = 0;
         std::vector<VAddr> lo, hi;       ///< per buffer: union over the objects
         std::vector<u8> written;         ///< per buffer
         std::vector<std::pair<OrderedTask, u32>> deferred; ///< held-back tasks, data offset
         std::vector<u8> deferred_data;
         u64 objects = 0, batches = 0, fences = 0; ///< statistics
         std::array<u64, 16> span_binding{}; ///< span flushes by buffer index
-        std::array<u64, 8> flush_reasons{}; ///< end of run, task, packet, dispatch, shape, full, span, hazard
+        std::array<u64, 10> flush_reasons{}; ///< end of run, task, packet, dispatch, shape, full, span, hazard
     };
     NativeBatch native_batch;
     /// Stage B, inside a dispatch packet: adds it to the open batch (true) or leaves it to
