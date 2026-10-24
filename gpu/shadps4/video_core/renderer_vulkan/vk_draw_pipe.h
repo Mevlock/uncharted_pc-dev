@@ -228,6 +228,11 @@ private:
             }
             const u64 start = __rdtsc();
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
+            // The last packet so far: work owed to other threads is paid before stage A can see
+            // the ring drained (it may record on this state right after).
+            if (on_idle && published.load(std::memory_order_acquire) == at + header->size) {
+                on_idle(idle_context);
+            }
             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
             at += header->size;
             consumed.store(at, std::memory_order_release);
@@ -249,6 +254,12 @@ private:
         }
     }
 
+public:
+    /// Stage B, when it runs out of packets (set before packets flow).
+    void (*on_idle)(void*) = nullptr;
+    void* idle_context = nullptr;
+
+private:
     static inline thread_local bool on_stage_b = false;
     std::mutex priority_mutex;
     std::vector<Common::UniqueFunction<void>> priority;

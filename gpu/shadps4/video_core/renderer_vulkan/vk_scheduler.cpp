@@ -24,6 +24,7 @@
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "bbport_threads.h"
 
 namespace Vulkan {
@@ -332,6 +333,19 @@ void Scheduler::SignalAfterHostCopies(std::function<void()> signal, u64 landing_
             VideoCore::LandingGate::Run(landing_seq, std::move(fire));
         });
     });
+    // bbport: on the draw recording thread a fence's kick waits until that thread runs out of
+    // packets (DrawPipe idle hook) or 16 fences: U3 puts one after each of ~1,900 dispatches a
+    // frame, each a forced handoff to the Vulkan recording thread. U3 square, 2 rounds:
+    // 114.2 -> 117.6 FPS. BB_LAZY_FENCE_KICK=0: a forced kick per fence, as before.
+    static const bool lazy = [] {
+        const char* env = std::getenv("BB_LAZY_FENCE_KICK");
+        return !(env && env[0] == '0');
+    }();
+    if (lazy && DrawPipe::OnStageB() && ++owed_fences < 16) {
+        kick_owed = true;
+        KickRecording(false);
+        return;
+    }
     KickRecording(true);
 }
 
@@ -377,8 +391,12 @@ void Scheduler::KickRecording(bool force) {
         return;
     }
     if (full_chunks.empty() && record_chunk->Empty()) {
+        kick_owed = false;
+        owed_fences = 0;
         return;
     }
+    kick_owed = false;
+    owed_fences = 0;
     bool wake;
     {
         std::scoped_lock lk{recorder_mutex};

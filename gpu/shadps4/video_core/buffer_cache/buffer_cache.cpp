@@ -1644,6 +1644,33 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             const u32 gpu_write = memory_tracker->LatestGpuWriteFrame(page, length);
             const u32 gpu_use = LastGpuUse(page, length);
             const auto side_start = std::chrono::steady_clock::now();
+            // bbport diagnosis (BB_FAULT_REGIONS=1): faults by 1 MiB region every 5 s, with
+            // how many frames ago the GPU last wrote the page.
+            static const bool fault_regions = [] {
+                const char* env = std::getenv("BB_FAULT_REGIONS");
+                return env && env[0] == '1';
+            }();
+            if (fault_regions) {
+                static std::map<VAddr, std::array<u64, 3>> regions; // count, gpu written this/last frame
+                static auto window = std::chrono::steady_clock::now();
+                auto& r = regions[page >> 20];
+                ++r[0];
+                r[1] += frames == gpu_write;
+                r[2] += frames == gpu_write + 1;
+                if (side_start - window >= std::chrono::seconds(5)) {
+                    std::string line;
+                    for (const auto& [region, c] : regions) {
+                        if (c[0] >= 50) {
+                            line += fmt::format(" {:#x}:{:.0f}/s({:.0f}% same frame,{:.0f}% previous)",
+                                                region << 20, c[0] / 5.0, 100.0 * c[1] / c[0],
+                                                100.0 * c[2] / c[0]);
+                        }
+                    }
+                    std::printf("Fault regions:%s\n", line.c_str());
+                    regions.clear();
+                    window = side_start;
+                }
+            }
             const bool on_gpu_bytes = gpu_modified_ranges.Intersects(device_addr, size);
             const bool work_done =
                 scheduler.IsFree(memory_tracker->LatestGpuWriteTick(page, length));

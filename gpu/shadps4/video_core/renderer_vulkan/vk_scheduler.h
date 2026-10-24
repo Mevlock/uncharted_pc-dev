@@ -824,6 +824,13 @@ public:
     /// Hands recorded commands to the recording thread. Called at points where no caller holds
     /// the raw command buffer (end of draws and dispatches); small batches are kept.
     void KickRecording(bool force = false);
+    /// bbport: the forced kick a deferred fence left owed (BB_LAZY_FENCE_KICK), when the draw
+    /// recording thread runs out of packets.
+    void KickOwed() {
+        if (kick_owed) {
+            KickRecording(true);
+        }
+    }
 
     /// Waits until every recorded command is in the command buffer.
     void SyncRecording();
@@ -971,6 +978,8 @@ private:
     u64 host_copies_issued = 0;
     std::atomic<u64> host_copies_done{0};
     std::atomic<u64> deferred_signals_issued{0}; ///< by the thread recording (A or B)
+    bool kick_owed = false; ///< BB_LAZY_FENCE_KICK: a fence's forced kick is still owed
+    u32 owed_fences = 0;
     std::shared_ptr<std::atomic<u64>> deferred_signals_done =
         std::make_shared<std::atomic<u64>>(0);
     // bbport: whether recorder_thread runs, read on every Record(). std::jthread::joinable()
