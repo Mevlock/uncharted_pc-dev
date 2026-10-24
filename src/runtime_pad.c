@@ -715,61 +715,9 @@ static int raw_aim_enabled(void) {
     if (on<0) { const char *e=getenv("BB_RAW_AIM"); on=!(e && e[0]=='0'); }
     return on;
 }
-static void aim_camera(float *look, float *arc, float arc_degrees) {
-    if (mouse_debug()) { /* calls per second, aiming or not (which camera step runs when) */
-        static uint64_t window; static unsigned calls, aiming;
-        const uint64_t t=now_us();
-        ++calls; aiming+=aim_held!=0;
-        if (t-window>1000000) {
-            printf("Mouse: camera input %u calls/s (%u while L2 held), arc %s\n",calls,aiming,arc ? "known" : "unknown");
-            calls=aiming=0; window=t;
-        }
-    }
-    if (!raw_aim_enabled() || !aim_held || !look) return;
-    const uint64_t now=now_us();
-    if (aim_hook_us && now-aim_hook_us>100000) { float ix, iy; camera_take(2,&ix,&iy); } /* stale */
-    aim_hook_us=now;
-    float dx, dy;
-    camera_take(2,&dx,&dy);
-    static float test=-1.0f; /* BB_RAW_AIM_TEST=<pixels per frame>: a steady turn (automated tests) */
-    if (test<0.0f) { const char *e=getenv("BB_RAW_AIM_TEST"); test=e ? (float)atof(e) : 0.0f; }
-    if (test>0.0f) { dx=test; dy=0.0f; }
-    const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
-    if (dx!=0.0f) {
-        /* the follow camera's convention: a positive turn (mouse right) rotates x towards z */
-        const float a=dx*scale*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
-        const float x=look[0], z=look[2];
-        look[0]=x*c-z*s;
-        look[2]=x*s+z*c;
-    }
-    if (dy!=0.0f && arc) {
-        const float v=*arc+(input.mouse_invert_y ? -dy : dy)*(scale/arc_degrees);
-        if (SDL_isinf(v)==0 && v==v) *arc=v<0.0f ? 0.0f : v>1.0f ? 1.0f : v;
-    }
-    if (mouse_debug()) printf("Mouse: aim t=%.4f dx=%.1f dy=%.1f heading=%.2f arc=%.3f\n",now*1e-6,dx,dy,
-                              heading_of(look),arc ? *arc : -1.0f);
-}
 /* U3 1.02 (EU): camera input at image+0x11d4e0 (camera rdi, look direction rsi, stick rdx). */
-static void __attribute__((ms_abi)) u3_camera_input(uint64_t camera, uint64_t look, uint64_t image, uint64_t r14, const uint64_t *regs) {
-    (void)regs;
-    (void)image; (void)r14;
-    aim_camera((float *)(uintptr_t)look, camera ? (float *)(uintptr_t)(camera+0x7874) : NULL, 105.0f);
-}
 /* U2 1.02 (EU): camera input at image+0x16d920 (camera rdi, look direction rsi, stick rdx); the
  * same in CUSA02344 1.02 at image+0x428f40 (BilalReloaded's build, untested here). */
-static void __attribute__((ms_abi)) u2_camera_input(uint64_t camera, uint64_t look, uint64_t image, uint64_t r14, const uint64_t *regs) {
-    (void)regs;
-    (void)image; (void)r14;
-    aim_camera((float *)(uintptr_t)look, camera ? (float *)(uintptr_t)(camera+0x9e60) : NULL, 135.0f);
-}
-static const unsigned char u3_camera_input_code[]={
-    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xc8,0x00,0x00,0x00,
-    0xc5,0xfa,0x11,0x85,
-};
-static const unsigned char u2_camera_input_code[]={
-    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x68,0xc5,0xfa,0x11,
-    0x45,0x8c,0x4c,0x89,
-};
 static const unsigned char u1_follow_camera_code[]={
     0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x28,0x01,0x00,0x00,
     0x44,0x89,0x8d,0x00,0xff,0xff,0xff,0x49,0x89,0xcd,0x48,0x89,0xd3,0x49,0x89,0xf7,0x49,0x89,0xfc,
@@ -831,6 +779,46 @@ static const unsigned char u1_102_aim_controller_c_code[]={
     0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x08,0x03,0x00,0x00,
     0x45,0x89,0xc4,0x48,0x89,0x8d,0x00,0xfd,0xff,0xff,
 };
+/* The same aim controllers and cover cameras in the EU version (CUSA02343), whose U2 and U3 are
+ * compiled differently: found by the aiming camera's call (rcx = camera + 0x1f30 / + 0x11e0, rsi =
+ * camera + 0x160 / + 0x1b0) and by the cover camera's vtable slot (U2 table 0xe063d0 slot 28, U3
+ * 0x1365470 slot 40), matched slot by slot against the 1.02 tables. Same arguments and fields. */
+static const unsigned char u1_eu_aim_controller_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x08,0x03,0x00,0x00,
+    0x45,0x89,0xc4,0x48,
+};
+static const unsigned char u2_eu_aim_controller_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x28,0x03,0x00,0x00,
+    0xc5,0xfa,0x11,0x85,
+};
+#define u3_eu_aim_controller_code u2_eu_aim_controller_code /* the same first 24 bytes (other game) */
+static const unsigned char u1_eu_cover_camera_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x88,0x01,0x00,0x00,
+    0x49,0x89,0xd7,0x48,
+};
+static const unsigned char u2_eu_cover_camera_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0x01,0x00,0x00,
+    0x49,0x89,0xd7,0x49,
+};
+static const unsigned char u3_eu_cover_camera_code[]={
+    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53,0x48,0x81,0xec,0x90,0x00,0x00,0x00,
+    0x49,0x89,0xf6,0x49,0x89,0xff,
+};
+static void __attribute__((ms_abi)) u1_eu_aim_controller(uint64_t output, uint64_t controller, uint64_t image,
+                                                         uint64_t r14, const uint64_t *regs) {
+    (void)output; (void)r14;
+    raw_aim("U1",controller,regs,image,0xc4b67); /* called at 0xc4b62 in the aiming camera 0xc42c0 */
+}
+static void __attribute__((ms_abi)) u2_eu_aim_controller(uint64_t output, uint64_t controller, uint64_t image,
+                                                         uint64_t r14, const uint64_t *regs) {
+    (void)output; (void)r14;
+    raw_aim("U2",controller,regs,image,0x18cc5f); /* called at 0x18cc5a in the aiming camera 0x18c9a0 */
+}
+static void __attribute__((ms_abi)) u3_eu_aim_controller(uint64_t output, uint64_t controller, uint64_t image,
+                                                         uint64_t r14, const uint64_t *regs) {
+    (void)output; (void)r14;
+    raw_aim("U3",controller,regs,image,0x13c621); /* called at 0x13c61c in the aiming camera 0x13c230 */
+}
 /* U1: the game's pad update (image+0x117200) fills the caller's joypad state (its first argument):
  * the sticks as floats lx ly rx ry at +0 and again at +0x10, converted from the pad's bytes. Cameras
  * other than the follow camera (aiming: about 45 degrees/s * x|x|, no speed ramp) get the mouse as a
@@ -851,77 +839,12 @@ static float aim_stick(float rate) {
  * U1 (45 x^2 degrees/s up to x = 1, then about 54 x - 9; vertically `pitch` times that).
  * BB_AIM_STICK=<x>[,<y>]: fixed values while aiming, n times them at the n-th aim press (y up and
  * down in turn; measuring the aiming curve). */
-static void aim_pad_sticks(float *pad, float pitch, float beyond) {
-    if (aim_held) bbgpu_note_aiming(); /* BB_DOF=aim */
-    if (!raw_aim_enabled() || !aim_held || !pad) return;
-    const uint64_t now=now_us();
-    static uint64_t last;
-    const float dt=last && now-last<100000 ? (float)(now-last)*1e-6f : 0.0f;
-    last=now;
-    aim_hook_us=now;
-    float dx, dy;
-    camera_take(2,&dx,&dy);
-    static int test=-1; static float test_x, test_y;
-    if (test<0) {
-        const char *e=getenv("BB_AIM_STICK");
-        test=e && sscanf(e,"%f,%f",&test_x,&test_y)>=1;
-    }
-    float x=0.0f, y=0.0f;
-    if (test) {
-        static int presses;
-        if (dt==0.0f) ++presses;
-        x=test_x*(float)presses; y=test_y*(float)(presses%2 ? presses : -presses);
-    } else if (dt>0.0f) {
-        const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity/dt;
-        const float rx=dx*scale, ry=(input.mouse_invert_y ? -dy : dy)*scale/pitch;
-        x=aim_stick(rx);
-        y=aim_stick(ry);
-        /* `beyond` (US: 1/0.65): past full deflection the US aiming camera turns at 45 * x^0.65
-         * degrees/s (measured with BB_AIM_STICK: 46, 71, 111, 144, 174 at 1, 2, 4, 6, 8), so a rate
-         * r above 45 takes x = (r / 45)^(1/0.65). */
-        if (beyond!=1.0f) {
-            if (rx>45.0f || rx<-45.0f) x=rx>0.0f ? SDL_powf(rx/45.0f,beyond) : -SDL_powf(-rx/45.0f,beyond);
-            if (ry>45.0f || ry<-45.0f) y=ry>0.0f ? SDL_powf(ry/45.0f,beyond) : -SDL_powf(-ry/45.0f,beyond);
-        }
-    }
-    if (mouse_debug()) printf("Mouse: aim sticks t=%.4f dt=%.4f dx=%.1f x=%.3f pad %.3f %.3f %.3f %.3f\n",now*1e-6,dt,dx,x,
-                              pad[2],pad[3],pad[6],pad[7]);
-    pad[2]+=x; pad[3]+=y; pad[6]+=x; pad[7]+=y;
-}
 /* U2: the pad update at image+0x251420 ends at image+0x251be8 with its input in r14. */
-static void __attribute__((ms_abi)) u2_pad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t sticks, const uint64_t *regs) {
-    (void)regs;
-    (void)unused0; (void)unused1; (void)image;
-    aim_pad_sticks((float *)(uintptr_t)sticks,0.66f,1.0f);
-}
 /* U2 US 1.02 (CUSA02320, as CUSA02344): the pad update at image+0x565d30 fills the two pads in a
  * loop that moves its output pointer (rdi at the start), so its start notes the output and its end
  * (image+0x56668e) turns pad 0's right stick, as in U3. */
 /* U3: the pad update at image+0x741a30 keeps its input (rdi) in r13; at its end (image+0x74231e)
  * the input is the one its start saw. */
-static uint64_t u3_pad_input;
-static void __attribute__((ms_abi)) u3_pad_update(uint64_t sticks, uint64_t unused, uint64_t image, uint64_t r14, const uint64_t *regs) {
-    (void)regs;
-    (void)unused; (void)image; (void)r14;
-    u3_pad_input=sticks;
-}
-static void __attribute__((ms_abi)) u3_pad_sticks(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14, const uint64_t *regs) {
-    (void)regs;
-    (void)unused0; (void)unused1; (void)image; (void)r14;
-    aim_pad_sticks((float *)(uintptr_t)u3_pad_input,0.66f,1.0f);
-}
-static const unsigned char u3_pad_update_code[]={
-    0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xb8,0x00,0x00,0x00,
-    0x49,0x89,0xfd,0x4c,
-};
-static const unsigned char u3_pad_sticks_code[]={
-    0x41,0x0f,0xb6,0x4f,0x76,0x41,0x0f,0xb6,0x87,0xf2,0x00,0x00,0x00,0x49,0x8b,0x16,0x48,0x3b,0x55,0xd0,
-    0x75,0x16,0x01,0xc0,
-};
-static const unsigned char u2_pad_sticks_code[]={
-    0x41,0x0f,0xb6,0x4f,0x6e,0x41,0x0f,0xb6,0x87,0xe2,0x00,0x00,0x00,0x49,0x8b,0x55,0x00,0x48,0x3b,0x55,
-    0xd0,0x75,0x16,0x01,
-};
 /* U2 US 1.02: the pad update's start (push rbp; mov rbp, rsp; push r15 move) and its end (mov rdx,
  * [r14]; cmp rdx, [rbp-0x30] move; the jne after it still sees the compare). */
 /* U1 US 1.02 (eboot.bin): the same code as EU, moved (follow camera image+0xaede0, pad update
@@ -1123,11 +1046,6 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U1 follow camera (mouse)",0xaecf0,u1_follow_camera_code,sizeof(u1_follow_camera_code),6,u1_follow_camera,NULL},
     {"U1 pad update (mouse)",0x117200,u1_pad_update_code,sizeof(u1_pad_update_code),6,u1_pad_update,NULL},
     {"U1 joypad sticks (mouse)",0x11784e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
-    {"U3 camera input (raw aim)",0x11d4e0,u3_camera_input_code,sizeof(u3_camera_input_code),6,u3_camera_input,NULL},
-    {"U2 camera input (raw aim)",0x16d920,u2_camera_input_code,sizeof(u2_camera_input_code),6,u2_camera_input,NULL},
-    {"U2 pad sticks (raw aim)",0x251be8,u2_pad_sticks_code,sizeof(u2_pad_sticks_code),5,u2_pad_sticks,NULL},
-    {"U3 pad update (raw aim)",0x741a30,u3_pad_update_code,sizeof(u3_pad_update_code),6,u3_pad_update,NULL},
-    {"U3 pad sticks (raw aim)",0x74231e,u3_pad_sticks_code,sizeof(u3_pad_sticks_code),5,u3_pad_sticks,NULL},
     {"U1 1.02 follow camera (mouse)",0xaede0,u1_102_follow_camera_code,sizeof(u1_102_follow_camera_code),6,u1_follow_camera,NULL},
     {"U1 1.02 pad update (mouse)",0x117350,u1_102_pad_update_code,sizeof(u1_102_pad_update_code),6,u1_pad_update,NULL},
     {"U1 1.02 joypad sticks (mouse)",0x11799e,u1_joypad_sticks_code,sizeof(u1_joypad_sticks_code),5,u1_joypad_sticks,NULL},
@@ -1141,6 +1059,12 @@ static const RuntimeGuestCallback guest_callbacks[]={
     {"U2 1.02 cover camera (mouse)",0x417450,u2_102_cover_camera_code,sizeof(u2_102_cover_camera_code),6,u2_102_cover_camera,NULL},
     {"U3 1.02 cover camera (mouse)",0x4cd030,u3_102_cover_camera_code,sizeof(u3_102_cover_camera_code),6,u3_102_cover_camera,NULL},
     {"U3 1.02 follow camera (mouse)",0x4e7970,u3_102_follow_camera_code,sizeof(u3_102_follow_camera_code),6,u3_follow_camera,NULL},
+    {"U1 EU aim controller (mouse)",0x2764c0,u1_eu_aim_controller_code,sizeof(u1_eu_aim_controller_code),6,u1_eu_aim_controller,NULL},
+    {"U2 EU aim controller (mouse)",0x334220,u2_eu_aim_controller_code,sizeof(u2_eu_aim_controller_code),6,u2_eu_aim_controller,NULL},
+    {"U3 EU aim controller (mouse)",0x317740,u3_eu_aim_controller_code,sizeof(u3_eu_aim_controller_code),6,u3_eu_aim_controller,NULL},
+    {"U1 EU cover camera (mouse)",0xa4590,u1_eu_cover_camera_code,sizeof(u1_eu_cover_camera_code),6,u1_102_cover_camera,NULL},
+    {"U2 EU cover camera (mouse)",0x161070,u2_eu_cover_camera_code,sizeof(u2_eu_cover_camera_code),6,u2_102_cover_camera,NULL},
+    {"U3 EU cover camera (mouse)",0x10e6d0,u3_eu_cover_camera_code,sizeof(u3_eu_cover_camera_code),6,u3_102_cover_camera,NULL},
     {"U2 camera focus NaN reset",0x33ba13,u2_focus_assert_code,sizeof(u2_focus_assert_code),
      sizeof(u2_focus_reset),NULL,u2_focus_reset},
     {"U2 leg IK NaN delta",0x8ec618,u2_leg_ik_assert_code,sizeof(u2_leg_ik_assert_code),
