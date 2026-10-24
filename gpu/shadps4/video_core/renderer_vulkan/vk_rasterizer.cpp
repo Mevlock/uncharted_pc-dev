@@ -706,9 +706,9 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     }
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
-        // The collector hands stage B bindings that live until the packet is done: native
-        // batches keep them longer.
-        if (RingCollector::Enabled() && !NativeBatchEnabled()) {
+        // The collector's bindings live until their packet is recorded: only BindBuffers reads
+        // them, for that packet (native batches stream their inputs at append).
+        if (RingCollector::Enabled()) {
             ring_collector = std::make_unique<RingCollector>();
             ring_collector->Start(&RingCollectOne, this);
         } else if (ConstantRing::CopierEnabled()) {
