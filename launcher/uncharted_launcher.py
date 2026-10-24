@@ -1747,8 +1747,7 @@ class Launcher:
         self.output.put(header)  # also on the Log page: copied logs name the build too
         try:
             log_dir = Path(self.app.get('user_dir') or DATA_DIR / 'user')
-            log_dir.mkdir(parents=True, exist_ok=True)
-            log = open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1)
+            log = open_run_log(log_dir)
             log.write(header)
         except OSError:
             pass
@@ -2074,13 +2073,26 @@ def log_header(settings, start=None):
     return f'Port: {NAME} {build} in {PORT_DIR}, starting {start or settings.get("start")}\n'
 
 
+def open_run_log(log_dir, keep=5):
+    """last_run.log for a new run; the previous ones move to last_run.1.log ... last_run.<keep-1>.log
+    (a restart after a problem no longer overwrites the log that shows it)."""
+    log_dir.mkdir(parents=True, exist_ok=True)
+    for n in range(keep - 1, 0, -1):
+        older = log_dir / (f'last_run.{n - 1}.log' if n > 1 else 'last_run.log')
+        try:
+            if older.exists():
+                older.replace(log_dir / f'last_run.{n}.log')
+        except OSError:
+            pass
+    return open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1)
+
+
 def play_without_window(settings):
     """--play [u1|u2|u3]: the game with the saved settings (shortcuts, Steam); output to the console
     when there is one and to <saves folder>/last_run.log."""
     attach_stdio()
     log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
-    log_dir.mkdir(parents=True, exist_ok=True)
-    with open(log_dir / 'last_run.log', 'w', encoding='utf-8', buffering=1) as log:
+    with open_run_log(log_dir) as log:
         log.write(log_header(settings))
         process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
