@@ -148,4 +148,9 @@ private:
     std::jthread watchdog_thread; ///< bbport: stacks into the log when no frame comes (last: stopped first)
 };
 
+/// bbport (BB_FRAME_PACE=1, with a frame limit): the guest's thread that submits a flip waits for the
+/// flip's slot, so each frame starts one frame period after the last one (the game times its frames
+/// with the real clock). Called from the guest's flip submissions only, never the GPU thread.
+void PaceGuestFlip();
+
 } // namespace Libraries::VideoOut

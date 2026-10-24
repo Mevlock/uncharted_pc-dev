@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -803,6 +804,44 @@ void NoteMovieFrame() {
 
 s64 LastFlipIntervalNs() {
     return last_flip_interval_ns.load(std::memory_order_relaxed);
+}
+
+void PaceGuestFlip() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_FRAME_PACE");
+        return env && env[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
+    // the frame limit's period, else the vblank's (a game at the display rate)
+    static const auto period = std::chrono::nanoseconds(
+        1000000000 / (EmulatorSettings.GetFrameLimit() ? EmulatorSettings.GetFrameLimit()
+                                                       : EmulatorSettings.GetVblankFrequency()));
+    static const bool logged = [] {
+        std::printf("VideoOut: guest flips paced (BB_FRAME_PACE)\n");
+        return true;
+    }();
+    (void)logged;
+    static std::mutex pace_mutex;
+    static std::chrono::steady_clock::time_point next{};
+    std::chrono::steady_clock::time_point slot;
+    {
+        std::scoped_lock lock{pace_mutex};
+        const auto now = std::chrono::steady_clock::now();
+        // one period after the last slot; a frame later than that starts the cadence again from now
+        next = next.time_since_epoch().count() == 0 || next + period < now ? now : next;
+        slot = next;
+        next += period;
+    }
+    // sleep to within 1 ms of the slot (Windows sleeps are ~1 ms coarse), then spin
+    const auto coarse = slot - std::chrono::milliseconds(1);
+    if (std::chrono::steady_clock::now() < coarse) {
+        std::this_thread::sleep_until(coarse);
+    }
+    while (std::chrono::steady_clock::now() < slot) {
+        std::this_thread::yield();
+    }
 }
 
 void VideoOutDriver::PresentThread(std::stop_token token) {
