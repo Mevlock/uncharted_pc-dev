@@ -4,6 +4,7 @@
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "core/emulator_settings.h"
+#include "shader_recompiler/frontend/decode.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
 #include "shader_recompiler/frontend/translate/translate.h"
 #include "shader_recompiler/info.h"
@@ -1138,11 +1139,23 @@ template void Translator::SetDstPk<IR::F32, false>(const InstOperand& operand,
 void Translator::EmitFetch(const GcnInst& inst) {
     const auto code_sgpr_base = inst.src[0].code;
 
-#if 0
+    // bbport (native batch, offline experiment): BB_INLINE_FETCH=1 translates the fetch shader
+    // inline with regular buffer bindings (vertex pulling): the vertex streams become formatted
+    // buffers, so a batched variant can give each draw its own stream offsets.
+    static const bool inline_fetch = [] {
+        const char* env = std::getenv("BB_INLINE_FETCH");
+        return env && env[0] == '1';
+    }();
+    if (inline_fetch) {
+    static std::atomic<u32> reported{0};
+    if (reported.fetch_add(1, std::memory_order_relaxed) < 3) {
+        std::printf("Inline fetch: vertex shader %016llx fetches through buffers\n",
+                    static_cast<unsigned long long>(info.pgm_hash));
+    }
     // Translate fetch shader inline using regular buffer bindings; useful for debugging.
     const auto* code = GetFetchShaderCode(info, code_sgpr_base);
-    GcnCodeSlice slice(code, code + std::numeric_limits<u32>::max());
-    GcnDecodeContext decoder;
+    Gcn::GcnCodeSlice slice(code, code + std::numeric_limits<u32>::max());
+    Gcn::GcnDecodeContext decoder;
 
     // Decode and save instructions
     while (!slice.atEnd()) {
@@ -1154,7 +1167,7 @@ void Translator::EmitFetch(const GcnInst& inst) {
         TranslateInstruction(sub_inst);
     }
     return;
-#endif
+    }
 
     info.has_fetch_shader = true;
     info.fetch_shader_sgpr_base = code_sgpr_base;

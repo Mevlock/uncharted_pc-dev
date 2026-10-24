@@ -2742,6 +2742,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
         ++draws;
         u64 pair = 0;
+        u64 textures = 0; // every T# and S# of the draw
         for (const auto* stage : pipeline->GetStages()) {
             if (!stage) {
                 continue;
@@ -2752,10 +2753,48 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             buffers += stage->buffers.size();
             for (const auto& image : stage->images) {
                 const auto sharp = image.GetSharp(*stage);
-                now_tsharps.insert(XXH3_64bits(&sharp, sizeof(sharp)));
+                const u64 h = XXH3_64bits(&sharp, sizeof(sharp));
+                now_tsharps.insert(h);
+                textures = textures * 0x100000001B3ull ^ h;
+            }
+            for (const auto& sampler : stage->samplers) {
+                const auto ssharp = sampler.GetSharp(*stage);
+                textures = textures * 0x100000001B3ull ^ XXH3_64bits(&ssharp, sizeof(ssharp));
             }
         }
         now_pairs.insert(pair);
+        // Runs of consecutive main-pass draws: same pipeline and textures (batchable with a
+        // per-draw table alone), and same pipeline only (batchable once textures are bindless).
+        static const Pipeline* last_pipeline = nullptr;
+        // Vertex streams and index buffer: a run that shares them needs no vertex pulling (one
+        // binding, per-draw firstIndex / vertexOffset at most).
+        u64 geometry = regs.index_base_address.Address<VAddr>();
+        {
+            const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
+            for (const auto& resource : vs.buffers) {
+                if (!resource.IsSpecial() && !resource.is_written) {
+                    geometry = geometry * 0x100000001B3ull ^ resource.GetSharp(vs).base_address;
+                }
+            }
+        }
+        static u64 last_textures = 0, last_geometry = 0, same_all = 0, same_pipe = 0,
+                   same_geometry = 0, run_draws = 0;
+        ++run_draws;
+        same_pipe += pipeline == last_pipeline;
+        same_all += pipeline == last_pipeline && textures == last_textures;
+        same_geometry += pipeline == last_pipeline && textures == last_textures &&
+                         geometry == last_geometry;
+        last_pipeline = pipeline;
+        last_textures = textures;
+        last_geometry = geometry;
+        if (run_draws == 100000) {
+            std::printf("Material runs: of %llu main-pass draws, %.0f%% continue a run of the same "
+                        "pipeline and textures (%.0f%% with the same vertex/index buffers too), "
+                        "%.0f%% of the same pipeline\n",
+                        static_cast<unsigned long long>(run_draws), 100.0 * same_all / run_draws,
+                        100.0 * same_geometry / run_draws, 100.0 * same_pipe / run_draws);
+            same_all = same_pipe = same_geometry = run_draws = 0;
+        }
         if (const auto t = std::chrono::steady_clock::now(); t - window >= std::chrono::seconds(5)) {
             const double d = std::max<u64>(draws, 1), f = std::max<u64>(frames, 1);
             std::printf("Material stats (main pass, 5 s): %.0f draws/frame; per draw %.1f images, "
