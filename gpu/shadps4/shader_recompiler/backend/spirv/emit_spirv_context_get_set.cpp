@@ -49,6 +49,13 @@ static std::pair<Id, bool> OutputAttrComponentType(EmitContext& ctx, IR::Attribu
 }
 
 Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg) {
+    if (ctx.profile.batched_compute) {
+        // Native batch: this workgroup's object's user data (DefineBufferProperties).
+        const Id ud_reg{ctx.EmitFlatbufferLoadRaw(ctx.OpIAdd(
+            ctx.U32[1], ctx.batch_ud_base, ctx.ConstU32(ctx.info.ud_mask.Index(reg))))};
+        ctx.Name(ud_reg, fmt::format("ud_{}", u32(reg)));
+        return ud_reg;
+    }
     const u32 index = ctx.binding.user_data + ctx.info.ud_mask.Index(reg);
     const u32 half = PushData::UdRegsIndex + (index >> 2);
     const Id ud_ptr{ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U32[1]),
@@ -239,6 +246,9 @@ Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, u32 comp) {
     case IR::Attribute::WorkgroupIndex:
         return ctx.workgroup_index_id;
     case IR::Attribute::WorkgroupId: {
+        if (ctx.profile.batched_compute && comp == 0) {
+            return ctx.u32_zero_value; // native batch: every object is one workgroup
+        }
         const Id wg =
             ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), comp);
         if (!Shader::IsSplitCtaProgram(ctx.info.pgm_hash) || comp != 0) {

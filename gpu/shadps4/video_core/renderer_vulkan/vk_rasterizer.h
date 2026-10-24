@@ -542,6 +542,41 @@ private:
     // stops first).
     static inline thread_local const AmdGpu::Regs* stage_regs = nullptr;
     static inline thread_local const AmdGpu::ComputeProgram* stage_cs = nullptr;
+
+public:
+    /// bbport (native batch): the ordered task a batch may hold back until its flush (the
+    /// compute queue's RELEASE_MEM, set by Liverpool), and whether native batching is on
+    /// (BB_NATIVE_BATCH=1; BB_NATIVE_BATCH_SHADERS=<hex hash,...>, default U3's cs 8f067540).
+    OrderedTask native_batch_deferrable = nullptr;
+    static bool NativeBatchEnabled();
+    static bool NativeBatchShader(u64 pgm_hash);
+
+private:
+    /// Native batch (vk_native_batch.cpp): consecutive single-workgroup dispatches of one
+    /// batchable program, recorded as one dispatch of the batched variant (one workgroup per
+    /// object; Profile::batched_compute) with the fences between them held back until then.
+    struct NativeBatch {
+        const ComputePipeline* base = nullptr;
+        const ComputePipeline* batched = nullptr;
+        u32 count = 0;
+        u32 num_buffers = 0;
+        u32 stride = 0; ///< dwords per object: buffer offsets, user data, flat data
+        std::vector<u32> table;          ///< [stride][object entries]
+        std::vector<VAddr> addresses;    ///< per object, per buffer (0: special)
+        std::vector<VAddr> lo, hi;       ///< per buffer: union over the objects
+        std::vector<u8> written;         ///< per buffer
+        std::vector<std::pair<OrderedTask, u32>> deferred; ///< held-back tasks, data offset
+        std::vector<u8> deferred_data;
+        u64 objects = 0, batches = 0, fences = 0; ///< statistics
+    };
+    NativeBatch native_batch;
+    /// Stage B, inside a dispatch packet: adds it to the open batch (true) or leaves it to
+    /// DispatchRecord (false; the batch is flushed first).
+    bool AppendNativeBatch(const ComputePipeline* pipeline);
+    /// Stage B: records the open batch (one dispatch) and runs the tasks it held back.
+    void FlushNativeBatch();
+    /// Stage B: holds back an ordered task while a batch is open (true).
+    bool DeferToNativeBatch(OrderedTask task, const u8* data, u32 size);
     AmdGpu::Regs pipe_regs{};
     bool pipe_synced = false;
     std::array<AmdGpu::CbDbExtent, AmdGpu::NUM_COLOR_BUFFERS> pipe_cb_extent{};

@@ -707,7 +707,11 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
         draw_pipe->idle_context = this;
-        draw_pipe->on_idle = [](void* self) { static_cast<Rasterizer*>(self)->scheduler.KickOwed(); };
+        draw_pipe->on_idle = [](void* self) {
+            auto& rasterizer = *static_cast<Rasterizer*>(self);
+            rasterizer.FlushNativeBatch(); // a guest may be waiting for one of its fences
+            rasterizer.scheduler.KickOwed();
+        };
     }
     // bbport: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
@@ -1759,6 +1763,13 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     auto& self = *static_cast<Rasterizer*>(context);
     if (*reinterpret_cast<const PacketKind*>(data) == PacketKind::Task) {
         const auto& task = *reinterpret_cast<const TaskPacket*>(data);
+        // Native batch: the compute fences between batched dispatches wait for the batch.
+        if (self.native_batch.count) {
+            if (self.DeferToNativeBatch(task.task, data + sizeof(TaskPacket), task.size)) {
+                return;
+            }
+            self.FlushNativeBatch();
+        }
         const u64 start = __rdtsc();
         task.task(self, data + sizeof(TaskPacket));
         // Statistics by task function (stage B only writes; the report reads approximately).
@@ -1872,6 +1883,9 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     stage_regs = &regs;
     self.pipe_cb_extent = packet.cb_extent;
     self.pipe_db_extent = packet.db_extent;
+    if (self.native_batch.count && !(cs && !indirect)) {
+        self.FlushNativeBatch();
+    }
     if (packet.kind == PacketKind::Special) {
         // A draw FilterDraw handles (fast clear elimination, resolve, depth copy, skip).
         FrameCapture::Poll();
@@ -1927,7 +1941,8 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         }
         if (indirect) {
             self.DispatchIndirectRecord(pipeline, indirect->args, indirect->stride);
-        } else {
+        } else if (!NativeBatchEnabled() || !self.AppendNativeBatch(pipeline)) {
+            self.FlushNativeBatch();
             self.DispatchRecord(pipeline);
         }
         stage_cs = nullptr;
@@ -3291,6 +3306,11 @@ void Rasterizer::DispatchDirect() {
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
+    }
+    // Native batch: the batched variant of a batchable program is built here, once.
+    if (pipelined && NativeBatchEnabled() &&
+        NativeBatchShader(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash)) {
+        pipeline_cache.GetBatchedComputePipeline(pipeline);
     }
     // bbport: the copy shaders run on the CPU (ExecuteShaderHLE) went to this thread after a
     // drain, ~2000 times a second in U3's Cartagena square (17% of this thread waiting). They
@@ -6732,3 +6752,273 @@ void Rasterizer::NoteFrameStart() {
 }
 
 } // namespace Vulkan
+
+// bbport (native batch, offline experiment): see vk_rasterizer.h NativeBatch.
+bool Rasterizer::NativeBatchEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_NATIVE_BATCH");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
+bool Rasterizer::NativeBatchShader(u64 pgm_hash) {
+    static const std::vector<u32> shaders = [] {
+        std::vector<u32> list;
+        const char* env = std::getenv("BB_NATIVE_BATCH_SHADERS");
+        for (const char* p = env ? env : "8f067540"; *p;) {
+            char* end;
+            const u32 value = u32(std::strtoul(p, &end, 16));
+            if (end == p) {
+                break;
+            }
+            list.push_back(value);
+            p = *end == ',' ? end + 1 : end;
+        }
+        return list;
+    }();
+    return std::ranges::find(shaders, u32(pgm_hash)) != shaders.end();
+}
+
+bool Rasterizer::DeferToNativeBatch(OrderedTask task, const u8* data, u32 size) {
+    if (!native_batch.count || task != native_batch_deferrable) {
+        return false;
+    }
+    native_batch.deferred.emplace_back(task, u32(native_batch.deferred_data.size()));
+    native_batch.deferred_data.insert(native_batch.deferred_data.end(), data, data + size);
+    ++native_batch.fences;
+    return true;
+}
+
+bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
+    auto& b = native_batch;
+    const ComputePipeline* batched = pipeline_cache.FindBatchedComputePipeline(pipeline);
+    const auto& cs_program = CsRegs();
+    if (!batched || cs_program.dim_x != 1 || cs_program.dim_y != 1 || cs_program.dim_z != 1) {
+        return false;
+    }
+    const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+    if (Shader::IsSplitCtaProgram(cs.pgm_hash)) {
+        return false;
+    }
+    const u32 num_buffers = static_cast<u32>(cs.buffers.size());
+    const auto flat = cs.FlatUserData();
+    const u32 num_ud = cs.ud_mask.NumRegs();
+    const u32 stride = num_buffers + num_ud + static_cast<u32>(flat.size());
+    constexpr u32 MaxObjects = 256;
+    constexpr u64 MaxSpan = 4_MB;
+
+    // This object's buffers; any buffer the batch cannot carry leaves it to DispatchRecord.
+    std::array<VAddr, Shader::NUM_BUFFERS> address{};
+    std::array<u64, Shader::NUM_BUFFERS> size{};
+    for (u32 i = 0; i < num_buffers; ++i) {
+        const auto& desc = cs.buffers[i];
+        if (desc.buffer_type == Shader::BufferType::Flatbuf) {
+            continue;
+        }
+        if (desc.IsSpecial()) {
+            return false;
+        }
+        const auto sharp = desc.GetSharp(cs);
+        if (!sharp.base_address || !sharp.GetSize()) {
+            return false;
+        }
+        size[i] = memory->ClampRangeSize(sharp.base_address, sharp.GetSize());
+        if (!size[i] || (desc.is_written && size[i] <= 64) ||
+            (!desc.is_written && buffer_cache.IsRegionGpuModified(sharp.base_address, size[i]))) {
+            return false; // small read-back candidates and GPU data go the usual way
+        }
+        address[i] = sharp.base_address;
+    }
+    // Another program or shape, a full batch, a span too wide, or a hazard with the objects
+    // already in the batch: the batch goes first.
+    bool fits = b.count && b.base == pipeline && b.stride == stride && b.count < MaxObjects;
+    for (u32 i = 0; fits && i < num_buffers; ++i) {
+        if (!address[i]) {
+            continue;
+        }
+        const VAddr lo = std::min(b.lo[i], address[i]);
+        const VAddr hi = std::max(b.hi[i], address[i] + size[i]);
+        fits = hi - lo <= MaxSpan;
+        for (u32 j = 0; fits && j < num_buffers; ++j) {
+            // A write of this object over anything the batch uses, or a read of what it writes.
+            if (b.lo[j] < b.hi[j] && address[i] < b.hi[j] && b.lo[j] < address[i] + size[i] &&
+                (cs.buffers[i].is_written || b.written[j])) {
+                fits = false;
+            }
+        }
+    }
+    if (!fits) {
+        FlushNativeBatch();
+        b.base = pipeline;
+        b.batched = batched;
+        b.num_buffers = num_buffers;
+        b.stride = stride;
+        b.table.assign(1, stride);
+        b.addresses.clear();
+        b.lo.assign(num_buffers, ~VAddr{0});
+        b.hi.assign(num_buffers, 0);
+        b.written.assign(num_buffers, 0);
+        for (u32 i = 0; i < num_buffers; ++i) {
+            b.written[i] = cs.buffers[i].is_written;
+        }
+    }
+    for (u32 i = 0; i < num_buffers; ++i) {
+        if (address[i]) {
+            b.lo[i] = std::min(b.lo[i], address[i]);
+            b.hi[i] = std::max(b.hi[i], address[i] + size[i]);
+        }
+        b.addresses.push_back(address[i]);
+        b.table.push_back(0); // the offset, at the flush
+    }
+    const auto ud = cs.UserData();
+    for (u32 mask = cs.ud_mask.mask; mask;) {
+        const u32 index = std::countr_zero(mask);
+        mask &= ~(1U << index);
+        b.table.push_back(ud[index]);
+    }
+    b.table.insert(b.table.end(), flat.begin(), flat.end());
+    if (upscaler->Enabled()) {
+        upscaler->OnDispatch(cs.pgm_hash);
+    }
+    ++b.count;
+    ++b.objects;
+    return true;
+}
+
+void Rasterizer::FlushNativeBatch() {
+    auto& b = native_batch;
+    if (!b.count) {
+        return;
+    }
+    FrameCapture::Poll();
+    scheduler.PopPendingOperations();
+    // Clusters: buffers whose ranges over the batch overlap or lie close (inputs back to back
+    // in one ring) are obtained once. Written and read-only clusters stay apart.
+    struct Cluster {
+        VAddr lo, hi;
+        bool written;
+        const VideoCore::Buffer* buffer;
+        u64 offset;
+    };
+    boost::container::static_vector<Cluster, Shader::NUM_BUFFERS> clusters;
+    std::array<u32, Shader::NUM_BUFFERS> cluster_of{};
+    std::array<u32, Shader::NUM_BUFFERS> order{};
+    u32 used = 0;
+    for (u32 i = 0; i < b.num_buffers; ++i) {
+        if (b.lo[i] < b.hi[i]) {
+            order[used++] = i;
+        }
+    }
+    std::sort(order.begin(), order.begin() + used,
+              [&](u32 x, u32 y) { return b.lo[x] < b.lo[y]; });
+    for (u32 k = 0; k < used; ++k) {
+        const u32 i = order[k];
+        Cluster* joined = nullptr;
+        for (auto& c : clusters) {
+            const u64 gap = b.written[i] ? 0 : 64_KB;
+            if (c.written == bool(b.written[i]) && b.lo[i] <= c.hi + gap && c.lo <= b.hi[i] &&
+                std::max(c.hi, b.hi[i]) - std::min(c.lo, b.lo[i]) <= 4_MB) {
+                joined = &c;
+                break;
+            }
+        }
+        if (joined) {
+            joined->lo = std::min(joined->lo, b.lo[i]);
+            joined->hi = std::max(joined->hi, b.hi[i]);
+            cluster_of[i] = u32(joined - clusters.data());
+        } else {
+            cluster_of[i] = u32(clusters.size());
+            clusters.push_back({b.lo[i], b.hi[i], bool(b.written[i]), nullptr, 0});
+        }
+    }
+    set_write_index = 0;
+    set_writes.clear();
+    buffer_infos.clear();
+    image_infos.clear();
+    bound_images.clear();
+    const u64 alignment = instance.StorageMinAlignment();
+    for (auto& c : clusters) {
+        const u32 bytes = u32(c.hi - c.lo);
+        const auto [buffer, offset] = buffer_cache.ObtainBuffer(c.lo, bytes, c.written, false,
+                                                                c.written ? 0 : 4_MB);
+        c.buffer = buffer;
+        c.offset = offset;
+        if (c.written) {
+            texture_cache.InvalidateMemoryFromGPU(c.lo, bytes);
+        }
+        needs_barrier |= runtime.IsBufferAccessed(buffer, offset, bytes, c.written);
+        bound_buffers.emplace_back(buffer, offset, bytes, c.written);
+    }
+    // Per object, per buffer: the byte offset of its range in its cluster's binding.
+    for (u32 o = 0; o < b.count; ++o) {
+        for (u32 i = 0; i < b.num_buffers; ++i) {
+            const VAddr address = b.addresses[o * b.num_buffers + i];
+            if (!address) {
+                continue;
+            }
+            const auto& c = clusters[cluster_of[i]];
+            const u64 aligned = Common::AlignDown(c.offset, alignment);
+            b.table[1 + o * b.stride + i] = u32(address - c.lo + (c.offset - aligned));
+        }
+    }
+    const auto& cs = b.batched->GetStage(Shader::SwStage::Compute);
+    push_data = MakeUserData(Regs());
+    set_writes.resize(b.num_buffers);
+    for (u32 i = 0; i < b.num_buffers; ++i) {
+        const auto& desc = cs.buffers[i];
+        if (desc.buffer_type == Shader::BufferType::Flatbuf) {
+            auto& stream = buffer_cache.GetStreamBuffer();
+            const u32 bytes = u32(b.table.size() * sizeof(u32));
+            const u64 offset = stream.Copy(b.table.data(), bytes, alignment);
+            buffer_infos.emplace_back(stream.Handle(), offset, bytes);
+        } else {
+            const auto& c = clusters[cluster_of[i]];
+            const u64 aligned = Common::AlignDown(c.offset, alignment);
+            buffer_infos.emplace_back(c.buffer->Handle(), aligned,
+                                      (c.hi - c.lo) + (c.offset - aligned));
+        }
+        auto& write = set_writes[set_write_index++];
+        write.dstSet = VK_NULL_HANDLE;
+        write.dstBinding = i;
+        write.dstArrayElement = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = vk::DescriptorType::eStorageBuffer;
+        write.pBufferInfo = &buffer_infos.back();
+    }
+    if (needs_barrier) {
+        runtime.FlushBarriers();
+    }
+    scheduler.EndRendering();
+    b.batched->BindResources(set_writes, push_data);
+    const vk::Pipeline handle = b.batched->Handle();
+    const u32 groups = b.count;
+    scheduler.Record([handle, groups](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+        cmdbuf.dispatch(groups, 1, 1);
+    });
+    ResetBindings(true);
+    scheduler.KickRecording();
+    ++b.batches;
+    // The fences held back, in order, now that the batch is recorded.
+    auto deferred = std::move(b.deferred);
+    auto deferred_data = std::move(b.deferred_data);
+    b.deferred.clear();
+    b.deferred_data.clear();
+    b.count = 0;
+    b.base = nullptr;
+    for (const auto& [task, at] : deferred) {
+        task(*this, deferred_data.data() + at);
+    }
+    static auto window = std::chrono::steady_clock::now();
+    if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(5)) {
+        std::printf("Native batch: %llu objects in %llu batches (%.1f each), %llu fences held "
+                    "back (5 s)\n",
+                    static_cast<unsigned long long>(b.objects),
+                    static_cast<unsigned long long>(b.batches),
+                    b.batches ? double(b.objects) / b.batches : 0.0,
+                    static_cast<unsigned long long>(b.fences));
+        b.objects = b.batches = b.fences = 0;
+        window = now;
+    }
+}

@@ -233,7 +233,20 @@ Id EmitContext::GetBufferSize(const u32 sharp_idx) {
 }
 
 void EmitContext::DefineBufferProperties() {
-    if (!profile.needs_buffer_offsets) {
+    if (profile.batched_compute) {
+        // Native batch: workgroup x is the object; its entry in the flat buffer starts at
+        // 1 + x * stride (stride in dword 0) with one 32-bit byte offset per buffer (all of
+        // info.buffers, specials 0), then the user data registers, then the flat data.
+        const Id group{OpCompositeExtract(U32[1], OpLoad(U32[3], workgroup_id), 0)};
+        const Id stride{EmitFlatbufferLoadRaw(u32_zero_value)};
+        batch_entry = OpIAdd(U32[1], ConstU32(1U), OpIMul(U32[1], group, stride));
+        Name(batch_entry, "batch_entry");
+        const u32 num_buffers = static_cast<u32>(info.buffers.size());
+        batch_ud_base = OpIAdd(U32[1], batch_entry, ConstU32(num_buffers));
+        batch_flat_base =
+            OpIAdd(U32[1], batch_ud_base, ConstU32(static_cast<u32>(info.ud_mask.NumRegs())));
+    }
+    if (!profile.needs_buffer_offsets && !profile.batched_compute) {
         return;
     }
     for (u32 i = 0; i < buffers.size(); i++) {
@@ -244,14 +257,18 @@ void EmitContext::DefineBufferProperties() {
             continue;
         }
 
-        const u32 half = PushData::BufOffsetIndex + (binding >> 4);
-        const u32 comp = (binding & 0xf) >> 2;
-        const u32 offset = (binding & 0x3) << 3;
-        const Id ptr{OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[1]),
-                                   push_data_block, ConstU32(half), ConstU32(comp))};
-        const Id value{OpLoad(U32[1], ptr)};
-
-        const Id buf_offset{OpBitFieldUExtract(U32[1], value, ConstU32(offset), ConstU32(8U))};
+        Id buf_offset;
+        if (profile.batched_compute) {
+            buf_offset = EmitFlatbufferLoadRaw(OpIAdd(U32[1], batch_entry, ConstU32(i)));
+        } else {
+            const u32 half = PushData::BufOffsetIndex + (binding >> 4);
+            const u32 comp = (binding & 0xf) >> 2;
+            const u32 offset = (binding & 0x3) << 3;
+            const Id ptr{OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U32[1]),
+                                       push_data_block, ConstU32(half), ConstU32(comp))};
+            const Id value{OpLoad(U32[1], ptr)};
+            buf_offset = OpBitFieldUExtract(U32[1], value, ConstU32(offset), ConstU32(8U));
+        }
         Name(buf_offset, fmt::format("buf{}_off", binding));
         buffer.Offset(PointerSize::B8) = buf_offset;
 
@@ -296,7 +313,10 @@ void EmitContext::DefineAmdPerVertexAttribs() {
 
 void EmitContext::DefineWorkgroupIndex() {
     const Id workgroup_id_val{OpLoad(U32[3], workgroup_id)};
-    const Id workgroup_x{OpCompositeExtract(U32[1], workgroup_id_val, 0)};
+    // Native batch: every object is one workgroup.
+    const Id workgroup_x{profile.batched_compute
+                             ? u32_zero_value
+                             : OpCompositeExtract(U32[1], workgroup_id_val, 0)};
     const Id workgroup_y{OpCompositeExtract(U32[1], workgroup_id_val, 1)};
     const Id workgroup_z{OpCompositeExtract(U32[1], workgroup_id_val, 2)};
     const Id num_workgroups{OpLoad(U32[3], num_workgroups_id)};

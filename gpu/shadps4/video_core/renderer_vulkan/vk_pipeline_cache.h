@@ -173,6 +173,16 @@ public:
     }
 
     const ComputePipeline* GetComputePipeline();
+    /// bbport (native batch): the batched variant of `base`, the pipeline GetComputePipeline()
+    /// just selected for the current compute registers (GPU command thread). Compiled once;
+    /// null when the program cannot run batched. Never saved.
+    const ComputePipeline* GetBatchedComputePipeline(const ComputePipeline* base);
+    /// The batched variant of `base` if GetBatchedComputePipeline built one (any thread).
+    const ComputePipeline* FindBatchedComputePipeline(const ComputePipeline* base) {
+        std::shared_lock lock{pipelines_mutex};
+        const auto it = batched_pipelines.find(base);
+        return it != batched_pipelines.end() ? it->second.pipeline.get() : nullptr;
+    }
 
     /// bbport: worker side of a dispatch: translates the compute program and builds its pipeline
     /// when they do not exist yet, so the GPU thread finds them (sel.cs is the program state).
@@ -259,6 +269,12 @@ private:
     vk::UniquePipelineCache pipeline_cache;
     vk::UniquePipelineLayout pipeline_layout;
     Shader::Profile profile{};
+    Shader::Profile batched_profile{}; ///< profile with batched_compute (native batch)
+    struct BatchedVariant {
+        std::unique_ptr<Shader::Info> info;
+        std::unique_ptr<ComputePipeline> pipeline;
+    };
+    std::unordered_map<const ComputePipeline*, BatchedVariant> batched_pipelines;
     Shader::Pools pools;
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
     /// bbport: exclusive for program/permutation insertions, shared for worker lookups.

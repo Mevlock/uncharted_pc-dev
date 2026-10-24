@@ -1510,6 +1510,60 @@ bool PipelineCache::RefreshComputeKey() {
 bool BbMovieShaderScaled(u64 pgm_hash);
 static std::vector<u32> ScaleMovieShader(std::span<const u32> code);
 
+/// bbport (native batch): a profile for the translations of this thread (GetBatchedComputePipeline).
+static thread_local const Shader::Profile* t_profile_override = nullptr;
+
+const ComputePipeline* PipelineCache::GetBatchedComputePipeline(const ComputePipeline* base) {
+    {
+        std::shared_lock lock{pipelines_mutex};
+        if (const auto it = batched_pipelines.find(base); it != batched_pipelines.end()) {
+            return it->second.pipeline.get();
+        }
+    }
+    if (!batched_profile.batched_compute) {
+        batched_profile = profile;
+        batched_profile.batched_compute = true;
+    }
+    const auto& cs_pgm = liverpool->GetCsRegs();
+    const auto params = AmdGpu::GetParams(cs_pgm);
+    BatchedVariant variant;
+    variant.info = std::make_unique<Shader::Info>(HwStage::Compute, SwStage::Compute, params);
+    auto runtime_info = BuildRuntimeInfo(sel, HwStage::Compute, SwStage::Compute);
+    Shader::Backend::Bindings binding{};
+    std::vector<u32> spv;
+    t_profile_override = &batched_profile;
+    const auto module =
+        TranslateModule(*variant.info, runtime_info, params.code, 0xBA7C, binding, pools, spv);
+    t_profile_override = nullptr;
+    // The table is filled in the base program's buffer order: both must list the same buffers.
+    const auto& base_info = base->GetStage(Shader::SwStage::Compute);
+    bool same = variant.info->buffers.size() == base_info.buffers.size() &&
+                variant.info->ud_mask.mask == base_info.ud_mask.mask;
+    for (size_t i = 0; same && i < base_info.buffers.size(); ++i) {
+        same = variant.info->buffers[i].buffer_type == base_info.buffers[i].buffer_type &&
+               variant.info->buffers[i].is_written == base_info.buffers[i].is_written &&
+               variant.info->buffers[i].is_formatted == base_info.buffers[i].is_formatted &&
+               variant.info->buffers[i].used_types == base_info.buffers[i].used_types;
+    }
+    if (same && module) {
+        ComputePipeline::SerializationSupport sdata{};
+        const ComputePipelineKey key{HashCombine(params.hash, 0xBA7C4ED0ull)};
+        variant.pipeline = std::make_unique<ComputePipeline>(
+            instance, scheduler, desc_heap, batched_profile, *pipeline_cache, key, *variant.info,
+            module, sdata, false);
+        if (!variant.pipeline->IsValid()) {
+            variant.pipeline.reset();
+        }
+    }
+    std::printf("Native batch: cs %016llx batched variant %s
+",
+                static_cast<unsigned long long>(params.hash),
+                variant.pipeline ? "ready" : (same ? "failed to build" : "refused (buffers differ)"));
+    std::unique_lock lock{pipelines_mutex};
+    const auto [it, inserted] = batched_pipelines.try_emplace(base, std::move(variant));
+    return it->second.pipeline.get();
+}
+
 vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
                                                 Shader::RuntimeInfo& runtime_info,
                                                 const std::span<const u32>& code, size_t perm_idx,
@@ -1528,12 +1582,15 @@ vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
         scaled_code = ScaleMovieShader(code);
         program_code = scaled_code;
     }
-    const auto ir_program =
-        Shader::TranslateProgram(program_code, translate_pools, info, runtime_info, profile);
+    // bbport (native batch): the batched variant translates with its own profile.
+    const Shader::Profile& translate_profile = t_profile_override ? *t_profile_override : profile;
+    const auto ir_program = Shader::TranslateProgram(program_code, translate_pools, info,
+                                                     runtime_info, translate_profile);
     translate_timer.reset();
     {
         SpanTimer emit_timer{g_bb_emit_ns};
-        spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+        spv = Shader::Backend::SPIRV::EmitSPIRV(translate_profile, runtime_info, ir_program,
+                                                binding);
     }
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 

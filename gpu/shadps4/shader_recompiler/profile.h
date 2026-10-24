@@ -51,6 +51,10 @@ struct Profile {
     bool needs_integer_interpolation_fix{};
     bool needs_lds_barriers{};
     bool needs_buffer_offsets{};
+    /// bbport (native batch): a compute shader run as one workgroup per object of a batch; the
+    /// flat buffer holds [stride][per object: buffer offsets, user data, flat data] and each
+    /// workgroup reads its object's entry (Rasterizer::FlushNativeBatch).
+    bool batched_compute{};
     bool needs_unorm_fixup{};
     bool needs_clip_distance_emulation{};
     bool supports_shader_stencil_export{};

@@ -2065,6 +2065,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (rasterizer && release_in_order) {
                 const ReleaseMemTask task{*reinterpret_cast<const PM4CmdReleaseMem*>(header),
                                           queue.pipe_id};
+                if (!rasterizer->native_batch_deferrable) {
+                    rasterizer->native_batch_deferrable = &RunReleaseMem; // native batch
+                }
                 if (rasterizer->RunInOrder(&RunReleaseMem, &task, sizeof(task))) {
                     // Pending until the recording thread runs it: guest reads of the label
                     // wait for it, and WAIT_REG_MEM sees the value it will have.

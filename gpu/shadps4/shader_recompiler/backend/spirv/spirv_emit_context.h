@@ -181,6 +181,13 @@ public:
     }
 
     Id EmitFlatbufferLoad(Id flatbuf_offset) {
+        if (batch_flat_base) {
+            // Native batch: this workgroup's object's flat data (see Profile::batched_compute).
+            flatbuf_offset = OpIAdd(U32[1], batch_flat_base, flatbuf_offset);
+        }
+        return EmitFlatbufferLoadRaw(flatbuf_offset);
+    }
+    Id EmitFlatbufferLoadRaw(Id flatbuf_offset) {
         const auto& flatbuf_buffer{buffers[flatbuf_index]};
         ASSERT(flatbuf_buffer.binding >= 0 && flatbuf_buffer.buffer_type == BufferType::Flatbuf);
         const auto [flatbuf_buffer_id, flatbuf_pointer_type] =
@@ -288,6 +295,11 @@ public:
     std::array<Id, 30> patches{};
 
     Id workgroup_id{};
+    /// Native batch (Profile::batched_compute): flat buffer index of this workgroup's entry, and
+    /// of its user data and flat data (set in the prologue, DefineBufferProperties).
+    Id batch_entry{};
+    Id batch_ud_base{};
+    Id batch_flat_base{};
     Id num_workgroups_id{};
     Id workgroup_index_id{};
     Id local_invocation_id{};
