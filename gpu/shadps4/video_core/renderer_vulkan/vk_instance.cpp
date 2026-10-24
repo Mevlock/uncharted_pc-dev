@@ -853,6 +853,10 @@ void Instance::CollectDeviceParameters() {
     LOG_INFO(Render_Vulkan, "GPU_Vulkan_Extensions: {}", extensions);
 }
 
+// bbport: BB_VRAM_SIMULATE_MIB: the ballast held and the simulated size (0: off). The usage the
+// caches see leaves the ballast out, and the driver's budget is capped at the simulated size.
+static u64 vram_ballast_bytes = 0, vram_simulated_bytes = 0;
+
 void Instance::CollectPhysicalMemoryInfo() {
     vk::PhysicalDeviceMemoryBudgetPropertiesEXT budget{};
     vk::PhysicalDeviceMemoryProperties2 props = {
@@ -913,6 +917,8 @@ void Instance::CollectPhysicalMemoryInfo() {
                     ballast.push_back(memory);
                     held += chunk;
                 }
+                vram_ballast_bytes = held;
+                vram_simulated_bytes = target;
                 total_memory_budget = std::min<u64>(total_memory_budget, target);
                 std::printf("GPU: simulating %llu MiB of VRAM (BB_VRAM_SIMULATE_MIB): %llu MiB held as "
                             "ballast, budget %llu MiB\n",
@@ -1001,7 +1007,7 @@ u64 Instance::GetDeviceMemoryUsage() const {
     for (const size_t heap : valid_heaps) {
         total_usage += memory_budget_props.heapUsage[heap];
     }
-    return total_usage;
+    return total_usage > vram_ballast_bytes ? total_usage - vram_ballast_bytes : 0;
 }
 
 u64 Instance::GetDeviceMemoryBudgetNow() const {
@@ -1014,6 +1020,10 @@ u64 Instance::GetDeviceMemoryBudgetNow() const {
     u64 total_budget = 0;
     for (const size_t heap : valid_heaps) {
         total_budget += memory_budget_props.heapBudget[heap];
+    }
+    if (vram_simulated_bytes) {
+        total_budget = total_budget > vram_ballast_bytes ? total_budget - vram_ballast_bytes : 0;
+        total_budget = std::min<u64>(total_budget, vram_simulated_bytes);
     }
     return total_budget;
 }
