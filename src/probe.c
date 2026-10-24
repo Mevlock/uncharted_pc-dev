@@ -992,18 +992,26 @@ static void __attribute__((ms_abi)) job_idle_yield(uint64_t rdi, uint64_t rsi, u
 static void install_job_idle_yield(uint64_t image_size) {
     const char *env=getenv("BB_JOB_YIELD");
     if (env && env[0]=='0') return;
-    static const unsigned char head[]={0x4d,0x89,0xf0,0x41,0x83,0xfd,0x03};  /* mov r8,r14; cmp r13d,3 */
-    static const unsigned char tail[]={0x49,0x8b,0x07,0x4a,0x8b,0x8c,0xe0};   /* mov rax,[r15]; mov rcx,[rax+r12*8+d32] */
+    /* US / EU-Russian 1.02: mov r8,r14; cmp r13d,3; ja; mov rax,[r15]; mov rcx,[rax+r12*8+d32]; rdtsc.
+     * EU 1.02 (CUSA02343): the same with other registers: cmp r12d,3; mov rax,[r13]. */
+    static const struct { unsigned char head[7]; unsigned char tail[8]; size_t tail_len; } forms[]={
+        {{0x4d,0x89,0xf0,0x41,0x83,0xfd,0x03},{0x49,0x8b,0x07,0x4a,0x8b,0x8c,0xe0},7},
+        {{0x4d,0x89,0xf0,0x41,0x83,0xfc,0x03},{0x49,0x8b,0x45,0x00,0x4a,0x8b,0x8c,0xe0},8},
+    };
     int hooked=0;
     for (uint64_t at=0;at+32<=image_size;++at) {
         const unsigned char *c=image+at;
-        if (c[0]!=0x4d || memcmp(c,head,sizeof(head))) continue;
-        size_t j=sizeof(head);
+        if (c[0]!=0x4d) continue;
+        int form=-1;
+        for (int f=0;f<2 && form<0;++f) if (!memcmp(c,forms[f].head,7)) form=f;
+        if (form<0) continue;
+        size_t j=7;
         if (c[j]==0x0f && c[j+1]==0x87) j+=6;       /* ja rel32 */
         else if (c[j]==0x77) j+=2;                  /* ja rel8 */
         else continue;
-        if (memcmp(c+j,tail,sizeof(tail)) || c[j+sizeof(tail)+4]!=0x0f || c[j+sizeof(tail)+5]!=0x31) continue;
-        if (!callback_thunk(image+at,sizeof(head),(const void *)job_idle_yield)) break;
+        const size_t tl=forms[form].tail_len;
+        if (memcmp(c+j,forms[form].tail,tl) || c[j+tl+4]!=0x0f || c[j+tl+5]!=0x31) continue;
+        if (!callback_thunk(image+at,sizeof(forms[form].head),(const void *)job_idle_yield)) break;
         printf("Job workers: the idle check at %#" PRIx64 " yields the CPU\n",at);
         ++hooked;
     }
