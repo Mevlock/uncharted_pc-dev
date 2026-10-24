@@ -29,7 +29,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 18u; // bbport: large ReadConst windows in compute only
+static constexpr u32 ShaderBinaryVersion = 19u; // bbport: shadPS4 #5447 buffer invalidation, #5427/#5364 phi fixes
 static constexpr u32 ShaderMetaVersion = 12u; // bbport: checksum of the shader binary
 static constexpr u32 PipelineKeyVersion = 6u; // bbport: GraphicsPipelineKey::ui_squeeze
 // bbport: translator options that change the shaders it produces are part of the stored version,
