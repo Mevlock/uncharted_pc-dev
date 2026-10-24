@@ -3520,6 +3520,7 @@ void Rasterizer::OnSubmit() {
     texture_cache.ProcessDownloadImages();
     texture_cache.UpdateButtonPrompts();
     texture_cache.RunGarbageCollector();
+    buffer_cache.ReclaimArenaMemory(); // bbport: VRAM give-back
     runtime.TickFrame();
 }
 
