@@ -995,7 +995,7 @@ static void __attribute__((ms_abi)) job_idle_yield(uint64_t rdi, uint64_t rsi, u
 }
 static void install_job_idle_yield(uint64_t image_size) {
     const char *env=getenv("BB_JOB_YIELD");
-    if (env && env[0]=='0') return;
+    if (env && env[0]=='0') { printf("Job workers: idle ones do not yield (BB_JOB_YIELD=0)\n"); return; }
     /* US / EU-Russian 1.02: mov r8,r14; cmp r13d,3; ja; mov rax,[r15]; mov rcx,[rax+r12*8+d32]; rdtsc.
      * EU 1.02 (CUSA02343): the same with other registers: cmp r12d,3; mov rax,[r13]. */
     static const struct { unsigned char head[7]; unsigned char tail[8]; size_t tail_len; } forms[]={
