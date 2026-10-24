@@ -706,7 +706,12 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     }
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
-        if (ConstantRing::CopierEnabled()) {
+        // The collector hands stage B bindings that live until the packet is done: native
+        // batches keep them longer.
+        if (RingCollector::Enabled() && !NativeBatchEnabled()) {
+            ring_collector = std::make_unique<RingCollector>();
+            ring_collector->Start(&RingCollectOne, this);
+        } else if (ConstantRing::CopierEnabled()) {
             constant_ring->StartCopier(
                 [](void* context, u64 source, u8* destination, u64 size) {
                     static_cast<Core::MemoryManager*>(context)->CopySparseMemory(
@@ -1116,6 +1121,7 @@ struct DrawPacket {
     AmdGpu::CbDbExtent db_extent;
     u64 ring_end; ///< constant ring position after this packet's copies
     u64 ring_copy_seq; ///< BB_RING_COPIER: the copier's sequence after this packet's copies
+    u64 collect_seq;   ///< BB_RING_COLLECTOR: the packet's sequence (0: nothing collected)
 };
 struct PacketStage {
     const Shader::Info* info;
@@ -1266,6 +1272,77 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
         }
     }
     return false;
+}
+
+void Rasterizer::QueueRingCandidates(const Shader::Info& stage, const PreparedDraw* prepared,
+                                     u32 stage_index) {
+    const PreparedStage* prepared_stage = nullptr;
+    if (prepared && !BbToggle::Disabled(BbToggle::PreparedResources)) {
+        for (u32 i = 0; i < prepared->num_stages; ++i) {
+            const auto& candidate = prepared->stages[i];
+            if (&candidate.program->info == &stage &&
+                candidate.num_buffers == stage.buffers.size()) {
+                prepared_stage = &candidate;
+                break;
+            }
+        }
+    }
+    for (u32 index = 0; index < stage.buffers.size(); ++index) {
+        const auto& desc = stage.buffers[index];
+        if (desc.IsSpecial()) {
+            if (desc.buffer_type == Shader::BufferType::Flatbuf &&
+                !stage.flattened_ud_buf.empty()) {
+                ring_collector->AddBytes(stage_index, index, stage.flattened_ud_buf.data(),
+                                         stage.flattened_ud_buf.size() * sizeof(u32));
+            }
+            continue;
+        }
+        const auto vsharp = prepared_stage ? prepared_stage->buffer_sharps[index]
+                                           : desc.GetSharp(stage);
+        const VAddr address = vsharp.base_address;
+        const u64 size = vsharp.GetSize();
+        if (address == 0 || size == 0) {
+            continue;
+        }
+        if (desc.is_written) {
+            NotePendingGpuWrite(address, memory->ClampRangeSize(address, size));
+            continue;
+        }
+        // Unclamped here (the collector clamps): a larger range only skips more.
+        if (size > VideoCore::BufferCache::STREAM_THRESHOLD ||
+            PendingWriteOverlaps(address, size)) {
+            continue;
+        }
+        ring_collector->Add(stage_index, index, address, size);
+    }
+}
+
+bool Rasterizer::RingCollectOne(void* context, VAddr address, u64& size, const u8* source,
+                                u64& ring_offset, u64& ring_end) {
+    auto& self = *static_cast<Rasterizer*>(context);
+    if (!source) {
+        size = self.memory->ClampRangeSize(address, size);
+        if (size == 0 || self.buffer_cache.IsRegionGpuModified(address, size)) {
+            return false;
+        }
+        VideoCore::NoteAsyncAccess("constant ring copy", address, size, false, true);
+    }
+    static const u64 alignment = std::max<u64>(self.instance.StorageMinAlignment(),
+                                               self.instance.UniformMinAlignment());
+    const auto offset = self.constant_ring->Allocate(size, alignment);
+    if (!offset) {
+        return false;
+    }
+    u8* dst = self.constant_ring->Data(*offset);
+    if (source) {
+        std::memcpy(dst, source, size);
+    } else {
+        self.memory->CopySparseMemory(address, dst, size);
+    }
+    self.constant_ring->Flush(*offset, size);
+    ring_offset = *offset;
+    ring_end = self.constant_ring->Position();
+    return true;
 }
 
 void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
@@ -1618,7 +1695,11 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
             auto& ring = rings[num_stages];
             ring.clear();
             if (constant_ring && !BbToggle::Disabled(BbToggle::ConstantRing)) {
-                CollectRingBindings(*stage, used_prepared, ring);
+                if (ring_collector) {
+                    QueueRingCandidates(*stage, used_prepared, num_stages);
+                } else {
+                    CollectRingBindings(*stage, used_prepared, ring);
+                }
             }
             ++num_stages;
             size += sizeof(PacketStage) +
@@ -1639,6 +1720,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
         size += sizeof(AmdGpu::Regs);
     }
 
+    const u64 collect_seq = ring_collector ? ring_collector->EndPacket() : 0;
     u8* out = draw_pipe->Begin(size);
     u8* const start = out;
     auto& packet = *reinterpret_cast<DrawPacket*>(out);
@@ -1658,6 +1740,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     packet.db_extent = liverpool->last_db_extent;
     packet.ring_end = constant_ring ? constant_ring->Position() : 0;
     packet.ring_copy_seq = constant_ring ? constant_ring->CopySeq() : 0;
+    packet.collect_seq = collect_seq;
     out += sizeof(DrawPacket);
     std::memcpy(out, blocks.data(), num_blocks * sizeof(u16));
     out += AlignPacket(num_blocks * sizeof(u16));
@@ -1853,6 +1936,19 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     }
     Shader::Info::num_ud_snapshots = packet.num_stages;
     self.num_ring_stages = packet.num_stages;
+    u64 collected_end = packet.ring_end;
+    if (packet.collect_seq) {
+        const auto& result = self.ring_collector->Wait(packet.collect_seq);
+        const auto* bindings =
+            reinterpret_cast<const RingBinding*>(self.ring_collector->Bindings(result));
+        u32 at = 0;
+        for (u32 i = 0; i < packet.num_stages && i < RingCollector::MaxStages; ++i) {
+            self.ring_stages[i].bindings = bindings + at;
+            self.ring_stages[i].count = result.counts[i];
+            at += result.counts[i];
+        }
+        collected_end = result.ring_end;
+    }
     const AmdGpu::ComputeProgram* cs = nullptr;
     if (packet.kind == PacketKind::Dispatch || packet.kind == PacketKind::IndirectDispatch) {
         cs = reinterpret_cast<const AmdGpu::ComputeProgram*>(in);
@@ -1996,8 +2092,11 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     }
     Shader::Info::num_ud_snapshots = 0;
     self.num_ring_stages = 0;
-    if (self.constant_ring) {
-        self.constant_ring->Stamp(packet.ring_end);
+    if (packet.collect_seq) {
+        self.ring_collector->Release(packet.collect_seq);
+    }
+    if (self.constant_ring && (!self.ring_collector || packet.collect_seq)) {
+        self.constant_ring->Stamp(collected_end);
     }
 }
 

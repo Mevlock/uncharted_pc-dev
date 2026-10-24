@@ -15,6 +15,7 @@
 #include "video_core/renderer_vulkan/vk_bind_helper.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_constant_ring.h"
+#include "video_core/renderer_vulkan/vk_ring_collector.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
@@ -290,6 +291,12 @@ private:
     const AmdGpu::ComputeProgram& CsRegs() const;
     static void RunDrawPacket(void* rasterizer, const u8* packet, u32 size);
     struct RingBinding;
+    /// BB_RING_COLLECTOR: stage A's part of CollectRingBindings; the collector thread does
+    /// the rest (RingCollectOne).
+    void QueueRingCandidates(const Shader::Info& stage, const PreparedDraw* prepared,
+                             u32 stage_index);
+    static bool RingCollectOne(void* context, VAddr address, u64& size, const u8* source,
+                               u64& ring_offset, u64& ring_end);
     void CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                              boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out);
     void PrintPipeStats();
@@ -644,6 +651,7 @@ private:
         return nullptr;
     }
     std::unique_ptr<ConstantRing> constant_ring;
+    std::unique_ptr<RingCollector> ring_collector; ///< BB_RING_COLLECTOR=1
     /// Submissions (prepared draws) kept alive until stage B reaches the position.
     std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
     std::unique_ptr<DrawPipe> draw_pipe;
