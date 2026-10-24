@@ -1003,6 +1003,26 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
                 view_slice = overlap_view_slice;
             }
             if (keep_view && found_id && image_id == found_id && view_mip < 0 && view_slice < 0) {
+                // BB_OVERLAP_KEEP_LOG=1 (diagnosis): each view kept, with what overlapped.
+                static const bool keep_log = std::getenv("BB_OVERLAP_KEEP_LOG") != nullptr;
+                if (keep_log && (found_mip > 0 || found_slice > 0)) {
+                    static int kept_logged = 0;
+                    if (kept_logged++ < 80) {
+                        const auto& found = slot_images[found_id].info;
+                        std::printf("Overlap keep: request %#llx %ux%u levels %u binding %d -> image "
+                                    "%#llx %ux%u levels %u mip %d slice %d kept; overlap with %#llx "
+                                    "%ux%u levels %u gave %s\n",
+                                    static_cast<unsigned long long>(info.guest_address),
+                                    info.size.width, info.size.height, info.resources.levels,
+                                    static_cast<int>(desc.type),
+                                    static_cast<unsigned long long>(found.guest_address),
+                                    found.size.width, found.size.height, found.resources.levels,
+                                    found_mip, found_slice,
+                                    static_cast<unsigned long long>(before.guest_address),
+                                    before.size.width, before.size.height, before.resources.levels,
+                                    overlap_image_id ? "the same image, no view" : "none");
+                    }
+                }
                 view_mip = found_mip;
                 view_slice = found_slice;
             }
