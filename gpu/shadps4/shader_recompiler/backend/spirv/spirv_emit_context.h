@@ -181,7 +181,7 @@ public:
     }
 
     Id EmitFlatbufferLoad(Id flatbuf_offset) {
-        if (batch_flat_base) {
+        if (Sirit::ValidId(batch_flat_base)) {
             // Native batch: this workgroup's object's flat data (see Profile::batched_compute).
             flatbuf_offset = OpIAdd(U32[1], batch_flat_base, flatbuf_offset);
         }

@@ -568,13 +568,14 @@ private:
         std::vector<std::pair<OrderedTask, u32>> deferred; ///< held-back tasks, data offset
         std::vector<u8> deferred_data;
         u64 objects = 0, batches = 0, fences = 0; ///< statistics
+        std::array<u64, 8> flush_reasons{}; ///< idle, task, packet, dispatch, shape, full, span, hazard
     };
     NativeBatch native_batch;
     /// Stage B, inside a dispatch packet: adds it to the open batch (true) or leaves it to
     /// DispatchRecord (false; the batch is flushed first).
     bool AppendNativeBatch(const ComputePipeline* pipeline);
     /// Stage B: records the open batch (one dispatch) and runs the tasks it held back.
-    void FlushNativeBatch();
+    void FlushNativeBatch(u32 reason = 0);
     /// Stage B: holds back an ordered task while a batch is open (true).
     bool DeferToNativeBatch(OrderedTask task, const u8* data, u32 size);
     AmdGpu::Regs pipe_regs{};

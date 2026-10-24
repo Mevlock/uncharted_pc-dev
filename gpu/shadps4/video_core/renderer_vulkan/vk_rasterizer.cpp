@@ -1768,7 +1768,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
             if (self.DeferToNativeBatch(task.task, data + sizeof(TaskPacket), task.size)) {
                 return;
             }
-            self.FlushNativeBatch();
+            self.FlushNativeBatch(1);
         }
         const u64 start = __rdtsc();
         task.task(self, data + sizeof(TaskPacket));
@@ -1884,7 +1884,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     self.pipe_cb_extent = packet.cb_extent;
     self.pipe_db_extent = packet.db_extent;
     if (self.native_batch.count && !(cs && !indirect)) {
-        self.FlushNativeBatch();
+        self.FlushNativeBatch(2);
     }
     if (packet.kind == PacketKind::Special) {
         // A draw FilterDraw handles (fast clear elimination, resolve, depth copy, skip).
@@ -1942,7 +1942,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         if (indirect) {
             self.DispatchIndirectRecord(pipeline, indirect->args, indirect->stride);
         } else if (!NativeBatchEnabled() || !self.AppendNativeBatch(pipeline)) {
-            self.FlushNativeBatch();
+            self.FlushNativeBatch(3);
             self.DispatchRecord(pipeline);
         }
         stage_cs = nullptr;
@@ -6753,6 +6753,8 @@ void Rasterizer::NoteFrameStart() {
 
 } // namespace Vulkan
 
+namespace Vulkan {
+
 // bbport (native batch, offline experiment): see vk_rasterizer.h NativeBatch.
 bool Rasterizer::NativeBatchEnabled() {
     static const bool enabled = [] {
@@ -6824,6 +6826,15 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
             return false;
         }
         size[i] = memory->ClampRangeSize(sharp.base_address, sharp.GetSize());
+        // Written typed views end at their last record's element (tight writes, as BindBuffers
+        // tracks them): U3's interleaved vertex views otherwise overlap the next object.
+        if (desc.is_written && desc.is_formatted && sharp.GetStride() && sharp.num_records) {
+            const u32 element = AmdGpu::NumBitsPerBlock(sharp.GetDataFmt()) / 8;
+            if (element && element <= sharp.GetStride()) {
+                size[i] = std::min<u64>(size[i], u64(sharp.GetStride()) * (sharp.num_records - 1) +
+                                                     element);
+            }
+        }
         if (!size[i] || (desc.is_written && size[i] <= 64) ||
             (!desc.is_written && buffer_cache.IsRegionGpuModified(sharp.base_address, size[i]))) {
             return false; // small read-back candidates and GPU data go the usual way
@@ -6832,7 +6843,8 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
     }
     // Another program or shape, a full batch, a span too wide, or a hazard with the objects
     // already in the batch: the batch goes first.
-    bool fits = b.count && b.base == pipeline && b.stride == stride && b.count < MaxObjects;
+    u32 reason = !b.count ? 0 : b.base != pipeline || b.stride != stride ? 4 : b.count >= MaxObjects ? 5 : 0;
+    bool fits = b.count && !reason;
     for (u32 i = 0; fits && i < num_buffers; ++i) {
         if (!address[i]) {
             continue;
@@ -6840,16 +6852,18 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
         const VAddr lo = std::min(b.lo[i], address[i]);
         const VAddr hi = std::max(b.hi[i], address[i] + size[i]);
         fits = hi - lo <= MaxSpan;
+        reason = fits ? 0 : 6;
         for (u32 j = 0; fits && j < num_buffers; ++j) {
             // A write of this object over anything the batch uses, or a read of what it writes.
             if (b.lo[j] < b.hi[j] && address[i] < b.hi[j] && b.lo[j] < address[i] + size[i] &&
                 (cs.buffers[i].is_written || b.written[j])) {
                 fits = false;
+                reason = 7;
             }
         }
     }
     if (!fits) {
-        FlushNativeBatch();
+        FlushNativeBatch(reason);
         b.base = pipeline;
         b.batched = batched;
         b.num_buffers = num_buffers;
@@ -6886,11 +6900,12 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
     return true;
 }
 
-void Rasterizer::FlushNativeBatch() {
+void Rasterizer::FlushNativeBatch(u32 reason) {
     auto& b = native_batch;
     if (!b.count) {
         return;
     }
+    ++b.flush_reasons[std::min<u32>(reason, 7)];
     FrameCapture::Poll();
     scheduler.PopPendingOperations();
     // Clusters: buffers whose ranges over the batch overlap or lie close (inputs back to back
@@ -7018,7 +7033,16 @@ void Rasterizer::FlushNativeBatch() {
                     static_cast<unsigned long long>(b.batches),
                     b.batches ? double(b.objects) / b.batches : 0.0,
                     static_cast<unsigned long long>(b.fences));
+        std::printf("Native batch flushes (5 s): idle %llu, task %llu, packet %llu, dispatch %llu, "
+                    "shape %llu, full %llu, span %llu, hazard %llu\n",
+                    (unsigned long long)b.flush_reasons[0], (unsigned long long)b.flush_reasons[1],
+                    (unsigned long long)b.flush_reasons[2], (unsigned long long)b.flush_reasons[3],
+                    (unsigned long long)b.flush_reasons[4], (unsigned long long)b.flush_reasons[5],
+                    (unsigned long long)b.flush_reasons[6], (unsigned long long)b.flush_reasons[7]);
+        b.flush_reasons = {};
         b.objects = b.batches = b.fences = 0;
         window = now;
     }
 }
+
+} // namespace Vulkan

@@ -1555,8 +1555,7 @@ const ComputePipeline* PipelineCache::GetBatchedComputePipeline(const ComputePip
             variant.pipeline.reset();
         }
     }
-    std::printf("Native batch: cs %016llx batched variant %s
-",
+    std::printf("Native batch: cs %016llx batched variant %s\n",
                 static_cast<unsigned long long>(params.hash),
                 variant.pipeline ? "ready" : (same ? "failed to build" : "refused (buffers differ)"));
     std::unique_lock lock{pipelines_mutex};
