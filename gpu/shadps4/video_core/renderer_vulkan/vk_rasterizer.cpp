@@ -1743,6 +1743,11 @@ void Rasterizer::RunNext(Common::UniqueFunction<void> task) {
 static std::array<std::atomic<u64>, 6> g_kind_packets{}, g_kind_cycles{};
 // Dispatches (BB_DISPATCH_STATS=1): before binding, binding, barriers and descriptor set, recording.
 static std::array<std::atomic<u64>, 4> g_dispatch_sections{};
+// Draws on stage B by class (BB_FRAME_STATS): depth-only (no colour target), colour.
+static std::array<std::atomic<u64>, 2> g_draw_class{}, g_draw_class_cycles{};
+// Draws on stage B by pass (colour targets, depth, size): count, cycles.
+static std::mutex g_pass_mutex;
+static std::unordered_map<u64, std::pair<u64, u64>> g_pass_stats;
 // Native batch append (BB_FRAME_STATS): sharps, hazard check, groups + written obtain, inputs,
 // table + pages.
 static std::array<std::atomic<u64>, 5> g_append_cycles{};
@@ -2034,6 +2039,31 @@ void Rasterizer::PrintPipeStats() {
                             "groups+written %.1f%%, inputs %.1f%%, table+pages %.1f%%",
                             100.0 * a[0] / cycles, 100.0 * a[1] / cycles, 100.0 * a[2] / cycles,
                             100.0 * a[3] / cycles, 100.0 * a[4] / cycles);
+            }
+        }
+        {
+            const u64 n0 = g_draw_class[0].exchange(0), n1 = g_draw_class[1].exchange(0);
+            const u64 c0 = g_draw_class_cycles[0].exchange(0), c1 = g_draw_class_cycles[1].exchange(0);
+            std::printf("\n  draws in stage B: depth-only %.0f/s %.1f%%, colour %.0f/s %.1f%%",
+                        n0 / seconds, 100.0 * c0 / cycles, n1 / seconds, 100.0 * c1 / cycles);
+            std::vector<std::pair<u64, std::pair<u64, u64>>> passes;
+            {
+                std::scoped_lock lk{g_pass_mutex};
+                passes.assign(g_pass_stats.begin(), g_pass_stats.end());
+                g_pass_stats.clear();
+            }
+            std::ranges::sort(passes, [](const auto& a, const auto& b) {
+                return a.second.second > b.second.second;
+            });
+            std::printf("\n  draw passes by stage B time (colours, depth, size):");
+            for (size_t k = 0; k < passes.size() && k < 8; ++k) {
+                const u64 key = passes[k].first;
+                std::printf(" [%llu%s %llux%llu: %.0f/s %.1f%%]",
+                            static_cast<unsigned long long>(key >> 48), (key >> 44 & 1) ? "+D" : "",
+                            static_cast<unsigned long long>(key >> 22 & 0x3fffff),
+                            static_cast<unsigned long long>(key & 0x3fffff),
+                            passes[k].second.first / seconds,
+                            100.0 * passes[k].second.second / cycles);
             }
         }
         std::printf("\n  tasks by function (exe offset):");
@@ -2505,6 +2535,21 @@ static bool SkipShader(u64 hash) {
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
+    // bbport diagnosis (BB_FRAME_STATS): stage B draws by class (depth-only / colour), cycles.
+    struct DrawClassTimer {
+        u32 cls;
+        u64 start = __rdtsc();
+        u64 pass = 0; ///< colour targets, depth, size (set at BeginRendering)
+        ~DrawClassTimer() {
+            const u64 cycles = __rdtsc() - start;
+            g_draw_class[cls].fetch_add(1, std::memory_order_relaxed);
+            g_draw_class_cycles[cls].fetch_add(cycles, std::memory_order_relaxed);
+            std::scoped_lock lk{g_pass_mutex};
+            auto& entry = g_pass_stats[pass];
+            ++entry.first;
+            entry.second += cycles;
+        }
+    } draw_class_timer{(pipeline->GetGraphicsKey().mrt_mask & 0xff) == 0 ? 0u : 1u};
     if (DrawPipe::OnStageB()) {
         FrameCapture::Poll();
         scheduler.PopPendingOperations();
@@ -2664,6 +2709,64 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     const auto state = BeginRendering(pipeline);
+    draw_class_timer.pass = u64(state.num_color_attachments) << 48 |
+                            u64(state.depth_stencil_attachment.image_view ? 1 : 0) << 44 |
+                            u64(state.width) << 22 | u64(state.height);
+    // bbport diagnosis (BB_MATERIAL_STATS=1, native batch S1): the main pass's draws - images,
+    // samplers and buffers per draw, distinct T#s and (VS, PS) pairs per frame, and how many of
+    // a frame's T#s the previous frame used too (how well a bindless slot cache would hold).
+    static const bool material_stats = [] {
+        const char* env = std::getenv("BB_MATERIAL_STATS");
+        return env && env[0] == '1';
+    }();
+    if (material_stats && state.num_color_attachments == 1 &&
+        state.depth_stencil_attachment.image_view && state.width >= 1280) {
+        static u64 frame = ~u64{0}, draws = 0, images = 0, samplers = 0, buffers = 0, frames = 0,
+                   distinct = 0, reused = 0, pairs = 0;
+        static std::unordered_set<u64> now_tsharps, last_tsharps, now_pairs;
+        static auto window = std::chrono::steady_clock::now();
+        const u64 flips = g_flips.load(std::memory_order_relaxed);
+        if (flips != frame) {
+            if (frame != ~u64{0}) {
+                ++frames;
+                distinct += now_tsharps.size();
+                pairs += now_pairs.size();
+                for (const u64 t : now_tsharps) {
+                    reused += last_tsharps.contains(t);
+                }
+                last_tsharps.swap(now_tsharps);
+            }
+            now_tsharps.clear();
+            now_pairs.clear();
+            frame = flips;
+        }
+        ++draws;
+        u64 pair = 0;
+        for (const auto* stage : pipeline->GetStages()) {
+            if (!stage) {
+                continue;
+            }
+            pair = pair * 0x9E3779B97F4A7C15ull ^ stage->pgm_hash;
+            images += stage->images.size();
+            samplers += stage->samplers.size();
+            buffers += stage->buffers.size();
+            for (const auto& image : stage->images) {
+                const auto sharp = image.GetSharp(*stage);
+                now_tsharps.insert(XXH3_64bits(&sharp, sizeof(sharp)));
+            }
+        }
+        now_pairs.insert(pair);
+        if (const auto t = std::chrono::steady_clock::now(); t - window >= std::chrono::seconds(5)) {
+            const double d = std::max<u64>(draws, 1), f = std::max<u64>(frames, 1);
+            std::printf("Material stats (main pass, 5 s): %.0f draws/frame; per draw %.1f images, "
+                        "%.1f samplers, %.1f buffers; per frame %.0f distinct T#s (%.0f%% also last "
+                        "frame), %.0f (VS, PS) pairs\n",
+                        draws / f, images / d, samplers / d, buffers / d, distinct / f,
+                        distinct ? 100.0 * reused / distinct : 0.0, pairs / f);
+            draws = images = samplers = buffers = frames = distinct = reused = pairs = 0;
+            window = t;
+        }
+    }
 
     if (!inputs_resolved) {
         ResolveVertexBuffers(pipeline, draw_prepared);

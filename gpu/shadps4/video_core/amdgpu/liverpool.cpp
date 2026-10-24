@@ -1875,11 +1875,26 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         const bool release_in_order =
             opcode == PM4ItOpcode::ReleaseMem && !release_drain &&
             reinterpret_cast<const PM4CmdReleaseMem*>(header)->data_sel != DataSelect::GdsMemStore;
+        // BB_COMPUTE_WRM_PENDING=1 (experiment, after axyl/shadPS4's WrmPartial): a WAIT_REG_MEM
+        // that a fence already handed to the draw recording thread meets passes without a drain
+        // (that thread writes the fence before anything after it), as the graphics queue does.
+        static const bool wrm_pending = [] {
+            const char* env = std::getenv("BB_COMPUTE_WRM_PENDING");
+            return env && env[0] == '1';
+        }();
+        bool wrm_passed = false;
+        if (wrm_pending && opcode == PM4ItOpcode::WaitRegMem && rasterizer) {
+            const auto* wait = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
+            u32 value;
+            wrm_passed = wait->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory &&
+                         PendingFenceValue(wait->Address<VAddr>(), value) &&
+                         wait->TestValue(value);
+        }
         const bool no_drain = opcode == PM4ItOpcode::Nop || opcode == PM4ItOpcode::SetShReg ||
                               opcode == PM4ItOpcode::SetQueueReg ||
                               opcode == PM4ItOpcode::DispatchDirect ||
                               opcode == PM4ItOpcode::IndirectBuffer || // its packets decide
-                              release_in_order;
+                              release_in_order || wrm_passed;
         // BB_COMPUTE_DRAIN_OPCODES=1 (with BB_FRAME_STATS): drains counted by opcode instead.
         static const bool by_opcode = [] {
             const char* env = std::getenv("BB_COMPUTE_DRAIN_OPCODES");
@@ -2076,6 +2091,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             // bbport: the CPU may write data for what follows once the wait is met.
             if (rasterizer) {
                 rasterizer->GetBufferCache().ForgetStreamCopies();
+            }
+            if (wrm_passed) {
+                break; // met by a fence the draw recording thread writes first
             }
             while (!wait_reg_mem->Test(regs.reg_array)) {
                 YIELD_ASC(vqid);
