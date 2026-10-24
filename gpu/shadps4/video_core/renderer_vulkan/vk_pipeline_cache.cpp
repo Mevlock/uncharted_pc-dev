@@ -1605,8 +1605,11 @@ static std::vector<u32> ScaleMovieShader(std::span<const u32> code) {
             std::memcpy(&from, &l.from, 4);
             std::memcpy(&to, &l.to, 4);
             if (word == from) {
+                // One replacement per word: at 3840x2160 1/1920 becomes 1/3840, which the next
+                // literal matched again (0.5/3840): movies showed 2x zoomed (issue #3).
                 word = to;
                 ++replaced;
+                break;
             }
         }
     }
