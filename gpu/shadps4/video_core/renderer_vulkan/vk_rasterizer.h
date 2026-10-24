@@ -573,6 +573,12 @@ private:
         u64 stream_lap = 0, stream_lo = 0, stream_hi = 0;
         /// Written buffers are obtained per object at append; all of a batch's in one buffer
         /// (an arena), at these offsets (stream_offsets holds each object's offset too).
+        /// The batch's ranges (hazards between its objects), read and written, with bounds:
+        /// outputs move forward and inputs lie elsewhere, so the bounds settle almost every check.
+        std::vector<std::pair<VAddr, VAddr>> read_ranges, write_ranges;
+        VAddr read_min = 0, read_max = 0, write_min = 0, write_max = 0;
+        /// Written ranges are obtained at the flush, merged into runs; all in one arena.
+        u64 arena_key = 0;
         const VideoCore::Buffer* written_buffer = nullptr;
         u64 written_lo = 0, written_hi = 0;
         std::vector<VAddr> lo, hi;       ///< per buffer: union over the objects

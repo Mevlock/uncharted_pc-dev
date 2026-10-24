@@ -159,6 +159,10 @@ public:
 
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
+    /// bbport (native batch): the arena an address lies in (one buffer per arena page).
+    [[nodiscard]] u64 ArenaKey(VAddr addr) const noexcept {
+        return addr >> arena_page_bits;
+    }
 
     /// bbport: whether buffers the GPU wrote cover any byte of the range. The page tracker
     /// (IsRegionGpuModified) flags whole 4 KiB pages, and so the bytes next to GPU data.
