@@ -18,6 +18,7 @@
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/landing_gate.h"
 #include "bbport_toggles.h"
+#include "bbport_trace.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -470,7 +471,9 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
             recorder_busy = true;
         }
         // current_cmdbuf only changes after SyncRecording(), which waits for this thread.
+        BbTrace::Record(BbTrace::ChunkBegin);
         chunk->Execute(current_cmdbuf);
+        BbTrace::Record(BbTrace::ChunkEnd);
         {
             std::scoped_lock lk{recorder_mutex};
             free_chunks.push_back(std::move(chunk));

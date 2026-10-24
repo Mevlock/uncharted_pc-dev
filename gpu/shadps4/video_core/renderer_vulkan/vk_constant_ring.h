@@ -9,6 +9,10 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <x86intrin.h>
 
 #include "common/assert.h"
 #include "common/types.h"
@@ -42,6 +46,7 @@ public:
         if (in_use()) {
             Retire();
             if (in_use()) {
+                ++failed_allocations;
                 return std::nullopt;
             }
         }
@@ -66,10 +71,22 @@ public:
     /// Stage B, after recording a packet whose allocations end at `end`. Stamps of one
     /// submission tick are merged: only the last end per tick is published.
     void Stamp(u64 end) {
+        const u64 tick = scheduler.CurrentTick();
         if (end == pending_end) {
+            // bbport: a full ring stops moving (its allocations fail), so the same end comes
+            // again and again: it still has to be published once its tick is submitted, or the
+            // ring never retires and stays full (every allocation failed after the first lap,
+            // ~2 million a second in U3's square). BB_RING_STALL_FIX=0: as before.
+            static const bool fix = [] {
+                const char* env = std::getenv("BB_RING_STALL_FIX");
+                return !(env && env[0] == '0');
+            }();
+            if (fix && tick != pending_tick && pending_end != last_published) {
+                Publish(pending_end, pending_tick);
+                pending_tick = tick;
+            }
             return;
         }
-        const u64 tick = scheduler.CurrentTick();
         if (tick != pending_tick && pending_end != last_published) {
             Publish(pending_end, pending_tick);
         }
@@ -90,7 +107,25 @@ private:
 
     void Retire() {
         auto* semaphore = scheduler.GetWorkSemaphore();
-        semaphore->Refresh();
+        // bbport: querying the GPU's progress is a driver call (a system call); with the ring
+        // waiting on the GPU every allocation came here (~7% of stage A in U3's square). The
+        // known tick is tried first; a query at most every 20 us (BB_RING_RETIRE_THROTTLE=0:
+        // every time, as before).
+        static const bool throttle = [] {
+            const char* env = std::getenv("BB_RING_RETIRE_THROTTLE");
+            return !(env && env[0] == '0');
+        }();
+        const u64 tail = stamps_tail.load(std::memory_order_relaxed);
+        const bool known_free = tail < stamps_head.load(std::memory_order_acquire) &&
+                                semaphore->IsFree(stamps[tail % stamps.size()].tick);
+        const u64 now = __rdtsc();
+        if (!throttle || (!known_free && now - last_refresh >= 20 * TicksPerUs())) {
+            semaphore->Refresh();
+            last_refresh = now;
+            ++refreshes;
+        }
+        ++retires;
+        PrintStats(now);
         u64 at = stamps_tail.load(std::memory_order_relaxed);
         const u64 head = stamps_head.load(std::memory_order_acquire);
         while (at < head && semaphore->IsFree(stamps[at % stamps.size()].tick)) {
@@ -99,6 +134,39 @@ private:
         }
         stamps_tail.store(at, std::memory_order_release);
     }
+
+    static u64 TicksPerUs() {
+        static const u64 ticks = [] {
+            const auto t0 = std::chrono::steady_clock::now();
+            const u64 c0 = __rdtsc();
+            while (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(2)) {
+            }
+            return std::max<u64>(1, (__rdtsc() - c0) / 2000);
+        }();
+        return ticks;
+    }
+
+    /// BB_FRAME_STATS: retire calls, driver queries and failed allocations per second.
+    void PrintStats(u64 now) {
+        static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
+        if (!stats) {
+            return;
+        }
+        if (!stats_since) {
+            stats_since = now;
+        }
+        const u64 window = 5'000'000 * TicksPerUs();
+        if (now - stats_since >= window) {
+            std::printf("Constant ring (5 s): %.0f retires/s, %.0f GPU queries/s, %.0f failed "
+                        "allocations/s\n",
+                        retires / 5.0, refreshes / 5.0, failed_allocations / 5.0);
+            retires = refreshes = failed_allocations = 0;
+            stats_since = now;
+        }
+    }
+
+    u64 last_refresh = 0;     ///< stage A
+    u64 retires = 0, refreshes = 0, failed_allocations = 0, stats_since = 0;
 
     struct StampEntry {
         u64 end;

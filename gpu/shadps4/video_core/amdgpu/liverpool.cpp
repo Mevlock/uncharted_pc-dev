@@ -9,6 +9,7 @@
 #include <time.h>
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
+#include "bbport_trace.h"
 #include "bbport_threads.h"
 #include <cstdio>
 #include <boost/preprocessor/stringize.hpp>
@@ -265,7 +266,9 @@ void Liverpool::Process(std::stop_token stoken) {
             if (not_before > std::chrono::steady_clock::now()) {
                 std::this_thread::sleep_until(not_before);
             }
+            BbTrace::Record(BbTrace::SubmissionBegin, curr_qid);
             task.resume();
+            BbTrace::Record(BbTrace::SubmissionEnd, curr_qid | (task.done() ? 0x100u : 0u));
 
             if (task.done()) {
                 task.destroy();
@@ -323,6 +326,7 @@ void Liverpool::Process(std::stop_token stoken) {
             }
         }
 
+        BbTrace::Record(BbTrace::DryBegin, submit_done);
         if (submit_done && SubmitMarkers()) {
             submit_done = false;
             RunDoneMarkers(false); // markers the dry queue reached: signalled below
@@ -352,6 +356,7 @@ void Liverpool::Process(std::stop_token stoken) {
                 work_retired = true;
             }
         }
+        BbTrace::Record(BbTrace::DryEnd);
         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
     }
 }
@@ -1629,10 +1634,18 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    if (rasterizer) {
+                    // BB_VO_NODRAIN=1 (experiment): the draw recording thread runs on by
+                    // itself (the flip that frees the label is queued there): no drain first.
+                    static const bool vo_no_drain = [] {
+                        const char* env = std::getenv("BB_VO_NODRAIN");
+                        return env && env[0] == '1';
+                    }();
+                    if (rasterizer && !vo_no_drain) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                     }
+                    BbTrace::Record(BbTrace::VoWaitBegin);
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
+                    BbTrace::Record(BbTrace::VoWaitEnd);
                     break;
                 }
                 // bbport: a fence handed to the draw recording thread counts as written: that

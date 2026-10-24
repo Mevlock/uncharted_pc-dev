@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include "bbport_toggles.h"
+#include "bbport_trace.h"
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -84,6 +85,7 @@ static constexpr u32 tessellation_offchip_buffer_size = 0x800000u;
 static void ResetSubmissionLock(Platform::InterruptId irq) {
     std::unique_lock lock{m_wait_idle};
     submission_lock = 0;
+    BbTrace::Record(BbTrace::IdleReset);
     cv_lock.notify_all();
 }
 
@@ -92,10 +94,12 @@ static void WaitGpuIdle(int site = 0) {
     // bbport diagnosis (BB_FRAME_STATS): the guest's waits here by caller (0 doorbell, 1 submit,
     // 2 submit and flip, 3 submit done).
     const auto start = std::chrono::steady_clock::now();
+    BbTrace::Record(BbTrace::GuestIdleWaitBegin, site);
     {
         std::unique_lock lock{m_wait_idle};
         cv_lock.wait(lock, [] { return submission_lock == 0; });
     }
+    BbTrace::Record(BbTrace::GuestIdleWaitEnd, site);
     BbStats::gpu_idle_waits[site].fetch_add(1, std::memory_order_relaxed);
     BbStats::gpu_idle_wait_ns[site].fetch_add(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
@@ -2423,6 +2427,7 @@ s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     if (!liverpool->IsGpuIdle()) {
         submission_lock = true;
     }
+    BbTrace::Record(BbTrace::GuestSubmitDone, submission_lock);
     liverpool->SubmitDone();
     send_init_packet = true;
     ++frames_submitted;

@@ -12,6 +12,7 @@
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "bbport_toggles.h"
+#include "bbport_trace.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
 #include "core/debug_state.h"
@@ -1165,6 +1166,10 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
         EndNativeRun(); // the batch is recorded before stage A records on its own
     }
     static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
+    BbTrace::Record(BbTrace::DrainBegin, reason | u64(line) << 16);
+    struct DrainEnd {
+        ~DrainEnd() { BbTrace::Record(BbTrace::DrainEnd); }
+    } drain_end;
     if (!stats) {
         draw_pipe->Drain(reason);
         return;
@@ -1762,10 +1767,19 @@ extern "C" char __ImageBase;
 
 void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     const u32 kind = std::min<u32>(u32(*reinterpret_cast<const PacketKind*>(data)), 5);
+    // BB_FRAME_TRACE: a task's argument also names its function (exe offset).
+    BbTrace::Record(BbTrace::PacketBegin,
+                    kind == u32(PacketKind::Task)
+                        ? kind | (reinterpret_cast<u64>(
+                                      reinterpret_cast<const TaskPacket*>(data)->task) -
+                                  reinterpret_cast<u64>(&__ImageBase))
+                                     << 8
+                        : kind);
     struct KindTimer {
         u32 kind;
         u64 start = __rdtsc();
         ~KindTimer() {
+            BbTrace::Record(BbTrace::PacketEnd, kind);
             g_kind_packets[kind].fetch_add(1, std::memory_order_relaxed);
             g_kind_cycles[kind].fetch_add(__rdtsc() - start, std::memory_order_relaxed);
         }
@@ -6292,6 +6306,7 @@ void Rasterizer::OnGuestFlip() {
     static u64 flips = 0;
     ++flips;
     g_flips.store(flips, std::memory_order_relaxed);
+    BbTrace::OnFlip();
     VertexCheckPoll();
     DrawLog::Flip(flips);
     PoolCheck::Flip();
