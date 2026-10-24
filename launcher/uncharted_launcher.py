@@ -39,7 +39,7 @@ CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.6.24'  # fork: upstream 0.3.6 + this fork's changes
+VERSION = '0.3.6.25'  # fork: upstream 0.3.6 + this fork's changes
 RELEASES_API = 'https://api.github.com/repos/Supermedo/uncharted_pc/releases/latest'
 RELEASES_PAGE = 'https://github.com/Supermedo/uncharted_pc/releases/latest'
 # Fork: no update check. The releases above are upstream's: installing one would replace this
