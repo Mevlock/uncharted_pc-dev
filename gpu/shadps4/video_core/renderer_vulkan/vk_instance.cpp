@@ -885,6 +885,43 @@ void Instance::CollectPhysicalMemoryInfo() {
         total_memory_budget += memory_props.memoryHeaps[i].size;
     }
     if (!IsIntegrated()) {
+        // bbport test setting: BB_VRAM_SIMULATE_MIB=<MiB> behaves like a card with that much VRAM.
+        // The rest is allocated as ballast (device-local memory held for the whole run, so the
+        // driver really has less room) and left out of the budget our caches size themselves by.
+        if (const char* sim = std::getenv("BB_VRAM_SIMULATE_MIB"); sim && *sim && local_memory) {
+            const u64 target = std::strtoull(sim, nullptr, 10) << 20;
+            if (target >= 1_GB && target < local_memory) {
+                u32 type = ~0u;
+                for (u32 t = 0; t < memory_props.memoryTypeCount; ++t) {
+                    const auto flags = memory_props.memoryTypes[t].propertyFlags;
+                    if ((flags & vk::MemoryPropertyFlagBits::eDeviceLocal) &&
+                        !(flags & vk::MemoryPropertyFlagBits::eHostVisible)) {
+                        type = t;
+                        break;
+                    }
+                }
+                static std::vector<vk::DeviceMemory> ballast;
+                u64 held = 0;
+                const u64 want = local_memory - target;
+                while (type != ~0u && held < want) {
+                    const u64 chunk = std::min<u64>(want - held, 512_MB);
+                    auto [result, memory] = device->allocateMemory(
+                        vk::MemoryAllocateInfo{.allocationSize = chunk, .memoryTypeIndex = type});
+                    if (result != vk::Result::eSuccess) {
+                        break;
+                    }
+                    ballast.push_back(memory);
+                    held += chunk;
+                }
+                total_memory_budget = std::min<u64>(total_memory_budget, target);
+                std::printf("GPU: simulating %llu MiB of VRAM (BB_VRAM_SIMULATE_MIB): %llu MiB held as "
+                            "ballast, budget %llu MiB\n",
+                            static_cast<unsigned long long>(target >> 20),
+                            static_cast<unsigned long long>(held >> 20),
+                            static_cast<unsigned long long>(total_memory_budget >> 20));
+                std::fflush(stdout);
+            }
+        }
         // We reserve some memory for the system.
         const u64 system_memory = std::min<u64>(total_memory_budget / 8, 1_GB);
         total_memory_budget -= system_memory;
