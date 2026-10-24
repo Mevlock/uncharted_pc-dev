@@ -866,12 +866,16 @@ static int callback_thunk(unsigned char *f, size_t moved, const void *callback) 
     size_t k=0;
     /* lea rsp, [rsp-0x80] (a hook inside a leaf function must not touch the 128 bytes below rsp
      * it keeps locals in; after drakolordx7, upstream PR #396); pushfq; push rax rcx rdx r8-r11 rbx;
-     * mov rbx, rsp; and rsp, -16; sub rsp, 0xa0 (works at a function's start and inside it) */
+     * mov rbx, rsp; and rsp, -16; sub rsp, 0xb0; mov [rsp+0x20], rbx (works at a function's start
+     * and inside it). The callback's 5th argument is rbx: the saved registers rbx r11 r10 r9 r8
+     * rdx rcx rax rflags (Umar-Qayyum-dev's raw mouse), then the 128-byte red-zone step, then (at
+     * a function's start) the return address: regs[9 + 16]. */
     static const unsigned char save[]={0x48,0x8d,0x64,0x24,0x80,0x9c,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53,0x53,
-                                       0x48,0x89,0xe3,0x48,0x83,0xe4,0xf0,0x48,0x81,0xec,0xa0,0x00,0x00,0x00};
+                                       0x48,0x89,0xe3,0x48,0x83,0xe4,0xf0,0x48,0x81,0xec,0xb0,0x00,0x00,0x00,
+                                       0x48,0x89,0x5c,0x24,0x20};
     memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
-    for (int x=0;x<8;++x) {                                     /* movdqu [rsp+0x20+16x], xmmx */
-        const uint32_t disp=0x20u+16u*(uint32_t)x;
+    for (int x=0;x<8;++x) {                                     /* movdqu [rsp+0x30+16x], xmmx */
+        const uint32_t disp=0x30u+16u*(uint32_t)x;
         t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x7f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
         memcpy(t+k,&disp,4); k+=4;
     }
@@ -882,8 +886,8 @@ static int callback_thunk(unsigned char *f, size_t moved, const void *callback) 
     t[k++]=0x4d; t[k++]=0x89; t[k++]=0xf1;                      /* mov r9, r14 */
     t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;        /* movabs rax, callback */
     t[k++]=0xff; t[k++]=0xd0;                                   /* call rax */
-    for (int x=0;x<8;++x) {                                     /* movdqu xmmx, [rsp+0x20+16x] */
-        const uint32_t disp=0x20u+16u*(uint32_t)x;
+    for (int x=0;x<8;++x) {                                     /* movdqu xmmx, [rsp+0x30+16x] */
+        const uint32_t disp=0x30u+16u*(uint32_t)x;
         t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x6f; t[k++]=(unsigned char)(0x84|x<<3); t[k++]=0x24;
         memcpy(t+k,&disp,4); k+=4;
     }
