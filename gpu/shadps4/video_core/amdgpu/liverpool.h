@@ -115,8 +115,20 @@ public:
         std::scoped_lock lk{submit_mutex};
         mapped_queues[GfxQueueId].ccb_buffer_offset = 0;
         mapped_queues[GfxQueueId].dcb_buffer_offset = 0;
+        // BB_SUBMIT_MARKERS=1: the frame ends where it stands in the graphics queue (a marker)
+        // instead of when the command thread next runs dry.
+        if (SubmitMarkers()) {
+            done_markers.push(gfx_enqueued);
+        }
         submit_done = true;
         submit_cv.notify_one();
+    }
+    static bool SubmitMarkers() {
+        static const bool on = [] {
+            const char* env = std::getenv("BB_SUBMIT_MARKERS");
+            return env && env[0] == '1';
+        }();
+        return on;
     }
 
     void WaitGpuIdle() noexcept {
@@ -333,6 +345,13 @@ private:
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
     std::queue<Common::UniqueFunction<void>> ordered_queue{}; ///< SendOrderedCommand
+    /// BB_SUBMIT_MARKERS (under submit_mutex): graphics submissions queued and done, and per
+    /// sceGnmSubmitDone the number queued before it.
+    u64 gfx_enqueued = 0, gfx_done = 0;
+    std::queue<u64> done_markers;
+    /// GPU command thread: the submission-done work for the markers the graphics queue reached
+    /// (labels written, then the guest's GPU idle interrupt). False: none reached.
+    bool RunDoneMarkers(bool signal);
     /// When the command thread took the ordered command running on this thread (statistics).
     static inline thread_local std::chrono::steady_clock::time_point ordered_picked{};
     static inline thread_local bool on_processor_thread = false;

@@ -299,20 +299,34 @@ void Liverpool::Process(std::stop_token stoken) {
                         }
                     }
                 }
-                std::scoped_lock lock{queue.m_access};
-                queue.submits.pop();
-                if (!queue.submit_times.empty()) {
-                    queue.submit_times.pop();
-                }
-                queue.front_started = false;
+                {
+                    std::scoped_lock lock{queue.m_access};
+                    queue.submits.pop();
+                    if (!queue.submit_times.empty()) {
+                        queue.submit_times.pop();
+                    }
+                    queue.front_started = false;
 
-                --num_submits;
-                std::scoped_lock lock2{submit_mutex};
-                submit_cv.notify_all();
+                    --num_submits;
+                    std::scoped_lock lock2{submit_mutex};
+                    if (curr_qid == GfxQueueId) {
+                        ++gfx_done;
+                    }
+                    submit_cv.notify_all();
+                }
+                // BB_SUBMIT_MARKERS: a frame the graphics queue just finished decoding is
+                // done for the guest now, while the next one is decoded (as the PS4's GPU
+                // idle after its own frame).
+                if (curr_qid == GfxQueueId && SubmitMarkers() && num_submits) {
+                    RunDoneMarkers(true);
+                }
             }
         }
 
-        if (submit_done) {
+        if (submit_done && SubmitMarkers()) {
+            submit_done = false;
+            RunDoneMarkers(false); // markers the dry queue reached: signalled below
+        } else if (submit_done) {
             VideoCore::EndCapture();
             if (rasterizer) {
                 rasterizer->OnSubmit();
@@ -2200,8 +2214,39 @@ void Liverpool::SubmitGfx(std::span<const u32> dcb, std::span<const u32> ccb) {
 
     std::scoped_lock lk{submit_mutex};
     ++num_submits;
+    ++gfx_enqueued;
     work_retired = false;
     submit_cv.notify_one();
+}
+
+bool Liverpool::RunDoneMarkers(bool signal) {
+    u32 reached = 0;
+    {
+        std::scoped_lock lk{submit_mutex};
+        while (!done_markers.empty() && done_markers.front() <= gfx_done) {
+            done_markers.pop();
+            ++reached;
+        }
+    }
+    if (!reached) {
+        return false;
+    }
+    VideoCore::EndCapture();
+    if (rasterizer) {
+        rasterizer->OnSubmit();
+        rasterizer->Flush();
+    }
+    if (!signal) {
+        return true; // the queue ran dry: the end of the loop drains and signals
+    }
+    // As at the end of the loop: the labels of everything decoded so far are written before
+    // the guest hears of GPU idle (it frees the objects holding them).
+    if (rasterizer) {
+        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonSubmissionEnd);
+        rasterizer->WaitDeferredSignals();
+    }
+    Platform::IrqC::Instance()->Signal(Platform::InterruptId::GpuIdle);
+    return true;
 }
 
 void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
