@@ -24,6 +24,7 @@
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "bbport_focus_fix.h"
 #include "bbport_nan_guard.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
@@ -446,7 +447,8 @@ void PipelineCache::WarmUpThread() {
                             &checksum) ||
             Shader::Backend::SPIRV::IsForcedShader(stage.program->info.pgm_hash) ||
             BbMovieShaderScaled(stage.program->info.pgm_hash) ||
-            BbNanGuard::BloomClampShader(stage.program->info.pgm_hash)) {
+            BbNanGuard::BloomClampShader(stage.program->info.pgm_hash) ||
+            BbFocusFix::FocusCentreShader(stage.program->info.pgm_hash)) {
             stage.program.reset();
             return;
         }
