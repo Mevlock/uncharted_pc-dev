@@ -4973,6 +4973,36 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
     // will need its full emulation anyways.
     const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
 
+    // bbport: each V# read once (BB_META_ONE_PASS=0: twice, as before): the reads decide in
+    // the first loop, the writes are only looked at when no read is metadata.
+    static const bool one_pass = [] {
+        const char* env = std::getenv("BB_META_ONE_PASS");
+        return !(env && env[0] == '0');
+    }();
+    if (one_pass) {
+        boost::container::static_vector<VAddr, Shader::NUM_BUFFERS> written;
+        for (const auto& desc : info.buffers) {
+            if (desc.IsSpecial()) {
+                continue;
+            }
+            const VAddr address = desc.GetSharp(info).base_address;
+            if (!desc.is_written) {
+                if (texture_cache.IsMeta(address)) {
+                    return false;
+                }
+            } else if (!info.has_bitwise_xor) {
+                written.push_back(address);
+            }
+        }
+        for (const VAddr address : written) {
+            if (texture_cache.ClearMeta(address)) {
+                LOG_TRACE(Render_Vulkan, "Metadata update skipped");
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Assume if a shader reads metadata, it is a copy shader.
     for (const auto& desc : info.buffers) {
         const VAddr address = desc.GetSharp(info).base_address;
@@ -5507,7 +5537,16 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     return std::min<u64>(size, u64(stride) * (records - 1) + element);
                 }();
                 // A coalesced span is tracked once, as a whole.
-                const bool track = !in_span || !span.tracked;
+                // bbport: read-only data in the stream buffer was written by the host into a
+                // region the GPU does not write while it is in use (laps and ticks guard reuse):
+                // no barrier can be needed for it. BB_STREAM_NO_TRACK=0: tracked as before.
+                static const bool stream_no_track = [] {
+                    const char* env = std::getenv("BB_STREAM_NO_TRACK");
+                    return !(env && env[0] == '0');
+                }();
+                const bool track = (!in_span || !span.tracked) &&
+                                   !(stream_no_track && !desc.is_written &&
+                                     buffer == &buffer_cache.GetStreamBuffer());
                 const u64 track_offset = in_span ? span.offset : offset;
                 const u64 track_size = in_span ? span.hi - span.lo : tracked_size;
                 span.tracked |= in_span;
