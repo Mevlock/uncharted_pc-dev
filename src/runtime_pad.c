@@ -352,6 +352,7 @@ static float heading_of(const float *dir) { return SDL_atan2f(-dir[0],-dir[2])*5
 static volatile int follow_direct=1;
 static float follow_kept=1.0f;            /* average fraction of a turn still there the next frame */
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
+static volatile int aim_stick_fallback; /* raw aim: the aiming camera puts its direction back (U1): the stick turns it */
 static int raw_aim_armed(uint64_t now) {
     return aim_held && aim_direct_us && (now-aim_direct_us<1000000 || now-aim_press_us<1500000);
 }
@@ -609,41 +610,99 @@ static void raw_aim(const char *game, uint64_t controller, const uint64_t *regs,
      * changes (aim assist, recoil) stay. */
     /* Two aiming cameras can also take turns within one frame (blending): each controller keeps
      * how much of this press's turns it already has, so each gets every turn exactly once. */
+    /* A turn counts as given once the controller keeps it. U1 sometimes starts an aim press with an
+     * aiming camera whose direction the game puts back every frame until it swaps in the next one
+     * (0.3-0.5 s, players: "the aim is locked for a second each time you aim"): turns given to it
+     * were counted and lost. A direction that comes back exactly as it was before the turn marks
+     * such a camera: while it is updated the mouse goes to the right stick instead (the old
+     * aiming, aim_stick_fallback), and the turns it threw away are dropped (no jump later). It is
+     * also the camera shown while the game blends aiming in (taking turns with one that keeps
+     * them, every frame): giving the mouse to the keeping one only (the stick off) made the aim
+     * follow 40-160 ms late. */
     static uint64_t session_press;
     static float turned_yaw, turned_pitch; /* the mouse's turns in this aim press (degrees) */
-    static struct { uint64_t controller, last_us; float yaw, pitch; } given[4];
+    static struct aim_given {
+        uint64_t controller, last_us;
+        float yaw, pitch;                  /* turns the controller's direction holds */
+        float sent_yaw, sent_pitch;        /* turned last time, not yet known to be kept */
+        float before[3];                   /* its direction before that turn */
+        int puts_back;                     /* it threw a turn away: the stick turns it */
+    } given[4];
+    static int last_slot=-1;
     if (session_press!=aim_press_us) {
         session_press=aim_press_us;
         turned_yaw=turned_pitch=0.0f;
         memset(given,0,sizeof(given));
+        last_slot=-1;
+        aim_stick_fallback=0;
     }
-    if (!aim_held) return;
+    if (!aim_held) { aim_stick_fallback=0; return; }
     int slot=0;
     for (int i=0;i<4;++i) {
         if (given[i].controller==controller) { slot=i; break; }
         if (given[i].last_us<given[slot].last_us) slot=i;
     }
-    /* A new controller that starts where the last one ended (U1 swaps aiming cameras while aiming)
-     * copied the turns already; one that starts elsewhere (after a roll: the game's own direction)
-     * gets them. */
-    static float last_dir[3];
-    static int have_last;
-    if (given[slot].controller!=controller) {
-        given[slot].controller=controller;
-        given[slot].yaw=given[slot].pitch=0.0f;
-        if (have_last && dir[0]*last_dir[0]+dir[1]*last_dir[1]+dir[2]*last_dir[2]>0.9986f) { /* within 3 degrees */
-            given[slot].yaw=turned_yaw; given[slot].pitch=turned_pitch;
+    #define AIM_DOT(a,b) ((a)[0]*(b)[0]+(a)[1]*(b)[1]+(a)[2]*(b)[2])
+    #define AIM_UNCHANGED(a,b) (SDL_fabsf((a)[0]-(b)[0])+SDL_fabsf((a)[1]-(b)[1])+SDL_fabsf((a)[2]-(b)[2])<1e-4f)
+    struct aim_given *g=&given[slot];
+    if (g->controller==controller) {
+        /* the last turn: kept unless the direction came back as it was before it */
+        if (g->sent_yaw!=0.0f || g->sent_pitch!=0.0f) {
+            /* U1 only: its joypad hook is where the stick fallback turns the camera */
+            if (game[1]=='1' && AIM_UNCHANGED(dir,g->before)) {
+                if (!g->puts_back && mouse_debug())
+                    printf("Mouse: aim controller %#llx puts its direction back: the stick turns it\n",(unsigned long long)controller);
+                g->puts_back=1;
+                turned_yaw=g->yaw; turned_pitch=g->pitch;
+            } else {
+                g->yaw+=g->sent_yaw; g->pitch+=g->sent_pitch;
+            }
         }
+    } else {
+        /* A new controller that starts where the last one ended (U1 swaps aiming cameras while
+         * aiming) holds that one's kept turns, and its last turn too when it starts where that
+         * turn pointed; one that starts elsewhere (after a roll: the game's own direction) holds none. */
+        float yaw0=0.0f, pitch0=0.0f;
+        if (last_slot>=0) {
+            const struct aim_given *p=&given[last_slot];
+            float turned_dir[3]={p->before[0],p->before[1],p->before[2]};
+            if (p->sent_yaw!=0.0f || p->sent_pitch!=0.0f) aim_turn(turned_dir,p->sent_yaw,p->sent_pitch);
+            const float to_before=AIM_DOT(dir,p->before), to_turned=AIM_DOT(dir,turned_dir);
+            if (to_turned>0.9986f && to_turned>=to_before) { /* within 3 degrees */
+                yaw0=p->yaw+p->sent_yaw; pitch0=p->pitch+p->sent_pitch;
+            } else if (to_before>0.9986f) {
+                yaw0=p->yaw; pitch0=p->pitch;
+            }
+        }
+        memset(g,0,sizeof(*g));
+        g->controller=controller;
+        g->yaw=yaw0; g->pitch=pitch0;
     }
-    given[slot].last_us=now;
+    #undef AIM_DOT
+    #undef AIM_UNCHANGED
+    g->last_us=now;
+    g->before[0]=dir[0]; g->before[1]=dir[1]; g->before[2]=dir[2];
+    last_slot=slot;
+    /* U1 blends aiming in from the follow camera (shown mixed, the aiming camera's share growing):
+     * a turn of the aiming camera alone showed 250 ms late (measured on screen), the stick
+     * turns the shown view at once (130 ms, as a controller). The stick aims for the start of
+     * each press (BB_AIM_STICK_MS, 400; 0: off), then the mouse turns 1:1. */
+    static int stick_ms=-1;
+    if (stick_ms<0) { const char *e=getenv("BB_AIM_STICK_MS"); stick_ms=e ? atoi(e) : 400; }
+    const int blending=game[1]=='1' && stick_ms>0 && now-aim_press_us<(uint64_t)stick_ms*1000;
+    aim_stick_fallback=g->puts_back || blending;
+    if (g->puts_back || blending) { /* the stick has this motion */
+        turned_yaw=g->yaw; turned_pitch=g->pitch;
+        g->sent_yaw=g->sent_pitch=0.0f;
+        return;
+    }
     if (dx!=0.0f || dy!=0.0f) {
         turned_yaw+=dx*k;
         turned_pitch+=-(input.mouse_invert_y ? -dy : dy)*k;
     }
-    const float yaw=turned_yaw-given[slot].yaw, pitch=turned_pitch-given[slot].pitch;
+    const float yaw=turned_yaw-g->yaw, pitch=turned_pitch-g->pitch;
+    g->sent_yaw=yaw; g->sent_pitch=pitch;
     if (yaw!=0.0f || pitch!=0.0f) aim_turn(dir,yaw,pitch);
-    given[slot].yaw=turned_yaw; given[slot].pitch=turned_pitch;
-    last_dir[0]=dir[0]; last_dir[1]=dir[1]; last_dir[2]=dir[2]; have_last=1;
 }
 static void __attribute__((ms_abi)) u1_102_aim_controller_c(uint64_t output, uint64_t controller, uint64_t image,
                                                             uint64_t r14, const uint64_t *regs) {
@@ -905,7 +964,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
          * measured in U1: 45 x^2 degrees/s up to x = 1, then about 54 x - 9 (x = 3: 152, x = 6: 324) */
         const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity/dt;
         const int following=camera_hook_us && now-camera_hook_us<50000;
-        if (raw_aim_armed(now)) dx=dy=0.0f; /* raw aim turns it */
+        if (raw_aim_armed(now) && !aim_stick_fallback) dx=dy=0.0f; /* raw aim turns it */
         float push=0.0f;
         if (!aim_held && following && follow_direct) { /* the follow camera turned itself */
             dx=dy=0.0f;
