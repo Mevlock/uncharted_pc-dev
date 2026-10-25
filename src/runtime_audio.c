@@ -14,6 +14,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdarg.h>
 #include <SDL3/SDL.h>
 
 #define PORTS 25
@@ -62,13 +63,90 @@ static void sleep_until(uint64_t deadline) {
     while (clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&t,NULL)) {}
 #endif
 }
+/* One Runtime line, flushed so it keeps its place between the stdout and stderr lines of the log. */
+static void audio_note(const char *format, ...) __attribute__((format(printf,1,2)));
+static void audio_note(const char *format, ...) {
+    va_list args;
+    va_start(args,format);
+    vprintf(format,args);
+    va_end(args);
+    fflush(stdout);
+}
+static pthread_mutex_t sdl_lock=PTHREAD_MUTEX_INITIALIZER; /* device queries vs. the driver switch; after table_lock */
+static int explicit_driver; /* SDL_AUDIO_DRIVER or BB_AUDIO names the backend: never switch away from it */
 static int sdl_audio(void) {
     if (sdl_ready<0) {
-        const char *mode=getenv("BB_AUDIO");
+        const char *mode=getenv("BB_AUDIO"), *hint=SDL_GetHint(SDL_HINT_AUDIO_DRIVER);
+        explicit_driver=(hint && *hint) || (mode && *mode && strcmp(mode,"none"));
         sdl_ready = (!mode || strcmp(mode,"none")) && SDL_InitSubSystem(SDL_INIT_AUDIO);
-        printf("Runtime: audio backend %s\n", sdl_ready ? SDL_GetCurrentAudioDriver() : "timer (silent)");
+        audio_note("Runtime: audio backend %s\n", sdl_ready ? SDL_GetCurrentAudioDriver() : "timer (silent)");
     }
     return sdl_ready;
+}
+static SDL_AudioStream *open_with(const SDL_AudioSpec *device, const SDL_AudioSpec *input) {
+    SDL_AudioStream *stream=SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,device,NULL,NULL);
+    /* The game's samples keep their own format; SDL converts them to what the device took. */
+    if (stream && device!=input && !SDL_SetAudioStreamFormat(stream,input,NULL)) {
+        SDL_DestroyAudioStream(stream);
+        return NULL;
+    }
+    return stream;
+}
+static const char *format_name(SDL_AudioFormat f) { return f==SDL_AUDIO_F32 ? "float" : "S16"; }
+/* The requested format first, then plain stereo S16 at 48000 and 44100 Hz. Once a plain format
+ * worked, later ports start with it. Needs table_lock. */
+static SDL_AudioStream *open_formats(int id, const SDL_AudioSpec *want, int *plain) {
+    static const SDL_AudioSpec plains[2]={{SDL_AUDIO_S16,2,48000},{SDL_AUDIO_S16,2,44100}};
+    SDL_AudioStream *stream;
+    if (*plain<0) {
+        if ((stream=open_with(want,want))) return stream;
+        audio_note("Runtime: audio port %d: SDL could not open the device as %d ch %s %d Hz (%s)\n",
+                   id,want->channels,format_name(want->format),want->freq,SDL_GetError());
+    }
+    for (int i=*plain<0 ? 0 : *plain;i<2;++i) {
+        if ((stream=open_with(&plains[i],want))) {
+            *plain=i;
+            audio_note("Runtime: audio port %d: opened the device as stereo S16 %d Hz instead (SDL converts the game's audio)\n",
+                       id,plains[i].freq);
+            return stream;
+        }
+        audio_note("Runtime: audio port %d: SDL could not open the device as stereo S16 %d Hz either (%s)\n",
+                   id,plains[i].freq,SDL_GetError());
+    }
+    return NULL;
+}
+/* Opens the stream of a new port: requested format, plain formats, then (once per process, when
+ * the user did not pick a backend) SDL's DirectSound driver in place of WASAPI. SDL3 has no winmm
+ * driver. NULL means the port runs on the timer sink. Needs table_lock. */
+static SDL_AudioStream *open_stream(int id, const SDL_AudioSpec *want) {
+    static int plain=-1, switched;
+    SDL_AudioStream *stream=open_formats(id,want,&plain);
+    const char *driver=SDL_GetCurrentAudioDriver();
+    if (stream || switched || explicit_driver || !driver || strcmp(driver,"wasapi")) return stream;
+    for (int i=0;i<PORTS;++i) if (ports[i].stream) {
+        audio_note("Runtime: audio port %d: WASAPI failed, but port %d is playing on it; keeping the driver\n",id,i);
+        return NULL;
+    }
+    /* Quitting SDL audio drops every stream and device, which is why no other port may hold one. */
+    switched=1;
+    audio_note("Runtime: audio port %d: WASAPI failed; switching SDL audio to the directsound driver\n",id);
+    pthread_mutex_lock(&sdl_lock);
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    SDL_SetHint(SDL_HINT_AUDIO_DRIVER,"directsound");
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        audio_note("Runtime: audio: the directsound driver failed to start (%s); back to the default driver\n",SDL_GetError());
+        SDL_ResetHint(SDL_HINT_AUDIO_DRIVER);
+        if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            audio_note("Runtime: audio: SDL audio can not be restarted (%s); audio is silent\n",SDL_GetError());
+            sdl_ready=0;
+        }
+    } else audio_note("Runtime: audio backend %s (directsound replaces wasapi for every port from now on)\n",SDL_GetCurrentAudioDriver());
+    pthread_mutex_unlock(&sdl_lock);
+    if (!sdl_ready) return NULL;
+    plain=-1;
+    stream=open_formats(id,want,&plain);
+    if (stream) audio_note("Runtime: audio port %d: sound works on the directsound driver\n",id);
+    return stream;
 }
 static int port_range(int type, int *first, int *last) {
     switch (type) {
@@ -120,13 +198,18 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
         /* The games are told the output is stereo (sceAudioOutGetPortState) and fill only the
            front pair of 8-channel buffers. SDL's 7.1 to stereo downmix scales that pair by
            about 0.3: on a stereo device everything played far too quietly. Fold here instead. */
+        /* A device whose format can't be read (WASAPI fails on some sound cards: the case the
+           fallback below is for) counts as stereo. The query holds sdl_lock: another port may be
+           switching the driver. */
         SDL_AudioSpec device={0};
-        p->fold_stereo = p->channels==8 &&
-            SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&device,NULL) && device.channels<8;
+        pthread_mutex_lock(&sdl_lock);
+        const int known=SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&device,NULL);
+        pthread_mutex_unlock(&sdl_lock);
+        p->fold_stereo = p->channels==8 && (!known || device.channels<8);
         SDL_AudioSpec spec={p->is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16, p->fold_stereo ? 2 : p->channels, 48000};
-        p->stream=SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&spec,NULL,NULL);
+        p->stream=open_stream(id,&spec);
         if (p->stream) SDL_ResumeAudioStreamDevice(p->stream);
-        else fprintf(stderr,"Runtime: SDL audio stream failed (%s); port %d uses the timer sink\n",SDL_GetError(),id);
+        else { fflush(stdout); fprintf(stderr,"Runtime: SDL audio stream failed (%s); port %d uses the timer sink\n",SDL_GetError(),id); }
     }
     p->stats=getenv("BB_AUDIO_STATS")!=NULL;
     const char *dump=getenv("BB_AUDIO_DUMP");
