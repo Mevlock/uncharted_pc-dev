@@ -55,6 +55,13 @@ struct Profile {
     /// flat buffer holds [stride][per object: buffer offsets, user data, flat data] and each
     /// workgroup reads its object's entry (Rasterizer::FlushNativeBatch).
     bool batched_compute{};
+    /// bbport (draw batching): a vertex + fragment pair drawing a run of guest draws with one
+    /// indirect multi-draw. Draw i's buffer offsets, user data and flat data are entry i of a
+    /// table in each stage's flat buffer (as batched_compute): the vertex shader finds it with
+    /// the DrawIndex built-in and hands it to the fragment shader as a flat varying at
+    /// BatchDrawLocation.
+    bool batched_graphics{};
+    static constexpr u32 BatchDrawLocation = 29;
     bool needs_unorm_fixup{};
     bool needs_clip_distance_emulation{};
     bool supports_shader_stencil_export{};

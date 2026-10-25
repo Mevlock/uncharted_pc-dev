@@ -49,7 +49,7 @@ static std::pair<Id, bool> OutputAttrComponentType(EmitContext& ctx, IR::Attribu
 }
 
 Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg) {
-    if (ctx.profile.batched_compute) {
+    if (Sirit::ValidId(ctx.batch_ud_base)) {
         // Native batch: this workgroup's object's user data (DefineBufferProperties).
         const Id ud_reg{ctx.EmitFlatbufferLoadRaw(ctx.OpIAdd(
             ctx.U32[1], ctx.batch_ud_base, ctx.ConstU32(ctx.info.ud_mask.Index(reg))))};

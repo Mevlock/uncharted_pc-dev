@@ -140,6 +140,14 @@ struct DynamicState {
         bool feedback_loop_enabled : 1;
     } dirty_state{};
 
+public:
+    /// bbport diagnosis (BB_DRAW_BATCH_DIAG): the dirty flags as bits, in declaration order.
+    u32 DirtyBits() const {
+        u32 bits = 0;
+        std::memcpy(&bits, &dirty_state, std::min(sizeof(bits), sizeof(dirty_state)));
+        return bits;
+    }
+
     Viewports viewports{};
     Scissors scissors{};
 
@@ -730,7 +738,20 @@ public:
     /// recording this first waits until all commands passed to Record() are recorded, then
     /// records directly (Record() included, so callers may mix both) until the next
     /// KickRecording() or submission.
+    /// bbport (draw batching): while a run of batched draws is open, the next command recorded
+    /// by anyone first records the run (batch_flush), so the order of commands is kept.
+    bool batch_open = false;
+    void (*batch_flush)(void*) = nullptr;
+    void* batch_flush_context = nullptr;
+    void FlushOpenBatch() {
+        if (batch_open) [[unlikely]] {
+            batch_open = false;
+            batch_flush(batch_flush_context);
+        }
+    }
+
     [[gnu::noinline]] vk::CommandBuffer CommandBuffer() {
+        FlushOpenBatch();
         if (recording_threaded && !direct_mode) {
             SyncRecording();
             direct_mode = true;
@@ -752,6 +773,7 @@ public:
     /// everything it uses (capture by value): it may run later on the recording thread.
     template <typename Func>
     void Record(Func&& func) {
+        FlushOpenBatch();
         if (!recording_threaded || direct_mode) {
             func(current_cmdbuf);
             return;
@@ -845,11 +867,16 @@ public:
     /// work anyway, so small copies cost no wakeup); WaitHostCopies() covers it.
     template <typename Func>
     void RecordHostCopy(Func&& copy) {
+        // bbport (draw batching): a host copy writes memory just reserved, which no open run of
+        // batched draws reads: it goes ahead of the run instead of ending it.
+        const bool open = batch_open;
+        batch_open = false;
         Record([copy = std::forward<Func>(copy), this,
                 seq = ++host_copies_issued](vk::CommandBuffer) {
             copy();
             host_copies_done.store(seq, std::memory_order_release);
         });
+        batch_open = open;
     }
 
     /// bbport: runs `signal` once the guest memory copies issued so far are done, without

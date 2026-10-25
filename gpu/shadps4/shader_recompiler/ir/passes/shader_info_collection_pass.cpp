@@ -194,6 +194,15 @@ void CollectShaderInfoPass(IR::Program& program, const Profile& profile) {
         });
         LOG_ERROR(Render, "Enabling DMA for shader {:#x}", info.pgm_hash);
     }
+
+    // bbport (draw batching): the table lives in the flat buffer; a stage without one gets it,
+    // after its other buffers (their bindings stay those of the normal variant).
+    if (profile.batched_graphics && !info.has_readconst) {
+        info.buffers.push_back({
+            .used_types = IR::Type::U32,
+            .buffer_type = BufferType::Flatbuf,
+        });
+    }
 }
 
 } // namespace Shader::Optimization

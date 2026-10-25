@@ -177,6 +177,9 @@ public:
     /// just selected for the current compute registers (GPU command thread). Compiled once;
     /// null when the program cannot run batched. Never saved.
     const ComputePipeline* GetBatchedComputePipeline(const ComputePipeline* base);
+    /// bbport (draw batching): the batched variant of `base` (vertex + fragment only), built from
+    /// the command processor's registers of a draw using `base`. GPU command thread only.
+    const GraphicsPipeline* GetBatchedGraphicsPipeline(const GraphicsPipeline* base);
     /// The batched variant of `base` if GetBatchedComputePipeline built one (any thread).
     const ComputePipeline* FindBatchedComputePipeline(const ComputePipeline* base) {
         std::shared_lock lock{pipelines_mutex};
@@ -275,6 +278,12 @@ private:
         std::unique_ptr<ComputePipeline> pipeline;
     };
     std::unordered_map<const ComputePipeline*, BatchedVariant> batched_pipelines;
+    Shader::Profile batched_graphics_profile{}; ///< profile with batched_graphics
+    struct BatchedGraphicsVariant {
+        std::array<std::unique_ptr<Shader::Info>, 2> infos; ///< fragment, vertex
+        std::unique_ptr<GraphicsPipeline> pipeline;
+    };
+    std::vector<BatchedGraphicsVariant> batched_graphics;
     Shader::Pools pools;
     tsl::robin_map<size_t, std::unique_ptr<Program>> program_cache;
     /// bbport: exclusive for program/permutation insertions, shared for worker lookups.

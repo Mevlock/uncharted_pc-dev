@@ -233,11 +233,22 @@ Id EmitContext::GetBufferSize(const u32 sharp_idx) {
 }
 
 void EmitContext::DefineBufferProperties() {
-    if (profile.batched_compute) {
+    if (profile.batched_compute || profile.batched_graphics) {
         // Native batch: workgroup x is the object; its entry in the flat buffer starts at
         // 1 + x * stride (stride in dword 0) with one 32-bit byte offset per buffer (all of
         // info.buffers, specials 0), then the user data registers, then the flat data.
-        const Id group{OpCompositeExtract(U32[1], OpLoad(U32[3], workgroup_id), 0)};
+        // Draw batching: the draw's index (DrawIndex, handed to the fragment shader) instead.
+        Id group;
+        if (profile.batched_compute) {
+            group = OpCompositeExtract(U32[1], OpLoad(U32[3], workgroup_id), 0);
+        } else if (sw_stage == SwStage::Fragment) {
+            group = OpLoad(U32[1], batch_draw_in);
+        } else {
+            group = OpLoad(U32[1], batch_draw_index);
+            if (Sirit::ValidId(batch_draw_out)) {
+                OpStore(batch_draw_out, group);
+            }
+        }
         const Id stride{EmitFlatbufferLoadRaw(u32_zero_value)};
         batch_entry = OpIAdd(U32[1], ConstU32(1U), OpIMul(U32[1], group, stride));
         Name(batch_entry, "batch_entry");
@@ -246,7 +257,7 @@ void EmitContext::DefineBufferProperties() {
         batch_flat_base =
             OpIAdd(U32[1], batch_ud_base, ConstU32(static_cast<u32>(info.ud_mask.NumRegs())));
     }
-    if (!profile.needs_buffer_offsets && !profile.batched_compute) {
+    if (!profile.needs_buffer_offsets && !Sirit::ValidId(batch_entry)) {
         return;
     }
     for (u32 i = 0; i < buffers.size(); i++) {
@@ -258,7 +269,7 @@ void EmitContext::DefineBufferProperties() {
         }
 
         Id buf_offset;
-        if (profile.batched_compute) {
+        if (Sirit::ValidId(batch_entry)) {
             buf_offset = EmitFlatbufferLoadRaw(OpIAdd(U32[1], batch_entry, ConstU32(i)));
         } else {
             const u32 half = PushData::BufOffsetIndex + (binding >> 4);
@@ -343,6 +354,11 @@ void EmitContext::DefineInputs() {
     case SwStage::Vertex: {
         vertex_index = DefineVariable(U32[1], spv::BuiltIn::VertexIndex, spv::StorageClass::Input);
         instance_id = DefineVariable(U32[1], spv::BuiltIn::InstanceIndex, spv::StorageClass::Input);
+        if (profile.batched_graphics) {
+            batch_draw_index =
+                DefineVariable(U32[1], spv::BuiltIn::DrawIndex, spv::StorageClass::Input);
+            Name(batch_draw_index, "batch_draw_index");
+        }
         if (info.loads.Get(IR::Attribute::BaseVertex)) {
             base_vertex =
                 DefineVariable(U32[1], spv::BuiltIn::BaseVertex, spv::StorageClass::Input);
@@ -371,6 +387,11 @@ void EmitContext::DefineInputs() {
         break;
     }
     case SwStage::Fragment: {
+        if (profile.batched_graphics) {
+            batch_draw_in = DefineInput(U32[1], Profile::BatchDrawLocation);
+            Decorate(batch_draw_in, spv::Decoration::Flat);
+            Name(batch_draw_in, "batch_draw_in");
+        }
         if (FragmentMotion() || info.loads.GetAny(IR::Attribute::FragCoord) ||
             (info.loads.GetAny(IR::Attribute::BaryCoordPullModel) &&
              !profile.supports_amd_shader_explicit_vertex_parameter)) {
@@ -664,6 +685,10 @@ void EmitContext::DefineOutputs() {
                 ++num_attrs;
             }
 
+            if (profile.batched_graphics) {
+                batch_draw_out = DefineOutput(U32[1], Profile::BatchDrawLocation);
+                Name(batch_draw_out, "batch_draw_out");
+            }
             if (VertexMotion()) {
                 motion_out_cur = DefineOutput(F32[4], MotionVectors::CurrentLocation);
                 motion_out_prev = DefineOutput(F32[4], MotionVectors::PreviousLocation);

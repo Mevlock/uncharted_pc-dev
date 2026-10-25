@@ -297,6 +297,44 @@ private:
                              u32 stage_index);
     static bool RingCollectOne(void* context, VAddr address, u64& size, const u8* source,
                                u64& ring_offset, u64& ring_end);
+    /// bbport (draw batching, BB_DRAW_BATCH=1): consecutive draws with the same pipeline, the
+    /// same buffer, image and sampler objects and the same state are drawn by the pipeline's
+    /// batched variant with one indexed indirect multi-draw (AppendDrawBatch, FlushDrawBatch).
+    struct DrawBatch {
+        const GraphicsPipeline* base = nullptr;
+        const GraphicsPipeline* variant = nullptr;
+        u64 key = 0;
+        Shader::PushData push{};
+        vk::Buffer index_buffer{};
+        vk::IndexType index_type{};
+        u32 index_size = 0;
+        u32 num_buffers = 0;                    ///< all stages
+        std::array<u32, 2> stage_buffers{};     ///< fragment, vertex
+        std::array<u32, 2> stage_first{};       ///< first buffer of the stage (all-stage index)
+        std::array<u32, 2> stage_words{};       ///< user data + flat data words per draw
+        std::array<u32, 2> stage_ud{};
+        u32 fs_bindings = 0;                    ///< the normal variant's fragment bindings
+        std::vector<u8> flat_buffer;            ///< per buffer: a flat buffer (the table)
+        std::vector<vk::DescriptorBufferInfo> buffers; ///< draws x num_buffers, exact offsets
+        std::vector<vk::WriteDescriptorSet> image_writes; ///< the first draw's
+        std::vector<vk::DescriptorImageInfo> image_infos;
+        /// The first draw's own writes (normal variant): a run of one draw is drawn as usual.
+        std::vector<vk::WriteDescriptorSet> first_writes;
+        std::vector<vk::DescriptorBufferInfo> first_buffers;
+        /// Flush scratch (kept: a flush per run, tens of thousands a second).
+        std::vector<u64> lo, hi;
+        std::vector<u32> table;
+        std::vector<vk::DescriptorBufferInfo> infos;
+        std::vector<vk::WriteDescriptorSet> writes;
+        std::array<std::vector<u32>, 2> data;   ///< per stage: draws x stage_words
+        std::vector<vk::DrawIndexedIndirectCommand> commands;
+        std::vector<u64> index_offsets;
+        u64 candidates = 0, batched = 0, runs = 0, run_draws = 0; ///< statistics
+        std::array<u64, 8> breaks{};
+    } draw_batch;
+    bool AppendDrawBatch(const GraphicsPipeline* pipeline, const GraphicsPipeline* variant);
+    void FlushDrawBatch();
+    static void FlushDrawBatchHook(void* self);
     void CollectRingBindings(const Shader::Info& stage, const PreparedDraw* prepared,
                              boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>& out);
     void PrintPipeStats();

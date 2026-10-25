@@ -721,7 +721,13 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         }
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
         draw_pipe->idle_context = this;
-        draw_pipe->on_idle = [](void* self) { static_cast<Rasterizer*>(self)->scheduler.KickOwed(); };
+        draw_pipe->on_idle = [](void* self) {
+            auto& r = *static_cast<Rasterizer*>(self);
+            r.scheduler.FlushOpenBatch(); // stage B ran dry: an open run of batched draws goes
+            r.scheduler.KickOwed();
+        };
+        scheduler.batch_flush = &FlushDrawBatchHook;
+        scheduler.batch_flush_context = this;
     }
     // bbport: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
@@ -1274,6 +1280,370 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
     return false;
 }
 
+bool Rasterizer::AppendDrawBatch(const GraphicsPipeline* pipeline,
+                                 const GraphicsPipeline* variant) {
+    auto& b = draw_batch;
+    const auto& regs = Regs();
+    const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
+    const auto* fs = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const auto [vertex_offset, instance_offset] =
+        GetDrawOffsets(regs, vs, pipeline->GetFetchShader());
+    const auto brk = [&](u32 why) {
+        ++b.breaks[std::min<u32>(why, 7)];
+        return false;
+    };
+    if (!fs || instance_offset != 0) {
+        FlushDrawBatch();
+        return brk(0);
+    }
+    const u32 num_buffers = static_cast<u32>(buffer_infos.size());
+    if (num_buffers != fs->buffers.size() + vs.buffers.size()) {
+        FlushDrawBatch();
+        return brk(1);
+    }
+    // Same objects: every buffer, image view, sampler, the index buffer and its type.
+    u64 key = reinterpret_cast<u64>(pipeline);
+    for (const auto& info : buffer_infos) {
+        key = key * 0x100000001B3ull ^ reinterpret_cast<u64>(VkBuffer(info.buffer));
+        if (info.buffer && info.range == VK_WHOLE_SIZE) {
+            FlushDrawBatch();
+            return brk(2);
+        }
+    }
+    for (const auto& write : set_writes) {
+        if (!write.pImageInfo) {
+            continue;
+        }
+        for (u32 j = 0; j < write.descriptorCount; ++j) {
+            const auto& info = write.pImageInfo[j];
+            key = key * 0x100000001B3ull ^ reinterpret_cast<u64>(VkImageView(info.imageView)) ^
+                  (reinterpret_cast<u64>(VkSampler(info.sampler)) << 1) ^ u64(info.imageLayout);
+        }
+    }
+    // Which part differs from the open run (BB_DRAW_BATCH_DIAG): pipeline, buffers, images.
+    const u64 key_images = key;
+    key = key * 0x100000001B3ull ^ reinterpret_cast<u64>(VkBuffer(index_bind.handle)) ^
+          (u64(index_bind.type) << 3);
+    static u64 run_key_images = 0, run_index = 0;
+    const u64 this_index = reinterpret_cast<u64>(VkBuffer(index_bind.handle));
+    if (!b.commands.empty() && key != b.key) {
+        static std::array<u64, 4> parts{};
+        static auto window = std::chrono::steady_clock::now();
+        parts[pipeline != b.base ? 0 : key_images != run_key_images ? 1 : this_index != run_index ? 2 : 3]++;
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(5)) {
+            std::printf("Draw batch object breaks: pipeline %llu, buffers/images %llu, index buffer %llu, other %llu\n",
+                        (unsigned long long)parts[0], (unsigned long long)parts[1],
+                        (unsigned long long)parts[2], (unsigned long long)parts[3]);
+            parts = {};
+            window = now;
+        }
+    }
+    if (b.commands.empty() || key != b.key) {
+        run_key_images = key_images;
+        run_index = this_index;
+    }
+    std::array<const Shader::Info*, 2> stages{fs, &vs};
+    std::array<u32, 2> words{};
+    for (u32 s = 0; s < 2; ++s) {
+        words[s] = stages[s]->ud_mask.NumRegs() + u32(stages[s]->FlatUserData().size());
+    }
+    const bool same_push = push_data.xoffset == b.push.xoffset &&
+                           push_data.yoffset == b.push.yoffset &&
+                           push_data.xscale == b.push.xscale && push_data.yscale == b.push.yscale &&
+                           push_data.motion_param == b.push.motion_param &&
+                           push_data.scene_size == b.push.scene_size;
+    if (!b.commands.empty()) {
+        const u32 why = key != b.key            ? 3
+                        : !same_push            ? 4
+                        : words != b.stage_words ? 5
+                        : b.commands.size() >= 512 ? 6
+                                                  : 0;
+        if (why) {
+            ++b.breaks[why];
+            FlushDrawBatch();
+        }
+    }
+    if (b.commands.empty()) {
+        b.base = pipeline;
+        b.variant = variant;
+        b.key = key;
+        b.push = push_data;
+        b.index_buffer = index_bind.handle;
+        b.index_type = index_bind.type;
+        b.index_size = index_bind.type == vk::IndexType::eUint16 ? 2 : 4;
+        b.num_buffers = num_buffers;
+        b.stage_buffers = {u32(fs->buffers.size()), u32(vs.buffers.size())};
+        b.stage_first = {0, u32(fs->buffers.size())};
+        b.stage_words = words;
+        b.stage_ud = {fs->ud_mask.NumRegs(), vs.ud_mask.NumRegs()};
+        b.fs_bindings = 0;
+        for (const auto& write : set_writes) {
+            (void)write;
+        }
+        // The normal variant's fragment bindings: its buffers, images (with their array sizes)
+        // and samplers.
+        b.fs_bindings = u32(fs->buffers.size()) + u32(fs->samplers.size());
+        for (const auto& image : fs->images) {
+            b.fs_bindings += image.NumBindings(*fs);
+        }
+        b.flat_buffer.assign(num_buffers, 0);
+        for (u32 s = 0; s < 2; ++s) {
+            for (u32 i = 0; i < stages[s]->buffers.size(); ++i) {
+                b.flat_buffer[b.stage_first[s] + i] =
+                    stages[s]->buffers[i].buffer_type == Shader::BufferType::Flatbuf;
+            }
+        }
+        b.image_writes.clear();
+        b.image_infos.clear();
+        for (const auto& write : set_writes) {
+            if (write.pImageInfo) {
+                b.image_writes.push_back(write);
+                b.image_infos.insert(b.image_infos.end(), write.pImageInfo,
+                                     write.pImageInfo + write.descriptorCount);
+            }
+        }
+        b.first_buffers.assign(buffer_infos.begin(), buffer_infos.end());
+        b.first_writes.assign(set_writes.begin(), set_writes.end());
+        b.buffers.clear();
+        b.data[0].clear();
+        b.data[1].clear();
+        b.index_offsets.clear();
+        ++b.runs;
+    }
+    for (u32 k = 0; k < num_buffers; ++k) {
+        auto info = buffer_infos[k];
+        if (info.buffer) {
+            const u64 adjust = push_data.buf_offsets[k];
+            info.offset += adjust;
+            info.range -= adjust;
+        }
+        b.buffers.push_back(info);
+    }
+    for (u32 s = 0; s < 2; ++s) {
+        const auto ud = stages[s]->UserData();
+        for (u32 mask = stages[s]->ud_mask.mask; mask;) {
+            const u32 index = std::countr_zero(mask);
+            mask &= ~(1U << index);
+            b.data[s].push_back(ud[index]);
+        }
+        const auto flat = stages[s]->FlatUserData();
+        b.data[s].insert(b.data[s].end(), flat.begin(), flat.end());
+    }
+    b.commands.push_back({regs.num_indices, regs.num_instances.NumInstances(), 0,
+                          s32(vertex_offset), 0});
+    b.index_offsets.push_back(index_bind.offset);
+    ++b.batched;
+    scheduler.batch_open = true;
+    return true;
+}
+
+void Rasterizer::FlushDrawBatchHook(void* self) {
+    // BB_DRAW_BATCH_DIAG=1: what recorded a command into an open run (the run ends there), by
+    // call stack (exe offsets), every 5 s.
+    static const bool diag = [] {
+        const char* env = std::getenv("BB_DRAW_BATCH_DIAG");
+        return env && env[0] == '1';
+    }();
+    if (diag) {
+        static std::map<std::array<u64, 4>, u64> callers;
+        static auto window = std::chrono::steady_clock::now();
+        void* frames[8]{};
+        const u16 count = CaptureStackBackTrace(1, 8, frames, nullptr);
+        const auto base = reinterpret_cast<u64>(GetModuleHandleA(nullptr));
+        std::array<u64, 4> key{};
+        for (u16 i = 0; i < count && i < 4; ++i) {
+            key[i] = reinterpret_cast<u64>(frames[i]) - base;
+        }
+        ++callers[key];
+        if (const auto now = std::chrono::steady_clock::now();
+            now - window >= std::chrono::seconds(5)) {
+            std::vector<std::pair<u64, std::array<u64, 4>>> top;
+            for (const auto& [k, n] : callers) {
+                top.emplace_back(n, k);
+            }
+            std::ranges::sort(top, std::greater{});
+            for (size_t i = 0; i < top.size() && i < 10; ++i) {
+                std::printf("Draw batch ended by: %llu x %llx %llx %llx %llx\n",
+                            (unsigned long long)top[i].first, (unsigned long long)top[i].second[0],
+                            (unsigned long long)top[i].second[1], (unsigned long long)top[i].second[2],
+                            (unsigned long long)top[i].second[3]);
+            }
+            callers.clear();
+            window = now;
+        }
+    }
+    static_cast<Rasterizer*>(self)->FlushDrawBatch();
+}
+
+void Rasterizer::FlushDrawBatch() {
+    auto& b = draw_batch;
+    scheduler.batch_open = false;
+    if (b.commands.empty()) {
+        return;
+    }
+    const u32 n = static_cast<u32>(b.commands.size());
+    b.run_draws += n;
+    const u64 alignment = instance.StorageMinAlignment();
+    const u32 nb = b.num_buffers;
+    // Per buffer: one view from the lowest to the highest draw's data.
+    // A run of one draw: as the normal variant draws it (no table, no indirect draw).
+    if (n == 1) {
+        size_t buffer_at = 0, image_at = 0;
+        for (auto& write : b.first_writes) {
+            if (write.pBufferInfo) {
+                write.pBufferInfo = b.first_buffers.data() + buffer_at;
+                buffer_at += write.descriptorCount;
+            } else if (write.pImageInfo) {
+                write.pImageInfo = b.image_infos.data() + image_at;
+                image_at += write.descriptorCount;
+            }
+        }
+        b.base->BindResources(b.first_writes, b.push);
+        if (instance.IsVertexInputDynamicState()) {
+            scheduler.Record([](vk::CommandBuffer cmdbuf) {
+                cmdbuf.setVertexInputEXT({}, {});
+            });
+        }
+        const auto& c = b.commands[0];
+        scheduler.Record([index = b.index_buffer, offset = b.index_offsets[0], type = b.index_type,
+                          handle = b.base->Handle(), c](vk::CommandBuffer cmdbuf) {
+            cmdbuf.bindIndexBuffer(index, offset, type);
+            cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+            cmdbuf.drawIndexed(c.indexCount, c.instanceCount, 0, c.vertexOffset, 0);
+        });
+        b.commands.clear();
+        b.buffers.clear();
+        b.data[0].clear();
+        b.data[1].clear();
+        b.index_offsets.clear();
+        return;
+    }
+    auto& lo = b.lo;
+    auto& hi = b.hi;
+    lo.assign(nb, ~u64{0});
+    hi.assign(nb, 0);
+    for (u32 d = 0; d < n; ++d) {
+        for (u32 k = 0; k < nb; ++k) {
+            const auto& info = b.buffers[d * nb + k];
+            if (!info.buffer || b.flat_buffer[k]) {
+                continue;
+            }
+            lo[k] = std::min(lo[k], Common::AlignDown(info.offset, alignment));
+            hi[k] = std::max(hi[k], info.offset + info.range);
+        }
+    }
+    auto& stream = buffer_cache.GetStreamBuffer();
+    std::array<u64, 2> table_offset{}, table_bytes{};
+    auto& table = b.table;
+    for (u32 s = 0; s < 2; ++s) {
+        const bool added = b.variant->batch_added_flatbuf[s];
+        const u32 nbv = b.stage_buffers[s] + (added ? 1 : 0);
+        const u32 stride = nbv + b.stage_words[s];
+        table.assign(1, stride);
+        for (u32 d = 0; d < n; ++d) {
+            for (u32 i = 0; i < b.stage_buffers[s]; ++i) {
+                const u32 k = b.stage_first[s] + i;
+                const auto& info = b.buffers[d * nb + k];
+                table.push_back(info.buffer && !b.flat_buffer[k] ? u32(info.offset - lo[k]) : 0);
+            }
+            if (added) {
+                table.push_back(0);
+            }
+            const u32* words = b.data[s].data() + size_t(d) * b.stage_words[s];
+            table.insert(table.end(), words, words + b.stage_words[s]);
+        }
+        table_bytes[s] = table.size() * sizeof(u32);
+        table_offset[s] = stream.Copy(table.data(), u32(table_bytes[s]), alignment);
+    }
+    // The variant's bindings: the normal ones, each stage's added flat buffer after its buffers.
+    const u32 add0 = b.variant->batch_added_flatbuf[0] ? 1 : 0;
+    const u32 add1 = b.variant->batch_added_flatbuf[1] ? 1 : 0;
+    auto& infos = b.infos;
+    infos.clear();
+    infos.reserve(nb + 2); // pointers into it are kept: no reallocation below
+    auto& writes = b.writes;
+    writes.clear();
+    writes.reserve(nb + 2 + b.image_writes.size());
+    const auto buffer_write = [&](u32 binding, const vk::DescriptorBufferInfo& info) {
+        infos.push_back(info);
+        vk::WriteDescriptorSet write{};
+        write.dstBinding = binding;
+        write.descriptorCount = 1;
+        write.descriptorType = vk::DescriptorType::eStorageBuffer;
+        write.pBufferInfo = &infos.back();
+        writes.push_back(write);
+    };
+    for (u32 s = 0; s < 2; ++s) {
+        for (u32 i = 0; i < b.stage_buffers[s]; ++i) {
+            const u32 k = b.stage_first[s] + i;
+            const u32 binding = s == 0 ? i : b.fs_bindings + add0 + i;
+            const auto& first = b.buffers[k];
+            if (b.flat_buffer[k]) {
+                buffer_write(binding, {stream.Handle(), table_offset[s], table_bytes[s]});
+            } else if (!first.buffer) {
+                buffer_write(binding, first);
+            } else {
+                buffer_write(binding, {first.buffer, lo[k], std::max<u64>(hi[k] - lo[k], 4)});
+            }
+        }
+        if (s == 0 ? add0 : add1) {
+            const u32 binding = s == 0 ? b.stage_buffers[0] : b.fs_bindings + add0 + b.stage_buffers[1];
+            buffer_write(binding, {stream.Handle(), table_offset[s], table_bytes[s]});
+        }
+    }
+    size_t image_at = 0;
+    for (auto write : b.image_writes) {
+        write.dstBinding += write.dstBinding < b.fs_bindings ? add0 : add0 + add1;
+        write.pImageInfo = b.image_infos.data() + image_at;
+        image_at += write.descriptorCount;
+        writes.push_back(write);
+    }
+    b.variant->BindResources(writes, b.push);
+    if (instance.IsVertexInputDynamicState()) {
+        scheduler.Record([](vk::CommandBuffer cmdbuf) {
+            cmdbuf.setVertexInputEXT({}, {});
+        });
+    }
+    u64 index_base = ~u64{0};
+    for (const u64 offset : b.index_offsets) {
+        index_base = std::min(index_base, offset);
+    }
+    for (u32 d = 0; d < n; ++d) {
+        b.commands[d].firstIndex = u32((b.index_offsets[d] - index_base) / b.index_size);
+    }
+    const u32 command_bytes = n * u32(sizeof(vk::DrawIndexedIndirectCommand));
+    const u64 command_offset = stream.Copy(b.commands.data(), command_bytes, 16);
+    scheduler.Record([index = b.index_buffer, index_base, type = b.index_type,
+                      handle = b.variant->Handle(), indirect = stream.Handle(), command_offset,
+                      n](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindIndexBuffer(index, index_base, type);
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+        cmdbuf.drawIndexedIndirect(indirect, command_offset, n,
+                                   sizeof(vk::DrawIndexedIndirectCommand));
+    });
+    b.commands.clear();
+    b.buffers.clear();
+    b.data[0].clear();
+    b.data[1].clear();
+    b.index_offsets.clear();
+    static auto window = std::chrono::steady_clock::now();
+    if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(5)) {
+        std::printf("Draw batch (5 s): %llu candidates, %llu batched in %llu runs (%.1f each); "
+                    "breaks: other %llu, buffers %llu, whole %llu, objects %llu, push %llu, "
+                    "words %llu, full %llu\n",
+                    (unsigned long long)b.candidates, (unsigned long long)b.batched,
+                    (unsigned long long)b.runs,
+                    b.runs ? double(b.run_draws) / double(b.runs) : 0.0,
+                    (unsigned long long)b.breaks[0], (unsigned long long)b.breaks[1],
+                    (unsigned long long)b.breaks[2], (unsigned long long)b.breaks[3],
+                    (unsigned long long)b.breaks[4], (unsigned long long)b.breaks[5],
+                    (unsigned long long)b.breaks[6]);
+        b.candidates = b.batched = b.runs = b.run_draws = 0;
+        b.breaks = {};
+        window = now;
+    }
+}
+
 void Rasterizer::QueueRingCandidates(const Shader::Info& stage, const PreparedDraw* prepared,
                                      u32 stage_index) {
     const PreparedStage* prepared_stage = nullptr;
@@ -1648,6 +2018,15 @@ static void NoteQueueWork(const Pipeline* pipeline, const AmdGpu::ComputeProgram
         watched = {};
         window = now;
     }
+}
+
+/// bbport (draw batching): BB_DRAW_BATCH=1 (needs BB_INLINE_FETCH=1: no vertex input state).
+static bool DrawBatchEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_DRAW_BATCH");
+        return env && env[0] == '1';
+    }();
+    return enabled;
 }
 
 /// bbport diagnosis (causal profiling): BB_SLOW_A_NS / BB_SLOW_B_NS=<ns> spin that long per draw
@@ -2407,6 +2786,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
         }
     }
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline({}, prepared);
+    if (pipeline && DrawBatchEnabled()) {
+        pipeline_cache.GetBatchedGraphicsPipeline(pipeline);
+    }
     const PreparedDraw* used_prepared = pipeline_cache.UsedPrepared();
     if (prepared) {
         draw_prep->Count(pipeline != nullptr &&
@@ -2933,6 +3315,18 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
         static u64 last_textures = 0, last_geometry = 0, same_all = 0, same_pipe = 0,
                    same_geometry = 0, run_draws = 0;
+        // Draw batching (phase 2): the same buffer and image objects in every binding (offsets
+        // aside): one descriptor set plus a per-draw offset table would serve the run.
+        u64 handles = 0;
+        for (const auto& info : buffer_infos) {
+            handles = handles * 0x100000001B3ull ^ reinterpret_cast<u64>(VkBuffer(info.buffer));
+        }
+        for (const auto& info : image_infos) {
+            handles = handles * 0x100000001B3ull ^ reinterpret_cast<u64>(VkImageView(info.imageView));
+        }
+        static u64 last_handles = 0, same_handles = 0;
+        same_handles += pipeline == last_pipeline && handles == last_handles;
+        last_handles = handles;
         ++run_draws;
         same_pipe += pipeline == last_pipeline;
         same_all += pipeline == last_pipeline && textures == last_textures;
@@ -2944,10 +3338,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         if (run_draws == 100000) {
             std::printf("Material runs: of %llu main-pass draws, %.0f%% continue a run of the same "
                         "pipeline and textures (%.0f%% with the same vertex/index buffers too), "
-                        "%.0f%% of the same pipeline\n",
+                        "%.0f%% of the same pipeline; %.0f%% the same pipeline and buffer/image "
+                        "objects (offsets aside)\n",
                         static_cast<unsigned long long>(run_draws), 100.0 * same_all / run_draws,
-                        100.0 * same_geometry / run_draws, 100.0 * same_pipe / run_draws);
-            same_all = same_pipe = same_geometry = run_draws = 0;
+                        100.0 * same_geometry / run_draws, 100.0 * same_pipe / run_draws,
+                        100.0 * same_handles / run_draws);
+            same_all = same_pipe = same_geometry = run_draws = same_handles = 0;
         }
         if (const auto t = std::chrono::steady_clock::now(); t - window >= std::chrono::seconds(5)) {
             const double d = std::max<u64>(draws, 1), f = std::max<u64>(frames, 1);
@@ -2967,9 +3363,16 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             ResolveIndexBuffer(index_offset);
         }
     }
-    EmitVertexBuffers();
-    if (is_indexed) {
-        EmitIndexBuffer();
+    // bbport (draw batching): a draw the pipeline's batched variant can take records nothing of
+    // its own until it is known to join a run (then the run records it at its flush).
+    const GraphicsPipeline* batch_variant =
+        is_indexed && DrawBatchEnabled() ? pipeline->batch_variant.load(std::memory_order_acquire)
+                                         : nullptr;
+    if (!batch_variant) {
+        EmitVertexBuffers();
+        if (is_indexed) {
+            EmitIndexBuffer();
+        }
     }
 
     if (needs_barrier) {
@@ -3189,7 +3592,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             });
         }
     }
-    pipeline->BindResources(set_writes, push_data);
+    if (!batch_variant) {
+        pipeline->BindResources(set_writes, push_data);
+    }
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
@@ -3245,6 +3650,16 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     MarkPass(pipeline, state);
     FullBarrierBeforeDraw(scheduler);
     scheduler.BeginRendering(state);
+    bool batched = false;
+    if (batch_variant) {
+        ++draw_batch.candidates;
+        batched = AppendDrawBatch(pipeline, batch_variant);
+        if (!batched) {
+            pipeline->BindResources(set_writes, push_data);
+            EmitVertexBuffers();
+            EmitIndexBuffer();
+        }
+    }
 
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
@@ -3261,7 +3676,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         checkpoint = NoteCheckpoint("draw", vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices,
                                     num_instances, 0, 0);
     }
-    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+    if (!batched) scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         if (checkpoint) {
             cmdbuf.setCheckpointNV(checkpoint);
         }
@@ -6646,6 +7061,31 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
     UpdateColorBlendingState(pipeline);
 
     auto& dynamic_state = scheduler.GetDynamicState();
+    // BB_DRAW_BATCH_DIAG=1: which dynamic states change while a run of batched draws is open.
+    static const bool batch_diag = [] {
+        const char* env = std::getenv("BB_DRAW_BATCH_DIAG");
+        return env && env[0] == '1';
+    }();
+    if (batch_diag && scheduler.batch_open) {
+        static std::array<u64, 32> counts{};
+        static auto window = std::chrono::steady_clock::now();
+        const u32 bits = dynamic_state.DirtyBits();
+        for (u32 i = 0; i < 32; ++i) {
+            counts[i] += (bits >> i) & 1;
+        }
+        if (const auto now = std::chrono::steady_clock::now();
+            now - window >= std::chrono::seconds(5)) {
+            std::printf("Draw batch dynamic state changes (bit:count):");
+            for (u32 i = 0; i < 32; ++i) {
+                if (counts[i]) {
+                    std::printf(" %u:%llu", i, (unsigned long long)counts[i]);
+                }
+            }
+            std::printf("\n");
+            counts = {};
+            window = now;
+        }
+    }
     dynamic_state.CommitWith(instance.IsDepthBoundsSupported(),
                              instance.IsDynamicColorWriteMaskSupported(),
                              instance.IsAttachmentFeedbackLoopLayoutSupported(),

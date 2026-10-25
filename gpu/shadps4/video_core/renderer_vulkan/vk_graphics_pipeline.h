@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <boost/container/static_vector.hpp>
 #include <xxhash.h>
 
@@ -114,6 +115,14 @@ public:
     const GraphicsPipelineKey& GetGraphicsKey() const {
         return key;
     }
+
+    /// bbport (draw batching, BB_DRAW_BATCH=1): the batched variant (Profile::batched_graphics),
+    /// built on the GPU command thread the first time this pipeline draws; null when it has none.
+    mutable std::atomic<const GraphicsPipeline*> batch_variant{nullptr};
+    mutable std::atomic<bool> batch_tried{false};
+    /// Of the variant: per stage (fragment, vertex), whether its flat buffer was added (one more
+    /// binding after the stage's buffers than the normal variant has).
+    std::array<bool, 2> batch_added_flatbuf{};
 
     /// Gets the attributes and bindings for vertex inputs.
     template <typename Attribute, typename Binding>

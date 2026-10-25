@@ -1563,6 +1563,111 @@ const ComputePipeline* PipelineCache::GetBatchedComputePipeline(const ComputePip
     return it->second.pipeline.get();
 }
 
+const GraphicsPipeline* PipelineCache::GetBatchedGraphicsPipeline(const GraphicsPipeline* base) {
+    if (base->batch_tried.load(std::memory_order_relaxed)) {
+        return base->batch_variant.load(std::memory_order_acquire);
+    }
+    base->batch_tried.store(true, std::memory_order_relaxed);
+    const auto& stages = base->GetStages();
+    const auto* base_vs = stages[u32(SwStage::Vertex)];
+    const auto* base_fs = stages[u32(SwStage::Fragment)];
+    const char* refused = nullptr;
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (stages[i] && i != u32(SwStage::Vertex) && i != u32(SwStage::Fragment)) {
+            refused = "other stages";
+        }
+    }
+    const auto& regs = liverpool->regs;
+    if (!refused && (!base_vs || !base_fs)) {
+        refused = "no vertex or fragment shader";
+    } else if (!refused && base->GetFetchShader()) {
+        refused = "fetch shader (needs BB_INLINE_FETCH=1)";
+    } else if (!refused && regs.stage_enable.raw != AmdGpu::ShaderStageEnable::VgtStages::Vs) {
+        refused = "not VS+PS";
+    } else if (!refused && base_vs->stores.GetAny(Shader::IR::Attribute::Param0 +
+                                                 Shader::Profile::BatchDrawLocation)) {
+        refused = "location taken";
+    }
+    if (refused) {
+        static std::atomic<u32> logged{0};
+        if (logged.fetch_add(1) < 20) {
+            std::printf("Draw batch: pipeline %016llx not batched (%s)\n",
+                        static_cast<unsigned long long>(base_vs ? base_vs->pgm_hash : 0), refused);
+        }
+        return nullptr;
+    }
+    if (!batched_graphics_profile.batched_graphics) {
+        batched_graphics_profile = profile;
+        batched_graphics_profile.batched_graphics = true;
+    }
+    PipelineSelection bsel{};
+    bsel.regs = &regs;
+    bsel.graphics_key = base->GetGraphicsKey();
+    bsel.motion = bsel.graphics_key.motion_vectors != 0;
+    bsel.ui_squeeze = bsel.graphics_key.ui_squeeze != 0;
+    BatchedGraphicsVariant variant;
+    std::array<const Shader::Info*, MaxShaderStages> infos{};
+    std::array<vk::ShaderModule, MaxShaderStages> modules{};
+    Shader::Backend::Bindings binding{};
+    std::vector<u32> spv;
+    std::array<bool, 2> added{};
+    bool same = true;
+    // The fragment shader first, as RefreshGraphicsStages binds them (one binding counter).
+    const std::array<std::pair<HwStage, SwStage>, 2> order{
+        std::pair{HwStage::Fragment, SwStage::Fragment}, std::pair{HwStage::Vertex, SwStage::Vertex}};
+    for (u32 k = 0; k < 2 && same; ++k) {
+        const auto [hw, sw] = order[k];
+        const auto* pgm = regs.ProgramForStage(u32(hw));
+        const auto params = AmdGpu::GetParams(*pgm);
+        auto& info = variant.infos[k];
+        info = std::make_unique<Shader::Info>(hw, sw, params);
+        auto runtime_info = BuildRuntimeInfo(bsel, hw, sw);
+        t_profile_override = &batched_graphics_profile;
+        modules[u32(sw)] =
+            TranslateModule(*info, runtime_info, params.code, 0xBA7D, binding, pools, spv);
+        t_profile_override = nullptr;
+        // The table is filled in the normal variant's buffer order: the batched one lists the
+        // same buffers, plus at most a flat buffer at the end.
+        const auto& base_info = *stages[u32(sw)];
+        added[k] = info->buffers.size() == base_info.buffers.size() + 1;
+        same = modules[u32(sw)] && info->ud_mask.mask == base_info.ud_mask.mask &&
+               info->images.size() == base_info.images.size() &&
+               info->samplers.size() == base_info.samplers.size() &&
+               (info->buffers.size() == base_info.buffers.size() || added[k]);
+        for (size_t i = 0; same && i < base_info.buffers.size(); ++i) {
+            same = info->buffers[i].buffer_type == base_info.buffers[i].buffer_type &&
+                   info->buffers[i].is_written == base_info.buffers[i].is_written &&
+                   info->buffers[i].is_formatted == base_info.buffers[i].is_formatted;
+        }
+        infos[u32(sw)] = info.get();
+    }
+    if (same) {
+        GraphicsPipeline::SerializationSupport sdata{};
+        variant.pipeline = std::make_unique<GraphicsPipeline>(
+            instance, scheduler, desc_heap, batched_graphics_profile, bsel.graphics_key,
+            *pipeline_cache, infos, bsel.runtime_infos, std::nullopt, modules, sdata, false);
+        if (!variant.pipeline->IsValid()) {
+            variant.pipeline.reset();
+        } else {
+            variant.pipeline->batch_added_flatbuf = added;
+        }
+    }
+    static std::atomic<u32> logged{0};
+    if (logged.fetch_add(1) < 40) {
+        std::printf("Draw batch: vs %016llx ps %016llx batched variant %s\n",
+                    static_cast<unsigned long long>(base_vs->pgm_hash),
+                    static_cast<unsigned long long>(base_fs->pgm_hash),
+                    variant.pipeline ? "ready" : (same ? "failed to build" : "refused (resources differ)"));
+    }
+    const GraphicsPipeline* result = variant.pipeline.get();
+    if (result) {
+        std::unique_lock lock{pipelines_mutex};
+        batched_graphics.push_back(std::move(variant));
+    }
+    base->batch_variant.store(result, std::memory_order_release);
+    return result;
+}
+
 vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
                                                 Shader::RuntimeInfo& runtime_info,
                                                 const std::span<const u32>& code, size_t perm_idx,

@@ -300,6 +300,11 @@ public:
     Id batch_entry{};
     Id batch_ud_base{};
     Id batch_flat_base{};
+    /// Draw batching (Profile::batched_graphics): DrawIndex (vertex), the draw index varying
+    /// (vertex output, fragment input).
+    Id batch_draw_index{};
+    Id batch_draw_out{};
+    Id batch_draw_in{};
     Id num_workgroups_id{};
     Id workgroup_index_id{};
     Id local_invocation_id{};
