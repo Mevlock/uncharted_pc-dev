@@ -98,11 +98,14 @@ void DataBase::Open() {
     const auto& game_info = Common::ElfInfo::Instance();
 
     using namespace Common::FS;
+    // Offline perf build (feature/native-batch): its own cache. Its shader profile differs from
+    // the release builds', so sharing one cache made each build clear the other's at every start.
+    const std::string perf_suffix = "-perf";
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         mz_zip_zero_struct(&zip_ar);
 
         cache_path = GetUserPath(PathType::CacheDir) /
-                     std::filesystem::path{std::string{game_info.GameSerial()} + BbNanGuard::ShaderCacheSuffix()}.replace_extension(".zip");
+                     std::filesystem::path{std::string{game_info.GameSerial()} + BbNanGuard::ShaderCacheSuffix() + perf_suffix}.replace_extension(".zip");
 
         if (!mz_zip_reader_init_file(&zip_ar, cache_path.string().c_str(),
                                      MZ_ZIP_FLAG_READ_ALLOW_WRITING) ||
@@ -114,7 +117,7 @@ void DataBase::Open() {
         }
     } else {
         cache_path = GetUserPath(PathType::CacheDir) /
-                     (std::string{game_info.GameSerial()} + BbNanGuard::ShaderCacheSuffix());
+                     (std::string{game_info.GameSerial()} + BbNanGuard::ShaderCacheSuffix() + perf_suffix);
         if (!std::filesystem::exists(cache_path)) {
             std::filesystem::create_directories(cache_path);
         }
