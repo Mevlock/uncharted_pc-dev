@@ -90,6 +90,7 @@ enum : std::uint64_t {
     ChainedEosLabels = 8, ///< end-of-shader labels written behind the deferred fences
     VoLabelNoDrain = 16, ///< a met display buffer label wait does not drain the draw pipe
     FaultReadbackHere = 32, ///< guest write faults on submitted GPU data read back on their thread
+    RecycledImages = 64, ///< images remade by format reuse the Vulkan images freed that way
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
