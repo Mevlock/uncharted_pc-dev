@@ -2,11 +2,13 @@
 // clang64) polls with yields (__libcpp_thread_poll_with_backoff): the draw recording thread,
 // "sleeping" between packets, took ~90 % of a core on a 4-core/8-thread PC whose CPU was full.
 // On Windows the wait is WaitOnAddress / WakeByAddressSingle (synchronization library);
-// BB_TOGGLE_FILE bit 62 (SleepingWaits) goes back to std::atomic::wait while running.
+// BB_TOGGLE_FILE bit 62 (SleepingWaits) goes back to std::atomic::wait while running, and
+// BB_SLEEPING_WAITS=0 for the whole run.
 #pragma once
 
 #include <atomic>
 #include <cstddef>
+#include <cstdlib>
 #include "bbport_toggles.h"
 
 #ifdef _WIN32
@@ -17,12 +19,17 @@ extern "C" __declspec(dllimport) void __stdcall WakeByAddressSingle(void* addres
 
 namespace BbWait {
 
+inline const bool sleeping_waits = [] {
+    const char* env = std::getenv("BB_SLEEPING_WAITS");
+    return !(env && env[0] == '0');
+}();
+
 /// Returns when `value` may differ from `old` (spurious returns: the caller checks again).
 template <typename T>
 inline void Wait(std::atomic<T>& value, T old) {
 #ifdef _WIN32
     static_assert(sizeof(std::atomic<T>) == sizeof(T));
-    if (!BbToggle::Disabled(BbToggle::SleepingWaits)) {
+    if (sleeping_waits && !BbToggle::Disabled(BbToggle::SleepingWaits)) {
         WaitOnAddress(&value, &old, sizeof(T), 0xFFFFFFFFul);
         return;
     }
