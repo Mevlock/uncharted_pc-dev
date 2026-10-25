@@ -3154,6 +3154,34 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (!bound) {
         return;
     }
+    // bbport diagnosis: BB_TRACE_PS=<hash>: that pixel shader's buffers, the first 8 floats
+    // (every 30th draw, 400 at most).
+    {
+        static const u64 trace_ps = [] {
+            const char* env = std::getenv("BB_TRACE_PS");
+            return env ? std::strtoull(env, nullptr, 16) : 0ull;
+        }();
+        const auto* ps_info = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        if (trace_ps && ps_info) {
+            const auto& ps = *ps_info;
+            static std::atomic<u32> traced{0};
+            if (u32(ps.pgm_hash) == u32(trace_ps) && (traced.fetch_add(1) % 30) == 0 &&
+                traced.load() < 30 * 400) {
+                for (u32 i = 0; i < ps.buffers.size(); ++i) {
+                    const auto& desc = ps.buffers[i];
+                    if (desc.IsSpecial()) continue;
+                    const auto sharp = desc.GetSharp(ps);
+                    float f[8]{};
+                    if (sharp.base_address && sharp.GetSize() >= 32) {
+                        std::memcpy(f, reinterpret_cast<const void*>(sharp.base_address), 32);
+                    }
+                    std::printf("Trace ps %08x buffer %u: %g %g %g %g %g %g %g %g\n",
+                                u32(ps.pgm_hash), i, f[0], f[1], f[2], f[3], f[4], f[5], f[6],
+                                f[7]);
+                }
+            }
+        }
+    }
     // bbport diagnosis: BB_DUMP_PS=<pixel shader hash,...> with BB_DUMP_PS_TRIGGER=<file>: when
     // the file exists, the next frame's draws of those shaders write every RGBA16F/RGBA8 image they
     // bind (mips 0..3, as before the draw) to BB_DUMP_DIR as psdump_*.raw.

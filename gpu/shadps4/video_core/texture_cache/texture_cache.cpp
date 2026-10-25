@@ -1222,6 +1222,37 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
 ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
+    // bbport diagnosis: BB_SMALL_RT_LOG=1: render targets of at most 32x32 pixels, once each
+    // (the depth of field's focus chain at other render sizes).
+    static const bool small_rt_log = std::getenv("BB_SMALL_RT_LOG") != nullptr;
+    if (small_rt_log && image.info.size.width <= 32 && image.info.size.height <= 32) {
+        static std::mutex log_mutex;
+        static std::unordered_map<VAddr, u64> logged;
+        std::scoped_lock lk{log_mutex};
+        const u64 key = (u64(image.info.size.width) << 32) | (u64(image.info.size.height) << 16) |
+                        u64(image.info.pixel_format);
+        // The 1x1 float result as the game's memory holds it now (the last read back).
+        static u32 value_logs = 0;
+        if (image.info.size.width == 1 && image.info.size.height == 1 &&
+            image.info.pixel_format == vk::Format::eR32Sfloat && (value_logs++ % 30) == 0 &&
+            value_logs < 30 * 400) {
+            float value;
+            std::memcpy(&value, reinterpret_cast<const void*>(image.info.guest_address), 4);
+            std::printf("Small RT value: 1x1 at %#llx holds %g\n",
+                        static_cast<unsigned long long>(image.info.guest_address), value);
+        }
+        if (logged.size() < 200 && logged[image.info.guest_address] != key) {
+            logged[image.info.guest_address] = key;
+            std::printf("Small RT: %ux%u format %d tiled %d at %#llx (read back: %s)\n",
+                        image.info.size.width, image.info.size.height,
+                        int(image.info.pixel_format), int(image.info.props.is_tiled),
+                        static_cast<unsigned long long>(image.info.guest_address),
+                        ReadbackSmallTargets() && image.info.size.width <= 8 &&
+                                image.info.size.height <= 8 && image.info.guest_address != 0
+                            ? "yes"
+                            : "no");
+        }
+    }
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
