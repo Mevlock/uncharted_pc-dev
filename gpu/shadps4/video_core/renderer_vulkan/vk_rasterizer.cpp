@@ -1650,9 +1650,32 @@ static void NoteQueueWork(const Pipeline* pipeline, const AmdGpu::ComputeProgram
     }
 }
 
+/// bbport diagnosis (causal profiling): BB_SLOW_A_NS / BB_SLOW_B_NS=<ns> spin that long per draw
+/// or dispatch on stage A (PostDraw) / stage B (each draw or dispatch packet). How much the frame
+/// rate drops shows how much that stage limits it.
+static void SlowStage(const char* name) {
+    static const u64 a_ns = [] {
+        const char* env = std::getenv("BB_SLOW_A_NS");
+        return env ? std::strtoull(env, nullptr, 10) : 0ull;
+    }();
+    static const u64 b_ns = [] {
+        const char* env = std::getenv("BB_SLOW_B_NS");
+        return env ? std::strtoull(env, nullptr, 10) : 0ull;
+    }();
+    const u64 ns = name[0] == 'A' ? a_ns : b_ns;
+    if (!ns) {
+        return;
+    }
+    const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(ns);
+    while (std::chrono::steady_clock::now() < until) {
+        _mm_pause();
+    }
+}
+
 void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_prepared,
                           bool is_indexed, u32 index_offset, const AmdGpu::ComputeProgram* cs,
                           const IndirectDraw* indirect) {
+    SlowStage("A");
     NoteQueueWork(pipeline, cs);
     if (scheduler.SegmentsEnabled()) {
         // BB_GPU_BUSY: a timestamp on the recording thread where the guest queue changes.
@@ -1907,6 +1930,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         return;
     }
     const auto& packet = *reinterpret_cast<const DrawPacket*>(data);
+    SlowStage("B");
     if (packet.ring_copy_seq) {
         self.constant_ring->WaitCopies(packet.ring_copy_seq);
     }
@@ -7256,6 +7280,7 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
         b.read_min = b.write_min = ~VAddr{0};
         b.read_max = b.write_max = 0;
         b.arena_key = ~u64{0};
+        b.ring_mode = false;
         b.written.assign(num_buffers, 0);
         for (u32 i = 0; i < num_buffers; ++i) {
             b.written[i] = cs.buffers[i].is_written;
@@ -7267,6 +7292,38 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
         start_batch();
     }
     lap_time(2);
+    // BB_NB_RING: read-only inputs the ring collector already copied into the constant ring are
+    // used from there (one view of the ring for the batch) instead of being streamed again here
+    // on stage B. All of an object's inputs or none; a batch does not mix the two.
+    static const bool nb_ring = [] {
+        const char* env = std::getenv("BB_NB_RING");
+        return !(env && env[0] == '0');
+    }();
+    std::array<u64, Shader::NUM_BUFFERS> ring_offset{};
+    bool all_ring = nb_ring && ring_collector && num_ring_stages;
+    u64 ring_lo = ~u64{0}, ring_hi = 0;
+    for (u32 i = 0; i < num_buffers && all_ring; ++i) {
+        if (!address[i] || cs.buffers[i].is_written) {
+            continue;
+        }
+        const RingBinding* r = FindRingBinding(cs, i);
+        if (!r || r->address != address[i] || r->size < size[i]) {
+            all_ring = false;
+            break;
+        }
+        ring_offset[i] = r->offset;
+        ring_lo = std::min(ring_lo, r->offset);
+        ring_hi = std::max(ring_hi, r->offset + size[i]);
+    }
+    if (b.count && (b.ring_mode != all_ring ||
+                    (all_ring && std::max(b.stream_hi, ring_hi) -
+                                         std::min(b.stream_lo, ring_lo) > 16_MB))) {
+        FlushNativeBatch(9); // the other kind of inputs, or the ring wrapped
+        start_batch();
+    }
+    if (!b.count) {
+        b.ring_mode = all_ring;
+    }
     // The read-only inputs are streamed now: copies of consecutive objects lie side by side in
     // the stream buffer, so one view of it serves every object of the batch. A copy streamed
     // earlier in this command buffer (the stream memo) may lie below: the view grows down.
@@ -7274,7 +7331,7 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
     auto& stream = buffer_cache.GetStreamBuffer();
     std::array<u64, Shader::NUM_BUFFERS> group_offset{};
     u64 lap = ~u64{0};
-    for (u32 g = 0; g < groups.size(); ++g) {
+    for (u32 g = 0; g < groups.size() && !all_ring; ++g) {
         if (groups[g].written) {
             continue;
         }
@@ -7306,15 +7363,22 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
             b.read_ranges.emplace_back(groups[g].lo, groups[g].hi);
             b.read_min = std::min(b.read_min, groups[g].lo);
             b.read_max = std::max(b.read_max, groups[g].hi);
-            b.stream_lo = std::min(b.stream_lo, group_offset[g]);
-            b.stream_hi = std::max(b.stream_hi, group_offset[g] + (groups[g].hi - groups[g].lo));
+            if (!all_ring) {
+                b.stream_lo = std::min(b.stream_lo, group_offset[g]);
+                b.stream_hi =
+                    std::max(b.stream_hi, group_offset[g] + (groups[g].hi - groups[g].lo));
+            }
         }
+    }
+    if (all_ring && ring_hi) {
+        b.stream_lo = std::min(b.stream_lo, ring_lo);
+        b.stream_hi = std::max(b.stream_hi, ring_hi);
     }
     for (u32 i = 0; i < num_buffers; ++i) {
         u64 offset = 0;
         if (address[i] && !cs.buffers[i].is_written) {
             const u32 g = group_of[i];
-            offset = group_offset[g] + (address[i] - groups[g].lo);
+            offset = all_ring ? ring_offset[i] : group_offset[g] + (address[i] - groups[g].lo);
         }
         b.addresses.push_back(address[i]);
         b.stream_offsets.push_back(offset); // written: resolved at the flush
@@ -7354,7 +7418,9 @@ void Rasterizer::FlushNativeBatch(u32 reason) {
     auto& stream = buffer_cache.GetStreamBuffer();
     const u64 stream_aligned = Common::AlignDown(b.stream_lo, alignment);
     const u64 stream_bytes = b.stream_hi > b.stream_lo ? b.stream_hi - stream_aligned : 0;
-    if (stream_bytes) {
+    // BB_NB_RING: the constant ring (host-written, read-only on the GPU: no barrier).
+    const vk::Buffer read_handle = b.ring_mode ? constant_ring->Handle() : stream.Handle();
+    if (stream_bytes && !b.ring_mode) {
         needs_barrier |= runtime.IsBufferAccessed(&stream, b.stream_lo,
                                                   b.stream_hi - b.stream_lo, false);
         bound_buffers.emplace_back(&stream, b.stream_lo, b.stream_hi - b.stream_lo, false);
@@ -7428,7 +7494,7 @@ void Rasterizer::FlushNativeBatch(u32 reason) {
             buffer_infos.emplace_back(written_buffer->Handle(), written_aligned,
                                       std::max<u64>(written_hi - written_aligned, 4));
         } else {
-            buffer_infos.emplace_back(stream.Handle(), stream_aligned,
+            buffer_infos.emplace_back(read_handle, stream_aligned,
                                       std::max<u64>(stream_bytes, 4));
         }
         auto& write = set_writes[set_write_index++];

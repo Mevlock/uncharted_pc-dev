@@ -578,6 +578,9 @@ private:
         /// offset of its data in the stream buffer (one lap), and the batch's stream range.
         std::vector<u64> stream_offsets;
         u64 stream_lap = 0, stream_lo = 0, stream_hi = 0;
+        /// BB_NB_RING (on with the ring collector): the read-only inputs are the collector's
+        /// copies in the constant ring (stream_lo/hi are ring offsets), not stream copies.
+        bool ring_mode = false;
         /// Written buffers are obtained per object at append; all of a batch's in one buffer
         /// (an arena), at these offsets (stream_offsets holds each object's offset too).
         /// The batch's ranges (hazards between its objects), read and written, with bounds:
