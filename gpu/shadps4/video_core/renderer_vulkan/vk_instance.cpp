@@ -1067,7 +1067,12 @@ void Instance::QueryMemory(u64& usage, u64& budget) const {
         usage += memory_budget_props.heapUsage[heap];
         budget += memory_budget_props.heapBudget[heap];
     }
-    if (const u64 test_limit = Vram::TestLimit(); test_limit && !IsIntegrated()) {
+    if (vram_simulated_bytes) {
+        // BB_VRAM_SIMULATE_MIB: the ballast is not the game's (as GetDeviceMemoryUsage/Budget).
+        usage = usage > vram_ballast_bytes ? usage - vram_ballast_bytes : 0;
+        budget = budget > vram_ballast_bytes ? budget - vram_ballast_bytes : 0;
+        budget = std::min<u64>(budget, vram_simulated_bytes);
+    } else if (const u64 test_limit = Vram::TestLimit(); test_limit && !IsIntegrated()) {
         budget = std::min<u64>(budget, test_limit / 10 * 9);
     }
 }
