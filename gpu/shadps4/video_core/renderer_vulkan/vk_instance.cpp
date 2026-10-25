@@ -904,7 +904,7 @@ void Instance::CollectPhysicalMemoryInfo() {
                         break;
                     }
                 }
-                static std::vector<vk::DeviceMemory> ballast;
+                auto& ballast = ballast_memory;
                 u64 held = 0;
                 const u64 want = local_memory - target;
                 while (type != ~0u && held < want) {
@@ -1026,6 +1026,35 @@ u64 Instance::GetDeviceMemoryBudgetNow() const {
         total_budget = std::min<u64>(total_budget, vram_simulated_bytes);
     }
     return total_budget;
+}
+
+void Instance::TouchBallast(vk::CommandBuffer cmdbuf) const {
+    if (ballast_memory.empty()) {
+        return;
+    }
+    if (ballast_buffers.empty()) {
+        for (const vk::DeviceMemory memory : ballast_memory) {
+            auto [result, buffer] = device->createBuffer(vk::BufferCreateInfo{
+                .size = 4096,
+                .usage = vk::BufferUsageFlagBits::eTransferDst,
+            });
+            if (result != vk::Result::eSuccess) {
+                continue;
+            }
+            if (device->bindBufferMemory(buffer, memory, 0) != vk::Result::eSuccess) {
+                device->destroyBuffer(buffer);
+                continue;
+            }
+            ballast_buffers.push_back(buffer);
+        }
+        std::printf("GPU: VRAM ballast kept resident (%zu of %zu blocks touched once a second)\n",
+                    ballast_buffers.size(), ballast_memory.size());
+    }
+    static u32 value = 0;
+    ++value;
+    for (const vk::Buffer buffer : ballast_buffers) {
+        cmdbuf.fillBuffer(buffer, 0, 4, value);
+    }
 }
 
 vk::FormatFeatureFlags2 Instance::GetFormatFeatureFlags(vk::Format format) const {
