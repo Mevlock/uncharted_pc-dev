@@ -86,6 +86,10 @@ inline bool Disabled(std::uint64_t bit) {
 enum : std::uint64_t {
     TextureSetExact = 1, ///< memoized texture sets of exact images survive (un)registrations
     CpuWritePageCheck = 2, ///< CPU writes to big GPU-written images: only the written pages hashed
+    PipelinedRaycasterCopies = 4, ///< 64-dword copies of GPU data run on the recording thread
+    ChainedEosLabels = 8, ///< end-of-shader labels written behind the deferred fences
+    VoLabelNoDrain = 16, ///< a met display buffer label wait does not drain the draw pipe
+    FaultReadbackHere = 32, ///< guest write faults on submitted GPU data read back on their thread
 };
 inline bool Disabled2(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations2, __ATOMIC_RELAXED) & bit) != 0;
