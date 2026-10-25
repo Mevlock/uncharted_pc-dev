@@ -2252,6 +2252,15 @@ static std::array<std::atomic<u64>, 2> g_draw_class{}, g_draw_class_cycles{};
 // Draws on stage B by pass (colour targets, depth, size): count, cycles.
 static std::mutex g_pass_mutex;
 static std::unordered_map<u64, std::pair<u64, u64>> g_pass_stats;
+// The two above and the packet kinds cost every packet two clock reads and atomics, every draw a
+// mutex and a map lookup: kept only with BB_STAGEB_STATS=1.
+static bool StageBStats() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_STAGEB_STATS");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
 // Native batch append (BB_FRAME_STATS): sharps, hazard check, groups + written obtain, inputs,
 // table + pages.
 static std::array<std::atomic<u64>, 5> g_append_cycles{};
@@ -2276,9 +2285,12 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
                         : kind);
     struct KindTimer {
         u32 kind;
-        u64 start = __rdtsc();
+        u64 start = StageBStats() ? __rdtsc() : 0;
         ~KindTimer() {
             BbTrace::Record(BbTrace::PacketEnd, kind);
+            if (!start) {
+                return;
+            }
             g_kind_packets[kind].fetch_add(1, std::memory_order_relaxed);
             g_kind_cycles[kind].fetch_add(__rdtsc() - start, std::memory_order_relaxed);
         }
@@ -3074,9 +3086,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // bbport diagnosis (BB_FRAME_STATS): stage B draws by class (depth-only / colour), cycles.
     struct DrawClassTimer {
         u32 cls;
-        u64 start = __rdtsc();
+        u64 start = StageBStats() ? __rdtsc() : 0;
         u64 pass = 0; ///< colour targets, depth, size (set at BeginRendering)
         ~DrawClassTimer() {
+            if (!start) {
+                return;
+            }
             const u64 cycles = __rdtsc() - start;
             g_draw_class[cls].fetch_add(1, std::memory_order_relaxed);
             g_draw_class_cycles[cls].fetch_add(cycles, std::memory_order_relaxed);
@@ -5458,7 +5473,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                         in_written = &written_spans[w];
                     }
                 }
-                const u64 t_obtain = __rdtsc();
+                const u64 t_obtain = StageBStats() ? __rdtsc() : 0;
                 const auto [buffer, offset] =
                     in_span ? std::pair<const VideoCore::Buffer*, u64>{span.buffer,
                                                             span.offset +
@@ -5470,7 +5485,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                                                         in_written->lo)}
                             : buffer_cache.ObtainBuffer(vsharp.base_address, size,
                                                         desc.is_written, desc.is_formatted);
-                g_bind_cycles[desc.is_written ? 1 : 0].fetch_add(__rdtsc() - t_obtain, std::memory_order_relaxed);
+                if (t_obtain) {
+                    g_bind_cycles[desc.is_written ? 1 : 0].fetch_add(__rdtsc() - t_obtain,
+                                                                    std::memory_order_relaxed);
+                }
                 // bbport diagnosis: BB_GPU_WRITE_WATCH=<hex address>: the shaders whose written
                 // bindings cover its 64 KiB (U2 reads GPU results there every frame).
                 if (desc.is_written) {
@@ -5559,15 +5577,19 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 if (desc.is_written) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
-                    const u64 t_inv = __rdtsc();
+                    const u64 t_inv = StageBStats() ? __rdtsc() : 0;
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
-                    g_bind_cycles[2].fetch_add(__rdtsc() - t_inv, std::memory_order_relaxed);
+                    if (t_inv) {
+                        g_bind_cycles[2].fetch_add(__rdtsc() - t_inv, std::memory_order_relaxed);
+                    }
                 }
                 if (track) {
-                    const u64 t_find = __rdtsc();
+                    const u64 t_find = StageBStats() ? __rdtsc() : 0;
                     needs_barrier |= runtime.IsBufferAccessed(buffer, track_offset, track_size,
                                                               desc.is_written);
-                    g_bind_cycles[3].fetch_add(__rdtsc() - t_find, std::memory_order_relaxed);
+                    if (t_find) {
+                        g_bind_cycles[3].fetch_add(__rdtsc() - t_find, std::memory_order_relaxed);
+                    }
                 }
                 if (const VAddr watch = WatchedGpuWrite();
                     watch && desc.is_written && vsharp.base_address < watch + 0x1000 &&
