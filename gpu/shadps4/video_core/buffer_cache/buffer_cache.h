@@ -309,6 +309,10 @@ private:
     struct SideQueue;
     std::unique_ptr<SideQueue> side_queue;
     bool DownloadOnSideQueue(VAddr page, u64 length);
+    /// bbport: the same read back for a guest thread's write fault on GPU data whose writes are
+    /// submitted, made on the faulting thread instead of the GPU command thread (BB_GPU_MERGE=0).
+    /// False when it cannot be done there (the GPU command thread's path then settles it).
+    bool ReadBackOnFaultThread(VAddr device_addr, u64 size);
 
     /// bbport (BB_PREFETCH_READBACK=0: off; idea from BilalReloaded's recurring read-back
     /// pieces): pages the guest keeps faulting on after their GPU work is done (U3's Cartagena

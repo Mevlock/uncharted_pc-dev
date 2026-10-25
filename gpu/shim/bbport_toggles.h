@@ -111,6 +111,8 @@ inline std::atomic<std::uint64_t> dead_gpu_drops{0}, gpu_read_backs{0};
 /// ... or read back on the second queue (waits for the writing GPU work only;
 /// BufferCache::DownloadOnSideQueue).
 inline std::atomic<std::uint64_t> gpu_side_downloads{0}, gpu_side_download_ns{0};
+/// ... of which on the faulting thread (BufferCache::ReadBackOnFaultThread).
+inline std::atomic<std::uint64_t> fault_thread_read_backs{0};
 inline std::atomic<std::int64_t> hot_pages{0};
 /// Stall diagnostics (BB_FRAME_STATS): per-frame deltas printed for frames over 40 ms.
 inline std::atomic<std::uint64_t> images_registered{0};
