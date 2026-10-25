@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <cstdlib>
 #include <cstdio>
 #include <mutex>
 #include "common/assert.h"
@@ -383,7 +384,12 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
             // do: the frame is prepared with that thread's draw scheduler, which no other thread
             // may record into (a thread of their own did, at the same time as the command
             // thread: GPU crashes writing to 0x0 and a null record chunk, U1 at 144 FPS).
-            if (Vulkan::Scheduler::OnRecorderThread()) {
+            // BB_EOP_FLIP_STRESS=1 (diagnosis): every end-of-pipe flip goes that way.
+            static const bool stress = [] {
+                const char* env = std::getenv("BB_EOP_FLIP_STRESS");
+                return env && env[0] == '1';
+            }();
+            if (stress || Vulkan::Scheduler::OnRecorderThread()) {
                 static std::atomic<u32> posted{0};
                 if (posted.fetch_add(1, std::memory_order_relaxed) == 0) {
                     std::printf("VideoOut: an end-of-pipe flip was raised on the Vulkan recording "
