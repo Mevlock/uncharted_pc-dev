@@ -453,7 +453,18 @@ u32 FrameGenerator::Generate(vk::CommandBuffer cmdbuf, vk::Image color, vk::Imag
     // still shown at 16:9 (2560x1440) while the ultrawide detector switches over, with the
     // scene already at the window's 3440x1440. DLSS Frame Generation takes smaller inputs (the
     // upscaled modes), not larger: it wrote out of bounds and the device was lost (4x, U3).
-    if (input_width > width || input_height > height) {
+    // Depth and motion of another shape: the 16:9 title and menu frames (2560x1440) over a scene
+    // already drawn for the wide screen (2016x832 in DLSS Balanced). DLSS Frame Generation was
+    // created for that frame and lost the device at its first evaluation (U3 title screen,
+    // Balanced, 2x). The upscaled modes keep the shape within a few percent (the
+    // render height rounds to 32), a 16:9 frame over a 21:9 scene is 34% off.
+    const u64 frame_shape = u64(width) * input_height;
+    const u64 input_shape = u64(input_width) * height;
+    const bool other_shape = (frame_shape > input_shape ? frame_shape - input_shape
+                                                        : input_shape - frame_shape) *
+                                 10 >
+                             frame_shape;
+    if (input_width > width || input_height > height || other_shape) {
         static int noted = 0;
         if (noted++ < 3) {
             std::printf("Frame generation: skipped a %ux%u frame with %ux%u depth and motion\n",
