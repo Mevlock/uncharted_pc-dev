@@ -636,10 +636,13 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     // second queue itself. Page states change under their region's lock, the one the recording
     // thread marks GPU writes under, and only if no write was marked since the read back began
     // (a later write has a later tick); else the GPU command thread's path settles the fault.
-    // BB_FAULT_HERE=0 or toggle2 FaultReadbackHere: always the GPU command thread's path.
+    // BB_FAULT_HERE=1: on; off by default (2026-10-26): it reads back before the GPU command
+    // thread's fault policy (shared writes, dead GPU data), so it stored GPU data thousands of
+    // frames old over memory U3 had reused (crashes in the pub). It has to become one of that
+    // policy's choices before it can be on. Toggle2 FaultReadbackHere: off.
     static const bool enabled = [] {
         const char* env = std::getenv("BB_FAULT_HERE");
-        return !(env && env[0] == '0');
+        return env && env[0] == '1';
     }();
     if (!enabled || !side_queue || BbToggle::Disabled2(BbToggle::FaultReadbackHere)) {
         return false;
