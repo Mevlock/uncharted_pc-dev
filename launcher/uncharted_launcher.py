@@ -93,6 +93,7 @@ WINDOW_SIZES = [('1280x720', '1280 × 720'), ('1600x900', '1600 × 900'),
 # render below it and the anti-aliasing (DLSS, FSR) upscales the frame to it before the HUD
 # (BB_OUTPUT_RES), like DLSS's own modes.
 RENDER_RESOLUTIONS = [('1080', "1920 × 1080 (the game's own)"),
+                      ('auto', 'Automatic (native; 1920 × 1080 on cards with 6 GB or less)'),
                       ('native', 'Native (the window, or the screen in fullscreen)'),
                       ('quality', 'Quality: upscaled from 67%'),
                       ('balanced', 'Balanced: upscaled from 58%'),
@@ -369,10 +370,43 @@ def output_size(s):
         return 1920, 1080
 
 
+# The graphics card's largest video memory heap in MiB (bb-gpu-capabilities), 0 while not known.
+# Cards up to 6 GB count as small: at 2560 x 1440 a 4 GB card went past its memory budget and the
+# game fell to about half speed now and then (2026-10-26); 1920 x 1080 fit.
+GPU_VRAM_MIB = 0
+SMALL_CARD_MIB = 7168
+
+
+def detect_vram():
+    """The largest device-local heap of the card the game uses, in MiB (0: unknown or integrated)."""
+    exe = PORT_DIR / 'bin' / 'bb-gpu-capabilities.exe'
+    if not exe.is_file():
+        exe = PORT_DIR / 'out' / 'bb-gpu-capabilities.exe'
+    try:
+        result = subprocess.run([str(exe), '--live-resolution'], capture_output=True, text=True,
+                                timeout=30, creationflags=NO_WINDOW)
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    for line in result.stderr.splitlines():
+        match = re.match(r'GPU: .+, (discrete|integrated or other), (\d+) MiB', line)
+        if match:
+            return int(match.group(2)) if match.group(1) == 'discrete' else 0
+    return 0
+
+
+def small_card():
+    return 0 < GPU_VRAM_MIB < SMALL_CARD_MIB
+
+
 def render_sizes(s, start=None):
     """('WxH', 'WxH'): the render size (BB_RENDER_RES) and the output size it is
     upscaled to (BB_OUTPUT_RES), or None for the game's own 1920 x 1080."""
     choice = str(s.get('render_resolution') or '1080')
+    if choice == 'auto':
+        # Automatic: native, but the game's own 1920 x 1080 on a small card.
+        choice = '1080' if small_card() else 'native'
+        if choice == '1080':
+            return None
     limit = RENDER_PIXELS_MAX_BIG if choice in RENDER_4K else RENDER_PIXELS_MAX
     out_w, out_h = output_size(s)
     if choice in RENDER_4K:
@@ -586,8 +620,32 @@ class Launcher:
         self.show('play')
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
+        threading.Thread(target=self.find_vram, daemon=True).start()
         if UPDATES and self.app.get('check_updates', True):
             threading.Thread(target=self.check_update, daemon=True).start()
+
+    def find_vram(self):
+        global GPU_VRAM_MIB
+        GPU_VRAM_MIB = detect_vram()
+        self.ui_calls.put(self.update_vram_note)
+
+    def update_vram_note(self):
+        """A note under Render resolution when a small card would draw above 1920 x 1080."""
+        note = getattr(self, 'vram_note', None)
+        if note is None:
+            return
+        s = dict(self.app)
+        for key in ('render_resolution', 'window_size', 'fullscreen'):
+            s[key] = self.var(key).get()
+        sizes = render_sizes(s)
+        width, height = (int(v) for v in sizes[0].split('x')) if sizes else (1920, 1080)
+        text = ''
+        if small_card() and width * height > 1920 * 1080:
+            text = _('Your graphics card has {} GB of video memory: above 1920 × 1080 the game may not '
+                     'fit in it and can run at half speed or stutter. 1920 × 1080, Automatic or '
+                     'Performance is recommended; FSR needs about 350 MB less video memory than '
+                     'DLSS.').format(round(GPU_VRAM_MIB / 1024))
+        note.configure(text=text)
 
     def px(self, size):
         return int(size * self.dpi)
@@ -671,6 +729,7 @@ class Launcher:
         s.configure('TLabel', background=CARD, foreground=TEXT)
         s.configure('Shell.TLabel', background=SURFACE, foreground=TEXT)
         s.configure('Muted.TLabel', background=CARD, foreground=MUTED, font=('Segoe UI', 9))
+        s.configure('Warn.TLabel', background=CARD, foreground=GOLD, font=('Segoe UI', 9))
         s.configure('ShellMuted.TLabel', background=SURFACE, foreground=MUTED, font=('Segoe UI', 9))
         s.configure('Section.TLabel', background=SURFACE, foreground=GOLD_DIM,
                     font=(self.brand_family, 10, 'bold'))
@@ -1227,6 +1286,14 @@ class Launcher:
                    'sharp. These go up to about 3440 × 1440; the 4K choices draw at 3840 × 2160 or 3840 × 1600 '
                    'whatever the window (experimental: only short tests so far). In busy '
                    'scenes the CPU usually sets the frame rate, so a smaller size gains little there.'))
+        # Small cards: a note when the chosen size is above 1920 x 1080 (filled in once the card
+        # is known and whenever the size, window or fullscreen changes).
+        parent = self.target(f)
+        self.vram_note = self.ttk.Label(parent, text='', style='Warn.TLabel', wraplength=self.px(560),
+                                        justify='left')
+        self.vram_note.grid(row=self.next_row(parent), column=1, sticky='w', pady=(0, 4))
+        for key in ('render_resolution', 'window_size', 'fullscreen'):
+            self.var(key).trace_add('write', lambda *_a: self.update_vram_note())
         self.row(f, _('Wide screens'), self.choice(f, 'ultrawide', ULTRAWIDE, 34),
                  _('On a screen or window wider than 16:9 (21:9, 32:9) gameplay shows more at the sides '
                    'and fills it. Menus, loading screens and cutscene videos stay 16:9; the in-game HUD '
