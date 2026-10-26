@@ -47,22 +47,23 @@ enum class StreamPlacement { Device, Host, Cached };
 static StreamPlacement StreamMemory() {
     static const StreamPlacement placement = [] {
         const char* env = std::getenv("BB_STREAM_MEMORY");
-        // bbport: on a small card (Vram::SmallCard) drawing above 1920x1080 the stream buffer and
-        // the constant ring (~190 MiB) go to cached system memory by default. A 4 GB card at
-        // 2560x1440 went past the driver's budget, the driver paged the game's memory out and
-        // runs fell into ~55-75 FPS with the constant ring full for good (2 of 3 runs; with these
-        // buffers in system memory none of 3, 2026-10-26). At 1920x1080 the game fits a 4 GB
-        // card: the buffers stay in video memory there, where the GPU reads them fastest.
-        const bool small_card = Vulkan::Vram::SmallCard() && Vulkan::Vram::RendersAbove1080p();
-        const std::string_view value = env ? env : small_card ? "cached" : "device";
-        const auto chosen = value == "cached" ? StreamPlacement::Cached
-                            : value == "host" ? StreamPlacement::Host
-                                              : StreamPlacement::Device;
-        std::printf("Stream buffer: %s memory (BB_STREAM_MEMORY=device|cached|host)%s\n",
+        // bbport: BB_STREAM_MEMORY=auto puts the stream buffer and the constant ring (~190 MiB) in
+        // cached system memory on a small card (Vram::SmallCard) drawing above 1920x1080. A 4 GB
+        // card at 2560x1440 fell into ~55-75 FPS with the constant ring full for good in 2 of 3
+        // runs, none of 3 with these buffers in system memory; after a restart (more free commit
+        // for the simulator's ballast) no run fell into it either way, so it stays opt-in
+        // (2026-10-26). Default: video memory, where the GPU reads them fastest.
+        const std::string_view value = env ? env : "device";
+        const bool small_card = value == "auto" && Vulkan::Vram::SmallCard() &&
+                                Vulkan::Vram::RendersAbove1080p();
+        const auto chosen = value == "cached" || small_card ? StreamPlacement::Cached
+                            : value == "host"               ? StreamPlacement::Host
+                                                            : StreamPlacement::Device;
+        std::printf("Stream buffer: %s memory (BB_STREAM_MEMORY=device|cached|host|auto)%s\n",
                     chosen == StreamPlacement::Cached ? "cached system"
                     : chosen == StreamPlacement::Host ? "uncached system"
                                                       : "GPU",
-                    !env && small_card ? " (small card)" : "");
+                    small_card ? " (small card)" : "");
         return chosen;
     }();
     return placement;
