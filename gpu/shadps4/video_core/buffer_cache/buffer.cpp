@@ -47,12 +47,13 @@ enum class StreamPlacement { Device, Host, Cached };
 static StreamPlacement StreamMemory() {
     static const StreamPlacement placement = [] {
         const char* env = std::getenv("BB_STREAM_MEMORY");
-        // bbport: on a small card (Vram::SmallCard) the stream buffer and the constant ring
-        // (~190 MiB) go to cached system memory by default. A 4 GB card at 2560x1440 went past the
-        // driver's budget, the driver paged the game's memory out and runs fell into ~55-75 FPS
-        // with the constant ring full for good (2 of 3 runs; with these buffers in system memory
-        // none of 3, 2026-10-26).
-        const bool small_card = Vulkan::Vram::SmallCard();
+        // bbport: on a small card (Vram::SmallCard) drawing above 1920x1080 the stream buffer and
+        // the constant ring (~190 MiB) go to cached system memory by default. A 4 GB card at
+        // 2560x1440 went past the driver's budget, the driver paged the game's memory out and
+        // runs fell into ~55-75 FPS with the constant ring full for good (2 of 3 runs; with these
+        // buffers in system memory none of 3, 2026-10-26). At 1920x1080 the game fits a 4 GB
+        // card: the buffers stay in video memory there, where the GPU reads them fastest.
+        const bool small_card = Vulkan::Vram::SmallCard() && Vulkan::Vram::RendersAbove1080p();
         const std::string_view value = env ? env : small_card ? "cached" : "device";
         const auto chosen = value == "cached" ? StreamPlacement::Cached
                             : value == "host" ? StreamPlacement::Host
