@@ -960,6 +960,20 @@ void Instance::CollectPhysicalMemoryInfo() {
         total_memory_budget -= system_memory;
         // bbport: small cards place some buffers in system memory (Vram::SmallCard).
         Vram::startup_budget.store(total_memory_budget, std::memory_order_relaxed);
+        if (Vram::SmallCard()) {
+            // Player logs: a small card drawing above 1920x1080 may not fit (2560x1440 on 4 GB
+            // went past the budget and ran at about half speed now and then).
+            unsigned width = 1920, height = 1080;
+            if (const char* res = std::getenv("BB_RENDER_RES")) {
+                std::sscanf(res, "%ux%u", &width, &height);
+            }
+            std::printf("GPU: small card, %llu MiB for the game, rendering %ux%u%s\n",
+                        static_cast<unsigned long long>(total_memory_budget >> 20), width, height,
+                        u64(width) * height > 1920ull * 1080 ? ": above 1920x1080 it may not fit "
+                                                               "(half speed or stutter)"
+                                                             : "");
+            std::fflush(stdout);
+        }
         return;
     }
     // Leave at least 8 GB for the system on integrated GPUs.
