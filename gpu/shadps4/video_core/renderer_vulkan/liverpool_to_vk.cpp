@@ -1,7 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <vector>
 #include "common/assert.h"
 #include "common/number_utils.h"
 #include "video_core/amdgpu/pixel_format.h"
@@ -1181,7 +1187,24 @@ vk::ClearValue ColorBufferClearValue(const AmdGpu::ColorBuffer& color_buffer) {
         break;
     }
 
+    const auto unswizzled = color.float32;
     color.float32 = comp_swizzle.Apply(color.float32);
+    // bbport diagnosis (BB_CLEAR_LOG=1): every distinct fast-clear colour once.
+    if (static const bool clear_log = std::getenv("BB_CLEAR_LOG") != nullptr; clear_log) {
+        static std::mutex mutex;
+        static std::vector<std::array<u32, 5>> seen;
+        const std::array<u32, 5> key{c0, c1, u32(format), u32(number_type),
+                                     u32(color_buffer.info.comp_swap)};
+        std::scoped_lock lock{mutex};
+        if (std::find(seen.begin(), seen.end(), key) == seen.end() && seen.size() < 64) {
+            seen.push_back(key);
+            std::printf("Clear colour: words %08x %08x, format %u number %u swap %u -> raw "
+                        "(%.3f %.3f %.3f %.3f) -> swizzled (%.3f %.3f %.3f %.3f)\n",
+                        c0, c1, u32(format), u32(number_type), key[4], unswizzled[0],
+                        unswizzled[1], unswizzled[2], unswizzled[3], color.float32[0],
+                        color.float32[1], color.float32[2], color.float32[3]);
+        }
+    }
     return {.color = color};
 }
 
