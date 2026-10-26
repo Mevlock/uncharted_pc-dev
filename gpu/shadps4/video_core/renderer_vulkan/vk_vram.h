@@ -9,6 +9,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 
 #include "common/types.h"
@@ -84,6 +85,18 @@ inline std::atomic<u64> startup_budget{0};
 inline bool SmallCard() {
     const u64 budget = startup_budget.load(std::memory_order_relaxed);
     return !Legacy() && budget != 0 && budget < (5632ull << 20);
+}
+
+/// The game draws above its own 1920x1080 (BB_RENDER_RES, set by the launcher).
+inline bool RendersAbove1080p() {
+    static const bool above = [] {
+        unsigned width = 1920, height = 1080;
+        if (const char* res = std::getenv("BB_RENDER_RES")) {
+            std::sscanf(res, "%ux%u", &width, &height);
+        }
+        return u64(width) * height > 1920ull * 1080;
+    }();
+    return above;
 }
 
 } // namespace Vulkan::Vram
