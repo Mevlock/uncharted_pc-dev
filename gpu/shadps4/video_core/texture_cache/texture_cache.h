@@ -469,6 +469,10 @@ private:
     /// bbport: gc_tick at each of the last 64 seconds (GarbageCollectImages).
     std::array<u64, 64> gc_tick_at_second{};
     u64 gc_second = 0;
+    /// bbport: gc_tick at the start of each 50 ms slot (BB_GC_MIN_AGE_MS: images used within
+    /// that time stay under memory pressure).
+    std::array<u64, 128> gc_tick_at_slot{};
+    u64 gc_slot = 0;
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;
     u64 critical_gc_memory = 0;

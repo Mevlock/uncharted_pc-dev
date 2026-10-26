@@ -607,17 +607,22 @@ void VideoOutDriver::Flip(const Request& req) {
                 std::sort(sorted.begin(), sorted.end());
                 const double median = sorted[sorted.size() / 2];
                 double sum = 0, sq = 0;
-                u32 spikes = 0;
+                u32 spikes = 0, over25 = 0, over33 = 0, over50 = 0;
                 for (const double ms : intervals) {
                     sum += ms;
                     sq += ms * ms;
                     spikes += ms > 1.5 * median;
+                    // Hitches by absolute length (comparable between runs at any frame rate).
+                    over25 += ms > 25.0;
+                    over33 += ms > 33.3;
+                    over50 += ms > 50.0;
                 }
                 const double mean = sum / intervals.size();
                 std::printf("Frame pacing: median %.2f ms, stddev %.2f ms, p99 %.2f ms, "
-                            "%u frames over 1.5x median\n",
+                            "%u frames over 1.5x median; frames over 25/33/50 ms: %u/%u/%u\n",
                             median, std::sqrt(std::max(0.0, sq / intervals.size() - mean * mean)),
-                            sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)], spikes);
+                            sorted[std::min(sorted.size() - 1, sorted.size() * 99 / 100)], spikes,
+                            over25, over33, over50);
             }
             intervals.clear();
             window_start = now;
