@@ -993,9 +993,28 @@ static void __attribute__((ms_abi)) job_idle_yield(uint64_t rdi, uint64_t rsi, u
     sched_yield();
 #endif
 }
+/* Windows' Meltdown mitigation (kernel VA shadow, on Intel CPUs before about the 8th generation)
+ * makes every kernel call much dearer, and the idle workers call SwitchToThread thousands of times
+ * a second: an i7-7700K player's U3 (CPU-bound, ~1900 draws) ran ~50 FPS with the yield and ~55
+ * without it, while newer CPUs gain ~4 % from it (2026-10-26). */
+static int kernel_va_shadow_on(void) {
+#ifdef _WIN32
+    typedef LONG (WINAPI *QuerySystem)(ULONG,void *,ULONG,ULONG *);
+    const QuerySystem query=(QuerySystem)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"),"NtQuerySystemInformation");
+    ULONG flags=0;
+    /* SystemKernelVaShadowInformation (196): bit 0 = KvaShadowEnabled */
+    return query && query(196,&flags,sizeof(flags),NULL)>=0 && (flags&1);
+#else
+    return 0;
+#endif
+}
 static void install_job_idle_yield(uint64_t image_size) {
     const char *env=getenv("BB_JOB_YIELD");
     if (env && env[0]=='0') { printf("Job workers: idle ones do not yield (BB_JOB_YIELD=0)\n"); return; }
+    if (!(env && env[0]=='1') && kernel_va_shadow_on()) {
+        printf("Job workers: idle ones do not yield (kernel VA shadow on: kernel calls are slow; BB_JOB_YIELD=1 yields)\n");
+        return;
+    }
     /* US / EU-Russian 1.02: mov r8,r14; cmp r13d,3; ja; mov rax,[r15]; mov rcx,[rax+r12*8+d32]; rdtsc.
      * EU 1.02 (CUSA02343): the same with other registers: cmp r12d,3; mov rax,[r13]. */
     static const struct { unsigned char head[7]; unsigned char tail[8]; size_t tail_len; } forms[]={
