@@ -16,6 +16,15 @@
 #include <vector>
 
 #include <SDL3/SDL.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 #include "bbport_settings.h"
 #include <miniz.h>
 #include "imgui.h"
@@ -78,6 +87,57 @@ float game_frame_ms[GameFrameHistory]{};
 int game_frame_next = 0, game_frame_count = 0;
 std::chrono::steady_clock::time_point last_game_frame{}, game_stats_at{};
 float game_fps = 0.0f, game_low_fps = 0.0f, game_worst_ms = 0.0f;
+
+// Memory for the counter's third line, once a second: the game's RAM (its working set, what Task
+// Manager shows) and the video memory the driver counts for it (VK_EXT_memory_budget heap
+// usage of the device-local heaps; on a simulated small card it includes the ballast).
+vk::PhysicalDevice memory_gpu{};
+bool memory_budget = false;
+std::chrono::steady_clock::time_point memory_at{};
+double ram_gib = 0.0, ram_total_gib = 0.0, vram_gib = 0.0, vram_total_gib = 0.0;
+
+void UpdateMemory() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - memory_at < std::chrono::seconds(1) && memory_at.time_since_epoch().count() != 0) {
+        return;
+    }
+    memory_at = now;
+    constexpr double GiB = 1024.0 * 1024.0 * 1024.0;
+#ifdef _WIN32
+    struct Counters {
+        DWORD cb, page_faults;
+        SIZE_T peak_working_set, working_set, quota_peak_paged, quota_paged, quota_peak_nonpaged,
+            quota_nonpaged, pagefile, peak_pagefile;
+    };
+    using GetInfo = BOOL(WINAPI*)(HANDLE, Counters*, DWORD);
+    static const auto get_info = reinterpret_cast<GetInfo>(reinterpret_cast<void*>(
+        GetProcAddress(GetModuleHandleA("kernel32.dll"), "K32GetProcessMemoryInfo")));
+    Counters counters{};
+    counters.cb = sizeof(counters);
+    if (get_info && get_info(GetCurrentProcess(), &counters, sizeof(counters))) {
+        ram_gib = double(counters.working_set) / GiB;
+    }
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status)) {
+        ram_total_gib = double(status.ullTotalPhys) / GiB;
+    }
+#endif
+    if (memory_gpu) {
+        vk::PhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+        vk::PhysicalDeviceMemoryProperties2 props{.pNext = memory_budget ? &budget : nullptr};
+        memory_gpu.getMemoryProperties2(&props);
+        u64 used = 0, total = 0;
+        for (u32 i = 0; i < props.memoryProperties.memoryHeapCount; ++i) {
+            if (props.memoryProperties.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+                total += props.memoryProperties.memoryHeaps[i].size;
+                used += memory_budget ? budget.heapUsage[i] : 0;
+            }
+        }
+        vram_gib = double(used) / GiB;
+        vram_total_gib = double(total) / GiB;
+    }
+}
 
 /// The game frame `back` frames ago (0 = newest).
 float GameFrameMs(int back) {
@@ -484,6 +544,14 @@ void FpsCounter() {
     } else {
         ImGui::TextColored(second_line, "%s %s", UpscalerShortName(s.upscaler), ShortRenderText());
     }
+    // "RAM 6.1/32 GB  VRAM 7.4/16 GB": the game's memory and video memory, once a second.
+    UpdateMemory();
+    if (ram_total_gib > 0.0 && vram_total_gib > 0.0 && memory_budget) {
+        ImGui::TextColored(second_line, "RAM %.1f/%.0f GB  VRAM %.1f/%.0f GB", ram_gib, ram_total_gib,
+                           vram_gib, vram_total_gib);
+    } else if (ram_total_gib > 0.0) {
+        ImGui::TextColored(second_line, "RAM %.1f/%.0f GB", ram_gib, ram_total_gib);
+    }
     if (s.show_fps_graph && game_frame_count > 1) {
         static float graph[GraphFrames];
         const int n = std::min(game_frame_count, GraphFrames);
@@ -701,6 +769,8 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     if (initialized) {
         return;
     }
+    memory_gpu = instance.GetPhysicalDevice();
+    memory_budget = instance.CanReportMemoryUsage();
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
