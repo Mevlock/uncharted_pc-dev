@@ -958,6 +958,8 @@ void Instance::CollectPhysicalMemoryInfo() {
         // We reserve some memory for the system.
         const u64 system_memory = std::min<u64>(total_memory_budget / 8, 1_GB);
         total_memory_budget -= system_memory;
+        // bbport: small cards place some buffers in system memory (Vram::SmallCard).
+        Vram::startup_budget.store(total_memory_budget, std::memory_order_relaxed);
         return;
     }
     // Leave at least 8 GB for the system on integrated GPUs.

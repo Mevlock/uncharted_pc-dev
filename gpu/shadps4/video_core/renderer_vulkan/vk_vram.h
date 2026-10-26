@@ -75,4 +75,15 @@ inline bool Allows(u64 bytes) {
 inline std::atomic<bool> urgent{false}; ///< an allocation went over the budget: collect hard
 inline std::atomic<u64> failed_allocs{0}, recovered_allocs{0}, host_fallbacks{0};
 
+/// The game's share of a discrete card's video memory at start (the driver's budget less the
+/// system reserve; the simulated size with BB_VRAM_SIMULATE_MIB). 0: integrated GPU or not known.
+inline std::atomic<u64> startup_budget{0};
+
+/// A discrete card whose budget at start is under the texture cache's small-card line (5.5 GB):
+/// memory placements that save video memory are chosen. BB_VRAM_LEGACY=1: never.
+inline bool SmallCard() {
+    const u64 budget = startup_budget.load(std::memory_order_relaxed);
+    return !Legacy() && budget != 0 && budget < (5632ull << 20);
+}
+
 } // namespace Vulkan::Vram
