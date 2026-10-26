@@ -3548,6 +3548,7 @@ void Rasterizer::OnSubmit() {
     texture_cache.ProcessDownloadImages();
     texture_cache.UpdateButtonPrompts();
     texture_cache.RunGarbageCollector();
+    buffer_cache.ReclaimArenaMemory(); // bbport: VRAM give-back
     runtime.TickFrame();
 }
 
@@ -5829,6 +5830,13 @@ void Rasterizer::OnGuestFlip() {
     PoolCheck::Flip();
     // The age of GPU data in the buffer cache's pages (BufferCache::InvalidateMemory).
     VideoCore::g_guest_frames.fetch_add(1, std::memory_order_relaxed);
+    // BB_VRAM_SIMULATE_MIB: the ballast used about once a second stays in video memory.
+    if (instance.HasBallast() && flips % 60 == 1) {
+        scheduler.EndRendering();
+        scheduler.Record([&instance = instance](vk::CommandBuffer cmdbuf) {
+            instance.TouchBallast(cmdbuf);
+        });
+    }
     if (StaleCheckEnabled()) {
         CheckComputeOutputs();
         auto& t = Stale();
