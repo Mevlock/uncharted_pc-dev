@@ -1812,6 +1812,19 @@ void TextureCache::GarbageCollectImages() {
         gc_second = second;
         gc_tick_at_second[second % gc_tick_at_second.size()] = gc_tick;
     }
+    const u64 slot = u64(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count()) /
+                     50;
+    if (slot != gc_slot) {
+        // Slots no collection ran in take this tick too (none of them saw a later one).
+        const u64 first = gc_slot ? std::max(gc_slot + 1, slot + 1 - std::min<u64>(slot + 1, gc_tick_at_slot.size()))
+                                  : slot;
+        for (u64 s = first; s <= slot; ++s) {
+            gc_tick_at_slot[s % gc_tick_at_slot.size()] = gc_tick;
+        }
+        gc_slot = slot;
+    }
     if (total_used_memory < trigger_gc_memory && !urgent_pass) {
         return;
     }
@@ -1821,6 +1834,17 @@ void TextureCache::GarbageCollectImages() {
     }();
     // The tick at the start of that second (an older one where no submission came then).
     const u64 idle_tick = gc_tick_at_second[(second - idle_seconds) % gc_tick_at_second.size()];
+    // bbport tuning for small cards (tight_budget), both off by default:
+    // BB_GC_MIN_AGE_MS=<ms>: under pressure, images used within that time are not evicted.
+    // BB_GC_HYSTERESIS=1: an eviction pass goes on down to the trigger mark.
+    static const u64 min_age_ms = [] {
+        const char* env = std::getenv("BB_GC_MIN_AGE_MS");
+        return env ? std::strtoull(env, nullptr, 10) : 0ull;
+    }();
+    static const bool hysteresis = [] {
+        const char* env = std::getenv("BB_GC_HYSTERESIS");
+        return env && env[0] == '1';
+    }();
     std::scoped_lock lock{mutex};
     bool pressured = false;
     bool aggresive = false;
@@ -1849,6 +1873,18 @@ void TextureCache::GarbageCollectImages() {
         below_tick = gc_tick - ticks_to_destroy;
         if (!pressured && !aggresive && !urgent_pass) {
             below_tick = std::min(below_tick, idle_tick);
+        }
+        if (tight_budget && min_age_ms && !urgent_pass) {
+            // An image used within the last min_age_ms (half that over the critical mark) is
+            // likely needed again at once: evicting it only uploads it again a frame later.
+            const u64 slots = std::min<u64>((aggresive ? min_age_ms / 2 : min_age_ms) / 50,
+                                            gc_tick_at_slot.size() - 1);
+            if (slots && gc_slot >= slots) {
+                below_tick = std::min(below_tick, gc_tick_at_slot[(gc_slot - slots) % gc_tick_at_slot.size()]);
+            }
+        }
+        if (tight_budget && hysteresis && (pressured || aggresive)) {
+            num_deletions = aggresive ? 160 : 120;
         }
         visited = 0;
     };
@@ -1892,7 +1928,11 @@ void TextureCache::GarbageCollectImages() {
                 aggresive = false;
                 return false;
             }
-            if (pressured && total_used_memory < pressure_gc_memory) {
+            // BB_GC_HYSTERESIS=1 (small cards): once evicting, go on down to the trigger mark,
+            // so the next submission does not start over a few images above the pressure mark.
+            const u64 stop_mark =
+                tight_budget && hysteresis ? trigger_gc_memory : pressure_gc_memory;
+            if (pressured && total_used_memory < stop_mark) {
                 num_deletions >>= 1;
                 pressured = false;
             }
