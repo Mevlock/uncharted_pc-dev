@@ -641,8 +641,7 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
         const char* env = std::getenv("BB_FAULT_HERE");
         return !(env && env[0] == '0');
     }();
-    if (!enabled || !side_queue || BbToggle::Disabled2(BbToggle::FaultReadbackHere) ||
-        shadow_pages.load(std::memory_order_relaxed) != 0) {
+    if (!enabled || !side_queue || BbToggle::Disabled2(BbToggle::FaultReadbackHere)) {
         return false;
     }
     const auto start_time = std::chrono::steady_clock::now();
@@ -720,18 +719,21 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     }
     if (total != 0) {
         auto& side = *side_queue;
-        std::scoped_lock lk{side.mutex};
-        Vulkan::Check(side.device.resetCommandPool(*side.pool));
-        Vulkan::Check(side.cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
-        side.cmdbuf.copyBuffer(arena->Handle(), side.staging.Handle(), copies);
+        auto* slot = side.Acquire();
+        if (!slot) {
+            return false; // every slot in flight: the GPU command thread's path settles it
+        }
+        Vulkan::Check(side.device.resetCommandPool(*slot->pool));
+        Vulkan::Check(slot->cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit}));
+        slot->cmdbuf.copyBuffer(arena->Handle(), slot->staging.Handle(), copies);
         const vk::MemoryBarrier2 to_host = {
             .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
             .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
             .dstStageMask = vk::PipelineStageFlagBits2::eHost,
             .dstAccessMask = vk::AccessFlagBits2::eHostRead,
         };
-        side.cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
-        Vulkan::Check(side.cmdbuf.end());
+        slot->cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
+        Vulkan::Check(slot->cmdbuf.end());
         const vk::Semaphore timeline = semaphore.Handle();
         const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
         const vk::TimelineSemaphoreSubmitInfo timeline_info = {
@@ -744,20 +746,24 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
             .pWaitSemaphores = &timeline,
             .pWaitDstStageMask = &wait_stage,
             .commandBufferCount = 1,
-            .pCommandBuffers = &side.cmdbuf,
+            .pCommandBuffers = &slot->cmdbuf,
         };
-        Vulkan::Check(side.queue.submit(submit, *side.fence));
-        const vk::Result result = side.device.waitForFences(*side.fence, true, UINT64_MAX);
+        {
+            std::scoped_lock submit_lock{side.submit_mutex};
+            Vulkan::Check(side.queue.submit(submit, *slot->fence));
+        }
+        const vk::Result result = side.device.waitForFences(*slot->fence, true, UINT64_MAX);
         if (result == vk::Result::eErrorDeviceLost) {
             Vulkan::DeviceLost(side.device);
         }
         Vulkan::Check(result);
-        Vulkan::Check(side.device.resetFences(*side.fence));
-        side.staging.Invalidate(0, total);
+        Vulkan::Check(side.device.resetFences(*slot->fence));
+        slot->staging.Invalidate(0, total);
         for (const auto& copy : copies) {
             memory->TryWriteBacking(std::bit_cast<u8*>(arena->cpu_addr + copy.srcOffset),
-                                    side.staging.mapped_data.data() + copy.dstOffset, copy.size);
+                                    slot->staging.mapped_data.data() + copy.dstOffset, copy.size);
         }
+        side.Release(slot);
     }
     // The pages whose GPU data is in guest memory now stop being GPU data, unless a write was
     // marked on them meanwhile; the faulting range becomes the guest's (writable).
