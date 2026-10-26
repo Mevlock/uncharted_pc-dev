@@ -461,6 +461,8 @@ private:
     std::unordered_set<ImageId> small_download_images; ///< bbport: ReadbackSmallTargets
     u64 total_used_memory = 0;
     u64 registered_image_bytes = 0; ///< bbport: guest bytes of registered images (diagnostics)
+    bool tight_budget = false;                  ///< bbport: card under ~5 GB
+    std::atomic<u64> pending_free_bytes{0};     ///< bbport: deleted, not yet destroyed
     u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
     std::chrono::steady_clock::time_point gc_report_time{};
     u64 gc_kept = 0, gc_kept_bytes = 0; ///< bbport: old GPU-written tiled images kept by one walk

@@ -142,6 +142,32 @@ public:
     }
 
     /// Calls 'func' for each interval that partially overlaps provided range.
+    /// bbport (after BilalReloaded's port): removes [start, end) from the set; an interval cut at
+    /// an edge keeps its outer part, made by `cut(interval, a, b)` (the part [a, b) of `interval`).
+    void Remove(u64 start, u64 end, auto&& cut) {
+        if (start >= end) [[unlikely]] {
+            return;
+        }
+        auto first = std::ranges::upper_bound(intervals, start, {}, &IV::end);
+        auto last = first;
+        while (last != intervals.end() && last->start < end) {
+            ++last;
+        }
+        if (first == last) {
+            return;
+        }
+        IV out[2];
+        std::size_t m = 0;
+        if (first->start < start) {
+            out[m++] = cut(*first, first->start, start);
+        }
+        const IV tail = *std::prev(last);
+        if (tail.end > end) {
+            out[m++] = cut(tail, end, tail.end);
+        }
+        Splice(first, last, out, m);
+    }
+
     void ForEachInRange(u64 start, u64 end, auto&& func) const {
         if (start >= end) [[unlikely]] {
             return;
