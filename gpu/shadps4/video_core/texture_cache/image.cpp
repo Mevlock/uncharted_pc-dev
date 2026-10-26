@@ -126,8 +126,6 @@ bool RecyclingEnabled() {
 
 void DestroyRecycled(const RecycledImage& entry) {
     vmaDestroyImage(entry.allocator, entry.image, entry.allocation);
-    Vulkan::Vram::image_bytes.fetch_sub(entry.size_bytes, std::memory_order_relaxed);
-    Vulkan::Vram::image_count.fetch_sub(1, std::memory_order_relaxed);
 }
 } // namespace
 
@@ -140,15 +138,15 @@ UniqueImage::ReuseScope::~ReuseScope() {
 }
 
 void UniqueImage::Recycle() {
-    if (!image || image_ci.pNext || size_bytes > MaxRecycledBytes / 2 || !RecyclingEnabled() ||
-        Vulkan::Vram::urgent.load(std::memory_order_relaxed)) {
+    // This branch has no VRAM budget accounting (feature/vram-limit's Vulkan::Vram): the cap of
+    // 6 images / 64 MiB is the only limit.
+    if (!image || image_ci.pNext || size_bytes > MaxRecycledBytes / 2 || !RecyclingEnabled()) {
         Destroy();
         return;
     }
     boost::container::small_vector<RecycledImage, 2> evicted;
     {
         std::scoped_lock lk{recycled_mutex};
-        // Still counted in Vram::image_bytes: the memory stays allocated.
         recycled_images.push_back({image_ci, allocator, allocation, image, size_bytes});
         recycled_bytes += size_bytes;
         while (recycled_images.size() > MaxRecycledImages || recycled_bytes > MaxRecycledBytes) {
