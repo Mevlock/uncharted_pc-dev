@@ -143,6 +143,12 @@ jobs:
           fi
           # Every tag becomes the latest release, -pre ones too (their changelog carries the
           # pre-release warning): GitHub shows a release flagged as a pre-release nowhere on the
-          # repository's front page.
-          gh release create "$GITHUB_REF_NAME" "$zip" --title "$GITHUB_REF_NAME" --latest \
-              --notes-file "$notes"
+          # repository's front page. Test builds (tags with -perf) are the exception: a
+          # pre-release, so the front page keeps pointing at the normal build.
+          if [[ $GITHUB_REF_NAME == *-perf* ]]; then
+              gh release create "$GITHUB_REF_NAME" "$zip" --title "$GITHUB_REF_NAME" --prerelease \
+                  --latest=false --notes-file "$notes"
+          else
+              gh release create "$GITHUB_REF_NAME" "$zip" --title "$GITHUB_REF_NAME" --latest \
+                  --notes-file "$notes"
+          fi
