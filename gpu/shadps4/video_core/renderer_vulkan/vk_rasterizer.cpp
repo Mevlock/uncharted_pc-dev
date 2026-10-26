@@ -3105,6 +3105,24 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         FrameCapture::Poll();
         scheduler.PopPendingOperations();
     }
+    // bbport diagnosis (BB_LIST_PS=1): every 10 s, the pixel shaders drawn and their draw counts
+    // (the candidates for a BB_SKIP_SHADERS bisect of a visual problem).
+    if (static const bool list_ps = std::getenv("BB_LIST_PS") != nullptr; list_ps) {
+        static std::unordered_map<u64, u64> drawn;
+        static auto window = std::chrono::steady_clock::now();
+        if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)]) {
+            ++drawn[ps->pgm_hash];
+        }
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(10)) {
+            std::string line = "Pixel shaders (10 s):";
+            for (const auto& [hash, count] : drawn) {
+                line += fmt::format(" {:x}:{}", hash, count);
+            }
+            std::printf("%s\n", line.c_str());
+            drawn.clear();
+            window = now;
+        }
+    }
     if (const auto* skip_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         skip_ps && SkipShader(skip_ps->pgm_hash)) {
         return;
@@ -3682,8 +3700,26 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             window = now;
         }
     }
+    // A draw of up to 6 indices is usually a full-screen quad (not jittered), but a quad that
+    // writes depth or tests it for equality is scene geometry: U3's chateau wall panels are single
+    // quads. Left unjittered, they sat a fraction of a pixel off their jittered neighbours and the
+    // seams opened into pinholes showing the scene colour's clear (0, 0, 1, 0): rows of bright
+    // blue dots, only with an upscaler on. BB_JITTER_SMALL=0: off.
+    static const bool jitter_small = [] {
+        const char* env = std::getenv("BB_JITTER_SMALL");
+        return !(env && env[0] == '0');
+    }();
+    const auto small_scene_geometry = [&] {
+        if (!jitter_small || !regs.depth_control.depth_enable) {
+            return false;
+        }
+        // Full-screen depth copies and resolves write depth with an always-passing test: not these.
+        const auto func = LiverpoolToVK::CompareOp(regs.depth_control.depth_func);
+        return func != vk::CompareOp::eAlways &&
+               (bool(regs.depth_control.depth_write_enable) || func == vk::CompareOp::eEqual);
+    };
     if (upscaler->Enabled() && db_desc.first &&
-        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
+        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1 || small_scene_geometry())) {
         draw_jitter = SceneJitterFor(db_desc.first);
     } else if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
                ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash)) {
@@ -4127,6 +4163,21 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     const auto& cs_program = CsRegs();
 
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+    // bbport diagnosis (BB_LIST_PS=1): the compute shaders dispatched too, every 10 s.
+    if (static const bool list_cs = std::getenv("BB_LIST_PS") != nullptr; list_cs) {
+        static std::unordered_map<u64, u64> dispatched;
+        static auto window = std::chrono::steady_clock::now();
+        ++dispatched[cs.pgm_hash];
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(10)) {
+            std::string line = "Compute shaders (10 s):";
+            for (const auto& [hash, count] : dispatched) {
+                line += fmt::format(" {:x}:{}", hash, count);
+            }
+            std::printf("%s\n", line.c_str());
+            dispatched.clear();
+            window = now;
+        }
+    }
     if (SkipShader(cs.pgm_hash)) {
         return;
     }
