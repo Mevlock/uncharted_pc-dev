@@ -717,9 +717,10 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     if (total > SideQueue::StagingSize) {
         return false;
     }
+    auto& side = *side_queue;
+    SideQueue::Slot* slot = nullptr;
     if (total != 0) {
-        auto& side = *side_queue;
-        auto* slot = side.Acquire();
+        slot = side.Acquire();
         if (!slot) {
             return false; // every slot in flight: the GPU command thread's path settles it
         }
@@ -759,12 +760,32 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
         Vulkan::Check(result);
         Vulkan::Check(side.device.resetFences(*slot->fence));
         slot->staging.Invalidate(0, total);
-        for (const auto& copy : copies) {
-            memory->TryWriteBacking(std::bit_cast<u8*>(arena->cpu_addr + copy.srcOffset),
-                                    slot->staging.mapped_data.data() + copy.dstOffset, copy.size);
-        }
-        side.Release(slot);
     }
+    // bbport: the copy is stored per page, under the region lock, and only on pages that are still
+    // the GPU's with the write tick seen at the start (as FinishSideDownload). The wait above can be
+    // long: meanwhile the GPU command thread may have read a neighbour back and handed it to the
+    // guest, which wrote it; storing this older copy over that brings stale data back. Stored
+    // unchecked and with a plain store, U3's pub stopped at a Havok spherecastMain assertion on a
+    // rigid body handle within seconds (2026-10-26).
+    const auto store_page = [&](VAddr at) {
+        if (!slot) {
+            return;
+        }
+        for (const auto& copy : copies) {
+            const VAddr start = std::max<VAddr>(arena->cpu_addr + copy.srcOffset, at);
+            const VAddr end =
+                std::min<VAddr>(arena->cpu_addr + copy.srcOffset + copy.size, at + TRACKER_BYTES_PER_PAGE);
+            if (start >= end) {
+                continue;
+            }
+            const u64 from = copy.dstOffset + (start - (arena->cpu_addr + copy.srcOffset));
+            // WriteBackGpuData, not a plain store: it leaves the headers and list links of U3's
+            // freed heap blocks alone (the heap reuses a freed block at once); storing GPU data over
+            // them corrupted the heap.
+            WriteBackGpuData(std::bit_cast<u8*>(start), slot->staging.mapped_data.data() + from,
+                             end - start);
+        }
+    };
     // The pages whose GPU data is in guest memory now stop being GPU data, unless a write was
     // marked on them meanwhile; the faulting range becomes the guest's (writable).
     bool settled = true;
@@ -774,13 +795,18 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
                 const bool faulting = candidate.at >= page && candidate.at < page + length;
                 const u64 offset = candidate.at - manager.GetCpuAddr();
                 if (!manager.IsRegionModified<Type::GPU>(offset, TRACKER_BYTES_PER_PAGE)) {
-                    continue; // read back by someone else meanwhile
+                    continue; // read back by someone else meanwhile: the guest's data is newer
                 }
                 if (manager.LatestGpuWriteTick(candidate.at, TRACKER_BYTES_PER_PAGE) !=
                     candidate.tick) {
                     settled &= !faulting;
-                    continue;
+                    continue; // newer GPU data than the copy
                 }
+                if (!faulting &&
+                    manager.IsRegionModified<Type::CPU>(offset, TRACKER_BYTES_PER_PAGE)) {
+                    continue; // a neighbour with guest data waiting for upload: not overwritten
+                }
+                store_page(candidate.at);
                 gpu_modified_ranges.Subtract(candidate.at, TRACKER_BYTES_PER_PAGE);
                 manager.ChangeRegionState<Type::GPU, false>(candidate.at, TRACKER_BYTES_PER_PAGE);
             }
@@ -788,6 +814,9 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
                 manager.ChangeRegionState<Type::CPU, true>(device_addr, size);
             }
         });
+    if (slot) {
+        side.Release(slot);
+    }
     if (!settled) {
         return false;
     }
