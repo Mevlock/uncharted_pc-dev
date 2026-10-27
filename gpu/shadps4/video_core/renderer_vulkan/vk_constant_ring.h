@@ -25,7 +25,13 @@ namespace Vulkan {
 
 class ConstantRing {
 public:
-    static constexpr u64 Capacity = 32ull << 20;
+    /// BB_RING_MB=<MiB> (experiment; default 32): U3's square keeps the 32 MiB ring full, ~170k
+    /// failed allocations a second (those bindings go through the buffer cache on stage B).
+    static inline const u64 Capacity = [] {
+        const char* env = std::getenv("BB_RING_MB");
+        const u64 mib = env ? std::strtoull(env, nullptr, 10) : 0;
+        return (mib >= 8 && mib <= 1024 ? mib : 32ull) << 20;
+    }();
 
     ConstantRing(const Instance& instance, Scheduler& scheduler_)
         : scheduler{scheduler_},

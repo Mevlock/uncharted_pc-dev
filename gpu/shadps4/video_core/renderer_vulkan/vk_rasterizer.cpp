@@ -1178,6 +1178,10 @@ bool Rasterizer::OnStageA() const {
 namespace {
 /// Stage A: cycles waited per drain site (BB_FRAME_STATS), keyed by function name and line.
 std::unordered_map<const char*, std::unordered_map<u32, u64>> drain_sites;
+// bbport diagnosis (BB_STAGEB_STATS=1): stage A's cycles per pipelined draw in the pipeline lookup
+// (with the check against the prepared draw) and in PostDraw. Stage A only.
+u64 g_a_draw_cycles[2]{};
+u64 g_a_draws = 0;
 } // namespace
 
 void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
@@ -1817,6 +1821,17 @@ bool Rasterizer::RingCollectOne(void* context, VAddr address, u64& size, const u
     if (!source) {
         size = self.memory->ClampRangeSize(address, size);
         if (size == 0 || self.buffer_cache.IsRegionGpuModified(address, size)) {
+            return false;
+        }
+        // bbport (experiment; BB_RING_SELECT=1: on): only bytes the CPU wrote since their last
+        // upload are copied into the ring. Unchanged ones are bound from the buffer cache: no
+        // upload there, and the same binding draw after draw (U3: a full ring, failing ~170k
+        // allocations/s, ran 5% faster than a ring big enough for all or no ring at all).
+        static const bool select = [] {
+            const char* env = std::getenv("BB_RING_SELECT");
+            return env && env[0] == '1';
+        }();
+        if (select && !self.buffer_cache.IsRegionCpuModified(address, size)) {
             return false;
         }
         VideoCore::NoteAsyncAccess("constant ring copy", address, size, false, true);
@@ -2756,6 +2771,15 @@ void Rasterizer::PrintPipeStats() {
             }
         }
     }
+    if (g_a_draws) {
+        const double us = cycles / seconds / 1e6;
+        std::printf("\n  stage A per draw: %.0f/s, lookup %.2f us (%.1f%%), PostDraw %.2f us (%.1f%%)",
+                    g_a_draws / seconds, g_a_draw_cycles[0] / us / g_a_draws,
+                    100.0 * g_a_draw_cycles[0] / cycles, g_a_draw_cycles[1] / us / g_a_draws,
+                    100.0 * g_a_draw_cycles[1] / cycles);
+        g_a_draw_cycles[0] = g_a_draw_cycles[1] = 0;
+        g_a_draws = 0;
+    }
     std::printf("\n  stage A waits over 0.5%%:");
     for (const auto& [function, lines] : drain_sites) {
         for (const auto& [line, waited] : lines) {
@@ -2943,7 +2967,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
             return;
         }
     }
+    const u64 lookup_start = StageBStats() ? __rdtsc() : 0;
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline({}, prepared);
+    if (lookup_start) {
+        g_a_draw_cycles[0] += __rdtsc() - lookup_start;
+        ++g_a_draws;
+    }
     if (pipeline && DrawBatchEnabled()) {
         pipeline_cache.GetBatchedGraphicsPipeline(pipeline);
     }
@@ -2958,7 +2987,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
         return;
     }
     if (pipelined && FilterDrawPasses()) {
+        const u64 post_start = lookup_start ? __rdtsc() : 0;
         PostDraw(pipeline, used_prepared, is_indexed, index_offset);
+        if (post_start) {
+            g_a_draw_cycles[1] += __rdtsc() - post_start;
+        }
         return;
     }
     DrawRecord(pipeline, used_prepared, is_indexed, index_offset);
