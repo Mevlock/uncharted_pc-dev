@@ -651,16 +651,17 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     // second queue itself. Page states change under their region's lock, the one the recording
     // thread marks GPU writes under, and only if no write was marked since the read back began
     // (a later write has a later tick); else the GPU command thread's path settles the fault.
-    // BB_FAULT_HERE=1: on; off by default. It read back before the GPU command thread's fault
-    // policy (shared writes), so it stored GPU data over memory U3 had reused (crashes in the pub).
-    // With the strict check below (only faults the policy would read back, only the faulting
-    // pages) U3's square gains ~5% (140.6 -> 147.2 FPS) and the pub fight ran 2 x 4 min, but the
-    // rooftop route still crashed in 1-2 runs of 4 (2026-10-27: guest pointers holding floats or
-    // unmapped addresses, guest offsets 0x60996f / 0x56edc4): something it stores is still newer
-    // in guest memory. Toggle2 FaultReadbackHere: off.
+    // On by default (BB_FAULT_HERE=0: off; toggle2 FaultReadbackHere: off). It once read back
+    // before the GPU command thread's fault policy (shared writes) and stored GPU data over memory
+    // U3 had reused (crashes in the pub); the strict check below takes only the faults the policy
+    // would read back, only the faulting pages. The rooftop route then still crashed in about 1 run
+    // of 3 until DownloadMemory's and the late read-backs' unconditional stores were fixed
+    // (downloads_in_flight, CompleteReadBacks). 2026-10-27: route 12 of 12 clean, pub fight, U2
+    // Borneo and gun save 4 min each clean; U3 square 149.4 -> 155.3 FPS, 8 threads at 60% CPU
+    // 82.1 -> 87.4.
     static const bool enabled = [] {
         const char* env = std::getenv("BB_FAULT_HERE");
-        return env && env[0] == '1';
+        return !(env && env[0] == '0');
     }();
     if (!enabled || !side_queue || BbToggle::Disabled2(BbToggle::FaultReadbackHere)) {
         return false;
