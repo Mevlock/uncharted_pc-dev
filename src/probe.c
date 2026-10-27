@@ -351,6 +351,23 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
             fprintf(stderr,"\n");
         }
     }
+    /* BB_FAULT_TABLE=1 (diagnosis, U1 EU 0x33972d: a bit-array pointer read from a 48-byte table
+     * entry was garbage under VRAM give-back stress, 2026-10-27): the chain the game followed
+     * (rsi+0x600 -> index at +0x118; [rbp-0x68]+0x10 -> entries; entry + 0x20 -> pointer). */
+    if (getenv("BB_FAULT_TABLE") && image && c->Rip-(uint64_t)(uintptr_t)image==0x33972d) {
+        uint64_t d=0,p=0,e=0; uint32_t idx=0; unsigned char entry[48]; SIZE_T got=0;
+        HANDLE self=GetCurrentProcess();
+        ReadProcessMemory(self,(void *)(uintptr_t)(c->Rsi+0x600),&d,8,&got);
+        ReadProcessMemory(self,(void *)(uintptr_t)(d+0x118),&idx,4,&got);
+        ReadProcessMemory(self,(void *)(uintptr_t)(c->Rbp-0x68),&p,8,&got);
+        ReadProcessMemory(self,(void *)(uintptr_t)(p+0x10),&e,8,&got);
+        const uint64_t at=e+(uint64_t)idx*48;
+        fprintf(stderr,"  Table: object %016llx index %u, table %016llx entries %016llx, entry %016llx:",
+                (unsigned long long)d,idx,(unsigned long long)p,(unsigned long long)e,(unsigned long long)at);
+        if (ReadProcessMemory(self,(void *)(uintptr_t)at,entry,sizeof(entry),&got) && got==sizeof(entry))
+            for (int i=0;i<48;++i) fprintf(stderr,"%s%02x",i%8?"":" ",entry[i]);
+        fprintf(stderr,"\n");
+    }
     /* The stack words at rsp that point into code: a jump to a bad address leaves its caller's
      * return address there, which the rbp chain below skips. */
     for (int i=0;i<16;++i) {

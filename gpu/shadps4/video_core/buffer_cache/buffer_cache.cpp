@@ -3732,6 +3732,20 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
         offset += copy_size;
         g_resident_buffer_bytes.fetch_sub(size, std::memory_order_relaxed);
     }
+    // bbport diagnosis: BB_GIVEBACK_TRACE=1 prints each range given back (with the U1 table dump
+    // of BB_FAULT_TABLE: was the memory the game read ever given back?).
+    static const bool giveback_trace = [] {
+        const char* env = std::getenv("BB_GIVEBACK_TRACE");
+        return env && env[0] == '1';
+    }();
+    if (giveback_trace) {
+        for (const auto& piece : pieces) {
+            std::printf("Give-back: 0x%llx-0x%llx (tick %llu)\n",
+                        static_cast<unsigned long long>(piece.start << block_shift),
+                        static_cast<unsigned long long>(piece.end << block_shift),
+                        static_cast<unsigned long long>(scheduler.CurrentTick()));
+        }
+    }
     staging.Flush();
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
     has_pending_unbinds |= !deferred;
@@ -3778,12 +3792,12 @@ void BufferCache::ReclaimArenaMemory() {
                     "(BB_ARENA_LIMIT_MB; BB_ARENA_RECLAIM=0: off)\n",
                     static_cast<unsigned long long>(mib));
         std::fflush(stdout);
-        return std::max<u64>(mib, 64) << 20;
+        return std::max<u64>(mib, 16) << 20; // 16..63: stress tests only
     }();
     static const u16 age_epochs = [] {
         const char* env = std::getenv("BB_ARENA_RECLAIM_AGE_S");
         const int seconds = env && env[0] ? std::atoi(env) : 60;
-        return static_cast<u16>(std::clamp(seconds, 6, 2 * (int(ReclaimEpochRing) - 4)) / 2);
+        return static_cast<u16>(std::clamp(seconds, 2, 2 * (int(ReclaimEpochRing) - 4)) / 2);
     }();
     const auto gpu_data = [&](VAddr lo, u64 size) {
         bool late = false;
@@ -3804,7 +3818,10 @@ void BufferCache::ReclaimArenaMemory() {
     // the probation is over and the GPU has finished the work before the last epoch.
     static const u16 probation_epochs = [] {
         const char* env = std::getenv("BB_ARENA_PROBATION");
-        return env && env[0] == '0' ? u16(0) : std::max<u16>(3, age_epochs / 4);
+        if (env && env[0] >= '0' && env[0] <= '9') {
+            return static_cast<u16>(std::atoi(env)); // 0: off; N: N epochs of 2 s (stress tests)
+        }
+        return std::max<u16>(3, age_epochs / 4);
     }();
     const bool over = (resident_in_use_blocks << block_shift) > limit;
     u64 released = 0, probation_blocks = 0;
