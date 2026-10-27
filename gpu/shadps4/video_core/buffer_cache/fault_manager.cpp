@@ -164,10 +164,13 @@ void FaultManager::ProcessFaultBuffer() {
         .pBufferMemoryBarriers = &post_barrier,
     });
 
-    scheduler.DeferOperation([this, mapped, area = current_area] {
+    scheduler.DeferOperation([this, mapped, area = current_area, tick = scheduler.CurrentTick()] {
         fault_ranges.Clear();
         const u64* fault_buf = std::bit_cast<const u64*>(mapped);
-        const u32 fault_count = fault_buf[0];
+        // bbport: the processing shader counts every page, also past the area's MaxPageFaults - 1
+        // slots (it stops storing there); reading further took the next area's words as addresses.
+        const u32 fault_count =
+            std::min<u32>(static_cast<u32>(fault_buf[0]), static_cast<u32>(MaxPageFaults - 1));
         // bbport diagnosis: BB_FAULT_LOG=1 prints the pages shaders read through a pointer
         // before they were in the GPU cache (those reads returned zeros).
         static const bool log_faults = [] {
@@ -185,9 +188,13 @@ void FaultManager::ProcessFaultBuffer() {
         fault_ranges.ForEach([&](VAddr start, VAddr end) {
             ASSERT_MSG((end - start) <= std::numeric_limits<u32>::max(),
                        "Buffer size is too large");
-            (void)buffer_cache.ObtainBuffer(start, end - start, false);
+            // bbport: never the stream buffer (stream limit 0): the pages become resident, and
+            // the arena use marks their window used (VRAM give-back probation).
+            (void)buffer_cache.ObtainBuffer(start, end - start, false, false, 0);
         });
         fault_areas[area] = 0;
+        applied_tick.store(std::max(applied_tick.load(std::memory_order_relaxed), tick),
+                           std::memory_order_release);
     });
 
     fault_areas[current_area++] = scheduler.CurrentTick();

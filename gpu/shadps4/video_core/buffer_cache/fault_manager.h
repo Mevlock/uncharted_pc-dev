@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <atomic>
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/range_set.h"
 
@@ -23,6 +25,13 @@ public:
 
     void ProcessFaultBuffer();
 
+    /// bbport: whether the reports of shader reads up to `tick` are all applied (or none is
+    /// pending): VRAM give-back probation releases a window only then.
+    [[nodiscard]] bool ReportsApplied(u64 tick) const noexcept {
+        return applied_tick.load(std::memory_order_acquire) >= tick ||
+               std::ranges::all_of(fault_areas, [](u64 t) { return t == 0; });
+    }
+
 private:
     Vulkan::Scheduler& scheduler;
     BufferCache& buffer_cache;
@@ -33,6 +42,7 @@ private:
     Buffer fault_buffer;
     Buffer download_buffer;
     std::array<u64, MaxPendingFaults> fault_areas{};
+    std::atomic<u64> applied_tick{0};
     u32 current_area{};
     vk::UniqueDescriptorSetLayout fault_process_desc_layout;
     vk::UniquePipeline fault_process_pipeline;
