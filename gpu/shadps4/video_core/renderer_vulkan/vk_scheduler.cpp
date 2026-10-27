@@ -705,10 +705,11 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     // then begins the next command buffer: the draw recording thread goes on instead of waiting
     // for that thread to catch up and for the submission (~6% of its time in U3).
     // =2: the recording thread also waits for the guest memory copies (the copy threads),
-    // which it reaches in order anyway.
+    // which it reaches in order anyway. Default 2 (2026-10-27: U3 square 141.5 -> 144.5 FPS,
+    // 2 rounds, once stage B set the frame rate); BB_ASYNC_SUBMIT=0: off.
     static const int async_submit = [] {
         const char* env = std::getenv("BB_ASYNC_SUBMIT");
-        return env && (env[0] == '1' || env[0] == '2') ? env[0] - '0' : 0;
+        return env && (env[0] == '0' || env[0] == '1') ? env[0] - '0' : 2;
     }();
     if (async_submit && on_submit && IsRecordingDeferred() && info.num_wait_semas == 0 &&
         info.num_signal_semas == 0 && !info.fence && !GpuBusy::Get(instance)) {
