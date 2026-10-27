@@ -753,16 +753,16 @@ bool Rasterizer::SyncSrtReads(const Shader::SrtReadLog& log) {
     const u32 count = std::min(log.count, Shader::SrtReadLogCapacity);
     // Stale pointers in the tables log addresses outside guest memory: the range set check
     // below is safe for any address (the page tracker is not).
-    u32 written = 0;
+    // One lock for all the reads (each took and released the set's lock: ~4% of stage A).
+    const bool written = buffer_cache.IsAnyRangeGpuWritten(count, [&log](u32 i) {
+        return std::pair<VAddr, u64>{log.reads[i].address, log.reads[i].bytes};
+    });
     bool pending = false;
-    for (u32 i = 0; i < count; ++i) {
+    for (u32 i = 0; i < count && !pending; ++i) {
         const auto& read = log.reads[i];
-        if (read.address && buffer_cache.IsRangeGpuWritten(read.address, read.bytes)) {
-            ++written;
-        }
         // A write still queued for the recording thread (a copy shader run there on the CPU
         // writes guest memory): the walk waits for it.
-        pending = pending || (read.address && PendingWriteOverlaps(read.address, read.bytes));
+        pending = read.address && PendingWriteOverlaps(read.address, read.bytes);
     }
     if (!written) {
         if (pending) {

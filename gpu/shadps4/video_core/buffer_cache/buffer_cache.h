@@ -170,6 +170,11 @@ public:
     [[nodiscard]] bool IsRangeGpuWritten(VAddr addr, size_t size) const {
         return gpu_modified_ranges.Intersects(addr, size);
     }
+    /// IsRangeGpuWritten for several ranges under one lock (`range_at(i)`: address, size).
+    template <typename Func>
+    [[nodiscard]] bool IsAnyRangeGpuWritten(u32 count, Func&& range_at) const {
+        return gpu_modified_ranges.IntersectsAny(count, std::forward<Func>(range_at));
+    }
 
     /// bbport: writes the image that starts at `addr` (its current GPU contents, tiled as in
     /// guest memory) into the buffer of that range, before a shader copies the range as plain
@@ -283,6 +288,18 @@ private:
         bool Contains(VAddr address, size_t size) const {
             std::shared_lock lock{mutex};
             return set.Contains(address, size);
+        }
+        /// One lock for several ranges: `range_at(i)` gives (address, size), address 0 skipped.
+        template <typename Func>
+        bool IntersectsAny(u32 count, Func&& range_at) const {
+            std::shared_lock lock{mutex};
+            for (u32 i = 0; i < count; ++i) {
+                const auto [address, size] = range_at(i);
+                if (address && set.Intersects(address, size)) {
+                    return true;
+                }
+            }
+            return false;
         }
         /// `func` must not change this set (the lock is held).
         template <typename Func>
