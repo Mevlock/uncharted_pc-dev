@@ -407,6 +407,19 @@ private:
     };
     std::vector<DeferredUnbinds> deferred_unbinds;
     u64 deferred_unbinds_submitted = 0;
+    /// Windows on probation before they are given back: their page table entries carry the watch
+    /// bit, so a shader reading them through a pointer reports them (and they are used again).
+    struct Probation {
+        u64 window;
+        u16 since;      ///< reclaim epoch the watch started
+        u16 last_epoch; ///< window_epoch then
+        u64 blocks;     ///< resident blocks then
+    };
+    std::vector<Probation> probation;
+    u64 probation_rescued = 0;
+    /// Rewrites the page table entries of the resident blocks in [first_block, end_block), with
+    /// the watch bit (bit 0) or without; returns the resident blocks.
+    u64 WatchArenaBlocks(u64 first_block, u64 end_block, bool watch);
     u64 resident_in_use_blocks = 0;
     bool has_pending_unbinds = false;
     /// Moves deferred unbinds whose tick the GPU has finished into pending_binds.
