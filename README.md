@@ -7,12 +7,12 @@
 > get releases, updates and support there. Please don't report problems with this fork to him.
 
 > [!TIP]
-> **Performance test build:** a separate `-perf` build with a rework of the port's CPU-side work:
-> about **+22% FPS when the processor is the limit** (DLSS/FSR upscaling, high frame rates, older
-> processors), about **+4 to +13% at native resolution** on a fast graphics card, and little or
-> nothing where the graphics card is the limit. Measured on one PC (RTX 5080); your numbers will
+> **Performance test build (perf2):** a separate `-perf` build with a rework of the port's CPU-side
+> work: about **+22% FPS when the processor is the limit** in the first perf build, and perf2 adds
+> about **+6 to +13% more** there (DLSS/FSR upscaling, high frame rates, older processors); little
+> or nothing where the graphics card is the limit. Measured on one PC (RTX 5080); your numbers will
 > differ. It is a test build: if something goes wrong, use the normal release.
-> [Release notes and download](https://github.com/Mevlock/uncharted_pc-dev/releases/tag/v0.3.6.27-perf1) ·
+> [Release notes and download](https://github.com/Mevlock/uncharted_pc-dev/releases/tag/v0.3.6.29-perf2) ·
 > [How it works](https://github.com/Mevlock/uncharted_pc-dev/blob/perf/build/docs/PERF_BUILD.md) ·
 > [What is finished and what is not](docs/STATUS.md)
 
