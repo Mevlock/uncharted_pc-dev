@@ -27,15 +27,17 @@ Release notes for every build: `docs/releases/<tag>.md`. Bug investigations: `do
 How it works is explained in `docs/PERF_BUILD.md` on that branch and its release notes. In short: the
 translation of the game's GPU command stream runs as three threads (command processor, draw
 recorder, Vulkan recorder, since 0.3.6.20); the perf work moves constant-data copies to a collector
-thread, trims per-draw work and batches fence hand-offs between the stages. Measured: about +22%
-where the CPU sets the pace, a few percent to +13% at native resolution on a fast GPU.
+thread, trims per-draw work and batches fence hand-offs between the stages (perf1: about +22% where
+the CPU sets the pace, a few percent to +13% at native resolution on a fast GPU). perf2 (0.3.6.29-perf2)
+adds asynchronous submission, a faster pending-write list, one lock per resource-table walk and
+write-fault read-back on the faulting thread: about +6% (Uncharted 2 and 3) to +13% (slow CPU) more.
 
 Half-done or not started, with where to begin:
 - **Starting the GPU on a frame earlier** (the GPU still idles part of each frame at high frame
   rates, waiting for the CPU side): the next big step; not started.
-- **Write-fault read-back on the faulting thread** (che2281337's idea): in the perf build but off by
-  default (`BB_FAULT_HERE=1`), because it bypasses the ordered fault policy and crashed Uncharted 3's
-  chapter 1 pub (Havok assert from a stale pointer).
+- **Write-fault read-back on the faulting thread** (che2281337's idea): on by default since perf2,
+  after the crash it caused (older GPU copies stored over pages the faulting thread had already read
+  back) was fixed; `BB_FAULT_HERE=0` turns it off.
 - **NVIDIA Reflex** (lower latency with DLSS Frame Generation): not started. Plan: VK_NV_low_latency2
   markers around the game's frame, measure with PresentMon.
 
