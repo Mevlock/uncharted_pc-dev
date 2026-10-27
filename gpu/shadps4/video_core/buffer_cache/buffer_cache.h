@@ -130,7 +130,8 @@ public:
     /// Finds a buffer for the specified region.
     [[nodiscard]] std::pair<const Buffer*, u64> ObtainBuffer(VAddr device_addr, u32 size,
                                                              bool is_written,
-                                                             bool is_texel_buffer = false);
+                                                             bool is_texel_buffer = false,
+                                                             u64 stream_limit = STREAM_THRESHOLD);
 
     /// bbport: the 64-dword copy of the game's mesh raycasters moves GPU results into a record
     /// array the guest CPU reads. Instead of waiting for the GPU at the dispatch, the guest part
