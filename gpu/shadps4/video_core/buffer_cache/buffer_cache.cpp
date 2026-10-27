@@ -3214,8 +3214,12 @@ void BufferCache::ReclaimArenaMemory() {
             return true;
         }
         const u16 waited = static_cast<u16>(reclaim_epoch - p.since);
+        // Reads near the end of the probation are reported a few ticks later (fault processing
+        // runs at a submission and is applied once its tick has finished).
+        const u64 now_tick = scheduler.CurrentTick();
         if (waited < probation_epochs ||
-            !scheduler.IsFree(epoch_start_tick[static_cast<u16>(reclaim_epoch - 1) % ReclaimEpochRing])) {
+            !scheduler.IsFree(epoch_start_tick[static_cast<u16>(reclaim_epoch - 1) % ReclaimEpochRing]) ||
+            !fault_manager->ReportsApplied(now_tick > 3 ? now_tick - 3 : 0)) {
             probation_blocks += p.blocks;
             return false;
         }
@@ -3281,6 +3285,11 @@ void BufferCache::ReclaimArenaMemory() {
         const u64 first = lo >> block_shift;
         const u64 end = (lo + size) >> block_shift;
         if (probation_epochs) {
+            // At most 48 windows (768 pages of 64 KiB) on probation: their reports must fit the
+            // fault buffer's 1023 slots per pass next to real faults.
+            if (probation.size() >= 48) {
+                break;
+            }
             if (const u64 blocks = WatchArenaBlocks(first, end, true)) {
                 probation.push_back({w, reclaim_epoch, window_epoch[w].load(std::memory_order_relaxed),
                                      blocks});
