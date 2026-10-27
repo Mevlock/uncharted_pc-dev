@@ -93,6 +93,16 @@ static void WaitGpuIdle(int site = 0) {
     HLE_TRACE;
     // bbport diagnosis (BB_FRAME_STATS): the guest's waits here by caller (0 doorbell, 1 submit,
     // 2 submit and flip, 3 submit done).
+    // BB_SUBMIT_NO_IDLE_WAIT=3 (experiment, unsafe): no site waits, so the guest builds and
+    // submits its next frame while the command processor still decodes this one. Only the
+    // game's own label waits (and BB_MAX_FRAMES_AHEAD) hold it back.
+    static const bool never_wait = [] {
+        const char* env = std::getenv("BB_SUBMIT_NO_IDLE_WAIT");
+        return env && env[0] == '3';
+    }();
+    if (never_wait) {
+        return;
+    }
     const auto start = std::chrono::steady_clock::now();
     BbTrace::Record(BbTrace::GuestIdleWaitBegin, site);
     {
