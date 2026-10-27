@@ -2531,7 +2531,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     boost::container::small_vector<std::pair<u64, u64>, 8> fresh;
     u64 fresh_blocks = 0;
     for (const auto& range : bind_ranges) {
-        if (has_pending_unbinds) {
+        if (has_pending_unbinds || !deferred_unbinds.empty()) {
             TrimPendingUnbinds(arena, range.start, range.end);
         }
         u64 start = range.start;
@@ -2867,6 +2867,7 @@ void BufferCache::DumpArenas() const {
 }
 
 void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
+    QueueFinishedUnbinds();
     if (pending_binds.empty()) {
         return;
     }
@@ -2967,9 +2968,9 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
 void BufferCache::TrimPendingUnbinds(const Buffer* arena, u64 first_block, u64 end_block) {
     const u64 lo = (first_block << block_shift) - arena->cpu_addr;
     const u64 hi = (end_block << block_shift) - arena->cpu_addr;
-    for (auto& pending : pending_binds) {
+    const auto trim = [&](ArenaBinds& pending) {
         if (pending.arena != arena) {
-            continue;
+            return;
         }
         decltype(pending.binds) kept;
         bool changed = false;
@@ -2989,7 +2990,34 @@ void BufferCache::TrimPendingUnbinds(const Buffer* arena, u64 first_block, u64 e
         if (changed) {
             pending.binds = std::move(kept);
         }
+    };
+    for (auto& pending : pending_binds) {
+        trim(pending);
     }
+    // Deferred unbinds of the range go too (its memory is still released with its batch).
+    for (auto& batch : deferred_unbinds) {
+        for (auto& pending : batch.binds) {
+            trim(pending);
+        }
+    }
+}
+
+void BufferCache::QueueFinishedUnbinds() {
+    if (deferred_unbinds.empty() || !scheduler.IsFree(deferred_unbinds.front().tick)) {
+        return;
+    }
+    auto it = deferred_unbinds.begin();
+    for (; it != deferred_unbinds.end() && scheduler.IsFree(it->tick); ++it) {
+        // An arena entry left empty by trimming still frees the runs at the next submission.
+        for (const auto& batch : it->binds) {
+            auto& pending = BindsForArena(batch.arena)->binds;
+            pending.insert(pending.end(), batch.binds.begin(), batch.binds.end());
+        }
+        quarantined_runs.insert(quarantined_runs.end(), it->runs.begin(), it->runs.end());
+        ++deferred_unbinds_submitted;
+    }
+    deferred_unbinds.erase(deferred_unbinds.begin(), it);
+    has_pending_unbinds = true;
 }
 
 u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
@@ -3010,6 +3038,23 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
     for (const auto& piece : pieces) {
         blocks += piece.end - piece.start;
     }
+    // bbport: the unbinds wait until the GPU has finished the command buffer being recorded now
+    // (BB_ARENA_UNBIND_DEFER=0: submitted with the next submission, as before). Work already
+    // submitted, and draws already in this command buffer, may still read these ranges through
+    // their old page table entries: the sparse unbind does not wait for the graphics queue, and
+    // a read of unbound memory through a physical pointer can fault the GPU (hang on small
+    // cards, where memory is given back sooner; 2026-10-27).
+    static const bool defer_unbinds = [] {
+        const char* env = std::getenv("BB_ARENA_UNBIND_DEFER");
+        return !(env && env[0] == '0');
+    }();
+    const bool deferred = defer_unbinds;
+    if (deferred) {
+        const u64 tick = scheduler.CurrentTick();
+        if (deferred_unbinds.empty() || deferred_unbinds.back().tick != tick) {
+            deferred_unbinds.push_back({.tick = tick});
+        }
+    }
     // The page table entries of the blocks become 0, as for memory never made resident (shaders
     // reading guest memory directly then see no data instead of another range's).
     boost::container::small_vector<vk::BufferCopy, 8> copies;
@@ -3024,11 +3069,20 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
         ASSERT_MSG(arena && address >= arena->cpu_addr &&
                        address + size <= arena->cpu_addr + arena->size_bytes,
                    "Released arena range outside its arena");
-        BindsForArena(arena)->binds.push_back({
+        const vk::SparseMemoryBind unbind = {
             .resourceOffset = address - arena->cpu_addr,
             .size = size,
-        });
-        quarantined_runs.push_back({piece.memory, piece.offset << block_shift, piece.end - piece.start});
+        };
+        const FreeRun run = {piece.memory, piece.offset << block_shift, piece.end - piece.start};
+        if (deferred) {
+            auto& batch = deferred_unbinds.back();
+            auto it = std::ranges::find(batch.binds, arena, &ArenaBinds::arena);
+            (it != batch.binds.end() ? *it : batch.binds.emplace_back(arena)).binds.push_back(unbind);
+            batch.runs.push_back(run);
+        } else {
+            BindsForArena(arena)->binds.push_back(unbind);
+            quarantined_runs.push_back(run);
+        }
         // The guest copy is the only one now: the next use uploads it.
         memory_tracker->MarkRegionAsCpuModified(address, size);
         const u64 copy_size = (piece.end - piece.start) * sizeof(vk::DeviceAddress);
@@ -3038,7 +3092,7 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
     }
     staging.Flush();
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
-    has_pending_unbinds = true;
+    has_pending_unbinds |= !deferred;
     resident_in_use_blocks -= blocks;
     return blocks;
 }
@@ -3146,11 +3200,14 @@ void BufferCache::ReclaimArenaMemory() {
     }
     if (windows || busy) {
         std::printf("GPU: buffer arenas gave back %llu MiB (%u windows unused for %u s or more; %u "
-                    "kept: GPU data or in use); %llu MiB in use, limit %llu MiB\n",
+                    "kept: GPU data or in use); %llu MiB in use, limit %llu MiB; unbinds after the "
+                    "GPU: %llu done, %zu waiting\n",
                     static_cast<unsigned long long>((released << block_shift) >> 20), windows,
                     u32(age_epochs) * 2, busy,
                     static_cast<unsigned long long>((resident_in_use_blocks << block_shift) >> 20),
-                    static_cast<unsigned long long>(limit >> 20));
+                    static_cast<unsigned long long>(limit >> 20),
+                    static_cast<unsigned long long>(deferred_unbinds_submitted),
+                    deferred_unbinds.size());
         std::fflush(stdout);
     }
 }
