@@ -651,15 +651,30 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     // second queue itself. Page states change under their region's lock, the one the recording
     // thread marks GPU writes under, and only if no write was marked since the read back began
     // (a later write has a later tick); else the GPU command thread's path settles the fault.
-    // BB_FAULT_HERE=1: on; off by default (2026-10-26): it reads back before the GPU command
-    // thread's fault policy (shared writes, dead GPU data), so it stored GPU data thousands of
-    // frames old over memory U3 had reused (crashes in the pub). It has to become one of that
-    // policy's choices before it can be on. Toggle2 FaultReadbackHere: off.
+    // Off from 2026-10-26 to 10-27: it read back before the GPU command thread's fault policy
+    // (shared writes), so it stored GPU data over memory U3 had reused (crashes in the pub). With
+    // the strict check below it only takes the faults the policy would read back as well, and is
+    // on by default (U3 square 140.6 -> 147.2 FPS; the pub fight 2 x 4 min without a crash).
+    // BB_FAULT_HERE=0: off. Toggle2 FaultReadbackHere: off.
     static const bool enabled = [] {
         const char* env = std::getenv("BB_FAULT_HERE");
-        return env && env[0] == '1';
+        return !(env && env[0] == '0');
     }();
     if (!enabled || !side_queue || BbToggle::Disabled2(BbToggle::FaultReadbackHere)) {
+        return false;
+    }
+    // bbport: only where the GPU command thread's policy would read back too (BB_FAULT_HERE_STRICT,
+    // default on): not while a shared landing is in flight or landed but not settled there (its
+    // GPU bytes merge with guest writes made after the share; storing a read back over those
+    // writes loses them), and not while the writing work is still running (the policy shares the
+    // page then instead of waiting). Those faults take the ordered path as before.
+    static const bool strict = [] {
+        const char* env = std::getenv("BB_FAULT_HERE_STRICT");
+        return !(env && env[0] == '0');
+    }();
+    if (strict && (landing_registered.load(std::memory_order_acquire) !=
+                       landing_done.load(std::memory_order_acquire) ||
+                   shared_landed_pending.load(std::memory_order_acquire))) {
         return false;
     }
     const auto start_time = std::chrono::steady_clock::now();
@@ -708,6 +723,9 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
         });
     // Writes still in the command buffer being recorded need a flush from the GPU side.
     if (!locked || !faulting_found || fault_tick == 0 || fault_tick >= scheduler.CurrentTick()) {
+        return false;
+    }
+    if (strict && !semaphore.IsFree(fault_tick)) {
         return false;
     }
     semaphore.Wait(fault_tick);
