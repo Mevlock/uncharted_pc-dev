@@ -1018,6 +1018,38 @@ static const unsigned char u2_focus_reset[]={
     0xcd,0x41,                                    /* trap: int 0x41 */
 };
 _Static_assert(sizeof(u2_focus_reset)==sizeof(u2_focus_assert_code),"same size");
+/* U2 "pAction != NULL" (moveactioncontroller.cpp:40): the player's move actions come from a pool
+ * of 64 slots of 0x300 bytes (the object at character+0x2e8, pool at +0xf0). Two move states
+ * swapping every frame (landing into a fight) keep one action each swap; at 144 fps bursts took
+ * 16-30 slots, and a longer one filled the pool and stopped the game. The slot count passed where
+ * the character is set up becomes 256 (+144 KB from the character's heap). */
+static const unsigned char u2_move_pool_code[]={
+    0x49,0x8b,0xbd,0xe8,0x02,0x00,0x00,           /* mov rdi, [r13+0x2e8] */
+    0xba,0x06,0x00,0x00,0x00,                     /* mov edx, 6 */
+    0xb9,0x40,0x00,0x00,0x00,                     /* mov ecx, 64 (move action slots) */
+    0x41,0xb8,0x20,0x00,0x00,0x00,                /* mov r8d, 32 */
+};
+static const unsigned char u2_move_pool_256[]={
+    0x49,0x8b,0xbd,0xe8,0x02,0x00,0x00,
+    0xba,0x06,0x00,0x00,0x00,
+    0xb9,0x00,0x01,0x00,0x00,                     /* mov ecx, 256 */
+    0x41,0xb8,0x20,0x00,0x00,0x00,
+};
+_Static_assert(sizeof(u2_move_pool_256)==sizeof(u2_move_pool_code),"same size");
+/* US 1.02 (CUSA02320, = CUSA02344): the same setup at 0x721347 (the character in r15). */
+static const unsigned char u2_move_pool_code_us[]={
+    0x49,0x8b,0xbf,0xe8,0x02,0x00,0x00,           /* mov rdi, [r15+0x2e8] */
+    0xba,0x06,0x00,0x00,0x00,                     /* mov edx, 6 */
+    0xb9,0x40,0x00,0x00,0x00,                     /* mov ecx, 64 (move action slots) */
+    0x41,0xb8,0x20,0x00,0x00,0x00,                /* mov r8d, 32 */
+};
+static const unsigned char u2_move_pool_256_us[]={
+    0x49,0x8b,0xbf,0xe8,0x02,0x00,0x00,
+    0xba,0x06,0x00,0x00,0x00,
+    0xb9,0x00,0x01,0x00,0x00,                     /* mov ecx, 256 */
+    0x41,0xb8,0x20,0x00,0x00,0x00,
+};
+_Static_assert(sizeof(u2_move_pool_256_us)==sizeof(u2_move_pool_code_us),"same size");
 /* U3's heap free (corelib memory-new-malloc, image+0x494a70: rdi the heap, rsi the block's data;
  * its size, header included, at data-0xc). The game frees a cloth simulation's buffers right
  * after its last dispatch and reuses the memory at once (its free list goes into the block):
@@ -1173,6 +1205,10 @@ static const RuntimeGuestCallback guest_callbacks[]={
      sizeof(u2_focus_reset_us),NULL,u2_focus_reset_us},
     {"U2 leg IK NaN delta (US)",0x4713b9,u2_leg_ik_assert_code_us,sizeof(u2_leg_ik_assert_code_us),
      sizeof(u2_leg_ik_zero_us),NULL,u2_leg_ik_zero_us},
+    {"U2 move action pool 256 slots",0x33872c,u2_move_pool_code,sizeof(u2_move_pool_code),
+     sizeof(u2_move_pool_256),NULL,u2_move_pool_256},
+    {"U2 move action pool 256 slots (US)",0x721347,u2_move_pool_code_us,sizeof(u2_move_pool_code_us),
+     sizeof(u2_move_pool_256_us),NULL,u2_move_pool_256_us},
     {"U3 player focus NaN reset",0x3908b8,u3_focus_assert_code,sizeof(u3_focus_assert_code),
      sizeof(u3_focus_reset),NULL,u3_focus_reset},
     {"U3 player focus NaN reset (US)",0xbcf3ba,u3_focus_assert_code_us,sizeof(u3_focus_assert_code_us),
