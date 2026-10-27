@@ -420,6 +420,15 @@ private:
     void ResetBindings(bool is_compute);
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
+    /// bbport: a dispatch's buffer V#s, read once for the metadata check and the binding
+    /// (BB_SHARE_CS_SHARPS=0: each reads them).
+    std::array<AmdGpu::Buffer, 32> cs_sharps{};
+    const Shader::Info* cs_sharps_info = nullptr;
+    AmdGpu::Buffer ComputeSharp(const Shader::Info& info, u32 index) const {
+        return &info == cs_sharps_info && index < cs_sharps.size()
+                   ? cs_sharps[index]
+                   : info.buffers[index].GetSharp(info);
+    }
     bool IsComputeImageCopy(const Pipeline* pipeline);
     bool IsComputeImageClear(const Pipeline* pipeline);
 

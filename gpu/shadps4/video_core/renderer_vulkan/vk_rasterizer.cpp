@@ -4895,8 +4895,24 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             last = now;
         }
     };
+    cs_sharps_info = nullptr;
+    if (pipeline->IsCompute()) {
+        static const bool share = [] {
+            const char* env = std::getenv("BB_SHARE_CS_SHARPS");
+            return !(env && env[0] == '0');
+        }();
+        const auto& info = pipeline->GetStage(Shader::SwStage::Compute);
+        if (share && info.buffers.size() <= cs_sharps.size()) {
+            for (u32 i = 0; i < info.buffers.size(); ++i) {
+                const auto& desc = info.buffers[i];
+                cs_sharps[i] = desc.IsSpecial() ? AmdGpu::Buffer::Null() : desc.GetSharp(info);
+            }
+            cs_sharps_info = &info;
+        }
+    }
     if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
         IsComputeImageClear(pipeline)) {
+        cs_sharps_info = nullptr;
         return false;
     }
     section(0);
@@ -5045,6 +5061,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         buffer_cache.SynchronizeDmaBuffers();
         fault_process_pending = true;
     }
+    cs_sharps_info = nullptr;
     section(3);
 
     return true;
@@ -5319,11 +5336,12 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
     }();
     if (one_pass) {
         boost::container::static_vector<VAddr, Shader::NUM_BUFFERS> written;
-        for (const auto& desc : info.buffers) {
+        for (u32 i = 0; i < info.buffers.size(); ++i) {
+            const auto& desc = info.buffers[i];
             if (desc.IsSpecial()) {
                 continue;
             }
-            const VAddr address = desc.GetSharp(info).base_address;
+            const VAddr address = ComputeSharp(info, i).base_address;
             if (!desc.is_written) {
                 if (texture_cache.IsMeta(address)) {
                     return false;
@@ -5489,6 +5507,14 @@ VAddr WatchedGpuWrite() {
 }
 } // namespace
 
+static bool SpanInvalidate() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_SPAN_INVALIDATE");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
 void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* prepared,
                              Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data, u32& write_index) {
@@ -5545,6 +5571,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
     const auto sharp_of = [&](u32 i) -> AmdGpu::Buffer {
         if (prepared) {
             return prepared->buffer_sharps[i];
+        }
+        if (&stage == cs_sharps_info && i < cs_sharps.size()) {
+            return cs_sharps[i];
         }
         if (i >= sharps.size()) {
             return stage.buffers[i].GetSharp(stage);
@@ -5653,6 +5682,15 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             if (j - i >= 2 && hi - lo <= 0xFFFFFFFFull) {
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(lo, u32(hi - lo), true);
                 written_spans[num_written_spans++] = {lo, hi, buffer, offset};
+                // bbport: the views of a span make cached images stale once, as their union
+                // (the views overlap: no gap is covered). BB_SPAN_INVALIDATE=0: per view.
+                if (SpanInvalidate()) {
+                    const u64 t_inv = StageBStats() ? __rdtsc() : 0;
+                    texture_cache.InvalidateMemoryFromGPU(lo, hi - lo);
+                    if (t_inv) {
+                        g_bind_cycles[2].fetch_add(__rdtsc() - t_inv, std::memory_order_relaxed);
+                    }
+                }
             }
             i = j;
         }
@@ -5913,7 +5951,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     checkpoint_buffers[num_checkpoint_buffers++] = {
                         vsharp.base_address, static_cast<u32>(size), desc.is_written};
                 }
-                if (desc.is_written) {
+                if (desc.is_written && !(in_written && SpanInvalidate())) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     const u64 t_inv = StageBStats() ? __rdtsc() : 0;
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
