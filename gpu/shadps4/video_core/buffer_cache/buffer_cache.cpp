@@ -2534,22 +2534,55 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         if (has_pending_unbinds || !deferred_unbinds.empty()) {
             TrimPendingUnbinds(arena, range.start, range.end);
         }
-        u64 start = range.start;
-        while (start < range.end && !free_runs.empty()) {
-            auto& run = free_runs.back();
-            const u64 count = std::min(run.blocks, range.end - start);
-            pieces.push_back({start, start + count, run.memory, run.offset});
-            run.offset += count << block_shift;
-            run.blocks -= count;
-            if (!run.blocks) {
-                free_runs.pop_back();
+        // Ranges given back whose unbinds still wait for the GPU keep their own memory (still
+        // bound there): work in flight may still read them, and other memory would hold other
+        // data. It is taken out of the batch, which no longer frees it.
+        boost::container::small_vector<Backing, 4> kept;
+        for (auto& batch : deferred_unbinds) {
+            for (size_t i = 0; i < batch.pieces.size();) {
+                const Backing piece = batch.pieces[i];
+                const u64 a = std::max(piece.start, range.start);
+                const u64 b = std::min(piece.end, range.end);
+                if (a >= b) {
+                    ++i;
+                    continue;
+                }
+                kept.push_back(piece.SubRange(a, b));
+                batch.pieces.erase(batch.pieces.begin() + i);
+                if (piece.start < a) {
+                    batch.pieces.push_back(piece.SubRange(piece.start, a));
+                }
+                if (b < piece.end) {
+                    batch.pieces.push_back(piece.SubRange(b, piece.end));
+                }
             }
-            start += count;
         }
-        if (start < range.end) {
-            fresh.emplace_back(start, range.end);
-            fresh_blocks += range.end - start;
+        std::ranges::sort(kept, {}, &Backing::start);
+        u64 start = range.start;
+        const auto fill = [&](u64 end) {
+            while (start < end && !free_runs.empty()) {
+                auto& run = free_runs.back();
+                const u64 count = std::min(run.blocks, end - start);
+                pieces.push_back({start, start + count, run.memory, run.offset});
+                run.offset += count << block_shift;
+                run.blocks -= count;
+                if (!run.blocks) {
+                    free_runs.pop_back();
+                }
+                start += count;
+            }
+            if (start < end) {
+                fresh.emplace_back(start, end);
+                fresh_blocks += end - start;
+                start = end;
+            }
+        };
+        for (const auto& own : kept) {
+            fill(own.start);
+            pieces.push_back({own.start, own.end, own.memory, own.offset << block_shift});
+            start = own.end;
         }
+        fill(range.end);
     }
     vk::DeviceMemory device_memory{};
     if (fresh_blocks) {
@@ -3013,7 +3046,10 @@ void BufferCache::QueueFinishedUnbinds() {
             auto& pending = BindsForArena(batch.arena)->binds;
             pending.insert(pending.end(), batch.binds.begin(), batch.binds.end());
         }
-        quarantined_runs.insert(quarantined_runs.end(), it->runs.begin(), it->runs.end());
+        for (const auto& piece : it->pieces) {
+            quarantined_runs.push_back(
+                {piece.memory, piece.offset << block_shift, piece.end - piece.start});
+        }
         ++deferred_unbinds_submitted;
     }
     deferred_unbinds.erase(deferred_unbinds.begin(), it);
@@ -3114,7 +3150,7 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
             auto& batch = deferred_unbinds.back();
             auto it = std::ranges::find(batch.binds, arena, &ArenaBinds::arena);
             (it != batch.binds.end() ? *it : batch.binds.emplace_back(arena)).binds.push_back(unbind);
-            batch.runs.push_back(run);
+            batch.pieces.push_back(piece);
         } else {
             BindsForArena(arena)->binds.push_back(unbind);
             quarantined_runs.push_back(run);

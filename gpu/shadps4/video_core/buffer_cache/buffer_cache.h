@@ -403,7 +403,7 @@ private:
     struct DeferredUnbinds {
         u64 tick;
         std::vector<ArenaBinds> binds;
-        std::vector<FreeRun> runs;
+        std::vector<Backing> pieces; ///< their memory, still bound there until the unbinds
     };
     std::vector<DeferredUnbinds> deferred_unbinds;
     u64 deferred_unbinds_submitted = 0;
