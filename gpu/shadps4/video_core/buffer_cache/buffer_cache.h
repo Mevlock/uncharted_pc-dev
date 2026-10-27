@@ -286,8 +286,10 @@ private:
             }();
             const VAddr end = address + size;
             if (memo) {
+                // Inside the recent union, or already in the set (marked the frame before): a
+                // lookup under the shared lock instead of an insert under the exclusive one.
                 std::shared_lock lock{mutex};
-                if (address >= covered_lo && end <= covered_hi) {
+                if ((address >= covered_lo && end <= covered_hi) || set.Contains(address, size)) {
                     return;
                 }
             }

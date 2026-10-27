@@ -2389,9 +2389,34 @@ static std::array<std::atomic<u64>, 4> g_dispatch_sections{};
 /// bbport (BB_DISPATCH_STATS): a dispatch's binding by part: special-case checks (image copy,
 /// metadata clear, image clear), buffers, textures and samplers, the rest.
 static std::array<std::atomic<u64>, 4> g_dispatch_bind{};
+static std::array<std::atomic<u64>, 4> g_draw_bind{}; ///< the same parts for draws
 /// bbport (BB_DISPATCH_STATS): a dispatch's BindBuffers: read-only span pre-pass, written span
 /// pre-pass, the per-buffer loop.
 static std::array<std::atomic<u64>, 3> g_dispatch_buffers{};
+/// bbport (BB_DISPATCH_STATS): the written span pre-pass: its ObtainBuffer and invalidation.
+static std::array<std::atomic<u64>, 2> g_wspan_parts{};
+/// bbport (BB_DISPATCH_STATS): a draw's recording by part: up to the binding (render state,
+/// upscaler, motion), BindResources, up to BeginRendering (diagnostics), BeginRendering, the rest.
+static std::array<std::atomic<u64>, 5> g_draw_parts{};
+struct DrawPartTimer {
+    bool on;
+    u64 last;
+    u32 part = 0;
+    explicit DrawPartTimer(bool on_) : on(on_), last(on_ ? __rdtsc() : 0) {}
+    void Next() {
+        if (on) {
+            const u64 now = __rdtsc();
+            g_draw_parts[part].fetch_add(now - last, std::memory_order_relaxed);
+            last = now;
+        }
+        ++part;
+    }
+    ~DrawPartTimer() {
+        if (on && part < g_draw_parts.size()) {
+            g_draw_parts[part].fetch_add(__rdtsc() - last, std::memory_order_relaxed);
+        }
+    }
+};
 static bool DispatchStatsOn() {
     static const bool on = [] {
         const char* env = std::getenv("BB_DISPATCH_STATS");
@@ -2722,12 +2747,28 @@ void Rasterizer::PrintPipeStats() {
                             "textures %.1f%%, rest %.1f%%",
                             100.0 * e0 / cycles, 100.0 * e1 / cycles, 100.0 * e2 / cycles,
                             100.0 * e3 / cycles);
+                const u64 g0 = g_draw_parts[0].exchange(0), g1 = g_draw_parts[1].exchange(0),
+                          g2 = g_draw_parts[2].exchange(0), g3 = g_draw_parts[3].exchange(0),
+                          g4 = g_draw_parts[4].exchange(0);
+                std::printf("\n  draw parts: to binding %.1f%%, binding %.1f%%, to rendering "
+                            "%.1f%%, BeginRendering %.1f%%, rest %.1f%%",
+                            100.0 * g0 / cycles, 100.0 * g1 / cycles, 100.0 * g2 / cycles,
+                            100.0 * g3 / cycles, 100.0 * g4 / cycles);
+                const u64 h0 = g_draw_bind[0].exchange(0), h1 = g_draw_bind[1].exchange(0),
+                          h2 = g_draw_bind[2].exchange(0), h3 = g_draw_bind[3].exchange(0);
+                std::printf("\n  draw binding: checks %.1f%%, buffers %.1f%%, textures %.1f%%, "
+                            "rest %.1f%%",
+                            100.0 * h0 / cycles, 100.0 * h1 / cycles, 100.0 * h2 / cycles,
+                            100.0 * h3 / cycles);
                 const u64 f0 = g_dispatch_buffers[0].exchange(0),
                           f1 = g_dispatch_buffers[1].exchange(0),
                           f2 = g_dispatch_buffers[2].exchange(0);
                 std::printf("\n  dispatch buffers: read span pre-pass %.1f%%, written span pre-pass "
                             "%.1f%%, per-buffer loop %.1f%%",
                             100.0 * f0 / cycles, 100.0 * f1 / cycles, 100.0 * f2 / cycles);
+                const u64 w0 = g_wspan_parts[0].exchange(0), w1 = g_wspan_parts[1].exchange(0);
+                std::printf("\n  written span pre-pass: ObtainBuffer %.1f%%, invalidation %.1f%%",
+                            100.0 * w0 / cycles, 100.0 * w1 / cycles);
             }
         }
         {
@@ -3358,6 +3399,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
     }
+    DrawPartTimer draw_parts{DispatchStatsOn()};
     bind_prepared = used_prepared;
     motion_draw = pipeline->GetGraphicsKey().motion_vectors;
     motion_geometry = 0;
@@ -3374,7 +3416,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // commands are recorded after BeginRendering, as before).
     draw_inputs = {pipeline, draw_prepared, index_offset, is_indexed, true, false};
     current_vs_hash = u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash);
+    draw_parts.Next();
     const bool bound = BindResources(pipeline);
+    draw_parts.Next();
     bind_prepared = nullptr; // indirect draws and dispatches bind without prepared sharps
     const bool inputs_resolved = draw_inputs.resolved;
     draw_inputs.pending = false;
@@ -3514,7 +3558,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             }
         }
     }
+    draw_parts.Next();
     const auto state = BeginRendering(pipeline);
+    draw_parts.Next();
     draw_class_timer.pass = u64(state.num_color_attachments) << 48 |
                             u64(state.depth_stencil_attachment.image_view ? 1 : 0) << 44 |
                             u64(state.width) << 22 | u64(state.height);
@@ -4886,12 +4932,13 @@ std::string Rasterizer::DescribeImages() {
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
-    const bool timed = DispatchStatsOn() && pipeline->IsCompute();
+    const bool timed = DispatchStatsOn();
+    auto& bind_parts = pipeline->IsCompute() ? g_dispatch_bind : g_draw_bind;
     u64 last = timed ? __rdtsc() : 0;
     const auto section = [&](u32 s) {
         if (timed) {
             const u64 now = __rdtsc();
-            g_dispatch_bind[s].fetch_add(now - last, std::memory_order_relaxed);
+            bind_parts[s].fetch_add(now - last, std::memory_order_relaxed);
             last = now;
         }
     };
@@ -5680,13 +5727,21 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 ++j;
             }
             if (j - i >= 2 && hi - lo <= 0xFFFFFFFFull) {
+                const u64 t_ob = timed ? __rdtsc() : 0;
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(lo, u32(hi - lo), true);
+                if (timed) {
+                    g_wspan_parts[0].fetch_add(__rdtsc() - t_ob, std::memory_order_relaxed);
+                }
                 written_spans[num_written_spans++] = {lo, hi, buffer, offset};
                 // bbport: the views of a span make cached images stale once, as their union
                 // (the views overlap: no gap is covered). BB_SPAN_INVALIDATE=0: per view.
                 if (SpanInvalidate()) {
                     const u64 t_inv = StageBStats() ? __rdtsc() : 0;
+                    const u64 t_iv = timed ? __rdtsc() : 0;
                     texture_cache.InvalidateMemoryFromGPU(lo, hi - lo);
+                    if (timed) {
+                        g_wspan_parts[1].fetch_add(__rdtsc() - t_iv, std::memory_order_relaxed);
+                    }
                     if (t_inv) {
                         g_bind_cycles[2].fetch_add(__rdtsc() - t_inv, std::memory_order_relaxed);
                     }
