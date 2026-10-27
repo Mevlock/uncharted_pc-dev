@@ -1050,6 +1050,22 @@ static const unsigned char u2_move_pool_256_us[]={
     0x41,0xb8,0x20,0x00,0x00,0x00,
 };
 _Static_assert(sizeof(u2_move_pool_256_us)==sizeof(u2_move_pool_code_us),"same size");
+/* U1 has the same move action pool (64 slots of 0x300 bytes, at +0x100 of the object at
+ * character+0x3a8) and the same "pAction != NULL" check: 256 slots as in U2. The setup's
+ * arguments, identical in EU (0x2668fe) and US (0x266e6e). */
+static const unsigned char u1_move_pool_code[]={
+    0x49,0x8b,0xb6,0xf0,0x00,0x00,0x00,           /* mov rsi, [r14+0xf0] */
+    0xba,0x06,0x00,0x00,0x00,                     /* mov edx, 6 */
+    0xb9,0x40,0x00,0x00,0x00,                     /* mov ecx, 64 (move action slots) */
+    0x41,0xb8,0x20,0x00,0x00,0x00,                /* mov r8d, 32 */
+};
+static const unsigned char u1_move_pool_256[]={
+    0x49,0x8b,0xb6,0xf0,0x00,0x00,0x00,
+    0xba,0x06,0x00,0x00,0x00,
+    0xb9,0x00,0x01,0x00,0x00,                     /* mov ecx, 256 */
+    0x41,0xb8,0x20,0x00,0x00,0x00,
+};
+_Static_assert(sizeof(u1_move_pool_256)==sizeof(u1_move_pool_code),"same size");
 /* U3's heap free (corelib memory-new-malloc, image+0x494a70: rdi the heap, rsi the block's data;
  * its size, header included, at data-0xc). The game frees a cloth simulation's buffers right
  * after its last dispatch and reuses the memory at once (its free list goes into the block):
@@ -1207,6 +1223,10 @@ static const RuntimeGuestCallback guest_callbacks[]={
      sizeof(u2_leg_ik_zero_us),NULL,u2_leg_ik_zero_us},
     {"U2 move action pool 256 slots",0x33872c,u2_move_pool_code,sizeof(u2_move_pool_code),
      sizeof(u2_move_pool_256),NULL,u2_move_pool_256},
+    {"U1 move action pool 256 slots",0x2668fe,u1_move_pool_code,sizeof(u1_move_pool_code),
+     sizeof(u1_move_pool_256),NULL,u1_move_pool_256},
+    {"U1 move action pool 256 slots (US)",0x266e6e,u1_move_pool_code,sizeof(u1_move_pool_code),
+     sizeof(u1_move_pool_256),NULL,u1_move_pool_256},
     {"U2 move action pool 256 slots (US)",0x721347,u2_move_pool_code_us,sizeof(u2_move_pool_code_us),
      sizeof(u2_move_pool_256_us),NULL,u2_move_pool_256_us},
     {"U3 player focus NaN reset",0x3908b8,u3_focus_assert_code,sizeof(u3_focus_assert_code),
