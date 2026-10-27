@@ -260,6 +260,11 @@ void Scheduler::EndRendering() {
         return;
     }
     is_rendering = false;
+    if (g_pass_draws) {
+        g_pass_runs[std::min<u32>(std::bit_width(g_pass_draws) - 1, 6)] += g_pass_draws;
+        ++g_pass_count;
+        g_pass_draws = 0;
+    }
     Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
 }
 

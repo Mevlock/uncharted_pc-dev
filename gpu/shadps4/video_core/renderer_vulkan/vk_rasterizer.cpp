@@ -2738,6 +2738,20 @@ void Rasterizer::PrintPipeStats() {
                 pending_stats[2] ? double(pending_stats[3]) / pending_stats[2] : 0.0,
                 pending_writes.size());
     std::fill(std::begin(pending_stats), std::end(pending_stats), 0);
+    {
+        u64 total = 0;
+        for (const u64 n : g_pass_runs) {
+            total += n;
+        }
+        std::printf("\n  render passes: %.0f/s, %.1f draws each; draws by pass length 1/2-3/4-7/8-15/"
+                    "16-31/32-63/64+:",
+                    g_pass_count / seconds, g_pass_count ? double(total) / g_pass_count : 0.0);
+        for (const u64 n : g_pass_runs) {
+            std::printf(" %.0f%%", total ? 100.0 * n / total : 0.0);
+        }
+        g_pass_runs = {};
+        g_pass_count = 0;
+    }
     std::printf("\n");
     drain_sites.clear();
     draw_pipe->drains_by_reason = {};
@@ -3853,6 +3867,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         checkpoint = NoteCheckpoint("draw", vs_info.pgm_hash, ps ? ps->pgm_hash : 0, num_indices,
                                     num_instances, 0, 0);
     }
+    ++g_pass_draws;
     if (!batched) scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         if (checkpoint) {
             cmdbuf.setCheckpointNV(checkpoint);

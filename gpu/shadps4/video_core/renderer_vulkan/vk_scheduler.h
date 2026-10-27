@@ -682,6 +682,12 @@ private:
     CommandBase* last{};
 };
 
+/// bbport diagnosis (BB_FRAME_STATS line): draws recorded in the open render pass, and draws by
+/// the length of the pass they were in (1, 2-3, 4-7, 8-15, 16-31, 32-63, 64+). Stage B only.
+inline u32 g_pass_draws = 0;
+inline std::array<u64, 7> g_pass_runs{};
+inline u64 g_pass_count = 0;
+
 class Scheduler {
 public:
     /// `threaded_recording`: Vulkan commands passed to Record() are recorded by a worker thread.
