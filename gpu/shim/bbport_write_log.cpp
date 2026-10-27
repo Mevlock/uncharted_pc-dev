@@ -167,12 +167,31 @@ extern "C" void bbgpu_dump_guest_writes(void* ucontext) {
     const char* sources[] = {"backing",      "WriteData",           "fence",
                              "EOP (decoded)", "WriteData (decoded)", "EOS (decoded)"};
     const std::uint64_t now = __rdtsc();
+    // The writing thread's name (Windows thread descriptions: bb:DrawRec, bb:Landing, guest
+    // threads), to tell which path stored the bytes.
+    const auto thread_name = [](std::uint32_t tid) {
+        static char name[64];
+        std::snprintf(name, sizeof(name), "?");
+#ifdef _WIN32
+        if (HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid)) {
+            PWSTR description = nullptr;
+            if (SUCCEEDED(GetThreadDescription(thread, &description)) && description) {
+                WideCharToMultiByte(CP_UTF8, 0, description, -1, name, sizeof(name), nullptr,
+                                    nullptr);
+                LocalFree(description);
+            }
+            CloseHandle(thread);
+        }
+#endif
+        return name;
+    };
     const auto print = [&](const Entry& e, const char* what) {
         std::fprintf(stderr,
-                     "Write log: %s %s %#llx +%llu first %#llx tid %u, %.3f s before the fault\n",
+                     "Write log: %s %s %#llx +%llu first %#llx tid %u '%s', %.3f s before the "
+                     "fault\n",
                      what, e.source < 6 ? sources[e.source] : "?", (unsigned long long)e.address,
                      (unsigned long long)e.size, (unsigned long long)e.first, e.tid,
-                     double(now - e.tsc) / 3.0e9);
+                     thread_name(e.tid), double(now - e.tsc) / 3.0e9);
     };
     const std::uint64_t nh = hits_head.load();
     for (std::uint64_t i = nh > hits.size() ? nh - hits.size() : 0; i < nh; ++i) {
