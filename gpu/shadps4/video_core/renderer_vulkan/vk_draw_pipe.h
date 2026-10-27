@@ -147,6 +147,10 @@ public:
     [[nodiscard]] bool Reached(u64 position) const noexcept {
         return consumed.load(std::memory_order_acquire) >= position;
     }
+    /// Stage A: every position up to this one is Reached.
+    [[nodiscard]] u64 Consumed() const noexcept {
+        return consumed.load(std::memory_order_acquire);
+    }
 
     [[nodiscard]] bool Idle() const noexcept {
         return consumed.load(std::memory_order_acquire) == head;

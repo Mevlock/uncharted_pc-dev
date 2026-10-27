@@ -1216,6 +1216,37 @@ bool Rasterizer::IsGpuSideThreadId(u32 tid) const {
     return tid == liverpool->GetGpuCommandProcessorThreadId();
 }
 
+// BB_PENDING_FAST=0: the pending write list as before (every entry scanned on each note and each
+// overlap check: ~1 M notes and ~0.8 M checks a second over ~100 entries in U3, ~9% of stage A).
+static bool PendingFast() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_PENDING_FAST");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
+void Rasterizer::PrunePendingWrites() {
+    // Stage B's position is a cache line it writes for every packet: read it now and then. An
+    // older value only keeps entries a little longer.
+    if ((pending_refresh++ & 15) == 0 || pending_first == pending_writes.size()) {
+        pending_done = draw_pipe->Consumed();
+    }
+    // Positions grow in note order (a merge below only raises a recent entry's: it then leaves
+    // later, never too early).
+    while (pending_first < pending_writes.size() &&
+           pending_writes[pending_first].position <= pending_done) {
+        ++pending_first;
+    }
+    if (pending_first == pending_writes.size()) {
+        pending_writes.clear();
+        pending_first = 0;
+    } else if (pending_first >= 64 && pending_first * 2 >= pending_writes.size()) {
+        pending_writes.erase(pending_writes.begin(), pending_writes.begin() + pending_first);
+        pending_first = 0;
+    }
+}
+
 void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     if (!draw_pipe || !size) {
         return;
@@ -1223,6 +1254,33 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     // Draws write the same buffers over and over: an entry for the range only moves on.
     const u64 position = draw_pipe->Head();
     const VAddr end = address + size;
+    if (PendingFast()) {
+        PrunePendingWrites();
+        ++pending_stats[0];
+        const VAddr first_block = address >> 16, last_block = (end - 1) >> 16;
+        if (last_block - first_block >= 32) {
+            pending_big = position;
+        } else {
+            for (VAddr block = first_block; block <= last_block; ++block) {
+                pending_blocks[block & 4095] = position;
+            }
+        }
+        // Only the newest entries: the ranges written again are the recent ones, and an older
+        // overlapping entry stays correct beside a new one.
+        const size_t live = pending_writes.size() - pending_first;
+        for (size_t i = 0; i < std::min<size_t>(live, 8); ++i) {
+            ++pending_stats[1];
+            auto& write = pending_writes[pending_writes.size() - 1 - i];
+            if (address <= write.end && write.begin <= end) {
+                write.begin = std::min(write.begin, address);
+                write.end = std::max(write.end, end);
+                write.position = position;
+                return;
+            }
+        }
+        pending_writes.push_back({address, end, position});
+        return;
+    }
     // Entries the recording thread has done go once the list has doubled: PendingWriteOverlaps
     // drops them only when a lookup falls inside the bounds, and the list (scanned for every
     // written binding) grew long between.
@@ -1239,7 +1297,9 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
         pending_prune_at = std::max<size_t>(32, pending_writes.size() * 2);
     }
     // Newest first: the recent ranges are the ones written again.
+    ++pending_stats[0];
     for (auto it = pending_writes.rbegin(); it != pending_writes.rend(); ++it) {
+        ++pending_stats[1];
         auto& write = *it;
         if (address <= write.end && write.begin <= end) {
             write.begin = std::min(write.begin, address);
@@ -1256,6 +1316,34 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
 }
 
 bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
+    if (PendingFast()) {
+        if (pending_writes.empty()) {
+            return false;
+        }
+        PrunePendingWrites();
+        const VAddr end = address + size;
+        // The blocks first: no write still pending in any block of the range -> none overlaps.
+        if (pending_big <= pending_done) {
+            const VAddr first_block = address >> 16, last_block = (end - 1) >> 16;
+            bool maybe = last_block - first_block >= 32;
+            for (VAddr block = first_block; !maybe && block <= last_block; ++block) {
+                maybe = pending_blocks[block & 4095] > pending_done;
+            }
+            if (!maybe) {
+                return false;
+            }
+        }
+        ++pending_stats[2];
+        pending_stats[3] += pending_writes.size() - pending_first;
+        for (size_t i = pending_first; i < pending_writes.size(); ++i) {
+            const auto& write = pending_writes[i];
+            if (address < write.end && write.begin < end && write.position > pending_done &&
+                !draw_pipe->Reached(write.position)) {
+                return true;
+            }
+        }
+        return false;
+    }
     if (pending_writes.empty() || address >= pending_max || address + size <= pending_min) {
         return false;
     }
@@ -1272,6 +1360,8 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
         }
     }
     const VAddr end = address + size;
+    ++pending_stats[2];
+    pending_stats[3] += pending_writes.size();
     for (const auto& write : pending_writes) {
         if (address < write.end && write.begin < end && !draw_pipe->Reached(write.position)) {
             return true;
@@ -2640,6 +2730,14 @@ void Rasterizer::PrintPipeStats() {
             }
         }
     }
+    std::printf("\n  pending GPU writes: notes %.0f/s (%.1f entries scanned), overlap checks past the "
+                "bounds %.0f/s (%.1f entries), list %zu",
+                pending_stats[0] / seconds,
+                pending_stats[0] ? double(pending_stats[1]) / pending_stats[0] : 0.0,
+                pending_stats[2] / seconds,
+                pending_stats[2] ? double(pending_stats[3]) / pending_stats[2] : 0.0,
+                pending_writes.size());
+    std::fill(std::begin(pending_stats), std::end(pending_stats), 0);
     std::printf("\n");
     drain_sites.clear();
     draw_pipe->drains_by_reason = {};

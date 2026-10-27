@@ -663,8 +663,20 @@ private:
     };
     std::vector<PendingWrite> pending_writes;
     VAddr pending_min = ~VAddr{0}, pending_max = 0; ///< bounds of pending_writes
+    /// Diagnosis (BB_FRAME_STATS line): calls and entries scanned (note, overlap check).
+    u64 pending_stats[4]{};
     u32 pending_checks = 0;
     size_t pending_prune_at = 32; ///< NotePendingGpuWrite drops done entries at this size
+    /// BB_PENDING_FAST (default on): pending_writes in note order from pending_first; entries
+    /// stage B has run (position <= pending_done) leave from the front.
+    size_t pending_first = 0;
+    u64 pending_done = 0; ///< stage B's consumed position, read every 16 calls (stale is safe)
+    u32 pending_refresh = 0;
+    /// Newest note position per 64 KiB block (direct mapped: a shared slot only means a scan);
+    /// ranges over 32 blocks raise pending_big instead.
+    std::array<u64, 4096> pending_blocks{};
+    u64 pending_big = 0;
+    void PrunePendingWrites();
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< bbport: extra bias of this draw's samplers
     bool material_draw = false;    ///< bbport: writes 5+ targets (G-buffer: scene materials)
