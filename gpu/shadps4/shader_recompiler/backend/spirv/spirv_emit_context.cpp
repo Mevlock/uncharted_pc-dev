@@ -1274,8 +1274,12 @@ Id EmitContext::DefineGetBdaPointer() {
     const auto bda_ptr{OpAccessChain(bda_pointer_type, bda_buffer_id, u32_zero_value, page32)};
     const auto bda{OpLoad(U64, bda_ptr)};
 
-    // Check if page is GPU cached
-    const auto is_fault{OpIEqual(U1[1], bda, u64_zero_value)};
+    // Check if page is GPU cached. bbport: bit 0 set = cached but watched (VRAM give-back
+    // probation, BufferCache::ReclaimArenaMemory): the read goes on and is reported like a fault.
+    const auto is_missing{OpIEqual(U1[1], bda, u64_zero_value)};
+    const auto is_watched{
+        OpINotEqual(U1[1], OpBitwiseAnd(U64, bda, Constant(U64, u64{1})), u64_zero_value)};
+    const auto is_fault{OpLogicalOr(U1[1], is_missing, is_watched)};
     OpSelectionMerge(merge_label, spv::SelectionControlMask::MaskNone);
     OpBranchConditional(is_fault, fault_label, available_label);
 
@@ -1291,20 +1295,17 @@ Id EmitContext::DefineGetBdaPointer() {
     const auto fault_value{OpLoad(U32[1], fault_ptr)};
     const auto fault_value_masked{OpBitwiseOr(U32[1], fault_value, page_mask)};
     OpStore(fault_ptr, fault_value_masked);
-
-    // Return null pointer
-    const auto fallback_result{u64_zero_value};
     OpBranch(merge_label);
 
-    // Value is available, compute address
     AddLabel(available_label);
-    const auto offset_in_bda{OpBitwiseAnd(U64, address, caching_pagemask)};
-    const auto addr{OpIAdd(U64, bda, offset_in_bda)};
     OpBranch(merge_label);
 
-    // Merge
+    // Merge: a null pointer for a missing page, else the address (watch bit cleared)
     AddLabel(merge_label);
-    const auto result{OpPhi(U64, addr, available_label, fallback_result, fault_label)};
+    const auto offset_in_bda{OpBitwiseAnd(U64, address, caching_pagemask)};
+    const auto addr{
+        OpIAdd(U64, OpBitwiseAnd(U64, bda, Constant(U64, ~u64{1})), offset_in_bda)};
+    const auto result{OpSelect(U64, is_missing, u64_zero_value, addr)};
     OpReturnValue(result);
     OpFunctionEnd();
     return func;

@@ -3626,6 +3626,42 @@ void BufferCache::QueueFinishedUnbinds() {
     has_pending_unbinds = true;
 }
 
+u64 BufferCache::WatchArenaBlocks(u64 first_block, u64 end_block, bool watch) {
+    boost::container::small_vector<Backing, 8> pieces;
+    u64 blocks = 0;
+    resident_ranges.ForEachInRange(first_block, end_block, [&](const Backing& backing) {
+        const u64 start = std::max(first_block, backing.start);
+        const u64 end = std::min(end_block, backing.end);
+        if (start < end) {
+            pieces.push_back(backing.SubRange(start, end));
+            blocks += end - start;
+        }
+    });
+    if (!blocks) {
+        return 0;
+    }
+    boost::container::small_vector<vk::BufferCopy, 8> copies;
+    const auto staging =
+        staging_pool.Request(blocks * sizeof(vk::DeviceAddress), MemoryType::HostUncached);
+    auto* bda_addrs = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
+    u64 offset = staging.offset;
+    for (const auto& piece : pieces) {
+        const VAddr address = piece.start << block_shift;
+        const Buffer* arena = address_space[address >> arena_page_bits];
+        ASSERT_MSG(arena && address >= arena->cpu_addr, "Watched arena range outside its arena");
+        for (u64 block = piece.start; block < piece.end; ++block) {
+            *(bda_addrs++) = (arena->BufferDeviceAddress() + (block << block_shift) - arena->cpu_addr) |
+                             (watch ? 1u : 0u);
+        }
+        const u64 copy_size = (piece.end - piece.start) * sizeof(vk::DeviceAddress);
+        copies.emplace_back(offset, piece.start * sizeof(vk::DeviceAddress), copy_size);
+        offset += copy_size;
+    }
+    staging.Flush();
+    runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
+    return blocks;
+}
+
 u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
     boost::container::small_vector<Backing, 8> pieces;
     resident_ranges.ForEachInRange(first_block, end_block, [&](const Backing& backing) {
@@ -3749,6 +3785,59 @@ void BufferCache::ReclaimArenaMemory() {
         const int seconds = env && env[0] ? std::atoi(env) : 60;
         return static_cast<u16>(std::clamp(seconds, 6, 2 * (int(ReclaimEpochRing) - 4)) / 2);
     }();
+    const auto gpu_data = [&](VAddr lo, u64 size) {
+        bool late = false;
+        for (const auto& read_back : late_read_backs) {
+            late = late || (read_back.address < lo + size && read_back.address + read_back.size > lo);
+        }
+        return late || gpu_modified_ranges.Intersects(lo, size) ||
+               memory_tracker->IsRegionGpuModified(lo, size) || shared_gpu_ranges.Intersects(lo, size);
+    };
+
+    // bbport: windows are given back after a probation (BB_ARENA_PROBATION=0: at once, as
+    // before). Shaders also read guest memory through pointers and the page table, which no arena
+    // use records: a window read only that way looked unused and was given back, and the next
+    // read returned zeros for a frame (U1 followed a garbage pointer: crash after 7 minutes of
+    // give-back every 2 s, 2026-10-27). On probation the window's page table entries carry the
+    // watch bit: reads go on and report the page like a fault, whose handling uses the window
+    // again (GetArena). Windows used since lose the bit and stay; the others are given back once
+    // the probation is over and the GPU has finished the work before the last epoch.
+    static const u16 probation_epochs = [] {
+        const char* env = std::getenv("BB_ARENA_PROBATION");
+        return env && env[0] == '0' ? u16(0) : std::max<u16>(3, age_epochs / 4);
+    }();
+    const bool over = (resident_in_use_blocks << block_shift) > limit;
+    u64 released = 0, probation_blocks = 0;
+    u32 windows = 0, busy = 0, rescued = 0, watched = 0;
+    std::erase_if(probation, [&](const Probation& p) {
+        const VAddr lo = p.window << ReclaimWindowBits;
+        const u64 size = u64(1) << ReclaimWindowBits;
+        const u64 first = lo >> block_shift;
+        const u64 end = (lo + size) >> block_shift;
+        if (!over || window_epoch[p.window].load(std::memory_order_relaxed) != p.last_epoch) {
+            WatchArenaBlocks(first, end, false);
+            rescued += over;
+            return true;
+        }
+        const u16 waited = static_cast<u16>(reclaim_epoch - p.since);
+        if (waited < probation_epochs ||
+            !scheduler.IsFree(epoch_start_tick[static_cast<u16>(reclaim_epoch - 1) % ReclaimEpochRing])) {
+            probation_blocks += p.blocks;
+            return false;
+        }
+        if (gpu_data(lo, size)) {
+            WatchArenaBlocks(first, end, false);
+            ++busy;
+            return true;
+        }
+        if (const u64 blocks = ReleaseArenaBlocks(first, end)) {
+            released += blocks;
+            ++windows;
+        }
+        return true;
+    });
+    probation_rescued += rescued;
+
     if ((resident_in_use_blocks << block_shift) <= limit) {
         return;
     }
@@ -3775,11 +3864,12 @@ void BufferCache::ReclaimArenaMemory() {
     }
     std::ranges::sort(candidates, std::greater{});
 
-    u64 released = 0;
-    u32 windows = 0, busy = 0;
     for (const auto& [age, w] : candidates) {
-        if ((resident_in_use_blocks << block_shift) <= target) {
+        if (((resident_in_use_blocks - probation_blocks) << block_shift) <= target) {
             break;
+        }
+        if (std::ranges::find(probation, w, &Probation::window) != probation.end()) {
+            continue;
         }
         const VAddr lo = w << ReclaimWindowBits;
         const u64 size = u64(1) << ReclaimWindowBits;
@@ -3790,30 +3880,36 @@ void BufferCache::ReclaimArenaMemory() {
             ++busy;
             continue;
         }
-        bool late = false;
-        for (const auto& read_back : late_read_backs) {
-            late = late || (read_back.address < lo + size && read_back.address + read_back.size > lo);
-        }
-        if (late || gpu_modified_ranges.Intersects(lo, size) ||
-            memory_tracker->IsRegionGpuModified(lo, size) || shared_gpu_ranges.Intersects(lo, size)) {
+        if (gpu_data(lo, size)) {
             ++busy;
             continue;
         }
-        if (const u64 blocks = ReleaseArenaBlocks(lo >> block_shift, (lo + size) >> block_shift)) {
+        const u64 first = lo >> block_shift;
+        const u64 end = (lo + size) >> block_shift;
+        if (probation_epochs) {
+            if (const u64 blocks = WatchArenaBlocks(first, end, true)) {
+                probation.push_back({w, reclaim_epoch, window_epoch[w].load(std::memory_order_relaxed),
+                                     blocks});
+                probation_blocks += blocks;
+                ++watched;
+            }
+        } else if (const u64 blocks = ReleaseArenaBlocks(first, end)) {
             released += blocks;
             ++windows;
         }
     }
-    if (windows || busy) {
+    if (windows || busy || watched || rescued) {
         std::printf("GPU: buffer arenas gave back %llu MiB (%u windows unused for %u s or more; %u "
                     "kept: GPU data or in use); %llu MiB in use, limit %llu MiB; unbinds after the "
-                    "GPU: %llu done, %zu waiting\n",
+                    "GPU: %llu done, %zu waiting; probation: %u started, %u used again (%llu in "
+                    "all), %zu on it\n",
                     static_cast<unsigned long long>((released << block_shift) >> 20), windows,
                     u32(age_epochs) * 2, busy,
                     static_cast<unsigned long long>((resident_in_use_blocks << block_shift) >> 20),
                     static_cast<unsigned long long>(limit >> 20),
                     static_cast<unsigned long long>(deferred_unbinds_submitted),
-                    deferred_unbinds.size());
+                    deferred_unbinds.size(), watched, rescued,
+                    static_cast<unsigned long long>(probation_rescued), probation.size());
         std::fflush(stdout);
     }
 }
