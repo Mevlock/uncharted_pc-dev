@@ -679,7 +679,8 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     }();
     if (strict && (landing_registered.load(std::memory_order_acquire) !=
                        landing_done.load(std::memory_order_acquire) ||
-                   shared_landed_pending.load(std::memory_order_acquire))) {
+                   shared_landed_pending.load(std::memory_order_acquire) ||
+                   downloads_in_flight.load(std::memory_order_seq_cst) != 0)) {
         return false;
     }
     const auto start_time = std::chrono::steady_clock::now();
@@ -832,6 +833,12 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     bool settled = true;
     memory_tracker->WithRegionLocked(
         window_start, window_end - window_start, [&](RegionManager& manager) {
+            // A DownloadMemory that began since the check above stores its older copy later,
+            // unconditionally: leave the pages to the ordered path.
+            if (strict && downloads_in_flight.load(std::memory_order_seq_cst) != 0) {
+                settled = false;
+                return;
+            }
             for (const auto& candidate : pages) {
                 const bool faulting = candidate.at >= page && candidate.at < page + length;
                 const u64 offset = candidate.at - manager.GetCpuAddr();
@@ -2456,13 +2463,54 @@ void BufferCache::CompleteReadBacks() {
                         static_cast<unsigned long long>(entry.address), was[0], was[1], was[2],
                         was[3], now[0], now[1], now[2], now[3]);
         }
-        WriteBackGpuData(std::bit_cast<u8*>(entry.address), entry.staging.mapped, entry.size);
+        // bbport: only the pages that still hold GPU data, checked under their region's lock.
+        // The copy was taken when the dispatch was recorded; a fault read back since (the
+        // faulting thread or the ordered path) may have handed a page to the guest, which wrote
+        // it: storing the older copy then put GPU data over guest pointers (U3 rooftop route, a
+        // 10 KiB store from this thread 2 ms after the faulting thread settled the page).
+        // BB_LATE_READBACK_CHECK=0: the whole copy, as before.
+        static const bool check = [] {
+            const char* env = std::getenv("BB_LATE_READBACK_CHECK");
+            return !(env && env[0] == '0');
+        }();
+        if (!check) {
+            WriteBackGpuData(std::bit_cast<u8*>(entry.address), entry.staging.mapped, entry.size);
+        } else {
+            const VAddr end = entry.address + entry.size;
+            for (VAddr page = Common::AlignDown(entry.address, TRACKER_BYTES_PER_PAGE); page < end;
+                 page += TRACKER_BYTES_PER_PAGE) {
+                const VAddr begin = std::max<VAddr>(page, entry.address);
+                const VAddr part_end = std::min<VAddr>(page + TRACKER_BYTES_PER_PAGE, end);
+                const bool locked = memory_tracker->WithRegionLocked(
+                    page, TRACKER_BYTES_PER_PAGE, [&](RegionManager& manager) {
+                        if (manager.IsRegionModified<Type::GPU>(page - manager.GetCpuAddr(),
+                                                               TRACKER_BYTES_PER_PAGE)) {
+                            WriteBackGpuData(std::bit_cast<u8*>(begin),
+                                             entry.staging.mapped + (begin - entry.address),
+                                             part_end - begin);
+                        }
+                    });
+                if (!locked && memory_tracker->IsRegionGpuModified(page, TRACKER_BYTES_PER_PAGE)) {
+                    WriteBackGpuData(std::bit_cast<u8*>(begin),
+                                     entry.staging.mapped + (begin - entry.address),
+                                     part_end - begin);
+                }
+            }
+        }
         staging_pool.FreeDeferred(entry.staging);
         return true;
     });
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
+    // Its ranges are chosen here and stored after the GPU finished, unconditionally: a faulting
+    // thread that settled one of these pages in between had its guest's writes overwritten (U3
+    // rooftop route, a 10 KiB store from bb:DrawRec 2 ms after). It backs off while this runs.
+    downloads_in_flight.fetch_add(1, std::memory_order_seq_cst);
+    struct InFlight {
+        std::atomic<u32>& count;
+        ~InFlight() { count.fetch_sub(1, std::memory_order_seq_cst); }
+    } in_flight{downloads_in_flight};
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     const VAddr arena_base = arena->cpu_addr;

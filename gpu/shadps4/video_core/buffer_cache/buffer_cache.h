@@ -400,6 +400,9 @@ private:
     std::mutex shared_landed_mutex;
     std::vector<SharedLanded> shared_landed;
     std::atomic<bool> shared_landed_pending{false};
+    /// DownloadMemory calls between choosing their ranges and storing them (they wait for the
+    /// GPU in between): ReadBackOnFaultThread backs off meanwhile.
+    std::atomic<u32> downloads_in_flight{0};
 
     struct SideTicket;
     bool BeginSideDownload(VAddr page, u64 length, SideTicket& ticket);
