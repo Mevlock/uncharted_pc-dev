@@ -439,7 +439,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         return env ? std::max(1, std::atoi(env)) : 1;
     }();
     static int frame_dump_left = 0;
-    if (frame_dump_trigger && std::remove(frame_dump_trigger) == 0) {
+    // The file is looked for every 30th frame: a remove() each frame cost stage B ~1.4% in tests.
+    static u32 frame_dump_poll = 0;
+    if (frame_dump_trigger && frame_dump_poll++ % 30 == 0 && std::remove(frame_dump_trigger) == 0) {
         frame_dump_left = frame_dump_burst;
     }
     const bool frame_dump = frame_dump_left > 0;
