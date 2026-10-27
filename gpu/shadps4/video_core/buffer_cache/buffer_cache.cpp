@@ -651,14 +651,16 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     // second queue itself. Page states change under their region's lock, the one the recording
     // thread marks GPU writes under, and only if no write was marked since the read back began
     // (a later write has a later tick); else the GPU command thread's path settles the fault.
-    // Off from 2026-10-26 to 10-27: it read back before the GPU command thread's fault policy
-    // (shared writes), so it stored GPU data over memory U3 had reused (crashes in the pub). With
-    // the strict check below it only takes the faults the policy would read back as well, and is
-    // on by default (U3 square 140.6 -> 147.2 FPS; the pub fight 2 x 4 min without a crash).
-    // BB_FAULT_HERE=0: off. Toggle2 FaultReadbackHere: off.
+    // BB_FAULT_HERE=1: on; off by default. It read back before the GPU command thread's fault
+    // policy (shared writes), so it stored GPU data over memory U3 had reused (crashes in the pub).
+    // With the strict check below (only faults the policy would read back, only the faulting
+    // pages) U3's square gains ~5% (140.6 -> 147.2 FPS) and the pub fight ran 2 x 4 min, but the
+    // rooftop route still crashed in 1-2 runs of 4 (2026-10-27: guest pointers holding floats or
+    // unmapped addresses, guest offsets 0x60996f / 0x56edc4): something it stores is still newer
+    // in guest memory. Toggle2 FaultReadbackHere: off.
     static const bool enabled = [] {
         const char* env = std::getenv("BB_FAULT_HERE");
-        return !(env && env[0] == '0');
+        return env && env[0] == '1';
     }();
     if (!enabled || !side_queue || BbToggle::Disabled2(BbToggle::FaultReadbackHere)) {
         return false;
@@ -667,7 +669,10 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     // default on): not while a shared landing is in flight or landed but not settled there (its
     // GPU bytes merge with guest writes made after the share; storing a read back over those
     // writes loses them), and not while the writing work is still running (the policy shares the
-    // page then instead of waiting). Those faults take the ordered path as before.
+    // page then instead of waiting). Those faults take the ordered path as before. Strict also
+    // reads back only the faulting pages: a neighbour is not known to be write protected (a
+    // shared page stays writable while it holds GPU data), and a guest pointer stored there
+    // without a fault was overwritten (U3 rooftop route: a read of 0xffffffffffffffff).
     static const bool strict = [] {
         const char* env = std::getenv("BB_FAULT_HERE_STRICT");
         return !(env && env[0] == '0');
@@ -715,7 +720,7 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
                     faulting_found = true;
                     fault_tick = std::max(fault_tick, tick);
                     pages.push_back({at, tick});
-                } else if (tick != 0 && semaphore.IsFree(tick) &&
+                } else if (!strict && tick != 0 && semaphore.IsFree(tick) &&
                            !manager.IsRegionModified<Type::CPU>(offset, TRACKER_BYTES_PER_PAGE)) {
                     pages.push_back({at, tick});
                 }
@@ -998,26 +1003,64 @@ bool BufferCache::FinishSideDownload(SideTicket& ticket, VAddr fault_page, u64 f
             side_queue->Release(check);
         }
     }
-    if (auto* slot = ticket.slot; slot && ticket.total) {
-        const u8* staging = slot->staging.mapped_data.data();
+    // bbport: each owned page is checked again, stored and handed back in one step under its
+    // region's lock (as drakolordx7's 792620c7). The checks above ran unlocked: meanwhile a guest
+    // thread's ReadBackOnFaultThread may have settled the page and the guest written it, and
+    // storing this copy then put GPU data over a guest pointer (U3 rooftop route: a read of
+    // 0xffffffffffffffff, the pointer field holding floats). BB_FINISH_LOCKED=0: as before.
+    static const bool finish_locked = [] {
+        const char* env = std::getenv("BB_FINISH_LOCKED");
+        return !(env && env[0] == '0');
+    }();
+    const u8* staging = ticket.slot && ticket.total ? ticket.slot->staging.mapped_data.data()
+                                                    : nullptr;
+    const auto store_page = [&](VAddr page) {
+        if (!staging) {
+            return;
+        }
         for (const auto& copy : ticket.copies) {
-            // A copy can span pages: store the parts in the pages still owned.
+            // A copy can span pages: only its part in this page.
             const VAddr start = ticket.arena->cpu_addr + copy.srcOffset;
-            const VAddr end = start + copy.size;
-            for (VAddr at = start; at < end;) {
-                const VAddr page = Common::AlignDown(at, TRACKER_BYTES_PER_PAGE);
-                const VAddr part_end = std::min<VAddr>(end, page + TRACKER_BYTES_PER_PAGE);
-                if (std::ranges::find(owned, page) != owned.end()) {
-                    WriteBackGpuData(std::bit_cast<u8*>(at), staging + copy.dstOffset + (at - start),
-                                     part_end - at);
-                }
-                at = part_end;
+            const VAddr begin = std::max<VAddr>(start, page);
+            const VAddr end = std::min<VAddr>(start + copy.size, page + TRACKER_BYTES_PER_PAGE);
+            if (begin < end) {
+                WriteBackGpuData(std::bit_cast<u8*>(begin), staging + copy.dstOffset + (begin - start),
+                                 end - begin);
             }
         }
-    }
-    for (const VAddr at : owned) {
-        gpu_modified_ranges.Subtract(at, TRACKER_BYTES_PER_PAGE);
-        memory_tracker->UnmarkRegionAsGpuModified(at, TRACKER_BYTES_PER_PAGE);
+    };
+    if (finish_locked) {
+        for (const VAddr at : owned) {
+            const bool faulting = at >= fault_page && at < fault_page + fault_length;
+            bool settled = false;
+            memory_tracker->WithRegionLocked(at, TRACKER_BYTES_PER_PAGE, [&](RegionManager& manager) {
+                const u64 offset = at - manager.GetCpuAddr();
+                if (!manager.IsRegionModified<Type::GPU>(offset, TRACKER_BYTES_PER_PAGE)) {
+                    settled = true; // handed back meanwhile: the guest's data is newer
+                    return;
+                }
+                if ((!faulting &&
+                     manager.IsRegionModified<Type::CPU>(offset, TRACKER_BYTES_PER_PAGE)) ||
+                    manager.LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE) > ticket.write_tick) {
+                    return;
+                }
+                store_page(at);
+                gpu_modified_ranges.Subtract(at, TRACKER_BYTES_PER_PAGE);
+                manager.ChangeRegionState<Type::GPU, false>(at, TRACKER_BYTES_PER_PAGE);
+                settled = true;
+            });
+            if (faulting && !settled) {
+                fault_ok = false;
+            }
+        }
+    } else {
+        for (const VAddr at : owned) {
+            store_page(at);
+        }
+        for (const VAddr at : owned) {
+            gpu_modified_ranges.Subtract(at, TRACKER_BYTES_PER_PAGE);
+            memory_tracker->UnmarkRegionAsGpuModified(at, TRACKER_BYTES_PER_PAGE);
+        }
     }
     if (AsyncAccessTracking()) {
         TraceFinish(ticket.slot && !ticket.pages.empty() ? ticket.pages.front() : 0,
