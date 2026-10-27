@@ -69,13 +69,39 @@ when stage B runs out of work); a deferred fence's forced kick waits for the que
   freed that way (image recycling), counted in the VRAM totals and paused while an allocation is
   over budget.
 - `48579bc4`, `523aa50a`, `92e285bc`, `d21a085d`: write faults on submitted GPU data read back on
-  the faulting thread. **Off by default** (`BB_FAULT_HERE=1` on): it bypasses the ordered fault
-  policy and crashed U3's chapter 1 pub (Havok assert from a stale pointer). See section 5.
+  the faulting thread. Off in perf1: it bypassed the ordered fault policy and crashed U3's chapter
+  1 pub (Havok assert from a stale pointer). **On by default since perf2** (section 2.7).
 
 ### 2.6 Perf build identity (`738550c3`, `f7ccaacf`)
 Window title, settings menu header and a line under the FPS counter say PERF BUILD; it keeps its
 own pipeline cache (`<serial>-perf`), because sharing one with the normal build made each wipe the
 other's at start.
+
+### 2.7 perf2 (0.3.6.29-perf2)
+After perf1 a causal profile showed stage A ~54% and stage B fully critical. perf2:
+- `f4e2005f` **asynchronous submission** (`BB_ASYNC_SUBMIT=2` default, `=0` off): a plain flush of
+  the draw scheduler (no semaphores, no fence) is ended and submitted by the Vulkan recorder as its
+  last command there; stage B goes on instead of waiting for stage C and the submission (~6% of its
+  time in U3). `=2` also waits for the guest copy threads in recorder order.
+- `d1b21c3c` **pending GPU-write list** in note order with a 64 KiB block filter (`BB_PENDING_FAST=0`
+  off): the stage A check "is this range about to be written by queued GPU work" no longer walks a
+  map per draw.
+- `ec8a0b0f` **one lock per resource-table walk** (`IsAnyRangeGpuWritten`) instead of one per entry.
+- `cbc41784` **write-fault read-back on the faulting thread on by default** (`BB_FAULT_HERE=0` off).
+  The crash root cause: stage B paths (`DownloadMemory`, late read-backs) stored older GPU copies
+  over pages a faulting guest thread had already read back and handed to the game. Fix (strict mode,
+  `BB_FAULT_HERE_STRICT`): the faulting thread bails out while `downloads_in_flight != 0` (checked
+  before and inside the settle lock), while landings are pending or unsettled, or while the writing
+  work has not finished; no 64 KiB neighbours. `e1a8ace9`: `FinishSideDownload` re-checks, stores and
+  unmarks under the region lock; late read-backs store only pages still GPU-modified
+  (`BB_FINISH_LOCKED=0`, `BB_LATE_READBACK_CHECK=0` = old). U3 rooftop route 12/12 clean (was about
+  1 in 3 crashing).
+- Smaller: the frame-dump trigger file is polled every 30th frame (`7dde4549`, a `remove()` per frame
+  cost stage B ~1.4%), render-pass and pass-length stats on the frame stats line, crash dumps name
+  the writing thread.
+- From the release line: VRAM give-back unmaps only after the GPU finished the releasing tick,
+  windows go on probation (page-table watch bit) before they are given back, a range used again
+  before its unbind keeps its own memory (`BB_ARENA_UNBIND_DEFER=0`, `BB_ARENA_PROBATION=0`).
 
 ## 3. Measurements
 
@@ -92,6 +118,13 @@ work.
 Older-CPU simulation (8 threads, CPU max state 60%, job workers sleeping), U3:
 square at DLSS Performance 62.3 -> 77.2 (+24%); crowd-heavy rooftop chase 81.4 -> 89.5 (+10%).
 8 threads at full clock: 117.8 -> 143.1 (+21%).
+
+perf2 against perf1's behaviour (perf2 with all its new switches off), 2 runs per side, DLSS
+Performance, frame generation off, uncapped: U3 square 145.6 -> 155.6 (+6.9%); U3 slow-CPU simulation
+(8 threads, 60%) 76.8 -> 87.1 (+13.4%); U2 museum 149.7 -> 158.9 (+6.1%); U1 jungle 201.6 -> 205.6
+(about +2%, within the noise of that spot). The release build of perf2 repeated these on its release
+day: U3 square 155.7 and 156.2, U2 museum 159.0, U1 jungle 207.3. After perf2 the causal profile has
+stage A ~62% and stage B ~75% critical: both are now limits.
 
 Frame times, U3 square at 1920x1080 uncapped: slowest 1% 12.6 ms -> 9.3 ms; frames over 1.5x the
 median in 2 minutes: 12 -> 0.
@@ -118,7 +151,7 @@ own threads and its frame waits: the games wait for the GPU to go idle each fram
 1. **Let the GPU start on a frame earlier.** The biggest remaining win: today the GPU idles part of
    every frame at high frame rates waiting for the CPU side. Needs care with the games' idle waits
    (removing them only moves the wait to the next call, measured 5-7 ms/frame).
-2. **Fault read-back on the faulting thread, made safe.** drakolordx7's `792620c7` (in his community
+2. ~~**Fault read-back on the faulting thread, made safe.**~~ Done in perf2 (section 2.7). drakolordx7's `792620c7` (in his community
    branch) writes each page back in the same locked step that settles it, only while it is still
    GPU data, and re-checks neighbour pages for CPU writes. That matches how our crash happened. Port
    it onto this branch's side-queue slots, turn `BB_FAULT_HERE` on (~+2.5% in our A/B), and play-test
@@ -176,7 +209,7 @@ Experiments and diagnostics in this branch, all off unless stated:
 | `BB_COALESCE_STREAMS=0`, `BB_STREAM_NO_TRACK=0`, `BB_META_ONE_PASS=0`, `BB_FLUSH_IN_ORDER=0` | per-draw savings off |
 | `BB_LAZY_FENCE_KICK=0` | fence hand-offs one by one again |
 | `BB_EOS_CHAIN=0` | che's label changes off |
-| `BB_FAULT_HERE=1` | fault read-back on the faulting thread (see 5.2) |
+| `BB_FAULT_HERE=0` | fault read-back back on the GPU thread (on by default since perf2, 2.7) |
 | `BB_PREFETCH_READBACK=1` | prefetched read-backs |
 | `BB_ASYNC_SUBMIT=1/2`, `BB_SUBMIT_MARKERS=1`, `BB_SUBMIT_NO_IDLE_WAIT=1/2`, `BB_VO_NODRAIN=1`, `BB_WAITREGMEM_NODRAIN=1`, `BB_COMPUTE_WRM_PENDING=1` | experiments on submission and waits (measurement only) |
 | `BB_STAGEB_STATS=1`, `BB_MATERIAL_STATS=1`, `BB_DISPATCH_STATS=1` | stage B and material statistics in the log |
