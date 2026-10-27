@@ -137,6 +137,34 @@ own threads and its frame waits: the games wait for the GPU to go idle each fram
 | Prefetched read-backs (`BB_PREFETCH_READBACK=1`) | No gain on 16 threads |
 | Guest thread priorities on host threads | U3 tie, U2 -4%, 4-core -4% |
 | Texture eviction age tuning on small cards | No difference |
+| Native batching (6.1) | +2% in calm scenes, -3.6% in the heaviest; left in the tree, off |
+| Object motion vectors off (`BB_OBJECT_MOTION=0`) | +0.4%: they cost practically nothing in U3 |
+| Chained WriteData on the draw recorder (spacepepperoni's port) | No gain here, and a load freeze in a slow-CPU test; not merged |
+
+### 6.1 Native batching (experiment, in the tree, off)
+U3 runs thousands of small compute dispatches per frame for character skinning, one per object
+(`cs 8f067540`). Native batching turns a run of them into one batched dispatch: each object gets a
+workgroup range, its read-only inputs are taken from the constant ring (`BB_NB_RING`, on with the
+experiment), outputs are allocated per object in one arena, and a hazard check by address ranges
+decides where a batch must end. A later prototype does the same for draws (`BB_DRAW_BATCH=1`, needs
+`BB_INLINE_FETCH=1`: the fetch shader translated to read vertex buffers through buffers, a DrawIndex
+table and indexed indirect multi-draws).
+
+Switches: `BB_NATIVE_BATCH=1` (compute batching), `BB_DRAW_BATCH=1` + `BB_INLINE_FETCH=1` (draws),
+`BB_DRAW_BATCH_DIAG=1`. It works (about 34 objects per batch, a play-test without errors), but the
+measurements say it is not worth turning on:
+
+| U3, DLSS Performance unless noted | Off | On |
+|---|---|---|
+| Cartagena street (2 rounds) | 140.2 | 143.0 (+2.0%) |
+| Rooftop chase, ~2,200 draws/frame | 174.3 | 167.9 (-3.6%) |
+| 8 threads at 60% CPU | 75.3 | 77.6 (+3%) |
+| Native 3440x1440 (earlier) | | +1.3% |
+
+The bookkeeping (hazard checks, building the batch tables) costs about as much as it saves, and in
+crowded scenes more; section 4 explains why a faster draw recorder has little left to gain in U3.
+The idea came from axylpup's shadPS4 work on inFAMOUS Second Son, where batching pays off for that
+engine.
 
 ## 7. Switches
 
