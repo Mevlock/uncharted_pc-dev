@@ -450,8 +450,19 @@ private:
         u64 blocks;
     };
     std::vector<FreeRun> free_runs, quarantined_runs;
+    /// Unbinds (and their memory) of ranges released while the command buffer with scheduler
+    /// tick `tick` was recorded: held until the GPU has finished that tick (see ReleaseArenaBlocks).
+    struct DeferredUnbinds {
+        u64 tick;
+        std::vector<ArenaBinds> binds;
+        std::vector<FreeRun> runs;
+    };
+    std::vector<DeferredUnbinds> deferred_unbinds;
+    u64 deferred_unbinds_submitted = 0;
     u64 resident_in_use_blocks = 0;
     bool has_pending_unbinds = false;
+    /// Moves deferred unbinds whose tick the GPU has finished into pending_binds.
+    void QueueFinishedUnbinds();
     void TouchArenaWindows(u64 first_block, u64 last_block) {
         const u16 epoch = reclaim_epoch;
         const u64 last = std::min<u64>(((last_block << block_shift) >> ReclaimWindowBits),
