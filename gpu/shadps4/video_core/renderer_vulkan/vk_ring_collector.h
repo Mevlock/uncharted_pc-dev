@@ -75,8 +75,11 @@ public:
         if (at % Bytes + size > Bytes) {
             at += Bytes - at % Bytes; // keep it contiguous
         }
-        while (at + size - bytes_done.load(std::memory_order_acquire) > Bytes) {
-            _mm_pause();
+        if (at + size - bytes_done.load(std::memory_order_acquire) > Bytes) {
+            Kick(); // items published lazily may not have woken the thread
+            while (at + size - bytes_done.load(std::memory_order_acquire) > Bytes) {
+                _mm_pause();
+            }
         }
         std::memcpy(bytes.data() + at % Bytes, data, size);
         bytes_head = at + size;
@@ -135,14 +138,45 @@ private:
     static constexpr u64 Bytes = 4ull << 20;
     static constexpr u64 MaxPerPacket = 512; ///< more than MaxStages x Shader::NUM_BUFFERS
 
+    /// BB_RING_LAZY=0: every item published with a full fence and a wake check (the old way).
+    /// Default: candidates and bytes go out with a plain release store (no fence, no read of the
+    /// thread's progress while there is room); the fence and wake check come with the packet's
+    /// End and before any wait for room, so a sleeping thread is always woken before stage A or
+    /// B can wait on it.
+    static bool Lazy() {
+        static const bool lazy = [] {
+            const char* env = std::getenv("BB_RING_LAZY");
+            return !(env && env[0] == '0');
+        }();
+        return lazy;
+    }
+
+    void Kick() {
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (sleeping.load(std::memory_order_seq_cst)) {
+            wake.store(1, std::memory_order_seq_cst);
+            wake.notify_one();
+        }
+    }
+
     void Push(const Item& item) {
         const u64 at = head.load(std::memory_order_relaxed);
-        while (at - done.load(std::memory_order_acquire) >= items.size()) {
-            _mm_pause();
+        if (at - done_seen >= items.size()) {
+            done_seen = done.load(std::memory_order_acquire);
+            if (at - done_seen >= items.size()) {
+                Kick();
+                while (at - (done_seen = done.load(std::memory_order_acquire)) >= items.size()) {
+                    _mm_pause();
+                }
+            }
         }
         items[at % items.size()] = item;
-        head.store(at + 1, std::memory_order_seq_cst);
         ++items_in_packet;
+        if (Lazy() && item.kind != ItemKind::End) {
+            head.store(at + 1, std::memory_order_release);
+            return;
+        }
+        head.store(at + 1, std::memory_order_seq_cst);
         if (sleeping.load(std::memory_order_seq_cst)) {
             wake.store(1, std::memory_order_seq_cst);
             wake.notify_one();
@@ -234,6 +268,7 @@ private:
     u64 items_in_packet = 0; ///< stage A
     u64 packets_queued = 0;  ///< stage A
     u64 bytes_head = 0;      ///< stage A
+    u64 done_seen = 0;       ///< stage A: `done` as last read (only rises)
     alignas(64) std::atomic<u64> head{0};
     alignas(64) std::atomic<u64> done{0};
     alignas(64) std::atomic<u64> packets_done{0};
