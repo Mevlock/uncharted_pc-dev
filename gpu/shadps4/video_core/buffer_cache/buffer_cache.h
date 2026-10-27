@@ -274,13 +274,39 @@ private:
     /// the tree while it was rebalanced looped forever (U3, chapter 1's pub: the game froze).
     class LockedRangeSet {
     public:
+        /// bbport: an interval known to be in the set (the union of recent adds that touch,
+        /// cleared by any subtract that reaches it): an add inside it is a shared-lock check
+        /// instead of a tree insert. U3's skinning marks ~200k output ranges a second, mostly
+        /// ones marked the frame before and next to the previous one (0.19 us each before).
+        /// BB_RANGE_ADD_MEMO=0: off.
         void Add(VAddr address, size_t size) {
+            static const bool memo = [] {
+                const char* env = std::getenv("BB_RANGE_ADD_MEMO");
+                return !(env && env[0] == '0');
+            }();
+            const VAddr end = address + size;
+            if (memo) {
+                std::shared_lock lock{mutex};
+                if (address >= covered_lo && end <= covered_hi) {
+                    return;
+                }
+            }
             std::unique_lock lock{mutex};
             set.Add(address, size);
+            if (covered_lo < covered_hi && address <= covered_hi && end >= covered_lo) {
+                covered_lo = std::min(covered_lo, address);
+                covered_hi = std::max(covered_hi, end);
+            } else {
+                covered_lo = address;
+                covered_hi = end;
+            }
         }
         void Subtract(VAddr address, size_t size) {
             std::unique_lock lock{mutex};
             set.Subtract(address, size);
+            if (address < covered_hi && address + size > covered_lo) {
+                covered_lo = covered_hi = 0;
+            }
         }
         bool Intersects(VAddr address, size_t size) const {
             std::shared_lock lock{mutex};
@@ -312,6 +338,7 @@ private:
     private:
         mutable Common::SrwSharedMutexT<1> mutex; ///< BB_SRW_RANGES=1: a slim reader/writer lock
         RangeSet set;
+        VAddr covered_lo = 0, covered_hi = 0; ///< guarded by `mutex`
     };
     LockedRangeSet gpu_modified_ranges;
     struct LateReadBack {

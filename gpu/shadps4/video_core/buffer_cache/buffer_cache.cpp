@@ -2741,6 +2741,41 @@ void BufferCache::CheckStableBindings() {
     }
 }
 
+/// bbport diagnosis (BB_OBTAIN_STATS=1): written arena requests by part, every 5 s: arena and
+/// residency, SynchronizeMemory, the GPU-modified mark.
+static std::array<std::atomic<u64>, 4> g_obtain_written{};
+static bool ObtainStatsOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_OBTAIN_STATS");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+static void ObtainStatsPrint() {
+    static std::atomic<u64> calls{0};
+    if ((calls.fetch_add(1, std::memory_order_relaxed) & 1023) != 0) {
+        return;
+    }
+    static auto window = std::chrono::steady_clock::now();
+    static const u64 start_tsc = __rdtsc();
+    static auto start_time = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) {
+        return;
+    }
+    window = now;
+    const double seconds = std::chrono::duration<double>(now - start_time).count();
+    const double tsc_per_us = (__rdtsc() - start_tsc) / seconds / 1e6;
+    const u64 n = g_obtain_written[3].exchange(0);
+    const u64 a = g_obtain_written[0].exchange(0), b = g_obtain_written[1].exchange(0),
+              c = g_obtain_written[2].exchange(0);
+    if (n) {
+        std::printf("Obtain written: %.0f/s; per call arena+resident %.2f us, sync %.2f us, mark "
+                    "%.2f us\n",
+                    n / 5.0, a / tsc_per_us / n, b / tsc_per_us / n, c / tsc_per_us / n);
+    }
+}
+
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer,
                                                         u64 stream_limit) {
@@ -2805,6 +2840,15 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         remember(offset);
         return {&stream_buffer, offset};
     }
+    const bool timed = is_written && ObtainStatsOn();
+    u64 t_last = timed ? __rdtsc() : 0;
+    const auto t_section = [&](u32 s) {
+        if (timed) {
+            const u64 now = __rdtsc();
+            g_obtain_written[s].fetch_add(now - t_last, std::memory_order_relaxed);
+            t_last = now;
+        }
+    };
     const u64 first_block = device_addr >> block_shift;
     const u64 last_block = (device_addr + size - 1) >> block_shift;
     const auto* arena = GetArena(first_block, last_block);
@@ -2839,7 +2883,9 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
             clean_pages.push_back(!memory_tracker->IsRegionCpuModified(page, TRACKER_BYTES_PER_PAGE));
         }
     }
+    t_section(0);
     SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
+    t_section(1);
     if (check_missed) {
         static std::mutex missed_mutex;
         static std::unordered_map<VAddr, std::pair<u64, u64>> part_hash; // start -> (length, hash)
@@ -2890,6 +2936,11 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     }
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
+        if (timed) {
+            t_section(2);
+            g_obtain_written[3].fetch_add(1, std::memory_order_relaxed);
+            ObtainStatsPrint();
+        }
         // bbport diagnosis: BB_GPU_WRITE_WATCH=<hex address>: who marks GPU writes over it
         // (bb-probe.exe offsets of the two callers; llvm-symbolizer at 0x140000000 + offset).
         static const VAddr watch = [] {

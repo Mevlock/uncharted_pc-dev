@@ -37,6 +37,9 @@ extern std::atomic<u32> g_async_stalled; // buffer_cache.cpp
 
 namespace AmdGpu {
 
+/// bbport: direct dispatches by queue (BB_STAGEB_STATS).
+std::atomic<u64> g_dispatches_gfx{0}, g_dispatches_asc{0};
+
 /// bbport diagnosis: the queue whose packet the GPU thread decodes (0 graphics, 1 + vqid for
 /// the compute queues); read by Rasterizer::PostDraw (BB_QUEUE_WATCH).
 std::atomic<int> g_decoding_queue{0};
@@ -1466,6 +1469,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (!rasterizer || (cs_program.dispatch_initiator & 1) == 0) {
                     break;
                 }
+                g_dispatches_gfx.fetch_add(1, std::memory_order_relaxed);
                 const auto cmd_address = reinterpret_cast<const void*>(header);
                 rasterizer->ScopeMarker("gfx:{}:DispatchDirect", fmt::make_format_args(cmd_address),
                                         [&] { rasterizer->DispatchDirect(); });
@@ -2061,6 +2065,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (!rasterizer || (cs_program.dispatch_initiator & 1) == 0) {
                 break;
             }
+            g_dispatches_asc.fetch_add(1, std::memory_order_relaxed);
             const auto cmd_address = reinterpret_cast<const void*>(header);
             rasterizer->ScopeMarker("asc[{}]:{}:DispatchDirect",
                                     fmt::make_format_args(vqid, cmd_address),

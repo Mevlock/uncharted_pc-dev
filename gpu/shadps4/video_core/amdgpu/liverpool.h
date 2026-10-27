@@ -36,6 +36,9 @@ struct VideoOutPort;
 
 namespace AmdGpu {
 
+/// bbport: direct dispatches by queue (BB_STAGEB_STATS).
+extern std::atomic<u64> g_dispatches_gfx, g_dispatches_asc;
+
 union PM4Header;
 
 struct Liverpool {

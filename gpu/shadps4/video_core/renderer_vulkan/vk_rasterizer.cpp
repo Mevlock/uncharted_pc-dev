@@ -2386,6 +2386,19 @@ void Rasterizer::RunNext(Common::UniqueFunction<void> task) {
 static std::array<std::atomic<u64>, 6> g_kind_packets{}, g_kind_cycles{};
 // Dispatches (BB_DISPATCH_STATS=1): before binding, binding, barriers and descriptor set, recording.
 static std::array<std::atomic<u64>, 4> g_dispatch_sections{};
+/// bbport (BB_DISPATCH_STATS): a dispatch's binding by part: special-case checks (image copy,
+/// metadata clear, image clear), buffers, textures and samplers, the rest.
+static std::array<std::atomic<u64>, 4> g_dispatch_bind{};
+/// bbport (BB_DISPATCH_STATS): a dispatch's BindBuffers: read-only span pre-pass, written span
+/// pre-pass, the per-buffer loop.
+static std::array<std::atomic<u64>, 3> g_dispatch_buffers{};
+static bool DispatchStatsOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_DISPATCH_STATS");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
 // Draws on stage B by class (BB_FRAME_STATS): depth-only (no colour target), colour.
 static std::array<std::atomic<u64>, 2> g_draw_class{}, g_draw_class_cycles{};
 // Draws on stage B by pass (colour targets, depth, size): count, cycles.
@@ -2703,6 +2716,18 @@ void Rasterizer::PrintPipeStats() {
                             "barriers+descriptor set %.1f%%, recording %.1f%%",
                             100.0 * d0 / cycles, 100.0 * d1 / cycles, 100.0 * d2 / cycles,
                             100.0 * d3 / cycles);
+                const u64 e0 = g_dispatch_bind[0].exchange(0), e1 = g_dispatch_bind[1].exchange(0),
+                          e2 = g_dispatch_bind[2].exchange(0), e3 = g_dispatch_bind[3].exchange(0);
+                std::printf("\n  dispatch binding: special-case checks %.1f%%, buffers %.1f%%, "
+                            "textures %.1f%%, rest %.1f%%",
+                            100.0 * e0 / cycles, 100.0 * e1 / cycles, 100.0 * e2 / cycles,
+                            100.0 * e3 / cycles);
+                const u64 f0 = g_dispatch_buffers[0].exchange(0),
+                          f1 = g_dispatch_buffers[1].exchange(0),
+                          f2 = g_dispatch_buffers[2].exchange(0);
+                std::printf("\n  dispatch buffers: read span pre-pass %.1f%%, written span pre-pass "
+                            "%.1f%%, per-buffer loop %.1f%%",
+                            100.0 * f0 / cycles, 100.0 * f1 / cycles, 100.0 * f2 / cycles);
             }
         }
         {
@@ -2779,6 +2804,11 @@ void Rasterizer::PrintPipeStats() {
                     100.0 * g_a_draw_cycles[1] / cycles);
         g_a_draw_cycles[0] = g_a_draw_cycles[1] = 0;
         g_a_draws = 0;
+    }
+    if (const u64 gfx = AmdGpu::g_dispatches_gfx.exchange(0), asc = AmdGpu::g_dispatches_asc.exchange(0);
+        gfx + asc) {
+        std::printf("\n  dispatches: graphics queue %.0f/s, compute queues %.0f/s", gfx / seconds,
+                    asc / seconds);
     }
     std::printf("\n  stage A waits over 0.5%%:");
     for (const auto& [function, lines] : drain_sites) {
@@ -4856,10 +4886,20 @@ std::string Rasterizer::DescribeImages() {
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
+    const bool timed = DispatchStatsOn() && pipeline->IsCompute();
+    u64 last = timed ? __rdtsc() : 0;
+    const auto section = [&](u32 s) {
+        if (timed) {
+            const u64 now = __rdtsc();
+            g_dispatch_bind[s].fetch_add(now - last, std::memory_order_relaxed);
+            last = now;
+        }
+    };
     if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
         IsComputeImageClear(pipeline)) {
         return false;
     }
+    section(0);
 
     set_write_index = 0;
     set_writes.clear();
@@ -4932,8 +4972,11 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                               stage->samplers.size());
             stage->PushUd(binding, push_data);
             const PreparedStage* prepared = FindPreparedStage(*stage);
+            section(3);
             BindBuffers(*stage, prepared, binding, push_data, set_write_index);
+            section(1);
             BindTextures(*stage, prepared, binding, set_write_index, needs_barrier);
+            section(2);
             uses_dma |= stage->uses_dma;
         }
     } else {
@@ -5002,6 +5045,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         buffer_cache.SynchronizeDmaBuffers();
         fault_process_pending = true;
     }
+    section(3);
 
     return true;
 }
@@ -5515,6 +5559,15 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         const char* env = std::getenv("BB_COALESCE_STREAMS");
         return !(env && env[0] == '0');
     }();
+    const bool timed = DispatchStatsOn() && stage.sw_stage == Shader::SwStage::Compute;
+    u64 last = timed ? __rdtsc() : 0;
+    const auto section = [&](u32 s) {
+        if (timed) {
+            const u64 now = __rdtsc();
+            g_dispatch_buffers[s].fetch_add(now - last, std::memory_order_relaxed);
+            last = now;
+        }
+    };
     if (coalesce) {
         // The candidates by address; the largest group of neighbours (gaps up to 4 KiB, 64 KiB
         // at most) becomes the span. Others (a small constant block elsewhere) bind as before.
@@ -5568,6 +5621,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         const VideoCore::Buffer* buffer;
         u64 offset;
     };
+    section(0);
     std::array<WrittenSpan, 4> written_spans;
     u32 num_written_spans = 0;
     if (coalesce) {
@@ -5603,6 +5657,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             i = j;
         }
     }
+    section(1);
+    struct LoopTimer {
+        decltype(section)& done;
+        ~LoopTimer() { done(2); }
+    } loop_timer{section};
     for (u32 buffer_index = 0; buffer_index < stage.buffers.size(); ++buffer_index) {
         const auto& desc = stage.buffers[buffer_index];
         const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, buffer_index) : nullptr;
