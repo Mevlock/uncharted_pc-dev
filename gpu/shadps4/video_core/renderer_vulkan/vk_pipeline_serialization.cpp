@@ -585,6 +585,143 @@ void PipelineCache::WaitWarm() {
     warm_done.wait(false, std::memory_order_acquire);
 }
 
+/// bbport (shader variant study, BB_SPEC_DUMP=<file>): every stored variant's specialization, one line each, grouped by
+/// where each part comes from: the shader's own registers (props), the render pass (fs color buffers, z, samples),
+/// the paired stage (fs inputs, vs outputs), the resources (buffers, images, samplers) and the mesh (vs attributes,
+/// fetch layout). Reads cache metas of version 13 and 14. Offline analysis: scratchpad specstudy.py.
+template <typename T>
+static std::string HexOf(const T& value) {
+    std::string out;
+    const auto* bytes = reinterpret_cast<const u8*>(&value);
+    for (size_t i = 0; i < sizeof(T); ++i) {
+        out += fmt::format("{:02x}", bytes[i]);
+    }
+    return out;
+}
+
+static void DumpSpecs(Storage::DataBase& db, const char* path) {
+    std::FILE* f = std::fopen(path, "w");
+    if (!f) {
+        return;
+    }
+    u32 count = 0;
+    db.ForEachBlob(Storage::BlobType::ShaderMeta, [&](std::vector<u8>&& data) {
+        // Version 12 stored Bindings without descriptor_set (its last member, after the 32-byte header).
+        if (data.size() > 44 && data[0] == 12) {
+            data.insert(data.begin() + 32 + 12, 4, u8{0});
+            data[0] = 13;
+        }
+        Serialization::Archive ar{std::move(data)};
+        Serialization::Reader r{ar};
+        u32 version{}, binary_version{};
+        r.Read(version);
+        r.Read(binary_version);
+        if (version != 13 && version != 14) {
+            return;
+        }
+        size_t perm_hash{}, perm_idx{};
+        u64 checksum{};
+        r.Read(perm_hash);
+        r.Read(perm_idx);
+        r.Read(checksum);
+        Shader::StageSpecialization spec;
+        spec.Deserialize(ar);
+        Shader::Info info;
+        info.Deserialize(ar);
+        u32 reads = 0;
+        if (version == 14) {
+            u32 has_inputs{};
+            r.Read(has_inputs);
+            if (has_inputs) {
+                std::array<u32, 16> user_data;
+                std::vector<Shader::UdRead> ud_reads;
+                r.Read(user_data.data(), sizeof(user_data));
+                r.Read(ud_reads);
+                reads = u32(ud_reads.size()) + 1;
+            }
+        }
+        const auto& rt = spec.runtime_info;
+        std::string line = fmt::format("{:016x}\t{}\t{}\treads={}\tprops={}", info.pgm_hash, perm_idx,
+                                       u32(info.hw_stage), reads, HexOf(rt.props));
+        switch (info.hw_stage) {
+        case Shader::HwStage::Fragment: {
+            const auto& fs = rt.hw.fs;
+            std::string cbs;
+            for (const auto& cb : fs.color_buffers) {
+                cbs += fmt::format("{}.{}.{}.{}.{}.{}|", u32(cb.data_format), u32(cb.num_format),
+                                   u32(cb.num_conversion), u32(cb.export_format),
+                                   u32(cb.blend_self_scale), HexOf(cb.swizzle));
+            }
+            std::string inputs;
+            for (u32 i = 0; i < fs.num_inputs && i < fs.inputs.size(); ++i) {
+                const auto& in = fs.inputs[i];
+                inputs += fmt::format("{}.{}.{}.{}|", in.param_index, u32(in.is_default),
+                                      u32(in.is_flat), in.default_value);
+            }
+            line += fmt::format("\tpass=cb:{}z:{},s:{},mrtz:{},dual:{},mv:{}\tlink=en:{},addr:{},in:{}",
+                                cbs, u32(fs.z_export_format), fs.num_samples, fs.mrtz_mask,
+                                u32(fs.dual_source_blending), u32(fs.motion_vectors),
+                                HexOf(fs.en_flags), HexOf(fs.addr_flags), inputs);
+            break;
+        }
+        case Shader::HwStage::Vertex: {
+            const auto& vs = rt.hw.vs;
+            line += fmt::format("\tpass=clip:{},ucp:{},mv:{},sq:{},neg:{}\tlink=out:{},{}\tstep={},{},{},{},{}",
+                                u32(vs.clip_disable), vs.user_clip_plane_mask, u32(vs.motion_vectors),
+                                vs.ui_squeeze_bits, u32(vs.emulate_depth_negative_one_to_one),
+                                vs.num_outputs, HexOf(vs.outputs), rt.sw.vs.step_rate_0,
+                                rt.sw.vs.step_rate_1, rt.sw.vs.vertex_sgpr_offset,
+                                rt.sw.vs.instance_sgpr_offset, u32(rt.sw.vs.tess_emulated_primitive));
+            break;
+        }
+        case Shader::HwStage::Compute: {
+            const auto& cs = rt.hw.cs;
+            line += fmt::format("\tdispatch=lds:{},wg:{}x{}x{},tg:{}{}{}", cs.shared_memory_size,
+                                cs.workgroup_size[0], cs.workgroup_size[1], cs.workgroup_size[2],
+                                u32(cs.tgid_enable[0]), u32(cs.tgid_enable[1]),
+                                u32(cs.tgid_enable[2]));
+            break;
+        }
+        default:
+            line += "\tother=" + HexOf(rt.hw);
+            break;
+        }
+        std::string bufs, imgs, samps, attribs;
+        for (size_t i = 0; i < spec.buffers.size(); ++i) {
+            const auto& b = spec.buffers[i];
+            bufs += fmt::format("{}.{}.{}.{}.{}.{}.{}|", u32(b.stride), u32(b.is_formatted),
+                                b.is_formatted ? u32(b.data_format) : 0u,
+                                b.is_formatted ? u32(b.num_format) : 0u, u32(b.swizzle_enable),
+                                b.swizzle_enable ? u32(b.index_stride) : 0u,
+                                b.swizzle_enable ? u32(b.element_size) : 0u);
+        }
+        for (const auto& im : spec.images) {
+            imgs += fmt::format("{}.{}.{}.{}.{}.{}.{}|", u32(im.type), u32(im.is_integer),
+                                u32(im.is_storage), u32(im.is_cube), u32(im.is_srgb),
+                                u32(im.num_conversion), im.num_bindings);
+        }
+        for (const auto& sm : spec.samplers) {
+            samps += fmt::format("{}.{}|", u32(sm.force_unnormalized), u32(sm.force_degamma));
+        }
+        for (const auto& a : spec.vs_attribs) {
+            attribs += fmt::format("{}.{}.{}|", a.divisor, u32(a.num_class), HexOf(a.dst_select));
+        }
+        std::string fetch;
+        if (spec.fetch_shader_data) {
+            for (const auto& a : spec.fetch_shader_data->attributes) {
+                fetch += fmt::format("{}.{}.{}.{}|", a.num_elements, a.data_format, a.num_format,
+                                     a.instance_data);
+            }
+        }
+        line += fmt::format("\tbits={}\tbuf={}\timg={}\tsamp={}\tattr={}\tfetch={}\n",
+                            spec.bitset.to_string().substr(96), bufs, imgs, samps, attribs, fetch);
+        std::fputs(line.c_str(), f);
+        ++count;
+    });
+    std::fclose(f);
+    std::printf("Spec dump: %u variants to %s\n", count, path);
+}
+
 void PipelineCache::WarmUpThread() {
     Common::SetCurrentThreadName("bb:PipelineWarm");
     BbThreads::MakeBelowNormal();
@@ -595,6 +732,9 @@ void PipelineCache::WarmUpThread() {
             .count();
     };
 
+    if (const char* dump = std::getenv("BB_SPEC_DUMP")) {
+        DumpSpecs(db, dump);
+    }
     // Check if cache is compatible
     std::vector<u8> profile_data{};
     db.Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
