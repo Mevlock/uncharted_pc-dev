@@ -134,10 +134,25 @@ public:
 
 private:
     void BuildDescSetLayout(bool preloading);
+    /// bbport (BB_GPL): builds `pipeline` as four pipeline-library parts from the given state and links them.
+    void BuildFromLibraries(vk::Device device, vk::PipelineCache pipeline_cache,
+                            const std::string& debug_str,
+                            std::span<const vk::DynamicState> dynamic_states,
+                            std::span<const vk::PipelineShaderStageCreateInfo> shader_stages,
+                            const vk::PipelineVertexInputStateCreateInfo& vertex_input_info,
+                            const vk::PipelineInputAssemblyStateCreateInfo& input_assembly,
+                            const vk::PipelineTessellationStateCreateInfo& tessellation_state,
+                            const vk::PipelineViewportStateCreateInfo& viewport_info,
+                            const vk::PipelineRasterizationStateCreateInfo& rasterization,
+                            const vk::PipelineMultisampleStateCreateInfo& multisampling,
+                            const vk::PipelineDepthStencilStateCreateInfo* depth_stencil,
+                            const vk::PipelineColorBlendStateCreateInfo& color_blending,
+                            const vk::PipelineRenderingCreateInfo& rendering);
 
 private:
     GraphicsPipelineKey key;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
+    std::array<vk::UniquePipeline, 4> library_parts; ///< bbport (BB_GPL): kept alive with the linked pipeline
 };
 
 struct ClipDistanceShaderKey {

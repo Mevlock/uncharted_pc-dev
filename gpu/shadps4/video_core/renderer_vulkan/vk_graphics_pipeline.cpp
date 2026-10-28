@@ -406,6 +406,18 @@ GraphicsPipeline::GraphicsPipeline(
     // In practice, we use dynamic state for all of it.
     constexpr vk::PipelineDepthStencilStateCreateInfo depth_stencil_info = {};
 
+    // bbport (BB_GPL, study step 2b): a split pipeline is built as the four pipeline-library parts (vertex input,
+    // pre-rasterization shaders, fragment shader, fragment output) from the same state, then linked without
+    // link-time optimisation. Step 2c caches the parts and reuses them across pipelines.
+    if (split_sets && instance.IsGraphicsPipelineLibrary() && !preloading) {
+        BuildFromLibraries(device, pipeline_cache, debug_str, dynamic_states, shader_stages,
+                           vertex_input_info, input_assembly, tessellation_state, viewport_info,
+                           raster_chain.get(), sdata.multisampling,
+                           !instance.IsExtendedDynamicState3Supported() ? &depth_stencil_info : nullptr,
+                           color_blending, pipeline_rendering_ci);
+        return;
+    }
+
     const vk::GraphicsPipelineCreateInfo pipeline_info = {
         .pNext = &pipeline_rendering_ci,
         .stageCount = static_cast<u32>(shader_stages.size()),
@@ -449,6 +461,125 @@ GraphicsPipeline::GraphicsPipeline(
 }
 
 GraphicsPipeline::~GraphicsPipeline() = default;
+
+void GraphicsPipeline::BuildFromLibraries(
+    vk::Device device, vk::PipelineCache pipeline_cache, const std::string& debug_str,
+    std::span<const vk::DynamicState> dynamic_states,
+    std::span<const vk::PipelineShaderStageCreateInfo> shader_stages,
+    const vk::PipelineVertexInputStateCreateInfo& vertex_input_info,
+    const vk::PipelineInputAssemblyStateCreateInfo& input_assembly,
+    const vk::PipelineTessellationStateCreateInfo& tessellation_state,
+    const vk::PipelineViewportStateCreateInfo& viewport_info,
+    const vk::PipelineRasterizationStateCreateInfo& rasterization,
+    const vk::PipelineMultisampleStateCreateInfo& multisampling,
+    const vk::PipelineDepthStencilStateCreateInfo* depth_stencil,
+    const vk::PipelineColorBlendStateCreateInfo& color_blending,
+    const vk::PipelineRenderingCreateInfo& rendering) {
+    using Part = vk::GraphicsPipelineLibraryFlagBitsEXT;
+    // Each part declares the dynamic states that belong to it.
+    const auto part_of = [](vk::DynamicState state) -> Part {
+        switch (state) {
+        case vk::DynamicState::eVertexInputEXT:
+        case vk::DynamicState::eVertexInputBindingStride:
+        case vk::DynamicState::ePrimitiveRestartEnable:
+            return Part::eVertexInputInterface;
+        case vk::DynamicState::eDepthTestEnable:
+        case vk::DynamicState::eDepthWriteEnable:
+        case vk::DynamicState::eDepthCompareOp:
+        case vk::DynamicState::eDepthBoundsTestEnable:
+        case vk::DynamicState::eDepthBounds:
+        case vk::DynamicState::eStencilTestEnable:
+        case vk::DynamicState::eStencilReference:
+        case vk::DynamicState::eStencilCompareMask:
+        case vk::DynamicState::eStencilWriteMask:
+        case vk::DynamicState::eStencilOp:
+            return Part::eFragmentShader;
+        case vk::DynamicState::eBlendConstants:
+        case vk::DynamicState::eColorWriteMaskEXT:
+            return Part::eFragmentOutputInterface;
+        default:
+            return Part::ePreRasterizationShaders;
+        }
+    };
+    std::array<boost::container::static_vector<vk::DynamicState, 32>, 4> part_states;
+    const std::array<Part, 4> parts = {Part::eVertexInputInterface, Part::ePreRasterizationShaders,
+                                       Part::eFragmentShader, Part::eFragmentOutputInterface};
+    for (const auto state : dynamic_states) {
+        for (size_t p = 0; p < parts.size(); ++p) {
+            if (part_of(state) == parts[p]) {
+                part_states[p].push_back(state);
+            }
+        }
+    }
+    std::array<vk::PipelineDynamicStateCreateInfo, 4> part_dynamic;
+    for (size_t p = 0; p < parts.size(); ++p) {
+        part_dynamic[p] = {.dynamicStateCount = static_cast<u32>(part_states[p].size()),
+                           .pDynamicStates = part_states[p].data()};
+    }
+    boost::container::static_vector<vk::PipelineShaderStageCreateInfo, MaxShaderStages> pre_raster_stages,
+        fragment_stages;
+    for (const auto& stage : shader_stages) {
+        (stage.stage == vk::ShaderStageFlagBits::eFragment ? fragment_stages : pre_raster_stages)
+            .push_back(stage);
+    }
+
+    auto& libraries = library_parts;
+    const auto build = [&](size_t p, vk::GraphicsPipelineCreateInfo info) -> bool {
+        const vk::GraphicsPipelineLibraryCreateInfoEXT library_info = {.pNext = info.pNext,
+                                                                       .flags = parts[p]};
+        info.pNext = &library_info;
+        info.flags |= vk::PipelineCreateFlagBits::eLibraryKHR;
+        info.pDynamicState = &part_dynamic[p];
+        auto [result, library] = device.createGraphicsPipelineUnique(pipeline_cache, info);
+        if (result != vk::Result::eSuccess) {
+            LOG_ERROR(Render_Vulkan, "Pipeline library part {} of {} failed: {}", p, debug_str,
+                      vk::to_string(result));
+            return false;
+        }
+        libraries[p] = std::move(library);
+        return true;
+    };
+    const bool built =
+        build(0, {.pVertexInputState = !instance.IsVertexInputDynamicState() ? &vertex_input_info : nullptr,
+                  .pInputAssemblyState = &input_assembly}) &&
+        build(1, {.pNext = &rendering,
+                  .stageCount = static_cast<u32>(pre_raster_stages.size()),
+                  .pStages = pre_raster_stages.data(),
+                  .pTessellationState = &tessellation_state,
+                  .pViewportState = &viewport_info,
+                  .pRasterizationState = &rasterization,
+                  .layout = *pipeline_layout}) &&
+        build(2, {.pNext = &rendering,
+                  .stageCount = static_cast<u32>(fragment_stages.size()),
+                  .pStages = fragment_stages.data(),
+                  .pMultisampleState = &multisampling,
+                  .pDepthStencilState = depth_stencil,
+                  .layout = *pipeline_layout}) &&
+        build(3, {.pNext = &rendering,
+                  .pMultisampleState = &multisampling,
+                  .pColorBlendState = &color_blending});
+    if (!built) {
+        return; // the pipeline stays empty and its draws are skipped, as for a refused monolithic one
+    }
+    const std::array<vk::Pipeline, 4> handles = {*libraries[0], *libraries[1], *libraries[2],
+                                                 *libraries[3]};
+    const vk::PipelineLibraryCreateInfoKHR link_info = {
+        .libraryCount = static_cast<u32>(handles.size()),
+        .pLibraries = handles.data(),
+    };
+    const vk::GraphicsPipelineCreateInfo linked_info = {
+        .pNext = &link_info,
+        .layout = *pipeline_layout,
+    };
+    auto [link_result, linked] = device.createGraphicsPipelineUnique(pipeline_cache, linked_info);
+    if (link_result != vk::Result::eSuccess) {
+        LOG_ERROR(Render_Vulkan, "Linking pipeline libraries of {} failed: {}", debug_str,
+                  vk::to_string(link_result));
+        return;
+    }
+    pipeline = std::move(linked);
+    SetObjectName(device, *pipeline, "Graphics Pipeline (libraries) {}", debug_str);
+}
 
 template <typename Attribute, typename Binding>
 void GraphicsPipeline::GetVertexInputs(
