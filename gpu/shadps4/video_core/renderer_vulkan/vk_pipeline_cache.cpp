@@ -1837,8 +1837,11 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     const auto module =
         TranslateModule(info, runtime_info, code, perm_idx, binding, translate_pools, spv);
     Shader::t_translation_record = nullptr;
+    // The inputs are kept also for the shaders whose binary depends on settings (the scaled movie shader, the
+    // clamped bloom shader, ...): a variant list then holds them, and preparation translates them for the current
+    // settings, as the game would at first use.
+    RegisterShaderInputs(info, reads, perm_idx);
     if (SaveShaderBinary(info.pgm_hash, info.hw_stage)) {
-        RegisterShaderInputs(info, reads, perm_idx);
         RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
     }
     return module;

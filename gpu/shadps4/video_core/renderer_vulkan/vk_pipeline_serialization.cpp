@@ -2313,9 +2313,13 @@ void PipelineCache::WarmUpThread() {
                 }
                 return true; // built (its end bindings count)
             }
-            // Saved like a shader translated in play: the next launch loads it from the cache.
+            // Saved like a shader translated in play: the next launch loads it from the cache. A binary that depends on
+            // settings (the scaled movie shader, the clamped bloom shader, ...) is not: it is prepared each launch.
             const u64 perm_hash = HashCombine(v.hash, v.perm);
-            RegisterShaderBinary(std::move(spv), v.hash, v.perm);
+            if (!Shader::Backend::SPIRV::IsForcedShader(v.hash) && !BbMovieShaderScaled(v.hash) &&
+                !BbNanGuard::BloomClampShader(v.hash) && !BbFocusFix::FocusCentreShader(v.hash)) {
+                RegisterShaderBinary(std::move(spv), v.hash, v.perm);
+            }
             RegisterShaderMeta(*info, spec.fetch_shader_data, spec, perm_hash, v.perm);
             std::scoped_lock lk{shipped_mutex};
             auto& stage = shipped.emplace_back();
