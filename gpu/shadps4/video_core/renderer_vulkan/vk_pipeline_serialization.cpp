@@ -335,7 +335,93 @@ struct LoadedStage {
     Shader::HwStage hw_stage{};
     Shader::SwStage sw_stage{};
     std::vector<u32> flat; ///< the stored flattened user-data tables
+    std::unique_ptr<Shader::Info> stored_info; ///< BB_VARIANT_SYNTH: its resource lists
 };
+
+/// bbport (shader variant list, BB_VARIANT_SYNTH=1): descriptor tables made from a variant's specialization alone, in
+/// place of the recorded ones: each bound resource gets a made-up descriptor at its stored location carrying only what
+/// the specialization keeps (view type, sRGB/integer, buffer stride/format/swizzle, sampler flags). If translation
+/// gives the same binary from these, predicted variants (no recording at all) can be translated the same way.
+static std::vector<u32> SynthesizeFlatBuffer(const Shader::Info& info,
+                                             const Shader::StageSpecialization& spec,
+                                             size_t size, bool copy_mtype) {
+    // The stored Info still holds the recorded tables: the diagnostic mode reads them.
+    const Shader::Info* recorded = copy_mtype ? &info : nullptr;
+    std::vector<u32> flat(size, 0);
+    const auto put = [&](const auto& fetch, const auto& value) {
+        const auto* dwords = reinterpret_cast<const u32*>(&value);
+        u8 mask = fetch.load_mask;
+        for (size_t k = 0; k < fetch.N; ++k, mask >>= 1) {
+            if ((mask & 1) && fetch.offsets[k] < flat.size()) {
+                flat[fetch.offsets[k]] = dwords[k];
+            }
+        }
+    };
+    u32 binding = 0;
+    for (size_t i = 0; i < info.buffers.size(); ++i, ++binding) {
+        if (!spec.bitset.test(binding) || i >= spec.buffers.size()) {
+            continue;
+        }
+        const auto& s = spec.buffers[i];
+        AmdGpu::Buffer buffer{};
+        buffer.base_address = 0x100000;
+        buffer.num_records = 0x10000;
+        buffer.stride = s.stride;
+        buffer.swizzle_enable = s.swizzle_enable;
+        buffer.dst_sel_x = u32(AmdGpu::CompSwizzle::Red);
+        buffer.dst_sel_y = u32(AmdGpu::CompSwizzle::Green);
+        buffer.dst_sel_z = u32(AmdGpu::CompSwizzle::Blue);
+        buffer.dst_sel_w = u32(AmdGpu::CompSwizzle::Alpha);
+        if (s.is_formatted) {
+            buffer.data_format = s.data_format;
+            buffer.num_format = s.num_format;
+            buffer.dst_sel_x = u32(s.dst_select.r);
+            buffer.dst_sel_y = u32(s.dst_select.g);
+            buffer.dst_sel_z = u32(s.dst_select.b);
+            buffer.dst_sel_w = u32(s.dst_select.a);
+        }
+        if (s.swizzle_enable) {
+            buffer.index_stride = s.index_stride;
+            buffer.element_size = s.element_size;
+        }
+        // Diagnostic (BB_VARIANT_SYNTH=2): the memory type of the recorded descriptor (not in the specialization).
+        if (recorded) {
+            const auto actual = info.buffers[i].GetSharp(*recorded);
+            buffer.mtype = actual.mtype;
+        }
+        put(info.buffers[i].sharp_fetch, buffer);
+    }
+    for (size_t i = 0; i < info.images.size(); ++i, ++binding) {
+        if (!spec.bitset.test(binding) || i >= spec.images.size()) {
+            continue;
+        }
+        const auto& s = spec.images[i];
+        auto image = AmdGpu::Image::Null(info.images[i].is_depth);
+        image.base_address = 0x1000;
+        image.width = 255;
+        image.height = 255;
+        image.type = u64(s.is_cube ? AmdGpu::ImageType::Cube : s.type);
+        if (s.is_srgb) {
+            image.num_format = u64(AmdGpu::NumberFormat::Srgb);
+        } else if (s.is_integer) {
+            image.num_format = u64(AmdGpu::NumberFormat::Uint);
+        }
+        if (s.is_storage) {
+            image.dst_sel_x = u64(s.dst_select.r);
+            image.dst_sel_y = u64(s.dst_select.g);
+            image.dst_sel_z = u64(s.dst_select.b);
+            image.dst_sel_w = u64(s.dst_select.a);
+        }
+        put(info.images[i].sharp_fetch, image);
+    }
+    for (size_t i = 0; i < info.samplers.size() && i < spec.samplers.size(); ++i) {
+        AmdGpu::Sampler sampler{};
+        sampler.force_unnormalized.Assign(spec.samplers[i].force_unnormalized);
+        sampler.force_degamma.Assign(spec.samplers[i].force_degamma);
+        put(info.samplers[i].sharp_fetch, sampler);
+    }
+    return flat;
+}
 
 /// bbport (shader variant list): where a shader sits in the game's files: a file under BB_APP0_DIR and the offset of
 /// its OrbShdr binary info block (shader_hash = the port's program hash, length = code bytes). The shaders sit there
@@ -844,6 +930,14 @@ void PipelineCache::WarmUpThread() {
     stage_hashes.erase(std::unique(stage_hashes.begin(), stage_hashes.end()), stage_hashes.end());
     std::vector<LoadedStage> stages(stage_hashes.size());
     std::atomic<u32> mismatched_binaries{0};
+    static const bool synth_variants = [] {
+        const char* env = std::getenv("BB_VARIANT_SYNTH");
+        return env && (env[0] == '1' || env[0] == '2');
+    }();
+    static const bool synth_copy_mtype = [] {
+        const char* env = std::getenv("BB_VARIANT_SYNTH");
+        return env && env[0] == '2';
+    }();
     static const bool replay_variants = [] {
         const char* env = std::getenv("BB_VARIANT_REPLAY");
         return env && env[0] == '1';
@@ -893,6 +987,9 @@ void PipelineCache::WarmUpThread() {
                 stage.hw_stage = info.hw_stage;
                 stage.sw_stage = info.sw_stage;
                 stage.flat = info.flattened_ud_buf;
+                if (synth_variants) {
+                    stage.stored_info = std::make_unique<Shader::Info>(info);
+                }
             }
             return;
         }
@@ -1083,7 +1180,13 @@ void PipelineCache::WarmUpThread() {
                 .hash = stage.pgm_hash,
             };
             Shader::Info info{stage.hw_stage, stage.sw_stage, params};
-            const Shader::TranslationReplay replay{&stage.flat, &stage.inputs.reads,
+            const std::vector<u32> synth_flat =
+                stage.stored_info
+                    ? SynthesizeFlatBuffer(*stage.stored_info, stage.spec, stage.flat.size(),
+                                           synth_copy_mtype)
+                    : std::vector<u32>{};
+            const Shader::TranslationReplay replay{stage.stored_info ? &synth_flat : &stage.flat,
+                                                   &stage.inputs.reads,
                                                    &stage.spec.fetch_shader_data};
             auto runtime_info = stage.spec.runtime_info;
             auto binding = stage.spec.start;
