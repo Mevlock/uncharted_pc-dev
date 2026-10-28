@@ -44,9 +44,9 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 21u; // bbport: shadPS4 #5447, #5427, #5364, #5365 (CFG fallthrough), #5429 (LDS barriers); page table watch bit
-static constexpr u32 ShaderMetaVersion = 15u; // bbport: BufferSpecialization::coherent
-static constexpr u32 PipelineKeyVersion = 7u; // bbport: GraphicsPipelineKey::split_sets
+static constexpr u32 ShaderBinaryVersion = 22u; // bbport: shadPS4 #5447, #5427, #5364, #5365 (CFG fallthrough), #5429 (LDS barriers); page table watch bit; WorkgroupSplit (Umar-Qayyum-dev)
+static constexpr u32 ShaderMetaVersion = 16u; // bbport: BufferSpecialization::coherent; Info::cs_split_eligible
+static constexpr u32 PipelineKeyVersion = 8u; // bbport: GraphicsPipelineKey::split_sets; Info layout (cs_split_eligible)
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
 static u32 TranslatedBinaryVersion() {

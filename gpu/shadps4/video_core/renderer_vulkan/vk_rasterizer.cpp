@@ -4499,10 +4499,17 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     dispatch_timer.Section(2);
 
     const vk::Pipeline handle = pipeline->Handle();
+    // bbport (Umar-Qayyum-dev): workgroups compiled as smaller ones (Shader::WorkgroupSplit): that many times the
+    // workgroups in X. Else shaders compiled as two 512-thread workgroups (shader_recompiler/cta_split.h) cover the
+    // same index range only with twice as many workgroups.
+    const Shader::HwComputeRuntimeInfo hw_cs = {
+        .workgroup_size = {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                           cs_program.num_thread_z.full},
+        .indirect = false,
+    };
+    const u32 workgroup_split = Shader::WorkgroupSplit(cs.cs_split_eligible, hw_cs);
     const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
-    // bbport: shaders compiled as two 512-thread workgroups (shader_recompiler/cta_split.h) cover
-    // the same index range only with twice as many workgroups.
-    const u32 groups_x = dim_x * Shader::CtaSplitFactor(cs.pgm_hash);
+    const u32 groups_x = dim_x * (workgroup_split > 1 ? workgroup_split : Shader::CtaSplitFactor(cs.pgm_hash));
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, groups_x, dim_y, dim_z);
     }
@@ -4555,7 +4562,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     if (!pipelined) {
         DrainDrawPipe();
     }
-    const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
+    const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline(true);
     if (!pipeline) {
         return;
     }
@@ -7851,7 +7858,13 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
         return false;
     }
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
-    if (Shader::IsSplitCtaProgram(cs.pgm_hash)) {
+    // Split workgroups (cta_split.h, Shader::WorkgroupSplit) need more workgroups than the batch dispatches.
+    const Shader::HwComputeRuntimeInfo hw_cs = {
+        .workgroup_size = {cs_program.num_thread_x.full, cs_program.num_thread_y.full,
+                           cs_program.num_thread_z.full},
+        .indirect = false,
+    };
+    if (Shader::IsSplitCtaProgram(cs.pgm_hash) || Shader::WorkgroupSplit(cs.cs_split_eligible, hw_cs) > 1) {
         return false;
     }
     const u32 num_buffers = static_cast<u32>(cs.buffers.size());

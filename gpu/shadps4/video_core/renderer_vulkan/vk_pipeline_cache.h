@@ -112,6 +112,7 @@ struct PipelineSelection {
     /// Compute program state of a worker's dispatch (the GPU thread reads its queue's own).
     const AmdGpu::ComputeProgram* cs{};
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
+    bool indirect_dispatch{}; ///< bbport: compute: workgroup count in GPU memory (WorkgroupSplit)
 };
 
 /// bbport: a draw-preparation worker's own program state (see vk_draw_prep.h).
@@ -178,7 +179,8 @@ public:
         return used_prepared;
     }
 
-    const ComputePipeline* GetComputePipeline();
+    /// bbport: `indirect`: the workgroup count is in GPU memory (no WorkgroupSplit).
+    const ComputePipeline* GetComputePipeline(bool indirect = false);
     /// bbport (native batch): the batched variant of `base`, the pipeline GetComputePipeline()
     /// just selected for the current compute registers (GPU command thread). Compiled once;
     /// null when the program cannot run batched. Never saved.
