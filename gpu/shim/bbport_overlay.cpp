@@ -955,15 +955,59 @@ void SetShaderPreparation(int phase, u32 done, u32 total) {
     prep_phase.store(phase, std::memory_order_release);
 }
 
-// "about 12 s left": the phase's time so far, extrapolated over what is left (after a second, once a few are done).
+// "about 25 s left". Pipelines differ a lot in cost and finish in bursts on several threads, so the rate is taken over
+// the last ~10 s (half weight) and the whole phase (half weight); the shown value is recomputed once a second, eases
+// toward the estimate, counts down between updates and only rises slowly, so the countdown does not jump around.
+// Called from the overlay's draw (one thread).
 std::string PreparationEta(u32 done, u32 total) {
-    const s64 elapsed = NowMs() - prep_phase_start_ms.load(std::memory_order_relaxed);
-    if (done < 8 || total <= done || elapsed < 1000) {
+    static s64 phase_start = -1, last_update = 0;
+    static double shown_s = -1.0;
+    static std::array<std::pair<s64, u32>, 24> samples{};  // (ms, done) every 0.5 s
+    static size_t next_sample = 0, num_samples = 0;
+    const s64 now = NowMs();
+    const s64 start = prep_phase_start_ms.load(std::memory_order_relaxed);
+    if (start != phase_start) {  // a new phase: start over
+        phase_start = start;
+        shown_s = -1.0;
+        num_samples = next_sample = 0;
+        last_update = 0;
+    }
+    const s64 elapsed = now - start;
+    if (done < 8 || total <= done || elapsed < 1500) {
         return {};
     }
-    const s64 left_s = (elapsed * s64(total - done) / s64(done) + 999) / 1000;
-    return left_s >= 60 ? fmt::format("  about {} min {} s left", left_s / 60, left_s % 60)
-                        : fmt::format("  about {} s left", left_s);
+    const auto& newest = samples[(next_sample + samples.size() - 1) % samples.size()];
+    if (num_samples == 0 || now - newest.first >= 500) {
+        samples[next_sample] = {now, done};
+        next_sample = (next_sample + 1) % samples.size();
+        num_samples = std::min(num_samples + 1, samples.size());
+    }
+    if (now - last_update >= 1000 || shown_s < 0.0) {
+        const double overall = double(done) / double(elapsed);  // per ms
+        const auto& oldest = samples[num_samples < samples.size() ? 0 : next_sample];
+        const double recent = now > oldest.first && done > oldest.second
+                                  ? double(done - oldest.second) / double(now - oldest.first)
+                                  : overall;
+        const double estimate_s = double(total - done) / (0.5 * overall + 0.5 * recent) / 1000.0;
+        if (shown_s < 0.0) {
+            shown_s = estimate_s;
+        } else {
+            const double counted = std::max(0.0, shown_s - double(now - last_update) / 1000.0);
+            // ease toward the estimate; going up only a little per update
+            shown_s = estimate_s < counted ? counted + 0.3 * (estimate_s - counted)
+                                           : counted + std::min(1.0, 0.3 * (estimate_s - counted));
+        }
+        last_update = now;
+    }
+    const s64 left_s = s64(shown_s + 0.5);
+    if (left_s < 5) {
+        return "  a few seconds left";
+    }
+    if (left_s >= 60) {
+        const s64 rounded = (left_s + 4) / 5 * 5;
+        return fmt::format("  about {} min {} s left", rounded / 60, rounded % 60);
+    }
+    return fmt::format("  about {} s left", left_s);
 }
 
 // "Preparing shaders 1240 / 4496": bottom left while the variant list is built behind the game.
