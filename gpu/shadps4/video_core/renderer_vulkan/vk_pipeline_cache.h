@@ -260,6 +260,11 @@ private:
     /// jumps back to a recovery point (sigsetjmp skips the ReleaseClaim calls in between).
     static size_t ClaimMark();
     void ReleaseClaimsAfter(size_t mark);
+    /// bbport (shader variant list): BuildRuntimeInfo from the stage registers stored in front of a shader's code in
+    /// the game files, plus the per-draw state of `draw`.
+    Shader::RuntimeInfo RuntimeInfoFromRegisters(Shader::HwStage hw_stage, Shader::SwStage sw_stage,
+                                                 const std::vector<u32>& registers,
+                                                 const Shader::RuntimeInfo& draw);
     const Shader::RuntimeInfo& BuildRuntimeInfo(PipelineSelection& sel, Shader::HwStage stage,
                                                 Shader::SwStage l_stage);
 

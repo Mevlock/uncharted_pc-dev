@@ -26,6 +26,7 @@
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/cta_split.h"
 #include "shader_recompiler/ir/passes/ir_passes.h"
+#include "video_core/amdgpu/regs.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -497,7 +498,8 @@ static void SaveShaderLocations(const std::filesystem::path& path, const ShaderL
 
 /// The code of the shader whose info block is at `at` in `f`, if that block still names `hash`. The code starts with
 /// s_mov_b32 vcc_hi, n where the info block is (n + 1) * 2 dwords on (AmdGpu::SearchBinaryInfo), or ends at the block.
-static std::optional<std::vector<u32>> ReadShaderCodeAt(std::FILE* f, u64 at, u64 hash, u32 length) {
+static std::optional<std::vector<u32>> ReadShaderCodeAt(std::FILE* f, u64 at, u64 hash, u32 length,
+                                                       std::vector<u32>* registers = nullptr) {
     if (at < 8 || length < 8 || length >= (1u << 22)) {
         return std::nullopt;
     }
@@ -529,6 +531,23 @@ static std::optional<std::vector<u32>> ReadShaderCodeAt(std::FILE* f, u64 at, u6
     }
     std::vector<u32> code(length / 4);
     std::memcpy(code.data(), bytes.data() + start, code.size() * 4);
+    // The GNM stage registers sit right in front of the code, after a 0xffffffff address placeholder (PS: rsrc1,
+    // rsrc2, z format, color format, input enable, input address, input control, barycentric control, depth shader
+    // control, color mask; VS: rsrc1, rsrc2, output config, position format, clip output control; CS: rsrc1, rsrc2,
+    // threads x, y, z), followed by the semantic table.
+    if (registers) {
+        registers->clear();
+        const s64 head = std::max<s64>(0, start - 0x100);
+        for (s64 o = start - 4; o >= head; o -= 4) {
+            u32 w;
+            std::memcpy(&w, bytes.data() + o, 4);
+            if (w == 0xFFFFFFFFu) {
+                registers->resize(size_t(start - o - 4) / 4);
+                std::memcpy(registers->data(), bytes.data() + o + 4, registers->size() * 4);
+                break;
+            }
+        }
+    }
     return code;
 }
 
@@ -596,8 +615,9 @@ static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u6
 
 /// The code of the given shaders, from their saved locations; a scan of the game's files finds (and saves) the
 /// locations when one is missing or no longer right.
-static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(const std::set<u64>& wanted,
-                                                                    u64* files_scanned) {
+static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(
+    const std::set<u64>& wanted, u64* files_scanned,
+    std::unordered_map<u64, std::vector<u32>>* registers = nullptr) {
     std::unordered_map<u64, std::vector<u32>> found;
     const char* app0_env = std::getenv("BB_APP0_DIR");
     if (!app0_env || wanted.empty()) {
@@ -619,7 +639,12 @@ static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(const std::s
             if (!f->second) {
                 continue;
             }
-            if (auto code = ReadShaderCodeAt(f->second, it->second.at, hash, it->second.length)) {
+            std::vector<u32> regs;
+            if (auto code = ReadShaderCodeAt(f->second, it->second.at, hash, it->second.length,
+                                             registers ? &regs : nullptr)) {
+                if (registers) {
+                    (*registers)[hash] = std::move(regs);
+                }
                 found.emplace(hash, std::move(*code));
             }
         }
@@ -702,7 +727,7 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
         u32 version{}, binary_version{};
         r.Read(version);
         r.Read(binary_version);
-        if (version != 13 && version != 14) {
+        if (version < 13 || version > 15) {
             return;
         }
         size_t perm_hash{}, perm_idx{};
@@ -715,7 +740,7 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
         Shader::Info info;
         info.Deserialize(ar);
         u32 reads = 0;
-        if (version == 14) {
+        if (version >= 14) {
             u32 has_inputs{};
             r.Read(has_inputs);
             if (has_inputs) {
@@ -812,6 +837,89 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
     });
     std::fclose(f);
     std::printf("Spec dump: %u variants to %s\n", count, path);
+}
+
+/// bbport (shader variant list): the runtime info of a stage built by BuildRuntimeInfo from the stage registers in
+/// front of its code in the game files, plus the per-draw state the files cannot give (taken from `draw`: color
+/// buffers, input linkage, clip state, motion vectors, the software-stage part).
+Shader::RuntimeInfo PipelineCache::RuntimeInfoFromRegisters(Shader::HwStage hw_stage,
+                                                            Shader::SwStage sw_stage,
+                                                            const std::vector<u32>& r,
+                                                            const Shader::RuntimeInfo& draw) {
+    static thread_local std::unique_ptr<AmdGpu::Regs> storage;
+    if (!storage) {
+        storage = std::make_unique<AmdGpu::Regs>();
+    }
+    auto& regs = *storage;
+    std::memset(&regs, 0, sizeof(regs));
+    PipelineSelection sel{};
+    sel.regs = &regs;
+    const auto set = [&](auto& field, size_t i) {
+        if (i < r.size()) {
+            std::memcpy(&field, &r[i], std::min(sizeof(field), sizeof(u32)));
+        }
+    };
+    const auto settings = [&](auto& program) {
+        if (r.size() >= 2) {
+            std::memcpy(&program.settings, r.data(), std::min(sizeof(program.settings), 8ull));
+        }
+    };
+    switch (hw_stage) {
+    case Shader::HwStage::Fragment: {
+        settings(regs.ps_program);
+        set(regs.z_export_format, 2);
+        set(regs.ps_input_ena, 4);
+        set(regs.ps_input_addr, 5);
+        regs.num_interp = r.size() > 6 ? (r[6] & 0x3f) : 0;
+        set(regs.barycentric_control, 7);
+        set(regs.depth_shader_control, 8);
+        const auto& fs = draw.hw.fs;
+        for (u32 i = 0; i < regs.num_interp && i < fs.inputs.size(); ++i) {
+            regs.ps_inputs[i].input_offset = fs.inputs[i].param_index;
+            regs.ps_inputs[i].use_default = fs.inputs[i].is_default;
+            regs.ps_inputs[i].flat_shade = fs.inputs[i].is_flat;
+            regs.ps_inputs[i].default_value = fs.inputs[i].default_value;
+        }
+        for (u32 i = 0; i < Shader::MaxColorBuffers; ++i) {
+            sel.graphics_key.color_buffers[i] = fs.color_buffers[i];
+        }
+        sel.motion = fs.motion_vectors;
+        break;
+    }
+    case Shader::HwStage::Vertex:
+        settings(regs.vs_program);
+        set(regs.vs_output_config, 2);
+        set(regs.shader_pos_format, 3);
+        set(regs.vs_output_control, 4);
+        regs.clipper_control.user_clip_plane_enable = draw.hw.vs.user_clip_plane_mask;
+        regs.clipper_control.clip_disable = draw.hw.vs.clip_disable;
+        sel.motion = draw.hw.vs.motion_vectors;
+        sel.ui_squeeze = draw.hw.vs.ui_squeeze_bits != 0;
+        break;
+    case Shader::HwStage::Compute:
+        settings(regs.cs_program);
+        if (r.size() >= 5) {
+            regs.cs_program.num_thread_x.full = u16(r[2]);
+            regs.cs_program.num_thread_y.full = u16(r[3]);
+            regs.cs_program.num_thread_z.full = u16(r[4]);
+        }
+        sel.cs = &regs.cs_program;
+        break;
+    default:
+        return draw;
+    }
+    auto info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
+    // Per draw: the software-stage part, and what the blend and clip state decide.
+    info.sw = draw.sw;
+    if (hw_stage == Shader::HwStage::Fragment) {
+        info.hw.fs.dual_source_blending = draw.hw.fs.dual_source_blending;
+        info.hw.fs.clip_distance_emulation = draw.hw.fs.clip_distance_emulation;
+        info.hw.fs.num_samples = draw.hw.fs.num_samples;
+    } else if (hw_stage == Shader::HwStage::Vertex) {
+        info.hw.vs.emulate_depth_negative_one_to_one = draw.hw.vs.emulate_depth_negative_one_to_one;
+        info.hw.vs.ui_squeeze_bits = draw.hw.vs.ui_squeeze_bits;
+    }
+    return info;
 }
 
 void PipelineCache::WarmUpThread() {
@@ -1004,6 +1112,54 @@ void PipelineCache::WarmUpThread() {
         }
         stage.module = CompileSPV(spv, device);
     });
+    // bbport (shader variant list, BB_RUNTIME_CHECK=1): every stored variant's runtime info rebuilt from the stage
+    // registers in the game files (plus its per-draw state) and compared with the stored one, byte for byte.
+    if (const char* check = std::getenv("BB_RUNTIME_CHECK"); check && check[0] == '1') {
+        std::set<u64> wanted;
+        for (const auto& stage : stages) {
+            if (stage.parsed) {
+                wanted.insert(stage.program->info.pgm_hash);
+            }
+        }
+        u64 scanned = 0;
+        std::unordered_map<u64, std::vector<u32>> registers;
+        ReadGameShaderCode(wanted, &scanned, &registers);
+        std::map<std::string, u32> counts;
+        u32 shown = 0;
+        for (const auto& stage : stages) {
+            if (!stage.parsed) {
+                continue;
+            }
+            const auto& info = stage.program->info;
+            const char* name = info.hw_stage == Shader::HwStage::Fragment ? "fs"
+                               : info.hw_stage == Shader::HwStage::Vertex ? "vs"
+                               : info.hw_stage == Shader::HwStage::Compute ? "cs"
+                                                                           : "other";
+            const auto it = registers.find(info.pgm_hash);
+            if (it == registers.end() || it->second.empty()) {
+                ++counts[fmt::format("{} no registers", name)];
+                continue;
+            }
+            const auto& stored = stage.spec.runtime_info;
+            const auto built = RuntimeInfoFromRegisters(info.hw_stage, info.sw_stage, it->second, stored);
+            const bool props = std::memcmp(&built.props, &stored.props, sizeof(stored.props)) == 0;
+            const bool hw = std::memcmp(&built.hw, &stored.hw, sizeof(stored.hw)) == 0;
+            const bool all = std::memcmp(&built, &stored, sizeof(stored)) == 0;
+            ++counts[fmt::format("{} variants", name)];
+            counts[fmt::format("{} props same", name)] += props;
+            counts[fmt::format("{} hw same", name)] += hw;
+            counts[fmt::format("{} whole same", name)] += all;
+            if (!all && shown++ < 6) {
+                std::printf("Runtime check: %s %016llx differs (props %d, hw %d)\n", name,
+                            (unsigned long long)info.pgm_hash, int(props), int(hw));
+            }
+        }
+        std::string line;
+        for (const auto& [k, v] : counts) {
+            line += fmt::format("{} {}, ", k, v);
+        }
+        std::printf("Runtime check: %s\n", line.c_str());
+    }
     // Everything is read: an archived cache turns writable now (the game saves what it compiles).
     db.FinishPreload();
 
