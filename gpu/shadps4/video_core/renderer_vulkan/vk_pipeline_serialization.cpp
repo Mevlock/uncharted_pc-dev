@@ -36,7 +36,7 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 21u; // bbport: shadPS4 #5447, #5427, #5364, #5365 (CFG fallthrough), #5429 (LDS barriers); page table watch bit
-static constexpr u32 ShaderMetaVersion = 14u; // bbport: translation inputs (shader variant list)
+static constexpr u32 ShaderMetaVersion = 15u; // bbport: BufferSpecialization::coherent
 static constexpr u32 PipelineKeyVersion = 7u; // bbport: GraphicsPipelineKey::split_sets
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
@@ -384,10 +384,10 @@ static std::vector<u32> SynthesizeFlatBuffer(const Shader::Info& info,
             buffer.index_stride = s.index_stride;
             buffer.element_size = s.element_size;
         }
-        // Diagnostic (BB_VARIANT_SYNTH=2): the memory type of the recorded descriptor (not in the specialization).
+        buffer.mtype = s.coherent ? 3 : 0;
+        // Diagnostic (BB_VARIANT_SYNTH=2): the memory type of the recorded descriptor.
         if (recorded) {
-            const auto actual = info.buffers[i].GetSharp(*recorded);
-            buffer.mtype = actual.mtype;
+            buffer.mtype = info.buffers[i].GetSharp(*recorded).mtype;
         }
         put(info.buffers[i].sharp_fetch, buffer);
     }
@@ -775,11 +775,11 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
         std::string bufs, imgs, samps, attribs;
         for (size_t i = 0; i < spec.buffers.size(); ++i) {
             const auto& b = spec.buffers[i];
-            bufs += fmt::format("{}.{}.{}.{}.{}.{}.{}|", u32(b.stride), u32(b.is_formatted),
+            bufs += fmt::format("{}.{}.{}.{}.{}.{}.{}.{}|", u32(b.stride), u32(b.is_formatted),
                                 b.is_formatted ? u32(b.data_format) : 0u,
                                 b.is_formatted ? u32(b.num_format) : 0u, u32(b.swizzle_enable),
                                 b.swizzle_enable ? u32(b.index_stride) : 0u,
-                                b.swizzle_enable ? u32(b.element_size) : 0u);
+                                b.swizzle_enable ? u32(b.element_size) : 0u, u32(b.coherent));
         }
         for (const auto& im : spec.images) {
             imgs += fmt::format("{}.{}.{}.{}.{}.{}.{}|", u32(im.type), u32(im.is_integer),
