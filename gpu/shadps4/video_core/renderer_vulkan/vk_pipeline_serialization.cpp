@@ -1685,7 +1685,7 @@ void PipelineCache::WarmUpThread() {
             }
             return out;
         };
-        u32 added = 0, known = 0, bad = 0;
+        u32 added = 0, known = 0, bad = 0, helpers = 0;
         const auto counts = instance.GetColorSampleCounts() & instance.GetDepthSampleCounts();
         for (std::string line; std::getline(in, line);) {
             std::unordered_map<std::string_view, std::string_view> f;
@@ -1757,6 +1757,13 @@ void PipelineCache::WarmUpThread() {
                 ++bad;
                 continue;
             }
+            // Rect and quad lists draw through helper tessellation shaders made for the draw's fragment inputs, which a
+            // text key does not carry (built from it, the helpers were empty: the driver refused them). The game builds
+            // these few pipelines itself at first use.
+            if (k.prim_type == AmdGpu::PrimitiveType::RectList || k.prim_type == AmdGpu::PrimitiveType::QuadList) {
+                ++helpers;
+                continue;
+            }
             if (!have.insert(k).second) {
                 ++known;
                 continue;
@@ -1765,7 +1772,8 @@ void PipelineCache::WarmUpThread() {
             stored.push_back(std::move(entry));
             ++added;
         }
-        std::printf("Key list: %u keys added, %u already stored, %u unreadable (%s)\n", added, known, bad, list);
+        std::printf("Key list: %u keys added, %u already stored, %u unreadable, %u rect/quad lists left to the game (%s)\n",
+                    added, known, bad, helpers, list);
     }
 
     // 2. The shader permutations those keys name, loaded once each.
