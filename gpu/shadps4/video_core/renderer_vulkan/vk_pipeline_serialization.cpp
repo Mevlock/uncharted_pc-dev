@@ -713,8 +713,14 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
                                      a.instance_data);
             }
         }
-        line += fmt::format("\tbits={}\tbuf={}\timg={}\tsamp={}\tattr={}\tfetch={}\n",
-                            spec.bitset.to_string().substr(96), bufs, imgs, samps, attribs, fetch);
+        // Where each image's descriptor is read from (flattened user data dword), for slot order.
+        std::string imgloc;
+        for (const auto& im : info.images) {
+            imgloc += fmt::format("{}.{}|", u32(im.sharp_fetch.offsets[0]), u32(im.sharp_fetch.load_mask));
+        }
+        line += fmt::format("\tbits={}\tbuf={}\timg={}\tsamp={}\tattr={}\tfetch={}\timgloc={}\n",
+                            spec.bitset.to_string().substr(96), bufs, imgs, samps, attribs, fetch,
+                            imgloc);
         std::fputs(line.c_str(), f);
         ++count;
     });
