@@ -105,6 +105,9 @@ struct PipelineSelection {
     GraphicsPipelineKey graphics_key{};
     bool motion = false;
     bool ui_squeeze = false; ///< bbport: ultrawide UI draw (UiSqueezeDraw)
+    /// bbport (BB_GPL): select the split-layout variant: the pre-raster stages declare their resources in descriptor
+    /// set 1, numbered from 0 (the fragment stage keeps set 0), so each half can be a pipeline library of its own.
+    bool split_sets = false;
     DrawIndirectParams draw_indirect_params{};
     /// Compute program state of a worker's dispatch (the GPU thread reads its queue's own).
     const AmdGpu::ComputeProgram* cs{};

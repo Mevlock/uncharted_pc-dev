@@ -1398,6 +1398,12 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     sel.modules.fill(nullptr);
 
     bind_stage(HwStage::Fragment, SwStage::Fragment);
+    if (sel.split_sets) {
+        // The pre-raster stages get descriptor set 1 of their own, numbered from 0; the push data counters
+        // (buffer offsets, user data) stay shared, as the push constant block is.
+        binding.unified = 0;
+        binding.descriptor_set = 1;
+    }
 
     const auto* fs_info = sel.infos[static_cast<u32>(SwStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
