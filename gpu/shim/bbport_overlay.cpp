@@ -973,16 +973,17 @@ void ShaderPreparation() {
         return;
     }
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    const float pad = 12.0f * base_scale;
+    const float pad = 24.0f * base_scale;
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad,
                                    viewport->WorkPos.y + viewport->WorkSize.y - pad),
                             ImGuiCond_Always, ImVec2(0.0f, 1.0f));
-    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::SetNextWindowBgAlpha(0.65f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f * base_scale, 10.0f * base_scale));
     ImGui::Begin("##prep", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoFocusOnAppearing);
-    ImGui::SetWindowFontScale(0.8f);
+    ImGui::SetWindowFontScale(1.25f);
     const u32 done = prep_done.load(std::memory_order_relaxed);
     const u32 total = prep_total.load(std::memory_order_relaxed);
     const char* what = phase == 1 ? "shaders" : "pipelines";
@@ -992,6 +993,7 @@ void ShaderPreparation() {
         ImGui::Text("Preparing %s %u / %u%s", what, done, total, PreparationEta(done, total).c_str());
     }
     ImGui::End();
+    ImGui::PopStyleVar();
 }
 
 bool Visible() {

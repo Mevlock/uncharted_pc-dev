@@ -1945,6 +1945,10 @@ void PipelineCache::WarmUpThread() {
             }
             built.fetch_add(1, std::memory_order_relaxed);
             Program* program{};
+            // The game's own module of this permutation when it was first (its pipelines are still built below).
+            vk::ShaderModule existing{};
+            Shader::StageSpecialization existing_spec;
+            Program* existing_owner{};
             {
                 std::unique_lock lk{programs_mutex};
                 auto [it_pgm, created] = program_cache.try_emplace(v.hash);
@@ -1960,6 +1964,10 @@ void PipelineCache::WarmUpThread() {
                 modules.resize(std::max(modules.size(), v.perm + 1));
                 const auto found = std::ranges::find(modules, spec, &Program::Module::spec);
                 if (modules[v.perm].module || (found != modules.end() && found->module)) {
+                    const auto& theirs = found != modules.end() && found->module ? *found : modules[v.perm];
+                    existing = theirs.module;
+                    existing_spec = theirs.spec;
+                    existing_owner = program;
                     program = nullptr; // the game was first
                 } else {
                     spec.info = &program->info;
@@ -1969,6 +1977,19 @@ void PipelineCache::WarmUpThread() {
             if (!program) {
                 taken.fetch_add(1, std::memory_order_relaxed);
                 device.destroyShaderModule(module);
+                // The stored pipelines naming this permutation are built with the game's module.
+                if (existing && existing_owner) {
+                    std::scoped_lock lk{shipped_mutex};
+                    auto& stage = shipped.emplace_back();
+                    stage.parsed = true;
+                    stage.ready = true;
+                    stage.owner = existing_owner;
+                    stage.module = existing;
+                    stage.spec = existing_spec;
+                    stage.perm_idx = v.perm;
+                    stage.fetch_shader = existing_spec.fetch_shader_data;
+                    new_stages.emplace_back(HashCombine(v.hash, v.perm), &stage);
+                }
                 return;
             }
             // Saved like a shader translated in play: the next launch loads it from the cache.
