@@ -16,6 +16,7 @@
 #include <vector>
 #include <xxhash.h>
 #include "bbport_threads.h"
+#include "bbport_toggles.h"
 #include "common/serdes.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
@@ -35,7 +36,7 @@
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 21u; // bbport: shadPS4 #5447, #5427, #5364, #5365 (CFG fallthrough), #5429 (LDS barriers); page table watch bit
-static constexpr u32 ShaderMetaVersion = 13u; // bbport: Bindings::descriptor_set (pipeline libraries)
+static constexpr u32 ShaderMetaVersion = 14u; // bbport: translation inputs (shader variant list)
 static constexpr u32 PipelineKeyVersion = 7u; // bbport: GraphicsPipelineKey::split_sets
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
@@ -104,6 +105,25 @@ struct SavedBinary {
 };
 static thread_local SavedBinary t_saved_binary{};
 
+// bbport (shader variant list): the inputs of the variant translated last on this thread, for its meta.
+struct SavedInputs {
+    u64 pgm_hash;
+    size_t perm_idx;
+    std::array<u32, Shader::ShaderParams::NumShaderUserData> user_data;
+    std::vector<Shader::UdRead> reads;
+};
+static thread_local SavedInputs t_saved_inputs{};
+
+void RegisterShaderInputs(const Shader::Info& info, const std::vector<Shader::UdRead>& reads,
+                          size_t perm_idx) {
+    t_saved_inputs.pgm_hash = info.pgm_hash;
+    t_saved_inputs.perm_idx = perm_idx;
+    t_saved_inputs.user_data.fill(0);
+    std::memcpy(t_saved_inputs.user_data.data(), info.user_data.data(),
+                std::min(info.user_data.size_bytes(), sizeof(t_saved_inputs.user_data)));
+    t_saved_inputs.reads = reads;
+}
+
 static u64 BinaryChecksum(const std::vector<u32>& spv) {
     return XXH3_64bits(spv.data(), spv.size() * sizeof(u32)) | 1; // 0: no binary saved
 }
@@ -133,6 +153,13 @@ void RegisterShaderMeta(const Shader::Info& info,
 
     spec.Serialize(ar);
     info.Serialize(ar);
+    // bbport (shader variant list): the translation inputs, when this thread just translated this variant.
+    const bool inputs = t_saved_inputs.pgm_hash == info.pgm_hash && t_saved_inputs.perm_idx == perm_idx;
+    meta.Write(u32{inputs ? 1u : 0u});
+    if (inputs) {
+        meta.Write(t_saved_inputs.user_data.data(), sizeof(t_saved_inputs.user_data));
+        meta.Write(t_saved_inputs.reads);
+    }
 
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderMeta,
                                        fmt::format("{:#018x}", perm_hash), ar.TakeOff());
@@ -149,10 +176,17 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
                                        std::move(spv));
 }
 
+/// bbport (shader variant list): the translation inputs stored with a variant's meta.
+struct ShaderInputs {
+    bool present = false;
+    std::array<u32, Shader::ShaderParams::NumShaderUserData> user_data{};
+    std::vector<Shader::UdRead> reads;
+};
+
 bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
                     std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
                     Shader::StageSpecialization& spec, size_t& perm_idx,
-                    u64* binary_checksum = nullptr) {
+                    u64* binary_checksum = nullptr, ShaderInputs* inputs = nullptr) {
     Serialization::Reader meta{ar};
 
     u32 meta_version{};
@@ -178,6 +212,15 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
 
     spec.Deserialize(ar);
     info.Deserialize(ar);
+    u32 has_inputs{};
+    meta.Read(has_inputs);
+    if (has_inputs) {
+        ShaderInputs scratch;
+        ShaderInputs& in = inputs ? *inputs : scratch;
+        in.present = true;
+        meta.Read(in.user_data.data(), sizeof(in.user_data));
+        meta.Read(in.reads);
+    }
 
     // bbport: BB_VS_CHECK instruments every vertex shader: none comes from the cache.
     if (info.hw_stage == Shader::HwStage::Vertex && Shader::VertexCheck::address) {
@@ -284,7 +327,113 @@ struct LoadedStage {
     Program* owner{};
     std::optional<Shader::Gcn::FetchShaderData> fetch_shader{};
     bool ready = false; ///< owner and module are usable
+    // bbport (shader variant list): no stored binary, but the translation inputs are known.
+    ShaderInputs inputs{};
+    u64 checksum{};
+    bool replay = false;
 };
+
+/// bbport (shader variant list): the code of the given shaders, read from the game's own files (BB_APP0_DIR). The
+/// shaders sit there uncompressed, each with its OrbShdr binary info block (shader_hash = the port's program hash,
+/// length = code bytes) behind its code, or reached from a jump at its start (AmdGpu::SearchBinaryInfo).
+static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(const std::set<u64>& wanted,
+                                                                    u64* files_scanned) {
+    std::unordered_map<u64, std::vector<u32>> found;
+    const char* app0 = std::getenv("BB_APP0_DIR");
+    if (!app0 || wanted.empty()) {
+        return found;
+    }
+    static constexpr char sig[] = "OrbShdr";
+    static constexpr size_t chunk = 64ull << 20;
+    std::vector<char> buf(chunk + 64);
+    std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(app0, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (found.size() == wanted.size()) {
+            break;
+        }
+        if (!it->is_regular_file(ec) || it->file_size(ec) < 64) {
+            continue;
+        }
+        std::FILE* f = _wfopen(it->path().c_str(), L"rb");
+        if (!f) {
+            continue;
+        }
+        ++*files_scanned;
+        // Info blocks of the wanted shaders in this file.
+        struct Hit {
+            u64 at, hash;
+            u32 length;
+        };
+        std::vector<Hit> hits;
+        size_t carry = 0;
+        u64 base = 0;
+        while (true) {
+            const size_t got = std::fread(buf.data() + carry, 1, chunk, f);
+            const size_t have = carry + got;
+            if (have < 28) {
+                break;
+            }
+            // The last 27 bytes go into the next chunk (an info block is 28).
+            const size_t scan_end = have - 27;
+            for (const char* p = buf.data();
+                 (p = static_cast<const char*>(std::memchr(p, 'O', buf.data() + scan_end - p)));
+                 ++p) {
+                if (std::memcmp(p, sig, 7) != 0) {
+                    continue;
+                }
+                u32 bits;
+                u64 hash;
+                std::memcpy(&bits, p + 8, 4);
+                std::memcpy(&hash, p + 16, 8);
+                const u32 length = bits >> 8;
+                if (wanted.contains(hash) && !found.contains(hash) && length >= 8 &&
+                    length < (1u << 22)) {
+                    hits.push_back({base + u64(p - buf.data()), hash, length});
+                }
+            }
+            if (!got) {
+                break;
+            }
+            carry = have - scan_end;
+            std::memmove(buf.data(), buf.data() + scan_end, carry);
+            base += scan_end;
+        }
+        for (const auto& hit : hits) {
+            if (found.contains(hit.hash)) {
+                continue;
+            }
+            // The code starts with s_mov_b32 vcc_hi, n where the info block is (n + 1) * 2 dwords on, or ends at the
+            // info block.
+            const u64 window = std::min<u64>(hit.at, u64(hit.length) + 0x10000);
+            std::vector<u8> bytes(window + 28);
+            if (_fseeki64(f, s64(hit.at - window), SEEK_SET) != 0 ||
+                std::fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) {
+                continue;
+            }
+            s64 start = -1;
+            for (u64 back = 8; back <= window; ++back) {
+                u32 w[2];
+                std::memcpy(w, bytes.data() + window - back, 8);
+                if (w[0] == 0xBEEB03FFu && (u64(w[1]) + 1) * 8 == back) {
+                    start = s64(window - back);
+                    break;
+                }
+            }
+            if (start < 0 && hit.length <= window) {
+                start = s64(window - hit.length);
+            }
+            if (start < 0 || u64(start) + hit.length > bytes.size()) {
+                continue;
+            }
+            std::vector<u32> code(hit.length / 4);
+            std::memcpy(code.data(), bytes.data() + start, code.size() * 4);
+            found.emplace(hit.hash, std::move(code));
+        }
+        std::fclose(f);
+    }
+    return found;
+}
 
 /// One stored pipeline key.
 struct StoredPipeline {
@@ -432,6 +581,10 @@ void PipelineCache::WarmUpThread() {
     stage_hashes.erase(std::unique(stage_hashes.begin(), stage_hashes.end()), stage_hashes.end());
     std::vector<LoadedStage> stages(stage_hashes.size());
     std::atomic<u32> mismatched_binaries{0};
+    static const bool replay_variants = [] {
+        const char* env = std::getenv("BB_VARIANT_REPLAY");
+        return env && env[0] == '1';
+    }();
     ParallelFor(stages.size(), threads, [&](size_t i) {
         auto& stage = stages[i];
         std::vector<u8> meta_blob;
@@ -448,7 +601,7 @@ void PipelineCache::WarmUpThread() {
         // are translated each run (and never saved, SaveShaderBinary).
         u64 checksum = 0;
         if (!LoadShaderMeta(meta_ar, stage.program->info, unused, stage.spec, stage.perm_idx,
-                            &checksum) ||
+                            &checksum, &stage.inputs) ||
             Shader::Backend::SPIRV::IsForcedShader(stage.program->info.pgm_hash) ||
             BbMovieShaderScaled(stage.program->info.pgm_hash) ||
             BbNanGuard::BloomClampShader(stage.program->info.pgm_hash) ||
@@ -469,6 +622,11 @@ void PipelineCache::WarmUpThread() {
         db.Load(Storage::BlobType::ShaderBinary,
                 fmt::format("{:#018x}_{}", info.pgm_hash, stage.perm_idx), spv);
         if (spv.empty()) {
+            // bbport (shader variant list): translated again from the game's files below.
+            if (replay_variants && stage.inputs.present && checksum) {
+                stage.checksum = checksum;
+                stage.replay = true;
+            }
             return;
         }
         if (BinaryChecksum(spv) != checksum) {
@@ -482,9 +640,88 @@ void PipelineCache::WarmUpThread() {
         }
         stage.module = CompileSPV(spv, device);
     });
-    const double t_shaders = elapsed_ms();
     // Everything is read: an archived cache turns writable now (the game saves what it compiles).
     db.FinishPreload();
+
+    // bbport (shader variant list, BB_VARIANT_REPLAY=1): variants with translation inputs but no binary are
+    // translated from the code in the player's own game files, with the recorded inputs in place of game memory,
+    // and kept only when the result matches the stored checksum bit for bit.
+    if (replay_variants) {
+        const double t_start = elapsed_ms();
+        std::set<u64> wanted;
+        u32 to_replay = 0;
+        for (const auto& stage : stages) {
+            if (stage.replay) {
+                wanted.insert(stage.program->info.pgm_hash);
+                ++to_replay;
+            }
+        }
+        u64 files_scanned = 0;
+        const auto code = ReadGameShaderCode(wanted, &files_scanned);
+        const double t_scan = elapsed_ms();
+        std::atomic<u32> matched{0}, differed{0}, no_code{0}, failed{0};
+        ParallelFor(stages.size(), threads, [&](size_t i) {
+            auto& stage = stages[i];
+            if (!stage.replay) {
+                return;
+            }
+            const auto& stored = stage.program->info;
+            const auto it = code.find(stored.pgm_hash);
+            if (it == code.end()) {
+                no_code.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            const std::span<const u32> program_code{it->second};
+            const Shader::ShaderParams params{
+                .user_data = std::span<const u32, Shader::ShaderParams::NumShaderUserData>{
+                    stage.inputs.user_data},
+                .code = program_code,
+                .hash = stored.pgm_hash,
+            };
+            Shader::Info info{stored.hw_stage, stored.sw_stage, params};
+            const Shader::TranslationReplay replay{&stored.flattened_ud_buf, &stage.inputs.reads,
+                                                   &stage.spec.fetch_shader_data};
+            auto runtime_info = stage.spec.runtime_info;
+            auto binding = stage.spec.start;
+            static thread_local Shader::Pools replay_pools;
+            std::vector<u32> spv;
+            sigjmp_buf recover;
+            if (sigsetjmp(recover, 0)) {
+                runtime_fault_recover = nullptr;
+                Shader::t_translation_replay = nullptr;
+                failed.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            runtime_fault_recover = &recover;
+            Shader::t_translation_replay = &replay;
+            const auto module = TranslateModule(info, runtime_info, program_code, stage.perm_idx,
+                                                binding, replay_pools, spv);
+            Shader::t_translation_replay = nullptr;
+            runtime_fault_recover = nullptr;
+            if (BinaryChecksum(spv) != stage.checksum) {
+                if (module) {
+                    device.destroyShaderModule(module);
+                }
+                if (differed.fetch_add(1, std::memory_order_relaxed) < 8) {
+                    LOG_WARNING(Render_Vulkan, "Variant replay of {} shader {:#x} ({}) differs",
+                                stored.hw_stage, stored.pgm_hash, stage.perm_idx);
+                }
+                return;
+            }
+            matched.fetch_add(1, std::memory_order_relaxed);
+            stage.module = module;
+            // Saved as if translated in play: the next launch loads it like any stored shader.
+            RegisterShaderBinary(std::move(spv), stored.pgm_hash, stage.perm_idx);
+        });
+        std::printf(
+                    "Variant replay: %u variants without a binary; code for %zu of %zu "
+                    "shaders from %llu game files (%.0f ms); %u identical, %u differ, %u without "
+                    "code, %u faulted (%.0f ms)\n",
+                    to_replay, code.size(), wanted.size(), (unsigned long long)files_scanned,
+                     t_scan - t_start, matched.load(), differed.load(), no_code.load(),
+                     failed.load(), elapsed_ms() - t_scan);
+    }
+    const double t_shaders = elapsed_ms();
 
     // 3. Into the program cache, in order. A permutation lives at its original index.
     std::unordered_map<u64, LoadedStage*> by_hash;

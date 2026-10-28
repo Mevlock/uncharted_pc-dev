@@ -989,6 +989,24 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
     }
     LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
+    {
+        // bbport (feature/stutter): why the GPU thread builds this one itself: no preparation for the draw, a worker
+        // still on it, a worker that failed, or a prepared pipeline that did not fit (BB_FRAME_STATS, every 5 s).
+        static std::atomic<u64> none{0}, pending{0}, failed{0}, mismatch{0};
+        const u32 state = prepared ? prepared->state.load(std::memory_order_acquire) : ~0u;
+        (state == ~0u ? none : state == PreparedDraw::Pending ? pending
+                              : state == PreparedDraw::Unavailable ? failed : mismatch) += 1;
+        static std::atomic<s64> last{0};
+        const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+        s64 seen = last.load();
+        if (now - seen >= 5 && last.compare_exchange_strong(seen, now)) {
+            std::printf("GPU-thread pipeline builds: %llu with no preparation, %llu a worker was still on, "
+                        "%llu a worker failed, %llu prepared but not fitting\n",
+                        static_cast<unsigned long long>(none.load()), static_cast<unsigned long long>(pending.load()),
+                        static_cast<unsigned long long>(failed.load()), static_cast<unsigned long long>(mismatch.load()));
+        }
+    }
     CompileTimer timer{"gpipe", pipeline_hash, sel.graphics_key.motion_vectors};
     SpanTimer gfx_timer{g_bb_gfx_pipeline_ns};
     ++g_bb_gfx_pipelines;
@@ -1806,9 +1824,17 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     CompileTimer timer{&translate_pools == &pools ? "shader" : "shader-w", info.pgm_hash,
                        u32(perm_idx) | (u32(info.hw_stage) << 16) | (motion ? 0x80000000u : 0u)};
     std::vector<u32> spv;
+    // bbport (shader variant list): the reads this translation makes through user-data table pointers are
+    // recorded and stored with the variant's meta, with its user data, so it can be translated again from the
+    // code alone (TranslateFromRecord). Thread-local storage: a fault jumping out leaves nothing dangling.
+    static thread_local std::vector<Shader::UdRead> reads;
+    reads.clear();
+    Shader::t_translation_record = &reads;
     const auto module =
         TranslateModule(info, runtime_info, code, perm_idx, binding, translate_pools, spv);
+    Shader::t_translation_record = nullptr;
     if (SaveShaderBinary(info.pgm_hash, info.hw_stage)) {
+        RegisterShaderInputs(info, reads, perm_idx);
         RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
     }
     return module;
