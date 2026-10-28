@@ -7,6 +7,7 @@
 #include "shader_recompiler/ir/type.h"
 #include "video_core/amdgpu/resource.h"
 
+#include <vector>
 #include <boost/container/static_vector.hpp>
 
 namespace Shader {
@@ -20,6 +21,27 @@ static constexpr u32 NUM_FMASKS = 8;
 using SharpLocation = u16;
 
 constexpr SharpLocation UNKNOWN_LOCATION = std::numeric_limits<u16>::max();
+
+/// bbport (shader variant list): while a listed variant is built, the descriptors come from its predicted setups, by
+/// resource index (BufferResource/ImageResource/SamplerResource::GetSharp), instead of the flattened user data.
+struct SharpOverride {
+    std::vector<AmdGpu::Buffer> buffers;
+    std::vector<AmdGpu::Image> images;
+    std::vector<AmdGpu::Sampler> samplers;
+};
+inline thread_local const SharpOverride* t_sharp_override = nullptr;
+
+/// The index of a resource in its list, by where its descriptor is fetched from (unique per resource): passes copy
+/// descriptors, so their address does not say.
+template <typename List, typename Resource>
+size_t OverrideIndex(const List& list, const Resource& resource) {
+    for (size_t i = 0; i < list.size(); ++i) {
+        if (list[i].sharp_fetch == resource.sharp_fetch) {
+            return i;
+        }
+    }
+    return list.size();
+}
 
 template <typename T>
 struct SharpFetch {
@@ -90,7 +112,13 @@ struct BufferResource {
 
     constexpr AmdGpu::Buffer GetSharp(const auto& info) const noexcept {
         AmdGpu::Buffer buffer;
-        if (!sharp_fetch.Fetch(info.FlatUserData().data(), &buffer)) {
+        if (t_sharp_override) [[unlikely]] {
+            const size_t i = OverrideIndex(info.buffers, *this);
+            if (i >= t_sharp_override->buffers.size()) {
+                return AmdGpu::Buffer::Null();
+            }
+            buffer = t_sharp_override->buffers[i];
+        } else if (!sharp_fetch.Fetch(info.FlatUserData().data(), &buffer)) {
             return AmdGpu::Buffer::Null();
         }
         if (post_op == SharpFetchPostOp::BitwiseOrDw1WithImm) {
@@ -128,7 +156,17 @@ struct ImageResource {
 
     constexpr AmdGpu::Image GetSharp(const auto& info) const noexcept {
         AmdGpu::Image image{};
-        if (!Fetch(info.FlatUserData().data(), &image)) {
+        if (t_sharp_override) [[unlikely]] {
+            const size_t i = OverrideIndex(info.images, *this);
+            if (i >= t_sharp_override->images.size() || !t_sharp_override->images[i]) {
+                return AmdGpu::Image::Null(is_depth);
+            }
+            image = t_sharp_override->images[i];
+            if (is_depth) {
+                image.data_format = u64(AmdGpu::DataFormat::Format32);
+                image.num_format = u64(AmdGpu::NumberFormat::Float);
+            }
+        } else if (!Fetch(info.FlatUserData().data(), &image)) {
             return AmdGpu::Image::Null(is_depth);
         }
         if (post_op == SharpFetchPostOp::ConvertCubeTo2DArray) {
@@ -177,7 +215,14 @@ struct SamplerResource {
 
     constexpr AmdGpu::Sampler GetSharp(const auto& info) const noexcept {
         AmdGpu::Sampler sampler{};
-        sharp_fetch.Fetch(info.FlatUserData().data(), &sampler);
+        if (t_sharp_override) [[unlikely]] {
+            const size_t i = OverrideIndex(info.samplers, *this);
+            if (i < t_sharp_override->samplers.size()) {
+                sampler = t_sharp_override->samplers[i];
+            }
+        } else {
+            sharp_fetch.Fetch(info.FlatUserData().data(), &sampler);
+        }
         if (post_op == SharpFetchPostOp::DisableAnisoIfSingleLod) {
             const u32 tsharp_dw3 = info.FlatUserData()[post_op_tsharp_dw3_off];
             if (((tsharp_dw3 >> 12) & 0xff) == 0) {
