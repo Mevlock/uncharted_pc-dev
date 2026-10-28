@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <set>
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
@@ -626,6 +628,31 @@ void PipelineCache::WarmUpThread() {
                 num_pipelines.load(), num_total_pipelines, u32(stages.size()), threads, elapsed_ms(),
                 t_keys, t_shaders - t_keys, t_programs - t_shaders, elapsed_ms() - t_programs,
                 t_ready);
+    // bbport: BB_GPL_STATS=1 (pipeline library study, docs in the local notes): how many stored graphics
+    // pipelines share their stages. Pipelines per distinct stage set = how often a library part is reused.
+    if (std::getenv("BB_GPL_STATS")) {
+        // stage_hashes is indexed by Shader::SwStage: 0 fragment, 1-2 tessellation, 3 vertex, 4 geometry.
+        constexpr size_t fragment = static_cast<size_t>(Shader::SwStage::Fragment);
+        std::set<std::array<size_t, MaxShaderStages>> stage_sets, pre_raster_sets;
+        std::set<size_t> fragment_stages;
+        u32 graphics = 0;
+        for (const auto& entry : stored) {
+            if (!entry.parsed || entry.compute) {
+                continue;
+            }
+            ++graphics;
+            stage_sets.insert(entry.gkey.stage_hashes);
+            auto pre_raster = entry.gkey.stage_hashes;
+            pre_raster[fragment] = 0;
+            pre_raster_sets.insert(pre_raster);
+            fragment_stages.insert(entry.gkey.stage_hashes[fragment]);
+        }
+        std::printf("GPL stats: %u graphics pipelines, %zu distinct stage sets (%.1f pipelines each), %zu "
+                    "distinct pre-raster sets, %zu distinct fragment stages\n",
+                    graphics, stage_sets.size(),
+                    stage_sets.empty() ? 0.0 : double(graphics) / double(stage_sets.size()),
+                    pre_raster_sets.size(), fragment_stages.size());
+    }
     if (const u32 n = mismatched_binaries.load()) {
         std::printf("Pipeline cache: %u shader binaries did not match their meta: removed, "
                     "translated again when used\n", n);
