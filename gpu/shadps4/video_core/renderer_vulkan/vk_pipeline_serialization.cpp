@@ -1551,7 +1551,9 @@ void PipelineCache::WarmUpThread() {
             compatible = false;
         }
     }
-    if (!compatible) {
+    // A new (or rebuilt) cache has nothing to load; with a variant list there is still everything to prepare (a new
+    // player's first start, or Prepare after Clear shader cache, used to end here unprepared).
+    if (!compatible && !ship_list) {
         warm_done.store(true, std::memory_order_release);
         warm_done.notify_all();
         return;

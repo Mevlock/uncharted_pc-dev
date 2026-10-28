@@ -15,6 +15,7 @@
 #include "bbport_overlay.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
 
@@ -1057,7 +1058,13 @@ void PrepareShadersWithoutWindow(AmdGpu::Liverpool* liverpool) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
     BbOverlay::PrintPreparationProgress();
+    // Every prepared shader and pipeline must reach the disk before the process ends (the exit flush waits at most
+    // 3 s: a first preparation's ~20,000 writes were mostly lost and the next start built them again).
+    const auto t_flush = std::chrono::steady_clock::now();
+    Storage::DataBase::Instance().Flush(120000);
     FlushPipelineCacheForExit();
+    std::printf("Preparation only: cache written in %.1f s\n",
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_flush).count());
 }
 
 } // namespace Vulkan
