@@ -732,11 +732,6 @@ std::condition_variable eop_flip_cv;
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
-    // bbport: the full-screen preparation page: the game waits here, before its flip takes a presenter frame, so the
-    // page's blank frames always find a free one (holding queued flips instead used up the frames: a deadlock).
-    while (BbOverlay::PreparationScreenActive()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
     if (index != -1) {
         const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
         const s64 last = last_flip_submit_ns.exchange(now, std::memory_order_relaxed);
@@ -965,10 +960,11 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
         }
         const bool flip_slot = movie || !frame_limit || now >= next_flip;
-        // bbport: the full-screen preparation page: blank frames with the page, the game's flips held (it waits at
-        // its first frames) until preparation is done.
-        if (BbOverlay::PreparationScreenActive()) {
-            if (timer.GetTotalWait().count() < 0) {
+        // bbport: the full-screen preparation page is drawn opaque over whatever is presented; before the game opens
+        // its video port, blank frames carry it at half the vblank rate (holding the game's flips instead upset its
+        // frame rotation: the title flickered afterwards).
+        if (BbOverlay::PreparationScreenActive() && !main_port.is_open) {
+            if (vblank_status.count % 2 == 0) {
                 DrawBlankFrame();
             }
         } else if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {

@@ -1774,7 +1774,23 @@ void PipelineCache::WarmUpThread() {
         const char* env = std::getenv("BB_VARIANT_REPLAY");
         return env && env[0] == '1';
     }();
+    // bbport: the preparation page shows loading the stored shaders as its first step.
+    std::atomic<u32> stages_loaded{0};
+    if (prep_screen) {
+        BbOverlay::SetShaderPreparation(3, 0, u32(stages.size()));
+    }
     ParallelFor(stages.size(), threads, [&](size_t i) {
+        struct Loaded {
+            std::atomic<u32>& n;
+            bool show;
+            u32 total;
+            ~Loaded() {
+                const u32 done = n.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (show) {
+                    BbOverlay::SetShaderPreparation(3, done, total);
+                }
+            }
+        } loaded{stages_loaded, prep_screen, u32(stages.size())};
         auto& stage = stages[i];
         std::vector<u8> meta_blob;
         db.Load(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", stage_hashes[i]),
@@ -1999,6 +2015,9 @@ void PipelineCache::WarmUpThread() {
     }
     // Everything is read: an archived cache turns writable now (the game saves what it compiles).
     db.FinishPreload();
+    if (prep_screen) {
+        BbOverlay::SetShaderPreparation(0, 0, 0);
+    }
 
     const double t_shaders = elapsed_ms();
 

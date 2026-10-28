@@ -1055,7 +1055,8 @@ void FullScreenPreparation() {
     centered("This happens once, before your first launch. Later launches start straight away.", 1.15f, grey);
     ImGui::Dummy(ImVec2(0.0f, 28.0f * base_scale));
 
-    const char* step = phase == 1   ? "Step 1 of 2: building shaders from your game files"
+    const char* step = phase == 3   ? "Step 1 of 2: loading shaders"
+                       : phase == 1 ? "Step 1 of 2: building shaders from your game files"
                        : phase == 2 ? "Step 2 of 2: compiling them for your graphics card"
                        : finishing  ? "Finishing..."
                                     : "Starting...";
@@ -1124,7 +1125,8 @@ void NotifyTrophy(int grade, std::string game, std::string name, std::vector<uns
 }
 
 bool CapturesInput() {
-    return menu_open || text_entry_active;
+    // the preparation page covers the game: its input is held so the title screen cannot be passed unseen
+    return menu_open || text_entry_active || prep_screen.load(std::memory_order_relaxed);
 }
 
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {
