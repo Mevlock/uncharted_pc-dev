@@ -15,6 +15,7 @@
 #include <sys/resource.h>
 #endif
 #include "common/assert.h"
+#include "bbport_overlay.h"
 #include "bbport_threads.h"
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -959,7 +960,13 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
         }
         const bool flip_slot = movie || !frame_limit || now >= next_flip;
-        if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
+        // bbport: the full-screen preparation page: blank frames with the page, the game's flips held (it waits at
+        // its first frames) until preparation is done.
+        if (BbOverlay::PreparationScreenActive()) {
+            if (timer.GetTotalWait().count() < 0) {
+                DrawBlankFrame();
+            }
+        } else if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (request && frame_limit) {
                 next_flip = std::max(next_flip + frame_period, now - frame_period);

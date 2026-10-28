@@ -1453,6 +1453,26 @@ void PipelineCache::WarmUpThread() {
             .count();
     };
 
+    // bbport: the full-screen preparation page before the game starts (BbOverlay::SetPreparationScreen): on for a
+    // first launch with a variant list (no "prepared" marker in the cache yet), BB_PREP_SCREEN=1/0 forces it. It is
+    // turned off however this thread ends (the game's flips wait while it is on).
+    const bool prep_screen = [&] {
+        if (const char* env = std::getenv("BB_PREP_SCREEN")) {
+            return env[0] == '1';
+        }
+        std::error_code ec;
+        return std::getenv("BB_VARIANT_SHIP") != nullptr &&
+               !std::filesystem::exists(db.Directory() / "prepared", ec);
+    }();
+    struct PrepScreenOff {
+        ~PrepScreenOff() {
+            BbOverlay::SetPreparationScreen(false);
+        }
+    } prep_screen_off;
+    if (prep_screen) {
+        BbOverlay::SetPreparationScreen(true);
+    }
+
     if (const char* dump = std::getenv("BB_SPEC_DUMP")) {
         DumpSpecs(db, dump);
     }
@@ -2145,8 +2165,9 @@ void PipelineCache::WarmUpThread() {
     if (const char* ship = std::getenv("BB_VARIANT_SHIP")) {
         const double t_ship = elapsed_ms();
         BbOverlay::SetShaderPreparation(1, 0, 0);
-        // Behind the game: half the warm-up threads (BB_SHIP_THREADS), so play keeps its share of the CPU.
-        u32 ship_threads = std::max<u32>(1, threads / 2);
+        // Behind the game: half the warm-up threads (BB_SHIP_THREADS), so play keeps its share of the CPU; all of
+        // them while the full-screen page holds the game.
+        u32 ship_threads = prep_screen ? threads : std::max<u32>(1, threads / 2);
         if (const char* env = std::getenv("BB_SHIP_THREADS")) {
             ship_threads = std::clamp<u32>(u32(std::atoi(env)), 1, 64);
         }
@@ -2395,6 +2416,18 @@ void PipelineCache::WarmUpThread() {
                 num_pipelines.load(), num_total_pipelines, u32(stages.size()), threads, elapsed_ms(),
                 t_keys, t_shaders - t_keys, t_programs - t_shaders, elapsed_ms() - t_programs,
                 t_ready);
+    // bbport: preparation is done: the game's frames may go out; a variant list's first launch leaves the
+    // "prepared" marker, so later launches load in the background with the corner box only.
+    if (prep_screen) {
+        BbOverlay::SetPreparationScreen(false);
+        std::printf("Preparation screen: shown for %.0f ms\n", elapsed_ms());
+    }
+    if (std::getenv("BB_VARIANT_SHIP")) {
+        if (std::FILE* f = std::fopen((db.Directory() / "prepared").string().c_str(), "w")) {
+            std::fputs("variant list prepared\n", f);
+            std::fclose(f);
+        }
+    }
     // bbport: BB_GPL_STATS=1 (pipeline library study, docs in the local notes): how many stored graphics
     // pipelines share their stages. Pipelines per distinct stage set = how often a library part is reused.
     if (std::getenv("BB_GPL_STATS")) {

@@ -939,6 +939,7 @@ std::atomic<u32> prep_done{0};
 std::atomic<u32> prep_total{0};
 
 std::atomic<s64> prep_phase_start_ms{0};
+std::atomic<bool> prep_screen{false};
 
 s64 NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -953,6 +954,14 @@ void SetShaderPreparation(int phase, u32 done, u32 total) {
     prep_done.store(done, std::memory_order_relaxed);
     prep_total.store(total, std::memory_order_relaxed);
     prep_phase.store(phase, std::memory_order_release);
+}
+
+void SetPreparationScreen(bool on) {
+    prep_screen.store(on, std::memory_order_release);
+}
+
+bool PreparationScreenActive() {
+    return prep_screen.load(std::memory_order_acquire);
 }
 
 // "about 25 s left". Pipelines differ a lot in cost and finish in bursts on several threads, so the rate is taken over
@@ -1010,8 +1019,62 @@ std::string PreparationEta(u32 done, u32 total) {
     return fmt::format("  about {} s left", left_s);
 }
 
+// The full-screen page shown before the game starts (SetPreparationScreen): what is happening, that it happens once,
+// a progress bar with the step, the count and the countdown. Centred on a dark background.
+void FullScreenPreparation() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(viewport->Size);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.055f, 0.06f, 0.07f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.85f, 0.62f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.16f, 0.17f, 0.19f, 1.0f));
+    ImGui::Begin("##prep_screen", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    const float w = viewport->Size.x;
+    const float h = viewport->Size.y;
+    const auto centered = [&](const char* text, float scale, ImVec4 color) {
+        ImGui::SetWindowFontScale(scale);
+        const float tw = ImGui::CalcTextSize(text).x;
+        ImGui::SetCursorPosX((w - tw) * 0.5f);
+        ImGui::TextColored(color, "%s", text);
+    };
+    const ImVec4 white{0.95f, 0.95f, 0.95f, 1.0f};
+    const ImVec4 grey{0.62f, 0.64f, 0.67f, 1.0f};
+    const int phase = prep_phase.load(std::memory_order_acquire);
+    const u32 done = prep_done.load(std::memory_order_relaxed);
+    const u32 total = prep_total.load(std::memory_order_relaxed);
+
+    ImGui::SetCursorPosY(h * 0.36f);
+    centered("Preparing shaders", 2.4f, white);
+    ImGui::Dummy(ImVec2(0.0f, 8.0f * base_scale));
+    centered("This happens once, before your first launch. Later launches start straight away.", 1.15f, grey);
+    ImGui::Dummy(ImVec2(0.0f, 28.0f * base_scale));
+
+    const char* step = phase == 1   ? "Step 1 of 2: building shaders from your game files"
+                       : phase == 2 ? "Step 2 of 2: compiling them for your graphics card"
+                                    : "Starting...";
+    centered(step, 1.2f, white);
+    ImGui::Dummy(ImVec2(0.0f, 10.0f * base_scale));
+    const float bar_w = std::min(w * 0.55f, 900.0f * base_scale);
+    ImGui::SetCursorPosX((w - bar_w) * 0.5f);
+    const float fraction = total ? float(done) / float(total) : 0.0f;
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::ProgressBar(fraction, ImVec2(bar_w, 22.0f * base_scale), "");
+    ImGui::Dummy(ImVec2(0.0f, 8.0f * base_scale));
+    const std::string count =
+        total ? fmt::format("{} / {}{}", done, total, PreparationEta(done, total)) : std::string{};
+    centered(count.c_str(), 1.1f, grey);
+    ImGui::End();
+    ImGui::PopStyleColor(3);
+}
+
 // "Preparing shaders 1240 / 4496": bottom left while the variant list is built behind the game.
 void ShaderPreparation() {
+    if (prep_screen.load(std::memory_order_acquire)) {
+        FullScreenPreparation();
+        return;
+    }
     const int phase = prep_phase.load(std::memory_order_acquire);
     if (phase == 0) {
         return;
@@ -1042,7 +1105,8 @@ void ShaderPreparation() {
 
 bool Visible() {
     return initialized && (menu_open || text_entry_active || BbSettings::Get().show_fps ||
-                           toast_busy || prep_phase.load(std::memory_order_relaxed) != 0);
+                           toast_busy || prep_phase.load(std::memory_order_relaxed) != 0 ||
+                           prep_screen.load(std::memory_order_relaxed));
 }
 
 void NotifyTrophy(int grade, std::string game, std::string name, std::vector<unsigned char> png) {
