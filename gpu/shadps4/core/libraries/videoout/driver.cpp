@@ -732,6 +732,11 @@ std::condition_variable eop_flip_cv;
 
 bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
                                 bool is_eop /*= false*/) {
+    // bbport: the full-screen preparation page: the game waits here, before its flip takes a presenter frame, so the
+    // page's blank frames always find a free one (holding queued flips instead used up the frames: a deadlock).
+    while (BbOverlay::PreparationScreenActive()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     if (index != -1) {
         const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
         const s64 last = last_flip_submit_ns.exchange(now, std::memory_order_relaxed);
