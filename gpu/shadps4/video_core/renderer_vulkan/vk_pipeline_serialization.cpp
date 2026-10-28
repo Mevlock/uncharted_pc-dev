@@ -2115,7 +2115,19 @@ void PipelineCache::WarmUpThread() {
         }
         ReleaseClaim(claim_id);
     };
-    ParallelFor(stored.size(), threads, build_stored);
+    // bbport: a large cache (a prepared list) shows the same "Preparing pipelines" progress as the list build.
+    if (stored.size() >= 500) {
+        BbOverlay::SetShaderPreparation(2, 0, u32(stored.size()));
+        std::atomic<u32> stored_done{0};
+        ParallelFor(stored.size(), threads, [&](size_t i) {
+            build_stored(i);
+            BbOverlay::SetShaderPreparation(2, stored_done.fetch_add(1, std::memory_order_relaxed) + 1,
+                                            u32(stored.size()));
+        });
+        BbOverlay::SetShaderPreparation(0, 0, 0);
+    } else {
+        ParallelFor(stored.size(), threads, build_stored);
+    }
 
     // bbport (variant list prototype, BB_VARIANT_SHIP=<lines>): the listed variants the cache does not hold are built
     // from the game files behind the game (BuildListedVariant), put into the program cache (unless the game made the
