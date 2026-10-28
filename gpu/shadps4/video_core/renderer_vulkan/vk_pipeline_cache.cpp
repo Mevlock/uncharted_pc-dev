@@ -762,8 +762,12 @@ struct CompileTimer {
         g_last_compile_ms.store(NowMs(), std::memory_order_relaxed);
         static const bool log = std::getenv("BB_COMPILE_LOG") != nullptr;
         if (log) {
-            std::printf("Compile: %s %016llx %u %.2f ms\n", kind,
-                        static_cast<unsigned long long>(id), extra, double(ns) / 1e6);
+            const auto wall = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count();
+            std::printf("Compile: %s %016llx %u %.2f ms at %lld\n", kind,
+                        static_cast<unsigned long long>(id), extra, double(ns) / 1e6,
+                        static_cast<long long>(wall));
         }
     }
 };

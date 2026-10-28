@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -375,6 +376,15 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     char path[1024];
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
+    /* bbport (variant list prototype, BB_OPEN_LOG=1): when each game file is opened (wall-clock ms, as the
+       compile log's), to measure how far ahead of their shaders' first use the level paks arrive. */
+    static int open_log=-1;
+    if (open_log<0) { const char *v=getenv("BB_OPEN_LOG"); open_log=v && v[0]=='1'; }
+    if (open_log) {
+        struct timespec ts;
+        timespec_get(&ts,TIME_UTC);
+        printf("Open: %lld %s\n",(long long)ts.tv_sec*1000+ts.tv_nsec/1000000,guest);
+    }
     if (skip_intro_movie(guest)) {
         /* The stand-in, written to the host's temporary directory. */
         const char *tmp=getenv("TEMP");
