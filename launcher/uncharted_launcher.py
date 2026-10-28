@@ -197,7 +197,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
-                'shader_preparation': 'before', 'preparation_speed': 'all',
+                'shader_preparation': 'before', 'preparation_speed': 'all', 'dev_menu': False,
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'pad_invert_y': False, 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
                 'trophy_game': 'u1'}
@@ -582,6 +582,8 @@ def game_environment(s, start=None):
         env['BB_SKIP_INTRO'] = '1'
     if s.get('unlock_chapters', False):
         env['BB_UNLOCK_CHAPTERS'] = '1'
+    if s.get('dev_menu', False):
+        env['BB_DEV_MENU'] = '1'
     job_threads = str(s.get('job_threads') or 'auto')
     if job_threads != 'auto':
         env['BB_JOB_SLEEP'] = '0' if job_threads == 'spin' else '1'
@@ -1729,6 +1731,10 @@ class Launcher:
     def build_advanced(self):
         f = self.page('advanced', _('Advanced'), _('Maintenance and options for testing.'))
         self.check(f, 'close_on_play', _('Close the launcher when the game starts'))
+        self.check(f, 'dev_menu', _("Developer menus (experimental, Uncharted 3 EU only for now)"),
+                   _("Naughty Dog's own debug menus, left in the game: F11 the Dev Menu (with its Camera menu "
+                     "under Player Menu...), F8 the Quick Menu (Invincible Player, Infinite Ammo, Manual Camera, "
+                     "...). Navigate with the controller."))
         extra = self.ttk.Entry(f, textvariable=self.var('extra_env'), width=60)
         self.row(f, _('Environment'), extra, _('Extra variables for the game, NAME=value separated by spaces.'))
         self.section(f, _('Shader preparation'))

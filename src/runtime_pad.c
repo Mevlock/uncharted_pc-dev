@@ -1518,12 +1518,46 @@ static void replay_sample(PadData *d) {
     d->left_x=s->axes[0]; d->left_y=s->axes[1]; d->right_x=s->axes[2]; d->right_y=s->axes[3];
     d->l2=s->l2; d->r2=s->r2;
 }
+/* BB_DEV_MENU=1 (experiment, Uncharted 3 EU 1.02): F11 opens and closes Naughty Dog's developer menu, which
+ * the retail game builds but gives no way to open: the menu's "open" byte (the camera code checks it) is
+ * flipped. The menu root pointer sits at guest offset 0x142ee88; "Dev Menu" at 0xf60a72 tells that this is
+ * the build these offsets are for (any other game or release is left alone). */
+static void dev_menu_key(void) {
+    static int checked, on, f11_was_down, f8_was_down;
+    if (!checked) { const char *e=getenv("BB_DEV_MENU"); on=e && e[0]=='1'; checked=1; }
+    if (!on || !sdl_ready) return;
+    const bool *k=SDL_GetKeyboardState(NULL);
+    const int f11=k && k[SDL_SCANCODE_F11], f8=k && k[SDL_SCANCODE_F8];
+    /* F8: the "Quick Menu" (player and actor tools: Invincible Player, Reset Actors, ...), the game's second
+     * debug menu, built at the same start-up step; root pointer at guest offset 0x196cdd0. (Shift is a game
+     * key, taken by the keyboard bindings, so it cannot pick the menu.) */
+    const int quick=f8 && !f8_was_down;
+    if ((f11 && !f11_was_down) || quick) {
+        const char *name=quick ? "Quick menu" : "Dev menu";
+        const uintptr_t base=runtime_image_base();
+        if (!base || memcmp((const void *)(base+0xf60a72),"Dev Menu",9) ||
+            memcmp((const void *)(base+0xfacfe0),"Quick Menu",11)) {
+            printf("%s: not this game or release (the offsets are for Uncharted 3 EU 1.02)\n",name);
+        } else {
+            unsigned char *menu=*(unsigned char **)(base+(quick ? 0x196cdd0 : 0x142ee88));
+            if (!menu) printf("%s: not built yet\n",name);
+            else {
+                menu[0x90]^=1;
+                printf("%s: %s (menu at %p)\n",name,menu[0x90] ? "opened" : "closed",(void *)menu);
+            }
+        }
+        fflush(stdout);
+    }
+    f11_was_down=f11;
+    f8_was_down=f8;
+}
 /* After the menu or the text dialog closes, buttons still held (the Cross that accepted a
  * name) stay hidden until released: the game would take them as a new press. */
 static int hold_after_capture;
 static void sample(PadData *d) {
     sample_host(d);
     if (bbgpu_overlay_captures_input()) { hold_after_capture=1; return; }
+    dev_menu_key();
     record_sample(d);
     read_inject();
     replay_sample(d);

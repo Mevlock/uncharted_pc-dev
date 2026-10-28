@@ -74,6 +74,8 @@ void runtime_set_guest_fpu(void);
 int32_t runtime_guest_errno(int host_errno);
 void *runtime_low_map(size_t size, int prot);
 void *runtime_image_map(size_t size, int prot);
+/* The loaded game's image (guest offset 0), or 0 before it is mapped. */
+uintptr_t runtime_image_base(void);
 /* Windows: reserves the PS4 user address range as a placeholder (no-op elsewhere). */
 void runtime_memory_reserve(void);
 uintptr_t runtime_ajm_resolve(const char *name);
