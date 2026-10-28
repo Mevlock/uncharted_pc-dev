@@ -949,15 +949,30 @@ static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(
     };
     // The saved locations come from a scan of every game file: a shader missing there is not in the game files. Only
     // no saved locations, or one that no longer matches (the files changed), scans again.
-    const auto saved = LoadShaderLocations(locations_path);
+    // BB_SHADER_LOCATIONS=<file> (the launcher passes the index shipped with the list for this release): used when none
+    // is saved yet, so a first preparation does not read all the game files (60 GB for the collection). Should any of
+    // its shaders not read back (other game files), the files are scanned as without it.
+    auto saved = LoadShaderLocations(locations_path);
+    bool shipped = false;
+    if (saved.shaders.empty()) {
+        if (const char* env = std::getenv("BB_SHADER_LOCATIONS")) {
+            saved = LoadShaderLocations(std::filesystem::path{env});
+            shipped = !saved.shaders.empty();
+        }
+    }
     read_from(saved);
-    if (saved.shaders.empty() || stale > 0) {
+    if (saved.shaders.empty() || stale > 0 || (shipped && unreadable > 0)) {
         std::printf("Shader locations: %s: scanning the game files\n",
-                    saved.shaders.empty() ? "none saved" : "a saved file cannot be opened");
+                    saved.shaders.empty() ? "none saved"
+                    : stale > 0           ? "a saved file cannot be opened"
+                                          : "the shipped index does not match these files");
         unreadable = 0;
         const auto scanned = ScanShaderLocations(app0, files_scanned);
         read_from(scanned);
         SaveShaderLocations(locations_path, scanned);
+    } else if (shipped) {
+        std::printf("Shader locations: from the shipped index (%zu shaders read)\n", found.size());
+        SaveShaderLocations(locations_path, saved);
     }
     if (unreadable > 0) {
         std::printf("Shader locations: %zu of %zu shaders read; %u saved locations did not read back\n",

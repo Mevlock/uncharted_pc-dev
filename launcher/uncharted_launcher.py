@@ -607,6 +607,12 @@ def game_environment(s, start=None):
         env['BB_VARIANT_SHIP'] = str(lists[0])
         if lists[1].is_file():
             env['BB_KEY_LIST'] = str(lists[1])
+        # Where the shaders sit in this release's files (shaders/shader_locations_<title id>.txt): no scan of the
+        # whole game folder on the first preparation.
+        info = game_info(game_folder(s, start))
+        locations = lists[0].with_name(f"shader_locations_{info['id']}.txt") if info else None
+        if locations and locations.is_file():
+            env['BB_SHADER_LOCATIONS'] = str(locations)
         if preparation == 'background':
             env['BB_PREP_SCREEN'] = '0'
         elif str(s.get('preparation_speed') or 'all') == 'half':
