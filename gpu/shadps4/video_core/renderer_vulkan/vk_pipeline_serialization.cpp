@@ -331,27 +331,129 @@ struct LoadedStage {
     ShaderInputs inputs{};
     u64 checksum{};
     bool replay = false;
+    u64 pgm_hash{};
+    Shader::HwStage hw_stage{};
+    Shader::SwStage sw_stage{};
+    std::vector<u32> flat; ///< the stored flattened user-data tables
 };
 
-/// bbport (shader variant list): the code of the given shaders, read from the game's own files (BB_APP0_DIR). The
-/// shaders sit there uncompressed, each with its OrbShdr binary info block (shader_hash = the port's program hash,
-/// length = code bytes) behind its code, or reached from a jump at its start (AmdGpu::SearchBinaryInfo).
-static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(const std::set<u64>& wanted,
-                                                                    u64* files_scanned) {
-    std::unordered_map<u64, std::vector<u32>> found;
-    const char* app0 = std::getenv("BB_APP0_DIR");
-    if (!app0 || wanted.empty()) {
-        return found;
+/// bbport (shader variant list): where a shader sits in the game's files: a file under BB_APP0_DIR and the offset of
+/// its OrbShdr binary info block (shader_hash = the port's program hash, length = code bytes). The shaders sit there
+/// uncompressed; the locations are the same for every copy of a game version.
+struct ShaderLocation {
+    u32 file;
+    u64 at;
+    u32 length;
+};
+struct ShaderLocations {
+    std::vector<std::string> files; ///< relative to BB_APP0_DIR, '/' separated
+    std::unordered_map<u64, ShaderLocation> shaders;
+};
+
+static std::filesystem::path ShaderLocationsPath(const std::filesystem::path& app0) {
+    using namespace Common::FS;
+    return GetUserPath(PathType::CacheDir) /
+           ("shader_locations_" + app0.filename().string() + ".txt");
+}
+
+/// Text: "F <path>" lines number the files from 0, then "<hash hex> <file> <offset> <length>" per shader.
+static ShaderLocations LoadShaderLocations(const std::filesystem::path& path) {
+    ShaderLocations locations;
+    std::FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) {
+        return locations;
     }
-    static constexpr char sig[] = "OrbShdr";
+    char line[4096];
+    while (std::fgets(line, sizeof(line), f)) {
+        if (line[0] == 'F' && line[1] == ' ') {
+            std::string name{line + 2};
+            while (!name.empty() && (name.back() == '\n' || name.back() == '\r')) {
+                name.pop_back();
+            }
+            locations.files.push_back(std::move(name));
+            continue;
+        }
+        unsigned long long hash, at;
+        unsigned file, length;
+        if (std::sscanf(line, "%llx %u %llu %u", &hash, &file, &at, &length) == 4 &&
+            file < locations.files.size()) {
+            locations.shaders.emplace(hash, ShaderLocation{file, at, length});
+        }
+    }
+    std::fclose(f);
+    return locations;
+}
+
+static void SaveShaderLocations(const std::filesystem::path& path, const ShaderLocations& locations) {
+    const auto temp = std::filesystem::path{path}.concat(".tmp");
+    std::FILE* f = _wfopen(temp.c_str(), L"wb");
+    if (!f) {
+        return;
+    }
+    for (const auto& name : locations.files) {
+        std::fprintf(f, "F %s\n", name.c_str());
+    }
+    std::vector<std::pair<u64, ShaderLocation>> sorted(locations.shaders.begin(),
+                                                       locations.shaders.end());
+    std::ranges::sort(sorted, {}, &std::pair<u64, ShaderLocation>::first);
+    for (const auto& [hash, loc] : sorted) {
+        std::fprintf(f, "%016llx %u %llu %u\n", (unsigned long long)hash, loc.file,
+                     (unsigned long long)loc.at, loc.length);
+    }
+    const bool ok = std::fclose(f) == 0;
+    std::error_code ec;
+    if (ok) {
+        std::filesystem::rename(temp, path, ec);
+    } else {
+        std::filesystem::remove(temp, ec);
+    }
+}
+
+/// The code of the shader whose info block is at `at` in `f`, if that block still names `hash`. The code starts with
+/// s_mov_b32 vcc_hi, n where the info block is (n + 1) * 2 dwords on (AmdGpu::SearchBinaryInfo), or ends at the block.
+static std::optional<std::vector<u32>> ReadShaderCodeAt(std::FILE* f, u64 at, u64 hash, u32 length) {
+    if (at < 8 || length < 8 || length >= (1u << 22)) {
+        return std::nullopt;
+    }
+    const u64 window = std::min<u64>(at, u64(length) + 0x10000);
+    std::vector<u8> bytes(window + 28);
+    if (_fseeki64(f, s64(at - window), SEEK_SET) != 0 ||
+        std::fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) {
+        return std::nullopt;
+    }
+    u64 info_hash;
+    std::memcpy(&info_hash, bytes.data() + window + 16, 8);
+    if (std::memcmp(bytes.data() + window, "OrbShdr", 7) != 0 || info_hash != hash) {
+        return std::nullopt;
+    }
+    s64 start = -1;
+    for (u64 back = 8; back <= window; ++back) {
+        u32 w[2];
+        std::memcpy(w, bytes.data() + window - back, 8);
+        if (w[0] == 0xBEEB03FFu && (u64(w[1]) + 1) * 8 == back) {
+            start = s64(window - back);
+            break;
+        }
+    }
+    if (start < 0 && length <= window) {
+        start = s64(window - length);
+    }
+    if (start < 0 || u64(start) + length > bytes.size()) {
+        return std::nullopt;
+    }
+    std::vector<u32> code(length / 4);
+    std::memcpy(code.data(), bytes.data() + start, code.size() * 4);
+    return code;
+}
+
+/// Every shader info block in the game's files.
+static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u64* files_scanned) {
+    ShaderLocations locations;
     static constexpr size_t chunk = 64ull << 20;
     std::vector<char> buf(chunk + 64);
     std::error_code ec;
     for (auto it = std::filesystem::recursive_directory_iterator(app0, ec);
          !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
-        if (found.size() == wanted.size()) {
-            break;
-        }
         if (!it->is_regular_file(ec) || it->file_size(ec) < 64) {
             continue;
         }
@@ -360,12 +462,8 @@ static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(const std::s
             continue;
         }
         ++*files_scanned;
-        // Info blocks of the wanted shaders in this file.
-        struct Hit {
-            u64 at, hash;
-            u32 length;
-        };
-        std::vector<Hit> hits;
+        const u32 file = u32(locations.files.size());
+        bool any = false;
         size_t carry = 0;
         u64 base = 0;
         while (true) {
@@ -379,7 +477,7 @@ static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(const std::s
             for (const char* p = buf.data();
                  (p = static_cast<const char*>(std::memchr(p, 'O', buf.data() + scan_end - p)));
                  ++p) {
-                if (std::memcmp(p, sig, 7) != 0) {
+                if (std::memcmp(p, "OrbShdr", 7) != 0) {
                     continue;
                 }
                 u32 bits;
@@ -387,9 +485,11 @@ static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(const std::s
                 std::memcpy(&bits, p + 8, 4);
                 std::memcpy(&hash, p + 16, 8);
                 const u32 length = bits >> 8;
-                if (wanted.contains(hash) && !found.contains(hash) && length >= 8 &&
-                    length < (1u << 22)) {
-                    hits.push_back({base + u64(p - buf.data()), hash, length});
+                if (hash && length >= 8 && length < (1u << 22)) {
+                    any |= locations.shaders
+                               .try_emplace(hash, ShaderLocation{file, base + u64(p - buf.data()),
+                                                                 length})
+                               .second;
                 }
             }
             if (!got) {
@@ -399,38 +499,55 @@ static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(const std::s
             std::memmove(buf.data(), buf.data() + scan_end, carry);
             base += scan_end;
         }
-        for (const auto& hit : hits) {
-            if (found.contains(hit.hash)) {
-                continue;
-            }
-            // The code starts with s_mov_b32 vcc_hi, n where the info block is (n + 1) * 2 dwords on, or ends at the
-            // info block.
-            const u64 window = std::min<u64>(hit.at, u64(hit.length) + 0x10000);
-            std::vector<u8> bytes(window + 28);
-            if (_fseeki64(f, s64(hit.at - window), SEEK_SET) != 0 ||
-                std::fread(bytes.data(), 1, bytes.size(), f) != bytes.size()) {
-                continue;
-            }
-            s64 start = -1;
-            for (u64 back = 8; back <= window; ++back) {
-                u32 w[2];
-                std::memcpy(w, bytes.data() + window - back, 8);
-                if (w[0] == 0xBEEB03FFu && (u64(w[1]) + 1) * 8 == back) {
-                    start = s64(window - back);
-                    break;
-                }
-            }
-            if (start < 0 && hit.length <= window) {
-                start = s64(window - hit.length);
-            }
-            if (start < 0 || u64(start) + hit.length > bytes.size()) {
-                continue;
-            }
-            std::vector<u32> code(hit.length / 4);
-            std::memcpy(code.data(), bytes.data() + start, code.size() * 4);
-            found.emplace(hit.hash, std::move(code));
-        }
         std::fclose(f);
+        if (any) {
+            locations.files.push_back(
+                std::filesystem::relative(it->path(), app0, ec).generic_string());
+        }
+    }
+    return locations;
+}
+
+/// The code of the given shaders, from their saved locations; a scan of the game's files finds (and saves) the
+/// locations when one is missing or no longer right.
+static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(const std::set<u64>& wanted,
+                                                                    u64* files_scanned) {
+    std::unordered_map<u64, std::vector<u32>> found;
+    const char* app0_env = std::getenv("BB_APP0_DIR");
+    if (!app0_env || wanted.empty()) {
+        return found;
+    }
+    const std::filesystem::path app0{app0_env};
+    const auto locations_path = ShaderLocationsPath(app0);
+    const auto read_from = [&](const ShaderLocations& locations) {
+        std::unordered_map<u32, std::FILE*> open;
+        for (const u64 hash : wanted) {
+            const auto it = locations.shaders.find(hash);
+            if (found.contains(hash) || it == locations.shaders.end()) {
+                continue;
+            }
+            auto [f, added] = open.try_emplace(it->second.file, nullptr);
+            if (added) {
+                f->second = _wfopen((app0 / locations.files[it->second.file]).c_str(), L"rb");
+            }
+            if (!f->second) {
+                continue;
+            }
+            if (auto code = ReadShaderCodeAt(f->second, it->second.at, hash, it->second.length)) {
+                found.emplace(hash, std::move(*code));
+            }
+        }
+        for (const auto& [file, f] : open) {
+            if (f) {
+                std::fclose(f);
+            }
+        }
+    };
+    read_from(LoadShaderLocations(locations_path));
+    if (found.size() < wanted.size()) {
+        const auto scanned = ScanShaderLocations(app0, files_scanned);
+        read_from(scanned);
+        SaveShaderLocations(locations_path, scanned);
     }
     return found;
 }
@@ -626,6 +743,10 @@ void PipelineCache::WarmUpThread() {
             if (replay_variants && stage.inputs.present && checksum) {
                 stage.checksum = checksum;
                 stage.replay = true;
+                stage.pgm_hash = info.pgm_hash;
+                stage.hw_stage = info.hw_stage;
+                stage.sw_stage = info.sw_stage;
+                stage.flat = info.flattened_ud_buf;
             }
             return;
         }
@@ -643,84 +764,6 @@ void PipelineCache::WarmUpThread() {
     // Everything is read: an archived cache turns writable now (the game saves what it compiles).
     db.FinishPreload();
 
-    // bbport (shader variant list, BB_VARIANT_REPLAY=1): variants with translation inputs but no binary are
-    // translated from the code in the player's own game files, with the recorded inputs in place of game memory,
-    // and kept only when the result matches the stored checksum bit for bit.
-    if (replay_variants) {
-        const double t_start = elapsed_ms();
-        std::set<u64> wanted;
-        u32 to_replay = 0;
-        for (const auto& stage : stages) {
-            if (stage.replay) {
-                wanted.insert(stage.program->info.pgm_hash);
-                ++to_replay;
-            }
-        }
-        u64 files_scanned = 0;
-        const auto code = ReadGameShaderCode(wanted, &files_scanned);
-        const double t_scan = elapsed_ms();
-        std::atomic<u32> matched{0}, differed{0}, no_code{0}, failed{0};
-        ParallelFor(stages.size(), threads, [&](size_t i) {
-            auto& stage = stages[i];
-            if (!stage.replay) {
-                return;
-            }
-            const auto& stored = stage.program->info;
-            const auto it = code.find(stored.pgm_hash);
-            if (it == code.end()) {
-                no_code.fetch_add(1, std::memory_order_relaxed);
-                return;
-            }
-            const std::span<const u32> program_code{it->second};
-            const Shader::ShaderParams params{
-                .user_data = std::span<const u32, Shader::ShaderParams::NumShaderUserData>{
-                    stage.inputs.user_data},
-                .code = program_code,
-                .hash = stored.pgm_hash,
-            };
-            Shader::Info info{stored.hw_stage, stored.sw_stage, params};
-            const Shader::TranslationReplay replay{&stored.flattened_ud_buf, &stage.inputs.reads,
-                                                   &stage.spec.fetch_shader_data};
-            auto runtime_info = stage.spec.runtime_info;
-            auto binding = stage.spec.start;
-            static thread_local Shader::Pools replay_pools;
-            std::vector<u32> spv;
-            sigjmp_buf recover;
-            if (sigsetjmp(recover, 0)) {
-                runtime_fault_recover = nullptr;
-                Shader::t_translation_replay = nullptr;
-                failed.fetch_add(1, std::memory_order_relaxed);
-                return;
-            }
-            runtime_fault_recover = &recover;
-            Shader::t_translation_replay = &replay;
-            const auto module = TranslateModule(info, runtime_info, program_code, stage.perm_idx,
-                                                binding, replay_pools, spv);
-            Shader::t_translation_replay = nullptr;
-            runtime_fault_recover = nullptr;
-            if (BinaryChecksum(spv) != stage.checksum) {
-                if (module) {
-                    device.destroyShaderModule(module);
-                }
-                if (differed.fetch_add(1, std::memory_order_relaxed) < 8) {
-                    LOG_WARNING(Render_Vulkan, "Variant replay of {} shader {:#x} ({}) differs",
-                                stored.hw_stage, stored.pgm_hash, stage.perm_idx);
-                }
-                return;
-            }
-            matched.fetch_add(1, std::memory_order_relaxed);
-            stage.module = module;
-            // Saved as if translated in play: the next launch loads it like any stored shader.
-            RegisterShaderBinary(std::move(spv), stored.pgm_hash, stage.perm_idx);
-        });
-        std::printf(
-                    "Variant replay: %u variants without a binary; code for %zu of %zu "
-                    "shaders from %llu game files (%.0f ms); %u identical, %u differ, %u without "
-                    "code, %u faulted (%.0f ms)\n",
-                    to_replay, code.size(), wanted.size(), (unsigned long long)files_scanned,
-                     t_scan - t_start, matched.load(), differed.load(), no_code.load(),
-                     failed.load(), elapsed_ms() - t_scan);
-    }
     const double t_shaders = elapsed_ms();
 
     // 3. Into the program cache, in order. A permutation lives at its original index.
@@ -782,7 +825,7 @@ void PipelineCache::WarmUpThread() {
     // the programs' template Infos (the game refreshes the programs' own per draw) and then
     // pointed at the programs' Infos.
     std::atomic<u32> num_pipelines{0};
-    ParallelFor(stored.size(), threads, [&](size_t i) {
+    const auto build_stored = [&](size_t i) {
         auto& entry = stored[i];
         if (!entry.parsed) {
             return;
@@ -855,7 +898,102 @@ void PipelineCache::WarmUpThread() {
                 graphics_pipelines.try_emplace(entry.gkey, std::move(pipeline)).second;
         }
         ReleaseClaim(claim_id);
-    });
+    };
+    ParallelFor(stored.size(), threads, build_stored);
+
+    // 6. bbport (shader variant list, BB_VARIANT_REPLAY=1): variants with translation inputs but no binary are
+    // translated from the code in the player's own game files, with the recorded inputs in place of game memory,
+    // and kept only when the result matches the stored checksum bit for bit. The game runs meanwhile (the file
+    // scan takes seconds); their pipelines are built after them.
+    if (replay_variants) {
+        const double t_start = elapsed_ms();
+        std::set<u64> wanted;
+        u32 to_replay = 0;
+        for (const auto& stage : stages) {
+            if (stage.replay) {
+                wanted.insert(stage.pgm_hash);
+                ++to_replay;
+            }
+        }
+        u64 files_scanned = 0;
+        const auto code = ReadGameShaderCode(wanted, &files_scanned);
+        const double t_scan = elapsed_ms();
+        std::atomic<u32> matched{0}, differed{0}, no_code{0}, failed{0}, late{0};
+        ParallelFor(stages.size(), threads, [&](size_t i) {
+            auto& stage = stages[i];
+            if (!stage.replay || !stage.owner) {
+                return;
+            }
+            const auto it = code.find(stage.pgm_hash);
+            if (it == code.end()) {
+                no_code.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            const std::span<const u32> program_code{it->second};
+            const Shader::ShaderParams params{
+                .user_data = std::span<const u32, Shader::ShaderParams::NumShaderUserData>{
+                    stage.inputs.user_data},
+                .code = program_code,
+                .hash = stage.pgm_hash,
+            };
+            Shader::Info info{stage.hw_stage, stage.sw_stage, params};
+            const Shader::TranslationReplay replay{&stage.flat, &stage.inputs.reads,
+                                                   &stage.spec.fetch_shader_data};
+            auto runtime_info = stage.spec.runtime_info;
+            auto binding = stage.spec.start;
+            static thread_local Shader::Pools replay_pools;
+            std::vector<u32> spv;
+            sigjmp_buf recover;
+            if (sigsetjmp(recover, 0)) {
+                runtime_fault_recover = nullptr;
+                Shader::t_translation_replay = nullptr;
+                failed.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            runtime_fault_recover = &recover;
+            Shader::t_translation_replay = &replay;
+            const auto module = TranslateModule(info, runtime_info, program_code, stage.perm_idx,
+                                                binding, replay_pools, spv);
+            Shader::t_translation_replay = nullptr;
+            runtime_fault_recover = nullptr;
+            if (BinaryChecksum(spv) != stage.checksum) {
+                if (module) {
+                    device.destroyShaderModule(module);
+                }
+                if (differed.fetch_add(1, std::memory_order_relaxed) < 8) {
+                    LOG_WARNING(Render_Vulkan, "Variant replay of {} shader {:#x} ({}) differs",
+                                stage.hw_stage, stage.pgm_hash, stage.perm_idx);
+                }
+                return;
+            }
+            matched.fetch_add(1, std::memory_order_relaxed);
+            // Saved as if translated in play: the next launch loads it like any stored shader.
+            RegisterShaderBinary(std::move(spv), stage.pgm_hash, stage.perm_idx);
+            // Into the slot reserved for it, unless the game translated the same permutation meanwhile
+            // (it appends those behind the stored ones).
+            {
+                std::unique_lock lk{programs_mutex};
+                auto& modules = stage.owner->modules;
+                const auto found = std::ranges::find(modules, stage.spec, &Program::Module::spec);
+                if (stage.perm_idx < modules.size() && !modules[stage.perm_idx].module &&
+                    (found == modules.end() || !found->module)) {
+                    modules[stage.perm_idx] = {module, stage.spec};
+                    stage.module = module;
+                    stage.ready = true;
+                    return;
+                }
+            }
+            late.fetch_add(1, std::memory_order_relaxed);
+            device.destroyShaderModule(module);
+        });
+        std::printf("Variant replay: %u variants without a binary; code for %zu of %zu shaders (%llu "
+                    "game files scanned, %.0f ms); %u identical, %u differ, %u without code, %u faulted, %u "
+                    "translated by the game first (%.0f ms)\n",
+                    to_replay, code.size(), wanted.size(), (unsigned long long)files_scanned,
+                    t_scan - t_start, matched.load(), differed.load(), no_code.load(), failed.load(),
+                    late.load(), elapsed_ms() - t_scan);
+        ParallelFor(stored.size(), threads, build_stored);
+    }
     const u32 num_total_pipelines = static_cast<u32>(stored.size());
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines.load());
     if (num_total_pipelines > num_pipelines.load()) {
