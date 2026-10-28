@@ -1044,6 +1044,10 @@ void FullScreenPreparation() {
     const int phase = prep_phase.load(std::memory_order_acquire);
     const u32 done = prep_done.load(std::memory_order_relaxed);
     const u32 total = prep_total.load(std::memory_order_relaxed);
+    // After the last step the phase goes back to 0 while the page is still up: show it finished, not "Starting".
+    static bool had_step = false;
+    had_step = had_step || phase != 0;
+    const bool finishing = phase == 0 && had_step;
 
     ImGui::SetCursorPosY(h * 0.36f);
     centered("Preparing shaders", 2.4f, white);
@@ -1053,17 +1057,19 @@ void FullScreenPreparation() {
 
     const char* step = phase == 1   ? "Step 1 of 2: building shaders from your game files"
                        : phase == 2 ? "Step 2 of 2: compiling them for your graphics card"
+                       : finishing  ? "Finishing..."
                                     : "Starting...";
     centered(step, 1.2f, white);
     ImGui::Dummy(ImVec2(0.0f, 10.0f * base_scale));
     const float bar_w = std::min(w * 0.55f, 900.0f * base_scale);
     ImGui::SetCursorPosX((w - bar_w) * 0.5f);
-    const float fraction = total ? float(done) / float(total) : 0.0f;
+    const float fraction = finishing ? 1.0f : total ? float(done) / float(total) : 0.0f;
     ImGui::SetWindowFontScale(1.0f);
     ImGui::ProgressBar(fraction, ImVec2(bar_w, 22.0f * base_scale), "");
     ImGui::Dummy(ImVec2(0.0f, 8.0f * base_scale));
-    const std::string count =
-        total ? fmt::format("{} / {}{}", done, total, PreparationEta(done, total)) : std::string{};
+    const std::string count = !finishing && total
+                                  ? fmt::format("{} / {}{}", done, total, PreparationEta(done, total))
+                                  : std::string{};
     centered(count.c_str(), 1.1f, grey);
     ImGui::End();
     ImGui::PopStyleColor(3);
