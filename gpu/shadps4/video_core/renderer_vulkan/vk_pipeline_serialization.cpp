@@ -1240,33 +1240,38 @@ vk::ShaderModule PipelineCache::BuildListedVariant(const ListedVariant& v, std::
         return {};
     }
     runtime_fault_recover = &recover;
-    // A predicted line gives its images by descriptor slot: a first translation with plain images says where each
-    // of the shader's images is read from; ranked by that, they take the slot setups.
-    if (v.by_slot) {
-        Shader::StageSpecialization probe;
-        probe.images.resize(Shader::NUM_IMAGES);
-        probe.bitset.set();
-        const auto plain = MakeSharpOverride(probe);
+    // A first translation with given descriptors says what the shader reads and writes, and from where.
+    const auto probe_translate = [&](const Shader::StageSpecialization& with) {
+        const auto descriptors = MakeSharpOverride(with);
         const Shader::TranslationReplay probe_replay{&no_flat, &no_reads, &v.spec.fetch_shader_data};
-        Shader::Info probe_info{draw.hw_stage, draw.sw_stage, params};
+        auto probe_info = std::make_unique<Shader::Info>(draw.hw_stage, draw.sw_stage, params);
         auto probe_runtime = runtime_info;
         auto probe_binding = v.spec.start;
         std::vector<u32> probe_spv;
         Shader::t_translation_replay = &probe_replay;
-        Shader::t_sharp_override = &plain;
-        const auto probe_module = TranslateModule(probe_info, probe_runtime, program_code, v.perm, probe_binding,
+        Shader::t_sharp_override = &descriptors;
+        const auto probe_module = TranslateModule(*probe_info, probe_runtime, program_code, v.perm, probe_binding,
                                                   list_pools, probe_spv);
         Shader::t_sharp_override = nullptr;
         Shader::t_translation_replay = nullptr;
         if (probe_module) {
             device.destroyShaderModule(probe_module);
         }
-        std::vector<size_t> order(probe_info.images.size());
+        return probe_info;
+    };
+    // A predicted line gives its images by descriptor slot: plain images first say where each of the shader's images
+    // is read from; ranked by that, they take the slot setups.
+    if (v.by_slot) {
+        Shader::StageSpecialization plain;
+        plain.images.resize(Shader::NUM_IMAGES);
+        plain.bitset.set();
+        const auto probe_info = probe_translate(plain);
+        std::vector<size_t> order(probe_info->images.size());
         for (size_t k = 0; k < order.size(); ++k) {
             order[k] = k;
         }
-        std::ranges::sort(order, {}, [&](size_t k) { return probe_info.images[k].sharp_fetch.offsets[0]; });
-        spec.images.assign(probe_info.images.size(), {});
+        std::ranges::sort(order, {}, [&](size_t k) { return probe_info->images[k].sharp_fetch.offsets[0]; });
+        spec.images.assign(probe_info->images.size(), {});
         for (size_t rank = 0; rank < order.size() && rank < v.slot_images.size(); ++rank) {
             spec.images[order[rank]] = v.slot_images[rank];
         }
@@ -1274,6 +1279,18 @@ vk::ShaderModule PipelineCache::BuildListedVariant(const ListedVariant& v, std::
         spec.bitset.reset();
         for (size_t k = 0; k < spec.images.size(); ++k) {
             spec.bitset.set(k);
+        }
+    }
+    // BB_VARIANT_COHERENT=written (lines of caches from before BufferSpecialization::coherent): a compute shader's
+    // buffers are taken as coherent (memory type 3) exactly when it writes them.
+    static const bool coherent_from_writes = [] {
+        const char* env = std::getenv("BB_VARIANT_COHERENT");
+        return env && std::string_view{env} == "written";
+    }();
+    if (coherent_from_writes && draw.hw_stage == Shader::HwStage::Compute && !spec.buffers.empty()) {
+        const auto probe_info = probe_translate(spec);
+        for (size_t k = 0; k < spec.buffers.size() && k < probe_info->buffers.size(); ++k) {
+            spec.buffers[k].coherent = probe_info->buffers[k].is_written;
         }
     }
     const auto overrides = MakeSharpOverride(spec);
@@ -1396,7 +1413,7 @@ void PipelineCache::WarmUpThread() {
         // bbport (variant list prototype, BB_VARIANT_SHIP): keys of version 6 lack GraphicsPipelineKey::split_sets
         // (4 bytes, and 4 of padding at the end: 8 bytes shorter). A graphics key of another size is skipped.
         constexpr size_t v6_key_size = sizeof(GraphicsPipelineKey) - 8;
-        const bool v6 = version == 6 && std::getenv("BB_VARIANT_SHIP");
+        const bool v6 = version == 6 && (std::getenv("BB_VARIANT_SHIP") || std::getenv("BB_KEY_DUMP"));
         if (version != Serialization::PipelineKeyVersion && !v6) {
             // A key of an older cache layout can never load again: drop it.
             std::error_code ec;
@@ -1443,6 +1460,45 @@ void PipelineCache::WarmUpThread() {
         entry.parsed = true;
     });
     const double t_keys = elapsed_ms();
+    // bbport (shader variant list, BB_KEY_DUMP=<file>): every stored graphics pipeline key, one line, fields named:
+    // what a pipeline adds to its shaders (for predicting pipelines from the game's data).
+    if (const char* dump = std::getenv("BB_KEY_DUMP")) {
+        if (std::FILE* f = std::fopen(dump, "w")) {
+            u32 n = 0;
+            for (const auto& entry : stored) {
+                if (!entry.parsed || entry.compute) {
+                    continue;
+                }
+                const auto& k = entry.gkey;
+                std::string line = "stages=";
+                for (const auto h : k.stage_hashes) {
+                    line += fmt::format("{:x},", h);
+                }
+                line += "\tvfmt=";
+                for (const auto fmt_ : k.vertex_buffer_formats) {
+                    if (fmt_ != vk::Format::eUndefined) {
+                        line += fmt::format("{},", u32(fmt_));
+                    }
+                }
+                line += fmt::format("\tncb={}\tcb={}\tblend={}\twmask=", k.num_color_attachments,
+                                    HexList(k.color_buffers), HexList(k.blend_controls));
+                for (const auto m : k.write_masks) {
+                    line += fmt::format("{:x},", u32(m));
+                }
+                line += fmt::format("\tcbmask={}\tlogic={}\tsamples={}.{}\tcsamples={}\tmrt={:x}\tmv={}\tsq={:x}"
+                                    "\tz={}\tstencil={}\tdclamp={}\tprim={}\tpoly={}\tclip={}\tprov={}\tdclip={}\n",
+                                    HexBytes(&k.cb_shader_mask, sizeof(k.cb_shader_mask)), u32(k.logic_op),
+                                    k.num_samples, k.depth_samples, HexList(k.color_samples), k.mrt_mask,
+                                    k.motion_vectors, k.ui_squeeze, u32(k.z_format), u32(k.stencil_format),
+                                    u32(k.depth_clamp_enable), u32(k.prim_type), u32(k.polygon_mode),
+                                    u32(k.clip_space), u32(k.provoking_vtx_last), u32(k.depth_clip_enable));
+                std::fputs(line.c_str(), f);
+                ++n;
+            }
+            std::fclose(f);
+            std::printf("Key dump: %u graphics pipeline keys to %s\n", n, dump);
+        }
+    }
 
     // 2. The shader permutations those keys name, loaded once each.
     std::vector<u64> stage_hashes;
