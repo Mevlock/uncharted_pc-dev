@@ -7,6 +7,8 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <cstring>
+#include <map>
 #include <set>
 #include <shared_mutex>
 #include <thread>
@@ -652,6 +654,130 @@ void PipelineCache::WarmUpThread() {
                     graphics, stage_sets.size(),
                     stage_sets.empty() ? 0.0 : double(graphics) / double(stage_sets.size()),
                     pre_raster_sets.size(), fragment_stages.size());
+    }
+    // bbport: BB_GUESS_TEST=1 (first-launch pre-translation study): could each stored permutation have been guessed
+    // without running the game? A guess takes, for every draw-time field, the most common value of its kind over
+    // all stored permutations (conditioned on what the shader code itself says: a buffer's is_formatted, an
+    // image's is_storage). Reported: permutations with no resources (only the runtime info to guess), exact hits
+    // of the full guess, and hits if the runtime info were known (resources guessed only). The binding start is
+    // left out: with the split layout of pipeline libraries each half starts at 0, so it is known.
+    if (std::getenv("BB_GUESS_TEST")) {
+        const auto bytes_hash = [](const auto& value) { return XXH3_64bits(&value, sizeof(value)); };
+        struct BufferKey {
+            u32 stride, is_formatted, swizzle, data_format, num_format, index_stride, element_size;
+            AmdGpu::CompMapping dst_select;
+            AmdGpu::NumberConversion conversion;
+        };
+        const auto buffer_key = [&](const Shader::BufferSpecialization& b) {
+            BufferKey k{};
+            std::memset(&k, 0, sizeof(k));
+            k.stride = b.stride;
+            k.is_formatted = b.is_formatted;
+            k.swizzle = b.swizzle_enable;
+            if (b.is_formatted) {
+                k.data_format = b.data_format;
+                k.num_format = b.num_format;
+                k.dst_select = b.dst_select;
+                k.conversion = b.num_conversion;
+            }
+            if (b.swizzle_enable) {
+                k.index_stride = b.index_stride;
+                k.element_size = b.element_size;
+            }
+            return bytes_hash(k);
+        };
+        const auto image_key = [&](const Shader::ImageSpecialization& i) {
+            Shader::ImageSpecialization k{};
+            std::memset(&k, 0, sizeof(k));
+            k = i;
+            return bytes_hash(k);
+        };
+        const auto sampler_key = [](const Shader::SamplerSpecialization& s) {
+            return u64(s.force_unnormalized) | u64(s.force_degamma) << 1;
+        };
+        const auto attrib_key = [&](const Shader::VsAttribSpecialization& a) {
+            Shader::VsAttribSpecialization k{};
+            std::memset(&k, 0, sizeof(k));
+            k = a;
+            return bytes_hash(k);
+        };
+        // Pass 1: the value counts per kind (and per known condition).
+        std::unordered_map<u64, std::unordered_map<u64, u32>> counts;
+        const auto kind = [](u64 type, u64 condition) { return type << 8 | condition; };
+        std::unique_lock lock{programs_mutex};
+        for (const auto& [hash, program] : program_cache) {
+            const u64 stage = static_cast<u64>(program->info.sw_stage);
+            for (const auto& module : program->modules) {
+                const auto& spec = module.spec;
+                ++counts[kind(1, stage)][bytes_hash(spec.runtime_info)];
+                for (const auto& b : spec.buffers) {
+                    ++counts[kind(2, b.is_formatted)][buffer_key(b)];
+                }
+                for (const auto& i : spec.images) {
+                    ++counts[kind(3, i.is_storage)][image_key(i)];
+                }
+                for (const auto& s : spec.samplers) {
+                    ++counts[kind(4, 0)][sampler_key(s)];
+                }
+                for (const auto& a : spec.vs_attribs) {
+                    ++counts[kind(5, 0)][attrib_key(a)];
+                }
+                ++counts[kind(6, 0)][spec.fmasks.size()];
+            }
+        }
+        std::unordered_map<u64, u64> mode;
+        for (const auto& [k, values] : counts) {
+            u32 best = 0;
+            for (const auto& [value, n] : values) {
+                if (n > best) {
+                    best = n;
+                    mode[k] = value;
+                }
+            }
+        }
+        // Pass 2: hits per stage.
+        struct Tally {
+            u32 total = 0, resource_free = 0, free_hit = 0, full_hit = 0, resources_hit = 0;
+        };
+        std::map<u64, Tally> tally;
+        for (const auto& [hash, program] : program_cache) {
+            const u64 stage = static_cast<u64>(program->info.sw_stage);
+            for (const auto& module : program->modules) {
+                const auto& spec = module.spec;
+                auto& t = tally[stage];
+                ++t.total;
+                const bool runtime_hit = bytes_hash(spec.runtime_info) == mode[kind(1, stage)];
+                bool resources = spec.fmasks.empty();
+                for (const auto& b : spec.buffers) {
+                    resources &= buffer_key(b) == mode[kind(2, b.is_formatted)];
+                }
+                for (const auto& i : spec.images) {
+                    resources &= image_key(i) == mode[kind(3, i.is_storage)];
+                }
+                for (const auto& s : spec.samplers) {
+                    resources &= sampler_key(s) == mode[kind(4, 0)];
+                }
+                for (const auto& a : spec.vs_attribs) {
+                    resources &= attrib_key(a) == mode[kind(5, 0)];
+                }
+                const bool no_resources = spec.buffers.empty() && spec.images.empty() &&
+                                          spec.samplers.empty() && spec.vs_attribs.empty() &&
+                                          spec.fmasks.empty();
+                t.resource_free += no_resources;
+                t.free_hit += no_resources && runtime_hit;
+                t.full_hit += runtime_hit && resources;
+                t.resources_hit += resources;
+            }
+        }
+        static constexpr const char* stage_names[] = {"fragment", "tess control", "tess eval",
+                                                      "vertex", "geometry", "compute"};
+        for (const auto& [stage, t] : tally) {
+            std::printf("Guess test: %-12s %5u permutations: %u with no resources (%u of them guessed), full guess "
+                        "%u (%.1f%%), resources only %u (%.1f%%)\n",
+                        stage < 6 ? stage_names[stage] : "?", t.total, t.resource_free, t.free_hit,
+                        t.full_hit, 100.0 * t.full_hit / std::max(1u, t.total), t.resources_hit,
+                        100.0 * t.resources_hit / std::max(1u, t.total));
+        }
     }
     if (const u32 n = mismatched_binaries.load()) {
         std::printf("Pipeline cache: %u shader binaries did not match their meta: removed, "
