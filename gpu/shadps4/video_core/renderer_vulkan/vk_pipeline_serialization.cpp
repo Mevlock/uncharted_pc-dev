@@ -1642,7 +1642,7 @@ void PipelineCache::WarmUpThread() {
                 }
                 line += fmt::format("\tcbmask={}\tlogic={}\tsamples={}.{}\tcsamples={}\tmrt={:x}\tmv={}\tsq={:x}"
                                     "\tz={}\tstencil={}\tdclamp={}\tprim={}\tpoly={}\tclip={}\tprov={}\tdclip={}"
-                                    "\tpcp={}\tsplit={}\tss={}\tnva={}\n",
+                                    "\tpcp={}\tsplit={}\tss={}\tnva={}",
                                     HexBytes(&k.cb_shader_mask, sizeof(k.cb_shader_mask)), u32(k.logic_op),
                                     k.num_samples, k.depth_samples, HexList(k.color_samples), k.mrt_mask,
                                     k.motion_vectors, k.ui_squeeze, u32(k.z_format), u32(k.stencil_format),
@@ -1651,6 +1651,15 @@ void PipelineCache::WarmUpThread() {
                                     k.patch_control_points, k.split_sets,
                                     u32(entry.gsdata.multisampling.sampleShadingEnable),
                                     entry.gsdata.vertex_attributes.size());
+                // Rect and quad lists: the helper tessellation shaders the port made for the draw's fragment inputs
+                // (our own SPIR-V; a text key cannot rebuild them).
+                if (!entry.gsdata.tcs.empty()) {
+                    line += "\ttcs=" + HexBytes(entry.gsdata.tcs.data(), entry.gsdata.tcs.size() * sizeof(u32));
+                }
+                if (!entry.gsdata.tes.empty()) {
+                    line += "\ttes=" + HexBytes(entry.gsdata.tes.data(), entry.gsdata.tes.size() * sizeof(u32));
+                }
+                line += '\n';
                 std::fputs(line.c_str(), f);
                 ++n;
             }
@@ -1750,6 +1759,17 @@ void PipelineCache::WarmUpThread() {
                     .sampleShadingEnable = num("ss") != 0,
                 };
                 ok = ok && num("nva") == 0;
+                // The helper tessellation shaders of a rect or quad list (tcs=, tes=: SPIR-V words in hex).
+                const auto words = [&](std::string_view name, std::vector<u32>& out) {
+                    const auto it = f.find(name);
+                    if (it == f.end() || it->second.size() % 8 != 0) {
+                        return;
+                    }
+                    out.resize(it->second.size() / 8);
+                    ok = ok && UnhexBytes(it->second, out.data(), out.size() * sizeof(u32));
+                };
+                words("tcs", entry.gsdata.tcs);
+                words("tes", entry.gsdata.tes);
             } catch (const std::exception&) {
                 ok = false;
             }
@@ -1757,10 +1777,11 @@ void PipelineCache::WarmUpThread() {
                 ++bad;
                 continue;
             }
-            // Rect and quad lists draw through helper tessellation shaders made for the draw's fragment inputs, which a
-            // text key does not carry (built from it, the helpers were empty: the driver refused them). The game builds
-            // these few pipelines itself at first use.
-            if (k.prim_type == AmdGpu::PrimitiveType::RectList || k.prim_type == AmdGpu::PrimitiveType::QuadList) {
+            // Rect and quad lists draw through helper tessellation shaders made for the draw's fragment inputs: without
+            // them in the line (keys dumped before tcs=/tes=) the helpers would be empty and the driver refuses them. The
+            // game builds those pipelines itself at first use.
+            if ((k.prim_type == AmdGpu::PrimitiveType::RectList || k.prim_type == AmdGpu::PrimitiveType::QuadList) &&
+                (entry.gsdata.tcs.empty() || entry.gsdata.tes.empty())) {
                 ++helpers;
                 continue;
             }
