@@ -23,6 +23,11 @@
 #include "video_core/host_shaders/tiling_micro_8_comp.h"
 #include "video_core/host_shaders/tiling_micro_96_comp.h"
 
+#include <cstdio>
+#include <fstream>
+#include "bbport_threads.h"
+#include "common/thread.h"
+#include "video_core/cache_storage.h"
 #include <magic_enum/magic_enum.hpp>
 #include <vk_mem_alloc.h>
 
@@ -82,9 +87,60 @@ TileManager::TileManager(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     ASSERT_MSG(layout_result == vk::Result::eSuccess, "Failed to create pipeline layout: {}",
                vk::to_string(layout_result));
     pl_layout = std::move(layout);
+    prebuild_thread = std::jthread{[this](std::stop_token stop) { PrebuildTilers(stop); }};
 }
 
 TileManager::~TileManager() = default;
+
+// bbport: a (de)tiling pipeline was built on the drawing thread the first time a texture of its kind came in (28-35 ms
+// hitches at new areas, with a fresh driver cache). Every one built is noted in the shader cache folder
+// (tiling_pipelines.txt: tile mode, array mode, bits, samples, tiler); later starts build those behind the game, as
+// do the ones in BB_TILING_LIST (shipped with the shader list), so a first start has them too.
+static std::filesystem::path TilingListPath() {
+    auto& db = Storage::DataBase::Instance();
+    return db.IsOpened() && !db.Directory().empty() ? db.Directory() / "tiling_pipelines.txt" : std::filesystem::path{};
+}
+
+void TileManager::PrebuildTilers(std::stop_token stop) {
+    Common::SetCurrentThreadName("bb:TilingPrebuild");
+    BbThreads::MakeBelowNormal();
+    // The shader cache opens with the pipeline cache's warm-up, just after this manager.
+    for (int i = 0; i < 200 && TilingListPath().empty() && !stop.stop_requested(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    std::vector<std::filesystem::path> lists{TilingListPath()};
+    if (const char* env = std::getenv("BB_TILING_LIST")) {
+        lists.emplace_back(env);
+    }
+    u32 built = 0;
+    for (const auto& path : lists) {
+        if (path.empty()) {
+            continue;
+        }
+        std::ifstream in{path};
+        u32 tile_mode, array_mode, num_bits, num_samples, is_tiler;
+        while (!stop.stop_requested() && in >> tile_mode >> array_mode >> num_bits >> num_samples >> is_tiler) {
+            ImageInfo info{};
+            info.tile_mode = AmdGpu::TileMode(tile_mode);
+            info.array_mode = AmdGpu::ArrayMode(array_mode);
+            info.num_bits = num_bits;
+            info.num_samples = num_samples;
+            const TilingKey key{info.tile_mode, num_bits, num_samples, is_tiler != 0};
+            {
+                std::scoped_lock lock{tiling_mutex};
+                if (tiling_pipelines.contains(key)) {
+                    continue;
+                }
+            }
+            auto pipeline = BuildTilingPipeline(info, is_tiler != 0);
+            std::scoped_lock lock{tiling_mutex};
+            built += tiling_pipelines.try_emplace(key, std::move(pipeline)).second;
+        }
+    }
+    if (built) {
+        std::printf("Tiling: %u pipelines built ahead\n", built);
+    }
+}
 
 vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler) {
     const TilingKey key{
@@ -93,10 +149,28 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
         .num_samples = info.num_samples,
         .is_tiler = is_tiler,
     };
-    if (const auto it = tiling_pipelines.find(key); it != tiling_pipelines.end()) {
-        return *it->second;
+    {
+        std::scoped_lock lock{tiling_mutex};
+        if (const auto it = tiling_pipelines.find(key); it != tiling_pipelines.end()) {
+            return *it->second;
+        }
     }
+    auto built = BuildTilingPipeline(info, is_tiler);
+    std::scoped_lock lock{tiling_mutex};
+    const auto [it, inserted] = tiling_pipelines.try_emplace(key, std::move(built));
+    if (inserted) {
+        if (const auto path = TilingListPath(); !path.empty()) {
+            if (std::FILE* f = std::fopen(path.string().c_str(), "a")) {
+                std::fprintf(f, "%u %u %u %u %u\n", u32(info.tile_mode), u32(info.array_mode), info.num_bits,
+                             info.num_samples, u32(is_tiler));
+                std::fclose(f);
+            }
+        }
+    }
+    return *it->second;
+}
 
+vk::UniquePipeline TileManager::BuildTilingPipeline(const ImageInfo& info, bool is_tiler) {
     const auto device = instance.GetDevice();
     const auto micro_tile_mode = AmdGpu::GetMicroTileMode(info.tile_mode);
     const bool is_macro = AmdGpu::IsMacroTiled(info.array_mode);
@@ -187,10 +261,8 @@ vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler
         device.createComputePipelineUnique(VK_NULL_HANDLE, compute_pipeline_ci);
     ASSERT_MSG(result == vk::Result::eSuccess, "Detiler pipeline creation failed {}",
                vk::to_string(result));
-    const auto handle = *pipeline;
-    tiling_pipelines.emplace(key, std::move(pipeline));
     device.destroyShaderModule(module);
-    return handle;
+    return std::move(pipeline);
 }
 
 void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::DescriptorBufferInfo& tiled,

@@ -613,6 +613,10 @@ def game_environment(s, start=None):
         locations = lists[0].with_name(f"shader_locations_{info['id']}.txt") if info else None
         if locations and locations.is_file():
             env['BB_SHADER_LOCATIONS'] = str(locations)
+        # The texture (de)tiling pipelines the game uses, built ahead (shaders/tiling_pipelines_<game>.txt).
+        tiling = lists[0].with_name(f'tiling_pipelines_{start}.txt')
+        if tiling.is_file():
+            env['BB_TILING_LIST'] = str(tiling)
         if preparation == 'background':
             env['BB_PREP_SCREEN'] = '0'
         elif str(s.get('preparation_speed') or 'all') == 'half':
