@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -18,7 +19,9 @@
 #include <vector>
 #include <xxhash.h>
 #include "bbport_threads.h"
+#include "bbport_overlay.h"
 #include "bbport_toggles.h"
+#include "common/hash.h"
 #include "common/serdes.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
@@ -576,12 +579,19 @@ static std::string VariantLine(u64 hash, size_t perm, u64 checksum,
     return line;
 }
 
+} // namespace
+
 struct ListedVariant {
     u64 hash{};
     size_t perm{};
-    u64 checksum{};
+    std::vector<u64> checksums; ///< reference binaries (any one counts)
     Shader::StageSpecialization spec;
+    /// A predicted line: image setups by descriptor-table slot (imgslot=) instead of in translation order.
+    std::vector<Shader::ImageSpecialization> slot_images;
+    bool by_slot = false;
 };
+
+namespace {
 
 static std::optional<ListedVariant> ParseVariantLine(const std::string& line) {
     std::map<std::string, std::string> f;
@@ -605,7 +615,11 @@ static std::optional<ListedVariant> ParseVariantLine(const std::string& line) {
         ListedVariant v;
         v.hash = std::stoull(f["h"], nullptr, 16);
         v.perm = f.contains("perm") ? std::stoull(f["perm"]) : 0;
-        v.checksum = f.contains("ck") ? std::stoull(f["ck"], nullptr, 16) : 0;
+        for (size_t a = 0; f.contains("ck") && a < f["ck"].size();) {
+            const size_t b = std::min(f["ck"].find(',', a), f["ck"].size());
+            v.checksums.push_back(std::stoull(f["ck"].substr(a, b - a), nullptr, 16));
+            a = b + 1;
+        }
         auto& rt = v.spec.runtime_info;
         rt.Initialize(Shader::HwStage(std::stoul(f["hw"])), Shader::SwStage(std::stoul(f["sw"])));
         if (rt.hw_stage == Shader::HwStage::Fragment) {
@@ -615,11 +629,18 @@ static std::optional<ListedVariant> ParseVariantLine(const std::string& line) {
                 return std::nullopt;
             }
             std::ranges::copy(cbs, fs.color_buffers.begin());
-            std::vector<Shader::HwFragmentRuntimeInfo::PsInput> inputs;
-            if (!UnhexList(f["in"], inputs) || inputs.size() > fs.inputs.size()) {
-                return std::nullopt;
+            // No in=: each input reads the vertex output of its own index (what the game's linkage gives).
+            if (!f.contains("in")) {
+                for (u32 i = 0; i < fs.inputs.size(); ++i) {
+                    fs.inputs[i] = {.param_index = u8(i)};
+                }
+            } else {
+                std::vector<Shader::HwFragmentRuntimeInfo::PsInput> inputs;
+                if (!UnhexList(f["in"], inputs) || inputs.size() > fs.inputs.size()) {
+                    return std::nullopt;
+                }
+                std::ranges::copy(inputs, fs.inputs.begin());
             }
-            std::ranges::copy(inputs, fs.inputs.begin());
             unsigned dual = 0, cde = 0, samples = 1, motion = 0;
             std::sscanf(f["fsx"].c_str(), "%u.%u.%u.%u", &dual, &cde, &samples, &motion);
             fs.dual_source_blending = dual;
@@ -636,9 +657,16 @@ static std::optional<ListedVariant> ParseVariantLine(const std::string& line) {
             vs.ui_squeeze_bits = squeeze;
             vs.emulate_depth_negative_one_to_one = neg;
         }
-        if (!UnhexBytes(f["swi"], &rt.sw, sizeof(rt.sw)) ||
-            !UnhexBytes(f["start"], &v.spec.start, sizeof(v.spec.start))) {
+        // Missing fields take their usual values (zero software-stage part and bindings, no buffers, default samplers).
+        if ((f.contains("swi") && !UnhexBytes(f["swi"], &rt.sw, sizeof(rt.sw))) ||
+            (f.contains("start") && !UnhexBytes(f["start"], &v.spec.start, sizeof(v.spec.start)))) {
             return std::nullopt;
+        }
+        if (f.contains("imgslot")) {
+            v.by_slot = true;
+            if (!UnhexList(f["imgslot"], v.slot_images)) {
+                return std::nullopt;
+            }
         }
         v.spec.bitset = std::bitset<Shader::StageSpecialization::MaxStageResources>(f["bits"]);
         if (!UnhexList(f["buf"], v.spec.buffers) || !UnhexList(f["img"], v.spec.images) ||
@@ -861,40 +889,55 @@ static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(
     }
     const std::filesystem::path app0{app0_env};
     const auto locations_path = ShaderLocationsPath(app0);
+    u32 stale = 0, opened = 0, unreadable = 0;
+    // One game file open at a time (the C runtime allows about 512 at once; a level's shaders come from hundreds),
+    // the shaders of each read in file order.
     const auto read_from = [&](const ShaderLocations& locations) {
-        std::unordered_map<u32, std::FILE*> open;
+        std::map<u32, std::vector<std::pair<u64, u64>>> by_file; // file -> (offset, hash)
         for (const u64 hash : wanted) {
             const auto it = locations.shaders.find(hash);
-            if (found.contains(hash) || it == locations.shaders.end()) {
-                continue;
-            }
-            auto [f, added] = open.try_emplace(it->second.file, nullptr);
-            if (added) {
-                f->second = _wfopen((app0 / locations.files[it->second.file]).c_str(), L"rb");
-            }
-            if (!f->second) {
-                continue;
-            }
-            std::vector<u32> regs;
-            if (auto code = ReadShaderCodeAt(f->second, it->second.at, hash, it->second.length,
-                                             registers ? &regs : nullptr)) {
-                if (registers) {
-                    (*registers)[hash] = std::move(regs);
-                }
-                found.emplace(hash, std::move(*code));
+            if (!found.contains(hash) && it != locations.shaders.end()) {
+                by_file[it->second.file].emplace_back(it->second.at, hash);
             }
         }
-        for (const auto& [file, f] : open) {
-            if (f) {
-                std::fclose(f);
+        for (auto& [file, shaders] : by_file) {
+            std::FILE* f = _wfopen((app0 / locations.files[file]).c_str(), L"rb");
+            if (!f) {
+                stale += u32(shaders.size());
+                continue;
             }
+            std::ranges::sort(shaders);
+            for (const auto& [at, hash] : shaders) {
+                ++opened;
+                std::vector<u32> regs;
+                if (auto code = ReadShaderCodeAt(f, at, hash, locations.shaders.at(hash).length,
+                                                 registers ? &regs : nullptr)) {
+                    if (registers) {
+                        (*registers)[hash] = std::move(regs);
+                    }
+                    found.emplace(hash, std::move(*code));
+                } else {
+                    ++unreadable;
+                }
+            }
+            std::fclose(f);
         }
     };
-    read_from(LoadShaderLocations(locations_path));
-    if (found.size() < wanted.size()) {
+    // The saved locations come from a scan of every game file: a shader missing there is not in the game files. Only
+    // no saved locations, or one that no longer matches (the files changed), scans again.
+    const auto saved = LoadShaderLocations(locations_path);
+    read_from(saved);
+    if (saved.shaders.empty() || stale > 0) {
+        std::printf("Shader locations: %s: scanning the game files\n",
+                    saved.shaders.empty() ? "none saved" : "a saved file cannot be opened");
+        unreadable = 0;
         const auto scanned = ScanShaderLocations(app0, files_scanned);
         read_from(scanned);
         SaveShaderLocations(locations_path, scanned);
+    }
+    if (unreadable > 0) {
+        std::printf("Shader locations: %zu of %zu shaders read; %u saved locations did not read back\n",
+                    found.size(), wanted.size(), unreadable);
     }
     return found;
 }
@@ -951,6 +994,9 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
     if (!f) {
         return;
     }
+    // BB_SPEC_DUMP_LINES=<file>: the same variants as BB_VARIANT_LIST lines.
+    const char* lines_path = std::getenv("BB_SPEC_DUMP_LINES");
+    std::FILE* lines = lines_path ? std::fopen(lines_path, "w") : nullptr;
     u32 count = 0;
     db.ForEachBlob(Storage::BlobType::ShaderMeta, [&](std::vector<u8>&& data) {
         // Version 12 stored Bindings without descriptor_set (its last member, after the 32-byte header).
@@ -1069,9 +1115,15 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
                             spec.bitset.to_string().substr(96), bufs, imgs, samps, attribs, fetch,
                             imgloc);
         std::fputs(line.c_str(), f);
+        if (lines) {
+            std::fprintf(lines, "%s\n", VariantLine(info.pgm_hash, perm_idx, checksum, spec).c_str());
+        }
         ++count;
     });
     std::fclose(f);
+    if (lines) {
+        std::fclose(lines);
+    }
     std::printf("Spec dump: %u variants to %s\n", count, path);
 }
 
@@ -1158,6 +1210,113 @@ Shader::RuntimeInfo PipelineCache::RuntimeInfoFromRegisters(Shader::HwStage hw_s
     return info;
 }
 
+/// bbport (shader variant list): builds one listed variant from the game files and its line alone: the stage registers
+/// give the runtime info (with the line's per-draw state), the resources' descriptors are made from the line's
+/// specializations (images by slot for a predicted line), the vertex attributes' as replayed reads. Returns the module
+/// (null on failure, `info` then empty), its binary, its Info and the specialization the game would compute for it.
+vk::ShaderModule PipelineCache::BuildListedVariant(const ListedVariant& v, std::span<const u32> program_code,
+                                                   const std::vector<u32>& registers, std::vector<u32>& spv,
+                                                   std::unique_ptr<Shader::Info>& info_out,
+                                                   Shader::StageSpecialization& spec_out) {
+    static const std::vector<Shader::UdRead> no_reads;
+    static const std::vector<u32> no_flat;
+    static thread_local Shader::Pools list_pools;
+    const auto& draw = v.spec.runtime_info;
+    auto runtime_info = RuntimeInfoFromRegisters(draw.hw_stage, draw.sw_stage, registers, draw);
+    static const std::array<u32, Shader::ShaderParams::NumShaderUserData> no_user_data{};
+    const Shader::ShaderParams params{
+        .user_data = std::span<const u32, Shader::ShaderParams::NumShaderUserData>{no_user_data},
+        .code = program_code,
+        .hash = v.hash,
+    };
+    const auto device = instance.GetDevice();
+    Shader::StageSpecialization spec = v.spec;
+    sigjmp_buf recover;
+    if (sigsetjmp(recover, 0)) {
+        runtime_fault_recover = nullptr;
+        Shader::t_translation_replay = nullptr;
+        Shader::t_sharp_override = nullptr;
+        info_out.reset();
+        return {};
+    }
+    runtime_fault_recover = &recover;
+    // A predicted line gives its images by descriptor slot: a first translation with plain images says where each
+    // of the shader's images is read from; ranked by that, they take the slot setups.
+    if (v.by_slot) {
+        Shader::StageSpecialization probe;
+        probe.images.resize(Shader::NUM_IMAGES);
+        probe.bitset.set();
+        const auto plain = MakeSharpOverride(probe);
+        const Shader::TranslationReplay probe_replay{&no_flat, &no_reads, &v.spec.fetch_shader_data};
+        Shader::Info probe_info{draw.hw_stage, draw.sw_stage, params};
+        auto probe_runtime = runtime_info;
+        auto probe_binding = v.spec.start;
+        std::vector<u32> probe_spv;
+        Shader::t_translation_replay = &probe_replay;
+        Shader::t_sharp_override = &plain;
+        const auto probe_module = TranslateModule(probe_info, probe_runtime, program_code, v.perm, probe_binding,
+                                                  list_pools, probe_spv);
+        Shader::t_sharp_override = nullptr;
+        Shader::t_translation_replay = nullptr;
+        if (probe_module) {
+            device.destroyShaderModule(probe_module);
+        }
+        std::vector<size_t> order(probe_info.images.size());
+        for (size_t k = 0; k < order.size(); ++k) {
+            order[k] = k;
+        }
+        std::ranges::sort(order, {}, [&](size_t k) { return probe_info.images[k].sharp_fetch.offsets[0]; });
+        spec.images.assign(probe_info.images.size(), {});
+        for (size_t rank = 0; rank < order.size() && rank < v.slot_images.size(); ++rank) {
+            spec.images[order[rank]] = v.slot_images[rank];
+        }
+        spec.buffers.clear();
+        spec.bitset.reset();
+        for (size_t k = 0; k < spec.images.size(); ++k) {
+            spec.bitset.set(k);
+        }
+    }
+    const auto overrides = MakeSharpOverride(spec);
+    // The vertex attributes' descriptors are read through a user-data table pointer: made from the attribute
+    // specializations (number class, swizzle) as the reads of a replay.
+    std::vector<Shader::UdRead> attribute_reads;
+    if (v.spec.fetch_shader_data) {
+        const auto& attributes = v.spec.fetch_shader_data->attributes;
+        for (size_t a = 0; a < attributes.size() && a < v.spec.vs_attribs.size(); ++a) {
+            const auto& s = v.spec.vs_attribs[a];
+            AmdGpu::Buffer buffer{};
+            buffer.base_address = 0x100000;
+            buffer.num_records = 0x10000;
+            buffer.stride = 16;
+            buffer.data_format = u32(AmdGpu::DataFormat::Format32_32_32_32);
+            buffer.num_format = u32(s.num_class == AmdGpu::NumberClass::Sint   ? AmdGpu::NumberFormat::Sint
+                                    : s.num_class == AmdGpu::NumberClass::Uint ? AmdGpu::NumberFormat::Uint
+                                                                                 : AmdGpu::NumberFormat::Float);
+            buffer.dst_sel_x = u32(s.dst_select.r);
+            buffer.dst_sel_y = u32(s.dst_select.g);
+            buffer.dst_sel_z = u32(s.dst_select.b);
+            buffer.dst_sel_w = u32(s.dst_select.a);
+            Shader::UdRead read{attributes[a].sgpr_base, attributes[a].dword_offset, u32(sizeof(buffer)), {}};
+            std::memcpy(read.data.data(), &buffer, sizeof(buffer));
+            attribute_reads.push_back(read);
+        }
+    }
+    const Shader::TranslationReplay replay{&no_flat, &attribute_reads, &v.spec.fetch_shader_data};
+    auto info = std::make_unique<Shader::Info>(draw.hw_stage, draw.sw_stage, params);
+    auto binding = v.spec.start;
+    Shader::t_translation_replay = &replay;
+    Shader::t_sharp_override = &overrides;
+    const auto module = TranslateModule(*info, runtime_info, program_code, v.perm, binding, list_pools, spv);
+    // The specialization the game computes for this variant, from the same descriptors.
+    info->RefreshFlatBuf();
+    spec_out = Shader::StageSpecialization(*info, runtime_info, profile, v.spec.start);
+    Shader::t_sharp_override = nullptr;
+    Shader::t_translation_replay = nullptr;
+    runtime_fault_recover = nullptr;
+    info_out = std::move(info);
+    return module;
+}
+
 void PipelineCache::WarmUpThread() {
     Common::SetCurrentThreadName("bb:PipelineWarm");
     BbThreads::MakeBelowNormal();
@@ -1229,11 +1388,16 @@ void PipelineCache::WarmUpThread() {
         if (data.empty()) {
             return;
         }
+        const size_t data_size = data.size();
         Serialization::Archive ar{std::move(data)};
         Serialization::Reader pldata{ar};
         u32 version{};
         pldata.Read(version);
-        if (version != Serialization::PipelineKeyVersion) {
+        // bbport (variant list prototype, BB_VARIANT_SHIP): keys of version 6 lack GraphicsPipelineKey::split_sets
+        // (4 bytes, and 4 of padding at the end: 8 bytes shorter). A graphics key of another size is skipped.
+        constexpr size_t v6_key_size = sizeof(GraphicsPipelineKey) - 8;
+        const bool v6 = version == 6 && std::getenv("BB_VARIANT_SHIP");
+        if (version != Serialization::PipelineKeyVersion && !v6) {
             // A key of an older cache layout can never load again: drop it.
             std::error_code ec;
             std::filesystem::remove(db.Directory() / (names[i] + ".key"), ec);
@@ -1246,6 +1410,32 @@ void PipelineCache::WarmUpThread() {
         if (entry.compute) {
             entry.ckey.Deserialize(ar);
             entry.csdata.Deserialize(ar);
+        } else if (v6) {
+            // The whole record must be a current one less those 8 bytes.
+            static const size_t v7_size = [] {
+                Serialization::Archive probe;
+                Serialization::Writer w{probe};
+                w.Write(u32{0});
+                w.Write(u32{0});
+                GraphicsPipelineKey key{};
+                key.Serialize(probe);
+                GraphicsPipeline::SerializationSupport support{};
+                support.Serialize(probe);
+                return probe.TakeOff().size();
+            }();
+            if (data_size + 8 != v7_size) {
+                return;
+            }
+            std::vector<u8> raw(v6_key_size);
+            pldata.Read(raw.data(), raw.size());
+            constexpr size_t at = offsetof(GraphicsPipelineKey, split_sets);
+            auto* key = reinterpret_cast<u8*>(&entry.gkey);
+            std::memcpy(key, raw.data(), at);
+            std::memset(key + at, 0, sizeof(u32));
+            std::memcpy(key + at + sizeof(u32), raw.data() + at, raw.size() - at);
+            std::memset(key + at + sizeof(u32) + (raw.size() - at), 0,
+                        sizeof(GraphicsPipelineKey) - (at + sizeof(u32) + (raw.size() - at)));
+            entry.gsdata.Deserialize(ar);
         } else {
             entry.gkey.Deserialize(ar);
             entry.gsdata.Deserialize(ar);
@@ -1414,70 +1604,23 @@ void PipelineCache::WarmUpThread() {
                 no_code.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
-            const auto& draw = v.spec.runtime_info;
-            auto runtime_info = RuntimeInfoFromRegisters(draw.hw_stage, draw.sw_stage, rit->second, draw);
-            const std::array<u32, Shader::ShaderParams::NumShaderUserData> no_user_data{};
-            const std::span<const u32> program_code{it->second};
-            const Shader::ShaderParams params{
-                .user_data = std::span<const u32, Shader::ShaderParams::NumShaderUserData>{no_user_data},
-                .code = program_code,
-                .hash = v.hash,
-            };
-            Shader::Info info{draw.hw_stage, draw.sw_stage, params};
-            const auto overrides = MakeSharpOverride(v.spec);
-            static const std::vector<u32> no_flat;
-            // The vertex attributes' descriptors are read through a user-data table pointer: made from the attribute
-            // specializations (number class, swizzle) as the reads of a replay.
-            std::vector<Shader::UdRead> attribute_reads;
-            if (v.spec.fetch_shader_data) {
-                const auto& attributes = v.spec.fetch_shader_data->attributes;
-                for (size_t a = 0; a < attributes.size() && a < v.spec.vs_attribs.size(); ++a) {
-                    const auto& s = v.spec.vs_attribs[a];
-                    AmdGpu::Buffer buffer{};
-                    buffer.base_address = 0x100000;
-                    buffer.num_records = 0x10000;
-                    buffer.stride = 16;
-                    buffer.data_format = u32(AmdGpu::DataFormat::Format32_32_32_32);
-                    buffer.num_format = u32(s.num_class == AmdGpu::NumberClass::Sint   ? AmdGpu::NumberFormat::Sint
-                                            : s.num_class == AmdGpu::NumberClass::Uint ? AmdGpu::NumberFormat::Uint
-                                                                                         : AmdGpu::NumberFormat::Float);
-                    buffer.dst_sel_x = u32(s.dst_select.r);
-                    buffer.dst_sel_y = u32(s.dst_select.g);
-                    buffer.dst_sel_z = u32(s.dst_select.b);
-                    buffer.dst_sel_w = u32(s.dst_select.a);
-                    Shader::UdRead read{attributes[a].sgpr_base, attributes[a].dword_offset,
-                                        u32(sizeof(buffer)), {}};
-                    std::memcpy(read.data.data(), &buffer, sizeof(buffer));
-                    attribute_reads.push_back(read);
-                }
-            }
-            const Shader::TranslationReplay replay{&no_flat, &attribute_reads, &v.spec.fetch_shader_data};
-            auto binding = v.spec.start;
-            static thread_local Shader::Pools list_pools;
             std::vector<u32> spv;
-            sigjmp_buf recover;
-            if (sigsetjmp(recover, 0)) {
-                runtime_fault_recover = nullptr;
-                Shader::t_translation_replay = nullptr;
-                Shader::t_sharp_override = nullptr;
+            std::unique_ptr<Shader::Info> built_info;
+            Shader::StageSpecialization built_spec;
+            const auto module = BuildListedVariant(v, it->second, rit->second, spv, built_info, built_spec);
+            if (!built_info) {
                 failed.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
-            runtime_fault_recover = &recover;
-            Shader::t_translation_replay = &replay;
-            Shader::t_sharp_override = &overrides;
-            const auto module = TranslateModule(info, runtime_info, program_code, v.perm, binding,
-                                                list_pools, spv);
-            Shader::t_sharp_override = nullptr;
-            Shader::t_translation_replay = nullptr;
-            runtime_fault_recover = nullptr;
             if (module) {
                 device.destroyShaderModule(module);
             }
+            const auto& draw = v.spec.runtime_info;
             const u64 sum = BinaryChecksum(spv);
             const auto ref = stored_checksums.find(v.hash);
-            const bool has_reference = v.checksum || ref != stored_checksums.end();
-            const bool ok = sum == v.checksum || (ref != stored_checksums.end() && ref->second.contains(sum));
+            const bool has_reference = !v.checksums.empty() || ref != stored_checksums.end();
+            const bool ok = std::ranges::find(v.checksums, sum) != v.checksums.end() ||
+                            (ref != stored_checksums.end() && ref->second.contains(sum));
             if (!has_reference) {
                 no_reference.fetch_add(1, std::memory_order_relaxed);
             } else if (ok) {
@@ -1683,6 +1826,123 @@ void PipelineCache::WarmUpThread() {
         ReleaseClaim(claim_id);
     };
     ParallelFor(stored.size(), threads, build_stored);
+
+    // bbport (variant list prototype, BB_VARIANT_SHIP=<lines>): the listed variants the cache does not hold are built
+    // from the game files behind the game (BuildListedVariant), put into the program cache (unless the game made the
+    // same permutation first) and saved; then the stored pipelines naming them are built.
+    std::deque<LoadedStage> shipped;
+    if (const char* ship = std::getenv("BB_VARIANT_SHIP")) {
+        const double t_ship = elapsed_ms();
+        BbOverlay::SetShaderPreparation(1, 0, 0);
+        // Behind the game: half the warm-up threads (BB_SHIP_THREADS), so play keeps its share of the CPU.
+        u32 ship_threads = std::max<u32>(1, threads / 2);
+        if (const char* env = std::getenv("BB_SHIP_THREADS")) {
+            ship_threads = std::clamp<u32>(u32(std::atoi(env)), 1, 64);
+        }
+        std::vector<ListedVariant> listed;
+        if (std::FILE* f = std::fopen(ship, "r")) {
+            std::string line;
+            int c;
+            while ((c = std::fgetc(f)) != EOF) {
+                if (c != '\n') {
+                    line += char(c);
+                    continue;
+                }
+                if (auto v = ParseVariantLine(line)) {
+                    if (!by_hash.contains(HashCombine(v->hash, v->perm))) {
+                        listed.push_back(std::move(*v));
+                    }
+                }
+                line.clear();
+            }
+            std::fclose(f);
+        }
+        std::set<u64> wanted;
+        for (const auto& v : listed) {
+            wanted.insert(v.hash);
+        }
+        u64 scanned = 0;
+        std::unordered_map<u64, std::vector<u32>> registers;
+        const auto code = ReadGameShaderCode(wanted, &scanned, &registers);
+        const double t_read = elapsed_ms();
+        std::atomic<u32> built{0}, taken{0}, failed{0}, no_code{0}, progress{0};
+        std::mutex shipped_mutex;
+        BbOverlay::SetShaderPreparation(1, 0, u32(listed.size()));
+        std::vector<std::pair<u64, LoadedStage*>> new_stages;
+        ParallelFor(listed.size(), ship_threads, [&](size_t i) {
+            const auto& v = listed[i];
+            BbOverlay::SetShaderPreparation(1, progress.fetch_add(1, std::memory_order_relaxed) + 1,
+                                            u32(listed.size()));
+            const auto it = code.find(v.hash);
+            const auto rit = registers.find(v.hash);
+            if (it == code.end() || rit == registers.end()) {
+                no_code.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            std::vector<u32> spv;
+            std::unique_ptr<Shader::Info> info;
+            Shader::StageSpecialization spec;
+            const auto module = BuildListedVariant(v, it->second, rit->second, spv, info, spec);
+            if (!info || !module) {
+                failed.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            built.fetch_add(1, std::memory_order_relaxed);
+            Program* program{};
+            {
+                std::unique_lock lk{programs_mutex};
+                auto [it_pgm, created] = program_cache.try_emplace(v.hash);
+                if (created) {
+                    it_pgm.value() = std::make_unique<Program>();
+                    it_pgm.value()->info = *info;
+                }
+                program = it_pgm.value().get();
+                if (!program->info_template) {
+                    program->info_template = std::make_unique<Shader::Info>(program->info);
+                }
+                auto& modules = program->modules;
+                modules.resize(std::max(modules.size(), v.perm + 1));
+                const auto found = std::ranges::find(modules, spec, &Program::Module::spec);
+                if (modules[v.perm].module || (found != modules.end() && found->module)) {
+                    program = nullptr; // the game was first
+                } else {
+                    spec.info = &program->info;
+                    modules[v.perm] = {module, spec};
+                }
+            }
+            if (!program) {
+                taken.fetch_add(1, std::memory_order_relaxed);
+                device.destroyShaderModule(module);
+                return;
+            }
+            // Saved like a shader translated in play: the next launch loads it from the cache.
+            const u64 perm_hash = HashCombine(v.hash, v.perm);
+            RegisterShaderBinary(std::move(spv), v.hash, v.perm);
+            RegisterShaderMeta(*info, spec.fetch_shader_data, spec, perm_hash, v.perm);
+            std::scoped_lock lk{shipped_mutex};
+            auto& stage = shipped.emplace_back();
+            stage.parsed = true;
+            stage.ready = true;
+            stage.owner = program;
+            stage.module = module;
+            stage.spec = spec;
+            stage.perm_idx = v.perm;
+            stage.fetch_shader = spec.fetch_shader_data;
+            new_stages.emplace_back(perm_hash, &stage);
+        });
+        for (const auto& [perm_hash, stage] : new_stages) {
+            by_hash.emplace(perm_hash, stage);
+        }
+        const double t_built = elapsed_ms();
+        const u32 before = num_pipelines.load();
+        BbOverlay::SetShaderPreparation(2, 0, 0);
+        ParallelFor(stored.size(), ship_threads, build_stored);
+        BbOverlay::SetShaderPreparation(0, 0, 0);
+        std::printf("Variant ship: %zu listed variants not in the cache; code read in %.0f ms; built %u (%u taken by "
+                    "the game first, %u failed, %u without code) in %.0f ms; then %u pipelines in %.0f ms\n",
+                    listed.size(), t_read - t_ship, built.load(), taken.load(), failed.load(), no_code.load(),
+                    t_built - t_read, num_pipelines.load() - before, elapsed_ms() - t_built);
+    }
 
     // 6. bbport (shader variant list, BB_VARIANT_REPLAY=1): variants with translation inputs but no binary are
     // translated from the code in the player's own game files, with the recorded inputs in place of game memory,

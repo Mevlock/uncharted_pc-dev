@@ -133,6 +133,9 @@ struct PrepWorker {
 
 struct PreparedDraw;
 
+/// bbport (shader variant list): one line of a variant list (vk_pipeline_serialization.cpp).
+struct ListedVariant;
+
 class PipelineCache {
 public:
     explicit PipelineCache(const Instance& instance, Scheduler& scheduler,
@@ -260,6 +263,11 @@ private:
     /// jumps back to a recovery point (sigsetjmp skips the ReleaseClaim calls in between).
     static size_t ClaimMark();
     void ReleaseClaimsAfter(size_t mark);
+    /// bbport (shader variant list): builds a listed variant from the game files and its line alone.
+    vk::ShaderModule BuildListedVariant(const ListedVariant& v, std::span<const u32> code,
+                                        const std::vector<u32>& registers, std::vector<u32>& spv,
+                                        std::unique_ptr<Shader::Info>& info,
+                                        Shader::StageSpecialization& spec);
     /// bbport (shader variant list): BuildRuntimeInfo from the stage registers stored in front of a shader's code in
     /// the game files, plus the per-draw state of `draw`.
     Shader::RuntimeInfo RuntimeInfoFromRegisters(Shader::HwStage hw_stage, Shader::SwStage sw_stage,

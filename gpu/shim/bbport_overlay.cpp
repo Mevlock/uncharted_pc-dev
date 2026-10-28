@@ -933,9 +933,45 @@ bool HandleEvent(const SDL_Event& event) {
     }
 }
 
+std::atomic<int> prep_phase{0};
+std::atomic<u32> prep_done{0};
+std::atomic<u32> prep_total{0};
+
+void SetShaderPreparation(int phase, u32 done, u32 total) {
+    prep_done.store(done, std::memory_order_relaxed);
+    prep_total.store(total, std::memory_order_relaxed);
+    prep_phase.store(phase, std::memory_order_release);
+}
+
+// "Preparing shaders 1240 / 4496": bottom left while the variant list is built behind the game.
+void ShaderPreparation() {
+    const int phase = prep_phase.load(std::memory_order_acquire);
+    if (phase == 0) {
+        return;
+    }
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad,
+                                   viewport->WorkPos.y + viewport->WorkSize.y - pad),
+                            ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::Begin("##prep", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::SetWindowFontScale(0.8f);
+    if (phase == 1) {
+        ImGui::Text("Preparing shaders %u / %u", prep_done.load(std::memory_order_relaxed),
+                    prep_total.load(std::memory_order_relaxed));
+    } else {
+        ImGui::Text("Preparing pipelines");
+    }
+    ImGui::End();
+}
+
 bool Visible() {
-    return initialized &&
-           (menu_open || text_entry_active || BbSettings::Get().show_fps || toast_busy);
+    return initialized && (menu_open || text_entry_active || BbSettings::Get().show_fps ||
+                           toast_busy || prep_phase.load(std::memory_order_relaxed) != 0);
 }
 
 void NotifyTrophy(int grade, std::string game, std::string name, std::vector<unsigned char> png) {
@@ -1030,6 +1066,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
         TextEntryBox();
     }
     TrophyToast();
+    ShaderPreparation();
     ImGui::Render();
 
     const vk::RenderingAttachmentInfo attachment{
