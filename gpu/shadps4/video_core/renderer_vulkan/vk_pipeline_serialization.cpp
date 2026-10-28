@@ -2041,6 +2041,9 @@ void PipelineCache::WarmUpThread() {
     // the programs' template Infos (the game refreshes the programs' own per draw) and then
     // pointed at the programs' Infos.
     std::atomic<u32> num_pipelines{0};
+    // bbport: why a stored pipeline was not preloaded (the "stale" count): a stage not in the cache, the game built
+    // it first, or the driver refused it.
+    std::atomic<u32> stale_no_stage{0}, stale_game_first{0}, stale_refused{0};
     const auto build_stored = [&](size_t i) {
         auto& entry = stored[i];
         if (!entry.parsed) {
@@ -2049,11 +2052,13 @@ void PipelineCache::WarmUpThread() {
         if (entry.compute) {
             const auto it = by_hash.find(entry.ckey.value);
             if (it == by_hash.end() || !it->second->ready) {
+                ++stale_no_stage;
                 return;
             }
             {
                 std::shared_lock lock{pipelines_mutex};
                 if (compute_pipelines.contains(entry.ckey)) {
+                    ++stale_game_first;
                     return;
                 }
             }
@@ -2063,6 +2068,7 @@ void PipelineCache::WarmUpThread() {
             // bbport: a cached pipeline the driver cannot create (a new driver, or one saved by a
             // build that stopped on it) is left to compile when the game uses it.
             if (!pipeline->IsValid()) {
+                ++stale_refused;
                 return;
             }
             pipeline->RebindStage(&it->second->owner->info);
@@ -2081,6 +2087,7 @@ void PipelineCache::WarmUpThread() {
             }
             const auto it = by_hash.find(hash);
             if (it == by_hash.end() || !it->second->ready) {
+                ++stale_no_stage;
                 return;
             }
             infos[stage] = it->second->owner->info_template.get();
@@ -2096,6 +2103,7 @@ void PipelineCache::WarmUpThread() {
         {
             std::shared_lock lock{pipelines_mutex};
             if (graphics_pipelines.contains(entry.gkey)) {
+                ++stale_game_first;
                 ReleaseClaim(claim_id);
                 return;
             }
@@ -2104,6 +2112,7 @@ void PipelineCache::WarmUpThread() {
             instance, scheduler, desc_heap, profile, entry.gkey, *pipeline_cache, infos,
             no_runtime_infos, fetch_shader, modules, entry.gsdata, true);
         if (!pipeline->IsValid()) {
+            ++stale_refused;
             ReleaseClaim(claim_id);
             return;
         }
@@ -2377,6 +2386,9 @@ void PipelineCache::WarmUpThread() {
     if (num_total_pipelines > num_pipelines.load()) {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines.load());
+        std::printf("Pipeline cache: not preloaded: %u with a stage not in the cache, %u built by the game first, "
+                    "%u refused by the driver\n",
+                    stale_no_stage.load(), stale_game_first.load(), stale_refused.load());
     }
     std::printf("Pipeline cache: preloaded %u of %u pipelines (%u shaders, %u threads) in %.0f ms "
                 "(keys %.0f, shaders %.0f, programs %.0f, pipelines %.0f); the game could select from %.0f ms\n",
