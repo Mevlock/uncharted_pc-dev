@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <fmt/format.h>
 
 #include <SDL3/SDL.h>
 #ifdef _WIN32
@@ -937,10 +938,32 @@ std::atomic<int> prep_phase{0};
 std::atomic<u32> prep_done{0};
 std::atomic<u32> prep_total{0};
 
+std::atomic<s64> prep_phase_start_ms{0};
+
+s64 NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 void SetShaderPreparation(int phase, u32 done, u32 total) {
+    if (prep_phase.load(std::memory_order_relaxed) != phase) {
+        prep_phase_start_ms.store(NowMs(), std::memory_order_relaxed);
+    }
     prep_done.store(done, std::memory_order_relaxed);
     prep_total.store(total, std::memory_order_relaxed);
     prep_phase.store(phase, std::memory_order_release);
+}
+
+// "about 12 s left": the phase's time so far, extrapolated over what is left (after a second, once a few are done).
+std::string PreparationEta(u32 done, u32 total) {
+    const s64 elapsed = NowMs() - prep_phase_start_ms.load(std::memory_order_relaxed);
+    if (done < 8 || total <= done || elapsed < 1000) {
+        return {};
+    }
+    const s64 left_s = (elapsed * s64(total - done) / s64(done) + 999) / 1000;
+    return left_s >= 60 ? fmt::format("  about {} min {} s left", left_s / 60, left_s % 60)
+                        : fmt::format("  about {} s left", left_s);
 }
 
 // "Preparing shaders 1240 / 4496": bottom left while the variant list is built behind the game.
@@ -960,11 +983,13 @@ void ShaderPreparation() {
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoFocusOnAppearing);
     ImGui::SetWindowFontScale(0.8f);
-    if (phase == 1) {
-        ImGui::Text("Preparing shaders %u / %u", prep_done.load(std::memory_order_relaxed),
-                    prep_total.load(std::memory_order_relaxed));
+    const u32 done = prep_done.load(std::memory_order_relaxed);
+    const u32 total = prep_total.load(std::memory_order_relaxed);
+    const char* what = phase == 1 ? "shaders" : "pipelines";
+    if (total == 0) {
+        ImGui::Text("Preparing %s", what);
     } else {
-        ImGui::Text("Preparing pipelines");
+        ImGui::Text("Preparing %s %u / %u%s", what, done, total, PreparationEta(done, total).c_str());
     }
     ImGui::End();
 }

@@ -1991,8 +1991,13 @@ void PipelineCache::WarmUpThread() {
         }
         const double t_built = elapsed_ms();
         const u32 before = num_pipelines.load();
-        BbOverlay::SetShaderPreparation(2, 0, 0);
-        ParallelFor(stored.size(), ship_threads, build_stored);
+        BbOverlay::SetShaderPreparation(2, 0, u32(stored.size()));
+        std::atomic<u32> pipelines_done{0};
+        ParallelFor(stored.size(), ship_threads, [&](size_t i) {
+            build_stored(i);
+            BbOverlay::SetShaderPreparation(2, pipelines_done.fetch_add(1, std::memory_order_relaxed) + 1,
+                                            u32(stored.size()));
+        });
         BbOverlay::SetShaderPreparation(0, 0, 0);
         std::printf("Variant ship: %zu listed variants not in the cache; code read in %.0f ms; built %u (%u taken by "
                     "the game first, %u failed, %u without code) in %.0f ms; then %u pipelines in %.0f ms\n",
