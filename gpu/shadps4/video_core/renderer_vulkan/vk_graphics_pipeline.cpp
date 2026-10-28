@@ -11,6 +11,7 @@
 #include <utility>
 #include <boost/container/small_vector.hpp>
 
+#include "bbport_threads.h"
 #include "common/assert.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
@@ -475,6 +476,8 @@ namespace {
 std::mutex g_parts_mutex;
 std::unordered_map<u64, std::shared_ptr<LibraryPart>> g_parts;
 std::atomic<u64> g_parts_reused{0}, g_parts_built{0}, g_parts_linked{0};
+/// Pipelines linked on the GPU thread: with every shader part ready, or after building some there; time in each.
+std::atomic<u64> g_gpu_ready{0}, g_gpu_built{0}, g_gpu_ready_us{0}, g_gpu_built_us{0};
 
 void ReportLibraryParts() {
     static std::atomic<s64> last{0};
@@ -485,10 +488,13 @@ void ReportLibraryParts() {
     if (now - seen < 5 || !last.compare_exchange_strong(seen, now)) {
         return;
     }
-    std::printf("Pipeline libraries: %llu pipelines linked, %llu parts built, %llu reused\n",
+    std::printf("Pipeline libraries: %llu pipelines linked, %llu parts built, %llu reused; on the GPU thread "
+                "%llu with every shader part ready (%.1f ms), %llu after building parts there (%.1f ms)\n",
                 static_cast<unsigned long long>(g_parts_linked.load()),
                 static_cast<unsigned long long>(g_parts_built.load()),
-                static_cast<unsigned long long>(g_parts_reused.load()));
+                static_cast<unsigned long long>(g_parts_reused.load()),
+                static_cast<unsigned long long>(g_gpu_ready.load()), g_gpu_ready_us.load() / 1000.0,
+                static_cast<unsigned long long>(g_gpu_built.load()), g_gpu_built_us.load() / 1000.0);
 }
 } // namespace
 
@@ -653,11 +659,14 @@ void GraphicsPipeline::BuildFromLibraries(
     };
 
     std::array<std::shared_ptr<LibraryPart>, 4> found;
+    const auto started = std::chrono::steady_clock::now();
+    u32 shader_parts_built = 0;
     const auto build = [&](size_t p, vk::GraphicsPipelineCreateInfo info,
                            vk::UniquePipelineLayout layout) -> bool {
         if ((found[p] = LibraryParts::Find(part_keys[p]))) {
             return true;
         }
+        shader_parts_built += (p == 1 || p == 2) ? 1 : 0;
         const vk::GraphicsPipelineLibraryCreateInfoEXT library_info = {.pNext = info.pNext,
                                                                        .flags = parts[p]};
         info.pNext = &library_info;
@@ -719,6 +728,13 @@ void GraphicsPipeline::BuildFromLibraries(
     pipeline = std::move(linked);
     SetObjectName(device, *pipeline, "Graphics Pipeline (libraries) {}", debug_str);
     ++g_parts_linked;
+    if (!BbThreads::IsBackground()) {
+        const u64 us = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - started)
+                                            .count());
+        (shader_parts_built ? g_gpu_built : g_gpu_ready) += 1;
+        (shader_parts_built ? g_gpu_built_us : g_gpu_ready_us) += us;
+    }
     ReportLibraryParts();
 }
 
