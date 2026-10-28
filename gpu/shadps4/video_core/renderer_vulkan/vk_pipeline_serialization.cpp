@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -16,12 +17,14 @@
 #include <shared_mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <xxhash.h>
 #include "bbport_threads.h"
 #include "bbport_overlay.h"
 #include "bbport_toggles.h"
 #include "common/hash.h"
+#include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "common/serdes.h"
 #include "common/thread.h"
 #include "core/emulator_settings.h"
@@ -1592,18 +1595,131 @@ void PipelineCache::WarmUpThread() {
                     line += fmt::format("{:x},", u32(m));
                 }
                 line += fmt::format("\tcbmask={}\tlogic={}\tsamples={}.{}\tcsamples={}\tmrt={:x}\tmv={}\tsq={:x}"
-                                    "\tz={}\tstencil={}\tdclamp={}\tprim={}\tpoly={}\tclip={}\tprov={}\tdclip={}\n",
+                                    "\tz={}\tstencil={}\tdclamp={}\tprim={}\tpoly={}\tclip={}\tprov={}\tdclip={}"
+                                    "\tpcp={}\tsplit={}\tss={}\tnva={}\n",
                                     HexBytes(&k.cb_shader_mask, sizeof(k.cb_shader_mask)), u32(k.logic_op),
                                     k.num_samples, k.depth_samples, HexList(k.color_samples), k.mrt_mask,
                                     k.motion_vectors, k.ui_squeeze, u32(k.z_format), u32(k.stencil_format),
                                     u32(k.depth_clamp_enable), u32(k.prim_type), u32(k.polygon_mode),
-                                    u32(k.clip_space), u32(k.provoking_vtx_last), u32(k.depth_clip_enable));
+                                    u32(k.clip_space), u32(k.provoking_vtx_last), u32(k.depth_clip_enable),
+                                    k.patch_control_points, k.split_sets,
+                                    u32(entry.gsdata.multisampling.sampleShadingEnable),
+                                    entry.gsdata.vertex_attributes.size());
                 std::fputs(line.c_str(), f);
                 ++n;
             }
             std::fclose(f);
             std::printf("Key dump: %u graphics pipeline keys to %s\n", n, dump);
         }
+    }
+
+    // bbport (variant list prototype, BB_KEY_LIST=<file>): graphics pipeline keys given as text lines in the
+    // BB_KEY_DUMP format (recorded, or predicted from the game's pass records), added to the stored ones. The
+    // vertex input is dynamic state, so a key and the fragment shader's sample shading (ss) are the whole pipeline.
+    if (const char* list = std::getenv("BB_KEY_LIST"); list && !instance.IsVertexInputDynamicState()) {
+        std::printf("Key list: ignored (vertex input is not dynamic state on this device)\n");
+    } else if (list) {
+        std::ifstream in{list};
+        std::unordered_set<GraphicsPipelineKey> have;
+        for (const auto& entry : stored) {
+            if (entry.parsed && !entry.compute) {
+                have.insert(entry.gkey);
+            }
+        }
+        // "a,b,c," or "a|b|c|" split into items
+        const auto items = [](std::string_view text, char sep) {
+            std::vector<std::string_view> out;
+            for (size_t pos = 0; pos < text.size();) {
+                size_t end = text.find(sep, pos);
+                if (end == std::string_view::npos) {
+                    end = text.size();
+                }
+                out.push_back(text.substr(pos, end - pos));
+                pos = end + 1;
+            }
+            return out;
+        };
+        u32 added = 0, known = 0, bad = 0;
+        const auto counts = instance.GetColorSampleCounts() & instance.GetDepthSampleCounts();
+        for (std::string line; std::getline(in, line);) {
+            std::unordered_map<std::string_view, std::string_view> f;
+            for (const auto field : items(line, '\t')) {
+                if (const size_t eq = field.find('='); eq != std::string_view::npos) {
+                    f[field.substr(0, eq)] = field.substr(eq + 1);
+                }
+            }
+            const auto num = [&](std::string_view name, int base = 10) -> u64 {
+                const auto it = f.find(name);
+                return it == f.end() || it->second.empty()
+                           ? 0
+                           : std::stoull(std::string{it->second}, nullptr, base);
+            };
+            StoredPipeline entry{};
+            auto& k = entry.gkey;
+            bool ok = f.contains("stages") && f.contains("cb") && f.contains("blend") && f.contains("cbmask");
+            try {
+                const auto stages = items(f["stages"], ',');
+                for (size_t i = 0; ok && i < stages.size() && i < k.stage_hashes.size(); ++i) {
+                    k.stage_hashes[i] = std::stoull(std::string{stages[i]}, nullptr, 16);
+                }
+                const auto vfmt = items(f["vfmt"], ',');
+                for (size_t i = 0; i < vfmt.size() && i < k.vertex_buffer_formats.size(); ++i) {
+                    k.vertex_buffer_formats[i] = vk::Format(std::stoul(std::string{vfmt[i]}));
+                }
+                const auto bytes_list = [&](std::string_view name, auto& arr) {
+                    const auto v = items(f[name], '|');
+                    for (size_t i = 0; i < v.size() && i < arr.size(); ++i) {
+                        ok = ok && UnhexBytes(v[i], &arr[i], sizeof(arr[i]));
+                    }
+                };
+                bytes_list("cb", k.color_buffers);
+                bytes_list("blend", k.blend_controls);
+                bytes_list("csamples", k.color_samples);
+                const auto wm = items(f["wmask"], ',');
+                for (size_t i = 0; i < wm.size() && i < k.write_masks.size(); ++i) {
+                    k.write_masks[i] =
+                        vk::ColorComponentFlags(u32(std::stoul(std::string{wm[i]}, nullptr, 16)));
+                }
+                ok = ok && UnhexBytes(f["cbmask"], &k.cb_shader_mask, sizeof(k.cb_shader_mask));
+                k.num_color_attachments = u32(num("ncb"));
+                k.logic_op = AmdGpu::ColorControl::LogicOp(num("logic"));
+                const auto samples = items(f["samples"], '.');
+                k.num_samples = samples.size() > 0 ? u8(std::stoul(std::string{samples[0]})) : 1;
+                k.depth_samples = samples.size() > 1 ? u8(std::stoul(std::string{samples[1]})) : 1;
+                k.mrt_mask = u32(num("mrt", 16));
+                k.motion_vectors = u32(num("mv"));
+                k.ui_squeeze = u32(num("sq", 16));
+                k.patch_control_points = u32(num("pcp"));
+                k.split_sets = u32(num("split"));
+                k.z_format = AmdGpu::DepthBuffer::ZFormat(num("z"));
+                k.stencil_format = AmdGpu::DepthBuffer::StencilFormat(num("stencil"));
+                k.depth_clamp_enable = u32(num("dclamp"));
+                k.prim_type = AmdGpu::PrimitiveType(num("prim"));
+                k.polygon_mode = AmdGpu::PolygonMode(num("poly"));
+                k.clip_space = AmdGpu::ClipSpace(num("clip"));
+                k.provoking_vtx_last = AmdGpu::ProvokingVtxLast(num("prov"));
+                k.depth_clip_enable = u32(num("dclip"));
+                entry.gsdata.multisampling = vk::PipelineMultisampleStateCreateInfo{
+                    .rasterizationSamples = LiverpoolToVK::NumSamples(k.num_samples, counts),
+                    .sampleShadingEnable = num("ss") != 0,
+                };
+                ok = ok && num("nva") == 0;
+            } catch (const std::exception&) {
+                ok = false;
+            }
+            if (!ok) {
+                ++bad;
+                continue;
+            }
+            if (!have.insert(k).second) {
+                ++known;
+                continue;
+            }
+            entry.parsed = true;
+            stored.push_back(std::move(entry));
+            ++added;
+        }
+        std::printf("Key list: %u keys added, %u already stored, %u unreadable (%s)\n", added, known, bad, list);
     }
 
     // 2. The shader permutations those keys name, loaded once each.
