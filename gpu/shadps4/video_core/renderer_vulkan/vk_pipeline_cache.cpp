@@ -1735,6 +1735,8 @@ vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
 
     auto patch = GetShaderPatch(info.pgm_hash, info.hw_stage, perm_idx, "spv");
     const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
+    t_spv_program_hash = info.pgm_hash;
+    t_spv_permutation = u32(perm_idx);
     if (is_patched) {
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.hw_stage, info.pgm_hash);
         module = CompileSPV(*patch, instance.GetDevice());

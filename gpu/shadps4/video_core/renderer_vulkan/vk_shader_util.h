@@ -17,4 +17,9 @@ namespace Vulkan {
  */
 vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device);
 
+/// bbport: the program hash and permutation of the shader this thread is turning into a module (named when the driver
+/// refuses the module).
+inline thread_local u64 t_spv_program_hash = 0;
+inline thread_local u32 t_spv_permutation = 0;
+
 } // namespace Vulkan
