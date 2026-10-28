@@ -47,10 +47,13 @@ GraphicsPipeline::GraphicsPipeline(
         .size = sizeof(Shader::PushData),
     };
 
-    const vk::DescriptorSetLayout set_layout = *desc_layout;
+    // bbport (BB_GPL): a split layout has the pre-raster stages' set 1. (Step 2a: one monolithic pipeline on
+    // it; the libraries of step 2b add VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT.)
+    const std::array<vk::DescriptorSetLayout, 2> set_layouts = {
+        *desc_layout, split_sets ? *pre_raster_layout : vk::DescriptorSetLayout{}};
     const vk::PipelineLayoutCreateInfo layout_info = {
-        .setLayoutCount = 1U,
-        .pSetLayouts = &set_layout,
+        .setLayoutCount = split_sets ? 2U : 1U,
+        .pSetLayouts = set_layouts.data(),
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &push_constants,
     };
@@ -503,15 +506,24 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
     boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> bindings;
     u32 binding{};
 
+    // bbport (BB_GPL): a split layout puts the pre-raster stages in set 1, numbered from 0, as the translator
+    // declared them (PipelineSelection::split_sets); the fragment stage (first in `stages`) stays in set 0.
+    split_sets = key.split_sets != 0;
+    boost::container::small_vector<vk::DescriptorSetLayoutBinding, 32> pre_raster_bindings;
+    u32 pre_raster_binding{};
+
     for (const auto* stage : stages) {
         if (!stage) {
             continue;
         }
+        const bool set1 = split_sets && stage->sw_stage != Shader::SwStage::Fragment;
+        auto& out = set1 ? pre_raster_bindings : bindings;
+        u32& next = set1 ? pre_raster_binding : binding;
         const auto stage_bit = LogicalStageToStageBit[u32(stage->sw_stage)];
         for (const auto& buffer : stage->buffers) {
             (void)buffer; // the V# is not needed for the layout (and reading it may touch memory)
-            bindings.push_back({
-                .binding = binding++,
+            out.push_back({
+                .binding = next++,
                 .descriptorType = vk::DescriptorType::eStorageBuffer,
                 .descriptorCount = 1,
                 .stageFlags = stage_bit,
@@ -519,23 +531,34 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
         }
         for (const auto& image : stage->images) {
             const u32 num_bindings = image.NumBindings(*stage);
-            bindings.push_back({
-                .binding = binding,
+            out.push_back({
+                .binding = next,
                 .descriptorType = image.is_written ? vk::DescriptorType::eStorageImage
                                                    : vk::DescriptorType::eSampledImage,
                 .descriptorCount = num_bindings,
                 .stageFlags = stage_bit,
             });
-            binding += num_bindings;
+            next += num_bindings;
         }
         for (const auto& sampler : stage->samplers) {
-            bindings.push_back({
-                .binding = binding++,
+            out.push_back({
+                .binding = next++,
                 .descriptorType = vk::DescriptorType::eSampler,
                 .descriptorCount = 1,
                 .stageFlags = stage_bit,
             });
         }
+    }
+    if (split_sets) {
+        const vk::DescriptorSetLayoutCreateInfo pre_raster_ci = {
+            .bindingCount = static_cast<u32>(pre_raster_bindings.size()),
+            .pBindings = pre_raster_bindings.data(),
+        };
+        auto [pre_result, pre_layout] =
+            instance.GetDevice().createDescriptorSetLayoutUnique(pre_raster_ci);
+        ASSERT_MSG(pre_result == vk::Result::eSuccess,
+                   "Failed to create pre-raster descriptor set layout: {}", vk::to_string(pre_result));
+        pre_raster_layout = std::move(pre_layout);
     }
     uses_push_descriptors = binding < instance.MaxPushDescriptors();
     const auto flags = uses_push_descriptors

@@ -46,6 +46,7 @@ struct GraphicsPipelineKey {
     u32 mrt_mask;
     u32 motion_vectors = 0;
     u32 ui_squeeze = 0; ///< bbport: ultrawide UI vertex shader (HwVertexRuntimeInfo::ui_squeeze_bits)
+    u32 split_sets = 0; ///< bbport (BB_GPL): split layout, fragment set 0 + pre-raster set 1 (PipelineSelection::split_sets)
     struct {
         AmdGpu::DepthBuffer::ZFormat z_format : 2;
         AmdGpu::DepthBuffer::StencilFormat stencil_format : 1;

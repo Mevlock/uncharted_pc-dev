@@ -467,6 +467,7 @@ private:
     boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS> bound_buffers;
 
     u32 set_write_index{};
+    size_t set1_first_write = ~size_t{0}; ///< bbport (BB_GPL): first write of a split layout's set 1
     Pipeline::DescriptorWrites set_writes;
     Shader::PushData push_data;
 

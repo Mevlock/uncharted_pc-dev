@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
 #include <cstdlib>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
@@ -307,6 +308,14 @@ bool Instance::CreateDevice() {
     custom_border_color = add_extension(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
     depth_clip_control = add_extension(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
     depth_clip_enable = add_extension(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
+    // bbport (BB_GPL=1, pipeline library study): split-layout pipelines need the extension's feature
+    // (independent descriptor sets). Off by default: the device is created as before.
+    if (const char* gpl_env = std::getenv("BB_GPL"); gpl_env && gpl_env[0] == '1') {
+        graphics_pipeline_library = add_extension(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+                                    add_extension(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+        std::printf("Pipelines: graphics pipeline libraries %s (BB_GPL=1)\n",
+                    graphics_pipeline_library ? "on" : "not supported");
+    }
     // bbport: Intel's Windows driver draws nothing with it (HD 630: black screen, issue #56; the
     // God of War III port saw the same). BB_VERTEX_INPUT_DYNAMIC=1/0 forces it on or off.
     const char* vertex_input_env = std::getenv("BB_VERTEX_INPUT_DYNAMIC");
@@ -665,7 +674,13 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceAddressBindingReportFeaturesEXT{
             .reportAddressBinding = true,
         },
+        vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT{
+            .graphicsPipelineLibrary = true,
+        },
     };
+    if (!graphics_pipeline_library) {
+        device_chain.unlink<vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT>();
+    }
     if (!g_device_fault_ext) {
         device_chain.unlink<vk::PhysicalDeviceFaultFeaturesEXT>();
     }

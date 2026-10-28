@@ -1365,6 +1365,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     const auto& regs = (*sel.regs);
     auto& key = sel.graphics_key;
     sel.fetch_shader = std::nullopt;
+    // bbport (BB_GPL=1, study step 2a): every graphics pipeline uses the split layout.
+    sel.split_sets = instance.IsGraphicsPipelineLibrary();
+    key.split_sets = sel.split_sets ? 1u : 0u;
 
     Shader::Backend::Bindings binding{};
     const auto bind_stage = [&](HwStage stage_in, SwStage stage_out) -> bool {

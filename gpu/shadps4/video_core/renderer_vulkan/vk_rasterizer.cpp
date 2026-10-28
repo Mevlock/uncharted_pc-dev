@@ -3766,7 +3766,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     if (!batch_variant) {
-        pipeline->BindResources(set_writes, push_data);
+        pipeline->BindResources(set_writes, push_data, set1_first_write);
     }
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
@@ -3846,7 +3846,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         ++draw_batch.candidates;
         batched = AppendDrawBatch(pipeline, batch_variant);
         if (!batched) {
-            pipeline->BindResources(set_writes, push_data);
+            pipeline->BindResources(set_writes, push_data, set1_first_write);
             EmitVertexBuffers();
             EmitIndexBuffer();
         }
@@ -4087,7 +4087,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     push_data.xoffset *= target_scale[0];
     push_data.yscale *= target_scale[1];
     push_data.yoffset *= target_scale[1];
-    pipeline->BindResources(set_writes, push_data);
+    pipeline->BindResources(set_writes, push_data, set1_first_write);
     draw_jitter = {};
     if (upscaler->Enabled() && db_desc.first) {
         draw_jitter = SceneJitterFor(db_desc.first);
@@ -4837,12 +4837,23 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(Regs());
+    // bbport (BB_GPL): a split layout's pre-raster stages bind set 1 from 0 (as the translator numbered them);
+    // set1_first_write marks where their writes start (Pipeline::BindResources).
+    set1_first_write = ~size_t{0};
+    const bool split = pipeline->SplitSets();
+    const auto enter_set1 = [&](const Shader::Info& stage) {
+        if (split && set1_first_write == ~size_t{0} && stage.sw_stage != Shader::SwStage::Fragment) {
+            binding.unified = 0;
+            set1_first_write = set_write_index;
+        }
+    };
     if (!HelperEligible(pipeline)) {
         ++helper_serial;
         for (const auto* stage : pipeline->GetStages()) {
             if (!stage) {
                 continue;
             }
+            enter_set1(*stage);
             set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                               stage->samplers.size());
             stage->PushUd(binding, push_data);
@@ -4870,6 +4881,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             if (!stage) {
                 continue;
             }
+            enter_set1(*stage);
             const u32 num_buffers = static_cast<u32>(stage->buffers.size());
             const u32 num_descriptors =
                 num_buffers + static_cast<u32>(stage->images.size() + stage->samplers.size());

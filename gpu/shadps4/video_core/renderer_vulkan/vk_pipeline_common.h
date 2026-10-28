@@ -63,7 +63,14 @@ public:
     }
 
     using DescriptorWrites = std::vector<vk::WriteDescriptorSet>;
-    void BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data) const;
+    /// `set1_first`: with a split layout (BB_GPL), the first write of descriptor set 1 (the pre-raster stages);
+    /// the writes before it are set 0 (the fragment stage).
+    void BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data,
+                       size_t set1_first = ~size_t{0}) const;
+
+    bool SplitSets() const {
+        return split_sets;
+    }
 
 protected:
     [[nodiscard]] std::string GetDebugString() const;
@@ -75,8 +82,10 @@ protected:
     vk::UniquePipeline pipeline;
     vk::UniquePipelineLayout pipeline_layout;
     vk::UniqueDescriptorSetLayout desc_layout;
+    vk::UniqueDescriptorSetLayout pre_raster_layout; ///< bbport (BB_GPL): set 1 of a split layout
     std::array<const Shader::Info*, Shader::MaxStageTypes> stages{};
     bool uses_push_descriptors{};
+    bool split_sets{}; ///< bbport (BB_GPL): fragment set 0 (desc_layout) + pre-raster set 1 (pre_raster_layout)
     bool is_compute;
 };
 

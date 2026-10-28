@@ -211,6 +211,11 @@ public:
         return dynamic_state_3 && dynamic_state_3_features.extendedDynamicState3ColorWriteMask;
     }
 
+    /// bbport: VK_EXT_graphics_pipeline_library enabled (BB_GPL=1): split-layout pipelines.
+    bool IsGraphicsPipelineLibrary() const {
+        return graphics_pipeline_library;
+    }
+
     /// Returns true when VK_EXT_vertex_input_dynamic_state is supported.
     bool IsVertexInputDynamicState() const {
         return vertex_input_dynamic_state;
@@ -610,6 +615,7 @@ private:
     bool dynamic_state_3{};
     bool depth_range_unrestricted{};
     bool vertex_input_dynamic_state{};
+    bool graphics_pipeline_library{}; ///< bbport: BB_GPL=1
     bool list_restart{};
     bool provoking_vertex{};
     bool shader_stencil_export{};
