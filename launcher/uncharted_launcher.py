@@ -197,6 +197,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
+                'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'pad_invert_y': False, 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
                 'trophy_game': 'u1'}
@@ -299,6 +300,36 @@ def game_info(folder):
     except (OSError, ValueError, ImportError):
         pass
     return info
+
+
+def shader_list(key):
+    """The variant list shipped for one game (shaders/<game>_variants.txt) and its pipeline keys, or None."""
+    ship = PORT_DIR / 'shaders' / f'{key}_variants.txt'
+    return (ship, ship.with_name(f'{key}_keys.txt')) if ship.is_file() else None
+
+
+def shader_cache_dirs(s, key):
+    """The game's shader cache folders (<title id>-<build>, not the dotted backups)."""
+    info = game_info(game_folder(s, key))
+    root = Path(s['user_dir'] or DATA_DIR / 'user') / 'cache'
+    if not info or not root.is_dir():
+        return []
+    return [p for p in root.glob(f"{info['id']}*") if p.is_dir() and '.' not in p.name]
+
+
+def shaders_prepared(s, key):
+    """True when the game left a marker for the current list (its size in it), False when not, None with no list."""
+    lists = shader_list(key)
+    if not lists:
+        return None
+    stamp = str(lists[0].stat().st_size)
+    for folder in shader_cache_dirs(s, key):
+        try:
+            if (folder / f'prepared_{lists[0].stem}').read_text().split('\n')[0].strip() == stamp:
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def game_folder(s, key):
@@ -567,6 +598,17 @@ def game_environment(s, start=None):
     env['BB_FRAME_GEN'] = str(s.get('frame_generation') or 'off')
     env['BB_FRAME_GEN_MULTIPLIER'] = str(s.get('frame_gen_multiplier') or '2')
     env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
+    # Shader preparation: the game builds its shader list once, before play (a full-screen page) or behind it.
+    lists = shader_list(start)
+    preparation = str(s.get('shader_preparation') or 'before')
+    if lists and preparation != 'off':
+        env['BB_VARIANT_SHIP'] = str(lists[0])
+        if lists[1].is_file():
+            env['BB_KEY_LIST'] = str(lists[1])
+        if preparation == 'background':
+            env['BB_PREP_SCREEN'] = '0'
+        elif str(s.get('preparation_speed') or 'all') == 'half':
+            env['BB_SHIP_THREADS'] = str(max(1, (os.cpu_count() or 2) // 2))
     for item in str(s['extra_env']).split():
         if '=' in item:
             key, value = item.split('=', 1)
@@ -601,6 +643,7 @@ class Launcher:
         self.app = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
         self.vars = {}
         self.process = self.job = None
+        self.preparing = False
         self.entered, self.last_problem, self.stopping = False, '', False
         self.output = queue.Queue()
         self.ui_calls = queue.Queue()
@@ -754,6 +797,8 @@ class Launcher:
         s.configure('Vertical.TScrollbar', background='#2a2c31', arrowcolor=MUTED, troughcolor=SURFACE,
                     bordercolor=SURFACE, lightcolor='#2a2c31', darkcolor='#2a2c31', gripcount=0, arrowsize=12)
         s.map('Vertical.TScrollbar', background=[('active', '#3a3d44')])
+        s.configure('Gold.Horizontal.TProgressbar', background=GOLD, troughcolor=CARD_HI, bordercolor=CARD_HI,
+                    lightcolor=GOLD, darkcolor=GOLD_DIM, thickness=self.px(10))
 
     # ---- widget helpers ----------------------------------------------------------------------
     def var(self, key):
@@ -1686,6 +1731,27 @@ class Launcher:
         self.check(f, 'close_on_play', _('Close the launcher when the game starts'))
         extra = self.ttk.Entry(f, textvariable=self.var('extra_env'), width=60)
         self.row(f, _('Environment'), extra, _('Extra variables for the game, NAME=value separated by spaces.'))
+        self.section(f, _('Shader preparation'))
+        self.note(f, _("Each game's shaders are built once for your graphics card, so play does not stutter "
+                       'when it meets a new one. It happens on the first start, or here ahead of time.'), top=2)
+        self.row(f, _('When'), self.choice(self.target(f), 'shader_preparation', [
+            ('before', 'Before playing (recommended)'), ('background', 'In the background while playing'),
+            ('off', 'Off (shaders are built as the game meets them)')]),
+            _('In the background the game starts at once but stutters until it is done.'))
+        self.row(f, _('Speed'), self.choice(self.target(f), 'preparation_speed', [
+            ('all', 'All CPU cores (fastest)'), ('half', 'Half the cores (the PC stays responsive)')]))
+        card = self.target(f)
+        self.prep_status = self.tk.Label(card, text='', bg=CARD, fg=TEXT, font=self.font_ui, justify='left')
+        self.prep_status.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
+        holder = self.tk.Frame(card, bg=CARD)
+        holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
+        self.pill(holder, _('Prepare shaders now'), lambda: self.play(prepare=True)).pack(side='left')
+        self.pill(holder, _('Prepare again'), self.prepare_again).pack(side='left', padx=(8, 0))
+        # Beside the buttons, filled from the game's PREP lines while it prepares (no game window then).
+        self.prep_bar = self.ttk.Progressbar(holder, style='Gold.Horizontal.TProgressbar', maximum=100,
+                                             length=self.px(360))
+        self.var('start').trace_add('write', lambda *_a: self.update_prep_status())
+        self.update_prep_status()
         self.section(f, _('Shader cache'))
         self.note(f, _('Compiled shaders are kept so the game does not stutter again. Clear the cache only '
                        'when the picture is broken after an update.'), top=2)
@@ -1758,6 +1824,7 @@ class Launcher:
             if missing:
                 ready += '\n' + _('Not in this folder: ') + ', '.join(missing)
         self.ready.configure(text=ready)
+        self.update_prep_status()
         if not self.process:
             title = next(t for k, t, _s, _e in GAMES if k == start)
             self.status.configure(text=_('Ready: {}').format(title) if info else _('No game folder yet.'),
@@ -1777,8 +1844,38 @@ class Launcher:
         except OSError:
             pass
 
-    def play(self):
+    def update_prep_status(self):
+        """The Shader preparation line for the selected game."""
+        if not getattr(self, 'prep_status', None) or self.preparing:
+            return
+        s = self.current()
+        title = next(t for k, t, _s, _e in GAMES if k == s['start'])
+        prepared = shaders_prepared(s, s['start'])
+        if prepared is None:
+            text, colour = _('{}: no shader list for this game yet.').format(title), MUTED
+        elif prepared:
+            text, colour = _('{}: shaders prepared.').format(title), GOLD
+        else:
+            text, colour = _('{}: not prepared yet (a few minutes, once).').format(title), TEXT
+        self.prep_status.configure(text=text, fg=colour)
+
+    def prepare_again(self):
+        """Forget the selected game's preparation and prepare it now."""
         if self.process:
+            return
+        s = self.current()
+        lists = shader_list(s['start'])
+        if not lists:
+            return
+        for folder in shader_cache_dirs(s, s['start']):
+            (folder / f'prepared_{lists[0].stem}').unlink(missing_ok=True)
+        self.play(prepare=True)
+
+    def play(self, prepare=False):
+        if self.process:
+            return
+        if prepare and not shader_list(self.current()['start']):
+            self.messagebox.showinfo(NAME, _('There is no shader list for this game yet.'))
             return
         self.collect()
         folder = game_folder(self.app, self.app['start'])
@@ -1790,8 +1887,13 @@ class Launcher:
             self.messagebox.showerror(NAME, _('This game is not in the chosen folder.'))
             return
         self.set_log('')
+        env = game_environment(self.app)
+        if prepare:
+            # No window and no game (BB_PREPARE_ONLY): the progress comes back as PREP lines for the bar.
+            env['BB_PREPARE_ONLY'] = '1'
+            env.setdefault('BB_VARIANT_SHIP', str(shader_list(self.app['start'])[0]))
         try:
-            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(self.app),
+            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=env,
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                             stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
         except OSError as error:
@@ -1803,7 +1905,13 @@ class Launcher:
         threading.Thread(target=self.read_output, args=(self.process,), daemon=True).start()
         self.play_button.configure(state='disabled')
         self.stop_button.configure(state='normal')
-        self.status.configure(text=_('Preparing the game; it opens in its own window…'), fg=GOLD)
+        self.preparing = prepare
+        if prepare:
+            self.prep_bar['value'] = 0
+            self.prep_bar.pack(side='left', padx=(self.px(28), 0))
+            self.prep_status.configure(text=_('Preparing shaders…'), fg=GOLD)
+        self.status.configure(text=_('Preparing shaders…') if prepare
+                              else _('Preparing the game; it opens in its own window…'), fg=GOLD)
         if self.app.get('close_on_play'):
             self.root.after(5000, self.root.destroy)
 
@@ -1841,13 +1949,22 @@ class Launcher:
                         self.job.close()
                     self.play_button.configure(state='normal')
                     self.stop_button.configure(state='disabled')
+                    prepared, self.preparing = self.preparing, False
+                    if prepared:
+                        self.prep_bar.pack_forget()
                     self.refresh()
+                    if prepared and code == 0 and not self.stopping:
+                        self.status.configure(text=_('Shaders prepared.'), fg=GOLD)
+                    elif prepared and self.stopping:
+                        self.status.configure(text=_('Preparation stopped; it continues next time.'), fg=MUTED)
                     # It failed to start or crashed (not Stop, not closing the window): say why.
-                    if not self.stopping and (code != 0 or not self.entered):
+                    elif not self.stopping and (code != 0 or not self.entered):
                         reason = self.last_problem or _('see the Log page')
                         self.status.configure(text=_('The game stopped: {}').format(reason[:110]),
                                               fg='#e07a4f')
                         self.show('log')
+                elif item.startswith('PREP '):
+                    self.show_preparation(item)
                 else:
                     stripped = item.strip()
                     if stripped.startswith(('STOP:', 'ERROR', 'GPU crash: the', 'Fault:')) or \
@@ -1864,6 +1981,25 @@ class Launcher:
         except queue.Empty:
             pass
         self.root.after(100, self.drain_output)
+
+    def show_preparation(self, line):
+        """A 'PREP <percent> <done> <total> <step>|<time left>' line from the game into the bar and status."""
+        head, _bar, left = line.rstrip('\r\n').partition('|')
+        try:
+            percent, done, total, step = (int(v) for v in head.split()[1:5])
+        except ValueError:
+            return
+        self.prep_bar['value'] = percent
+        steps = {0: _('Starting…'), 1: _('Step 1 of 2: reading the shaders'),
+                 2: _('Step 2 of 2: compiling them for your graphics card'), 3: _('Finishing…')}
+        text = f'{steps.get(step, "")}   {percent} %'
+        if step in (1, 2) and total:
+            text += f'   ({done} / {total})'
+        if left.strip():
+            text += f' · {left.strip()}'
+        self.prep_status.configure(text=text, fg=GOLD)
+        self.status.configure(text=_('Preparing shaders: {} %').format(percent) +
+                              (f' · {left.strip()}' if left.strip() else ''), fg=GOLD)
 
     def stop(self):
         if self.job:

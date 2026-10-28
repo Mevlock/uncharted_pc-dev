@@ -51,6 +51,12 @@ void SetShaderPreparation(int phase, u32 done, u32 total);
 void SetPreparationScreen(bool on);
 bool PreparationScreenActive();
 
+/// Preparation without a window (BB_PREPARE_ONLY, the launcher's Prepare shaders button): the warm-up thread marks
+/// its end, and one thread prints the progress for the launcher's bar as "PREP <percent> <done> <total> <step>|<eta>".
+void SetPreparationFinished();
+bool PreparationFinished();
+void PrintPreparationProgress();
+
 /// The menu is open or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();
 

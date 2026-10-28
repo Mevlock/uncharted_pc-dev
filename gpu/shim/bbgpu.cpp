@@ -16,6 +16,8 @@
 #include <boost/asio/io_context.hpp>
 #include "common/polyfill_thread.h"
 #include "video_core/renderdoc.h"
+#include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/vk_presenter.h"
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -235,6 +237,17 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
     if (config->user_dir) setenv("BB_GPU_USER_DIR", config->user_dir, 0);
 #endif
     Core::Emulator::FillElfInfo(*config);
+    // bbport: BB_PREPARE_ONLY=1 (the launcher's Prepare shaders button): the shaders are prepared with no window and
+    // the game never starts; the process ends as the window's quit path ends it.
+    if (const char* only = std::getenv("BB_PREPARE_ONLY"); only && only[0] == '1') {
+        Vulkan::PrepareShadersWithoutWindow(new AmdGpu::Liverpool());
+        std::printf("Preparation only: done\n");
+        std::fflush(stdout);
+#ifdef _WIN32
+        TerminateProcess(GetCurrentProcess(), 0);
+#endif
+        std::_Exit(0);
+    }
     // Offline perf build (feature/native-batch): marked so it is never mistaken for a release.
     const std::string title =
         std::string(config->title ? config->title : "Bloodborne") + " — PERF BUILD";

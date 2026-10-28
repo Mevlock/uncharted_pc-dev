@@ -982,10 +982,12 @@ struct StoredPipeline {
 
 void PipelineCache::StartWarmUp() {
     if (!EmulatorSettings.IsPipelineCacheEnabled()) {
+        BbOverlay::SetPreparationFinished();
         return;
     }
     // BB_WARM_MODE=0: no preload (the pipelines compile as the game needs them).
     if (const char* mode = std::getenv("BB_WARM_MODE"); mode && mode[0] == '0') {
+        BbOverlay::SetPreparationFinished();
         Storage::DataBase::Instance().FinishPreload();
         warm_done.store(true, std::memory_order_release);
         return;
@@ -1454,19 +1456,43 @@ void PipelineCache::WarmUpThread() {
     };
 
     // bbport: the full-screen preparation page before the game starts (BbOverlay::SetPreparationScreen): on for a
-    // first launch with a variant list (no "prepared" marker in the cache yet), BB_PREP_SCREEN=1/0 forces it. It is
-    // turned off however this thread ends (the game's flips wait while it is on).
+    // first launch with a variant list (no matching "prepared_<list>" marker in the cache yet: a changed list, as an
+    // update brings, is prepared again), BB_PREP_SCREEN=1/0 forces it. It is turned off however this thread ends
+    // (the game's flips wait while it is on).
+    const char* ship_list = std::getenv("BB_VARIANT_SHIP");
+    std::filesystem::path prepared_marker;
+    std::string prepared_stamp;
+    if (ship_list) {
+        std::error_code ec;
+        const std::filesystem::path list_path{ship_list};
+        prepared_marker = db.Directory() / ("prepared_" + list_path.stem().string());
+        prepared_stamp = std::to_string(std::filesystem::file_size(list_path, ec));
+    }
+    // BB_PREPARE_ONLY=1 (the launcher's Prepare shaders button): no window and no game, the progress goes to the
+    // launcher (PrepareShadersWithoutWindow); preparation runs at full speed as on the page.
+    const bool prepare_only = [] {
+        const char* env = std::getenv("BB_PREPARE_ONLY");
+        return env && env[0] == '1';
+    }();
     const bool prep_screen = [&] {
+        if (prepare_only) {
+            return false;
+        }
         if (const char* env = std::getenv("BB_PREP_SCREEN")) {
             return env[0] == '1';
         }
-        std::error_code ec;
-        return std::getenv("BB_VARIANT_SHIP") != nullptr &&
-               !std::filesystem::exists(db.Directory() / "prepared", ec);
+        if (!ship_list) {
+            return false;
+        }
+        std::ifstream marker{prepared_marker};
+        std::string stamp;
+        return !std::getline(marker, stamp) || stamp != prepared_stamp;
     }();
+    const bool full_preparation = prep_screen || prepare_only;
     struct PrepScreenOff {
         ~PrepScreenOff() {
             BbOverlay::SetPreparationScreen(false);
+            BbOverlay::SetPreparationFinished();
         }
     } prep_screen_off;
     if (prep_screen) {
@@ -1776,7 +1802,7 @@ void PipelineCache::WarmUpThread() {
     }();
     // bbport: the preparation page shows loading the stored shaders as its first step.
     std::atomic<u32> stages_loaded{0};
-    if (prep_screen) {
+    if (full_preparation) {
         BbOverlay::SetShaderPreparation(3, 0, u32(stages.size()));
     }
     ParallelFor(stages.size(), threads, [&](size_t i) {
@@ -1790,7 +1816,7 @@ void PipelineCache::WarmUpThread() {
                     BbOverlay::SetShaderPreparation(3, done, total);
                 }
             }
-        } loaded{stages_loaded, prep_screen, u32(stages.size())};
+        } loaded{stages_loaded, full_preparation, u32(stages.size())};
         auto& stage = stages[i];
         std::vector<u8> meta_blob;
         db.Load(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", stage_hashes[i]),
@@ -2015,7 +2041,7 @@ void PipelineCache::WarmUpThread() {
     }
     // Everything is read: an archived cache turns writable now (the game saves what it compiles).
     db.FinishPreload();
-    if (prep_screen) {
+    if (full_preparation) {
         BbOverlay::SetShaderPreparation(0, 0, 0);
     }
 
@@ -2186,7 +2212,7 @@ void PipelineCache::WarmUpThread() {
         BbOverlay::SetShaderPreparation(1, 0, 0);
         // Behind the game: half the warm-up threads (BB_SHIP_THREADS), so play keeps its share of the CPU; all of
         // them while the full-screen page holds the game.
-        u32 ship_threads = prep_screen ? threads : std::max<u32>(1, threads / 2);
+        u32 ship_threads = full_preparation ? threads : std::max<u32>(1, threads / 2);
         if (const char* env = std::getenv("BB_SHIP_THREADS")) {
             ship_threads = std::clamp<u32>(u32(std::atoi(env)), 1, 64);
         }
@@ -2441,12 +2467,14 @@ void PipelineCache::WarmUpThread() {
         BbOverlay::SetPreparationScreen(false);
         std::printf("Preparation screen: shown for %.0f ms\n", elapsed_ms());
     }
-    if (std::getenv("BB_VARIANT_SHIP")) {
-        if (std::FILE* f = std::fopen((db.Directory() / "prepared").string().c_str(), "w")) {
-            std::fputs("variant list prepared\n", f);
+    if (ship_list) {
+        if (std::FILE* f = std::fopen(prepared_marker.string().c_str(), "w")) {
+            std::fprintf(f, "%s\n", prepared_stamp.c_str());
             std::fclose(f);
         }
     }
+    // Without a window (BB_PREPARE_ONLY) the process saves the cache and ends now.
+    BbOverlay::SetPreparationFinished();
     // bbport: BB_GPL_STATS=1 (pipeline library study, docs in the local notes): how many stored graphics
     // pipelines share their stages. Pipelines per distinct stage set = how often a library part is reused.
     if (std::getenv("BB_GPL_STATS")) {

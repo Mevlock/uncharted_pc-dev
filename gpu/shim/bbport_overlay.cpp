@@ -964,6 +964,27 @@ bool PreparationScreenActive() {
     return prep_screen.load(std::memory_order_acquire);
 }
 
+static std::atomic<bool> prep_finished{false};
+
+void SetPreparationFinished() {
+    prep_finished.store(true, std::memory_order_release);
+}
+
+bool PreparationFinished() {
+    return prep_finished.load(std::memory_order_acquire);
+}
+
+// One bar for the whole preparation: step 1 (loading or building shaders) fills the first 15 %, step 2 (the driver
+// compiling pipelines, most of the time) the rest; between the steps it holds at 15 %.
+static float PreparationFraction(int phase, u32 done, u32 total, bool finishing, bool between) {
+    const float step_part = total ? float(done) / float(total) : 0.0f;
+    return finishing                  ? 1.0f
+           : phase == 2               ? 0.15f + 0.85f * step_part
+           : phase == 1 || phase == 3 ? 0.15f * step_part
+           : between                  ? 0.15f
+                                      : 0.0f;
+}
+
 // "about 25 s left". Pipelines differ a lot in cost and finish in bursts on several threads, so the rate is taken over
 // the last ~10 s (half weight) and the whole phase (half weight); the shown value is recomputed once a second, eases
 // toward the estimate, counts down between updates and only rises slowly, so the countdown does not jump around.
@@ -1066,14 +1087,7 @@ void FullScreenPreparation() {
     ImGui::Dummy(ImVec2(0.0f, 10.0f * base_scale));
     const float bar_w = std::min(w * 0.55f, 900.0f * base_scale);
     ImGui::SetCursorPosX((w - bar_w) * 0.5f);
-    // One bar for the whole preparation: step 1 (loading or building shaders) fills the first 15 %, step 2 (the
-    // driver compiling pipelines, most of the time) the rest; between the steps it holds at 15 %.
-    const float step_part = total ? float(done) / float(total) : 0.0f;
-    const float fraction = finishing                  ? 1.0f
-                           : phase == 2               ? 0.15f + 0.85f * step_part
-                           : phase == 1 || phase == 3 ? 0.15f * step_part
-                           : between                  ? 0.15f
-                                                      : 0.0f;
+    const float fraction = PreparationFraction(phase, done, total, finishing, between);
     ImGui::SetWindowFontScale(1.0f);
     ImGui::ProgressBar(fraction, ImVec2(bar_w, 22.0f * base_scale), "");
     ImGui::Dummy(ImVec2(0.0f, 8.0f * base_scale));
@@ -1085,6 +1099,25 @@ void FullScreenPreparation() {
     centered(count.c_str(), 1.1f, grey);
     ImGui::End();
     ImGui::PopStyleColor(3);
+}
+
+// "PREP 37 1240 4496 2|  about 25 s left": the launcher's bar while preparing without a window (one thread, the
+// page's PreparationEta is not drawn then).
+void PrintPreparationProgress() {
+    const int phase = prep_phase.load(std::memory_order_acquire);
+    const u32 done = prep_done.load(std::memory_order_relaxed);
+    const u32 total = prep_total.load(std::memory_order_relaxed);
+    static bool had_step = false, seen_step2 = false;
+    had_step = had_step || phase != 0;
+    seen_step2 = seen_step2 || phase == 2;
+    const bool finishing = PreparationFinished() || (phase == 0 && seen_step2);
+    const bool between = phase == 0 && had_step && !seen_step2;
+    const int step = finishing ? 3 : phase == 2 || between ? 2 : had_step ? 1 : 0;
+    const std::string eta = phase == 2 && total ? PreparationEta(done, total) : std::string{};
+    std::printf("PREP %d %u %u %d|%s\n",
+                int(100.0f * PreparationFraction(phase, done, total, finishing, between)), done, total, step,
+                eta.c_str());
+    std::fflush(stdout);
 }
 
 // "Preparing shaders 1240 / 4496": bottom left while the variant list is built behind the game.

@@ -1045,4 +1045,19 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
     }
 }
 
+void PrepareShadersWithoutWindow(AmdGpu::Liverpool* liverpool) {
+    // The renderer as the presenter builds it, on a device with no surface: the rasterizer starts the pipeline
+    // cache's warm-up, which prepares the list and marks the end. They are left alive (the process ends next).
+    auto* instance = new Instance(EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled());
+    auto* scheduler = new Scheduler(*instance, true);
+    auto* runtime = new Runtime(*instance, *scheduler);
+    new Rasterizer(*instance, *scheduler, *runtime, liverpool);
+    while (!BbOverlay::PreparationFinished()) {
+        BbOverlay::PrintPreparationProgress();
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    BbOverlay::PrintPreparationProgress();
+    FlushPipelineCacheForExit();
+}
+
 } // namespace Vulkan
