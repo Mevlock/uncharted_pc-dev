@@ -4,6 +4,8 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
+#include <type_traits>
 #include <boost/container/static_vector.hpp>
 #include <xxhash.h>
 
@@ -70,6 +72,41 @@ struct GraphicsPipelineKey {
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);
+};
+
+/// bbport (BB_GPL): one shared pipeline-library part and the layout view it was built with.
+struct LibraryPart {
+    vk::UniquePipeline pipeline;
+    vk::UniquePipelineLayout layout;
+};
+
+/// bbport (BB_GPL): the parts built so far, by part key; shared by every pipeline linked from them.
+class LibraryParts {
+public:
+    static std::shared_ptr<LibraryPart> Find(u64 key);
+    /// Keeps the first part inserted under a key (two threads may build the same part at once).
+    static std::shared_ptr<LibraryPart> Insert(u64 key, vk::UniquePipeline pipeline,
+                                               vk::UniquePipelineLayout layout);
+};
+
+/// bbport (BB_GPL): the key of a part, hashed from the values it is built from.
+class PartKeyWriter {
+public:
+    explicit PartKeyWriter(u64 part) : hash{0x9E3779B97F4A7C15ull ^ part} {}
+    template <typename T>
+    void Add(const T& value) {
+        static_assert(std::is_trivially_copyable_v<T>);
+        const auto* bytes = reinterpret_cast<const u8*>(&value);
+        for (size_t i = 0; i < sizeof(T); ++i) {
+            hash = (hash ^ bytes[i]) * 0x100000001B3ull;
+        }
+    }
+    u64 Get() const {
+        return hash;
+    }
+
+private:
+    u64 hash;
 };
 
 class GraphicsPipeline : public Pipeline {
@@ -152,7 +189,7 @@ private:
 private:
     GraphicsPipelineKey key;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
-    std::array<vk::UniquePipeline, 4> library_parts; ///< bbport (BB_GPL): kept alive with the linked pipeline
+    std::array<std::shared_ptr<LibraryPart>, 4> library_parts; ///< bbport (BB_GPL): the parts it was linked from
 };
 
 struct ClipDistanceShaderKey {

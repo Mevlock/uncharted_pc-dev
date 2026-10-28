@@ -2,6 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <unordered_map>
 #include <utility>
 #include <boost/container/small_vector.hpp>
 
@@ -47,11 +53,14 @@ GraphicsPipeline::GraphicsPipeline(
         .size = sizeof(Shader::PushData),
     };
 
-    // bbport (BB_GPL): a split layout has the pre-raster stages' set 1. (Step 2a: one monolithic pipeline on
-    // it; the libraries of step 2b add VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT.)
+    // bbport (BB_GPL): a split layout has the pre-raster stages' set 1, made of independent sets: the shared
+    // library parts were built with views that hold only their own set (BuildFromLibraries).
     const std::array<vk::DescriptorSetLayout, 2> set_layouts = {
         *desc_layout, split_sets ? *pre_raster_layout : vk::DescriptorSetLayout{}};
+    const bool independent_sets = split_sets && instance.IsGraphicsPipelineLibrary();
     const vk::PipelineLayoutCreateInfo layout_info = {
+        .flags = independent_sets ? vk::PipelineLayoutCreateFlagBits::eIndependentSetsEXT
+                                  : vk::PipelineLayoutCreateFlags{},
         .setLayoutCount = split_sets ? 2U : 1U,
         .pSetLayouts = set_layouts.data(),
         .pushConstantRangeCount = 1,
@@ -409,7 +418,7 @@ GraphicsPipeline::GraphicsPipeline(
     // bbport (BB_GPL, study step 2b): a split pipeline is built as the four pipeline-library parts (vertex input,
     // pre-rasterization shaders, fragment shader, fragment output) from the same state, then linked without
     // link-time optimisation. Step 2c caches the parts and reuses them across pipelines.
-    if (split_sets && instance.IsGraphicsPipelineLibrary() && !preloading) {
+    if (split_sets && instance.IsGraphicsPipelineLibrary()) {
         BuildFromLibraries(device, pipeline_cache, debug_str, dynamic_states, shader_stages,
                            vertex_input_info, input_assembly, tessellation_state, viewport_info,
                            raster_chain.get(), sdata.multisampling,
@@ -461,6 +470,50 @@ GraphicsPipeline::GraphicsPipeline(
 }
 
 GraphicsPipeline::~GraphicsPipeline() = default;
+
+namespace {
+std::mutex g_parts_mutex;
+std::unordered_map<u64, std::shared_ptr<LibraryPart>> g_parts;
+std::atomic<u64> g_parts_reused{0}, g_parts_built{0}, g_parts_linked{0};
+
+void ReportLibraryParts() {
+    static std::atomic<s64> last{0};
+    const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+    s64 seen = last.load();
+    if (now - seen < 5 || !last.compare_exchange_strong(seen, now)) {
+        return;
+    }
+    std::printf("Pipeline libraries: %llu pipelines linked, %llu parts built, %llu reused\n",
+                static_cast<unsigned long long>(g_parts_linked.load()),
+                static_cast<unsigned long long>(g_parts_built.load()),
+                static_cast<unsigned long long>(g_parts_reused.load()));
+}
+} // namespace
+
+std::shared_ptr<LibraryPart> LibraryParts::Find(u64 key) {
+    std::scoped_lock lock{g_parts_mutex};
+    const auto it = g_parts.find(key);
+    if (it == g_parts.end()) {
+        return nullptr;
+    }
+    ++g_parts_reused;
+    return it->second;
+}
+
+std::shared_ptr<LibraryPart> LibraryParts::Insert(u64 key, vk::UniquePipeline pipeline,
+                                                  vk::UniquePipelineLayout layout) {
+    auto part = std::make_shared<LibraryPart>();
+    part->pipeline = std::move(pipeline);
+    part->layout = std::move(layout);
+    std::scoped_lock lock{g_parts_mutex};
+    const auto [it, inserted] = g_parts.emplace(key, std::move(part));
+    if (inserted) {
+        ++g_parts_built;
+    }
+    return it->second;
+}
 
 void GraphicsPipeline::BuildFromLibraries(
     vk::Device device, vk::PipelineCache pipeline_cache, const std::string& debug_str,
@@ -523,46 +576,132 @@ void GraphicsPipeline::BuildFromLibraries(
             .push_back(stage);
     }
 
-    auto& libraries = library_parts;
-    const auto build = [&](size_t p, vk::GraphicsPipelineCreateInfo info) -> bool {
+    // Step 2c: the parts are shared between pipelines (LibraryParts). Each part's key holds exactly what it is
+    // built from; the shader parts see only their own descriptor set (independent sets), so a pre-raster or
+    // fragment part fits any pipeline with the same shaders.
+    using Shader::SwStage;
+    const auto stage_hash = [&](SwStage s) { return key.stage_hashes[static_cast<u32>(s)]; };
+    const bool aux_tess = !stage_hash(SwStage::TessellationControl) &&
+                          (key.prim_type == AmdGpu::PrimitiveType::RectList ||
+                           key.prim_type == AmdGpu::PrimitiveType::QuadList);
+    std::array<u64, 4> part_keys{};
+    {
+        PartKeyWriter k0{0};
+        k0.Add(key.prim_type);
+        if (!instance.IsVertexInputDynamicState()) {
+            k0.Add(std::hash<GraphicsPipelineKey>{}(key)); // vertex inputs baked in: not shared
+        }
+        part_keys[0] = k0.Get();
+        PartKeyWriter k1{1};
+        k1.Add(stage_hash(SwStage::Vertex));
+        k1.Add(stage_hash(SwStage::Geometry));
+        k1.Add(stage_hash(SwStage::TessellationControl));
+        k1.Add(stage_hash(SwStage::TessellationEval));
+        k1.Add(aux_tess ? stage_hash(SwStage::Fragment) : 0); // the stand-in tessellation shaders read the FS
+        k1.Add(key.prim_type);
+        k1.Add(key.patch_control_points);
+        k1.Add(key.polygon_mode);
+        k1.Add(key.clip_space);
+        k1.Add(key.provoking_vtx_last);
+        k1.Add(u32(key.depth_clamp_enable) | u32(key.depth_clip_enable) << 1);
+        k1.Add(key.ui_squeeze);
+        k1.Add(key.motion_vectors);
+        part_keys[1] = k1.Get();
+        PartKeyWriter k2{2};
+        k2.Add(stage_hash(SwStage::Fragment));
+        k2.Add(fragment_stages.empty() || stage_hash(SwStage::Fragment) ? 0 : stage_hash(SwStage::Vertex));
+        k2.Add(multisampling.rasterizationSamples);
+        k2.Add(multisampling.sampleShadingEnable);
+        k2.Add(uses_push_descriptors);
+        k2.Add(key.z_format);
+        k2.Add(key.stencil_format);
+        part_keys[2] = k2.Get();
+        PartKeyWriter k3{3};
+        k3.Add(key.num_color_attachments);
+        k3.Add(key.color_buffers);
+        k3.Add(key.blend_controls);
+        k3.Add(key.write_masks);
+        k3.Add(key.cb_shader_mask);
+        k3.Add(key.logic_op);
+        k3.Add(key.num_samples);
+        k3.Add(key.depth_samples);
+        k3.Add(key.color_samples);
+        k3.Add(key.mrt_mask);
+        k3.Add(key.z_format);
+        k3.Add(key.stencil_format);
+        k3.Add(multisampling.sampleShadingEnable);
+        part_keys[3] = k3.Get();
+    }
+
+    // The shader parts' views of the layout: their own set, the other left empty (independent sets).
+    const vk::PushConstantRange push_constants = {
+        .stageFlags = AllGraphicsStageBits,
+        .offset = 0,
+        .size = sizeof(Shader::PushData),
+    };
+    const auto part_layout = [&](vk::DescriptorSetLayout set0, vk::DescriptorSetLayout set1) {
+        const std::array<vk::DescriptorSetLayout, 2> sets = {set0, set1};
+        const vk::PipelineLayoutCreateInfo info = {
+            .flags = vk::PipelineLayoutCreateFlagBits::eIndependentSetsEXT,
+            .setLayoutCount = 2U,
+            .pSetLayouts = sets.data(),
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &push_constants,
+        };
+        auto [result, layout] = device.createPipelineLayoutUnique(info);
+        return result == vk::Result::eSuccess ? std::move(layout) : vk::UniquePipelineLayout{};
+    };
+
+    std::array<std::shared_ptr<LibraryPart>, 4> found;
+    const auto build = [&](size_t p, vk::GraphicsPipelineCreateInfo info,
+                           vk::UniquePipelineLayout layout) -> bool {
+        if ((found[p] = LibraryParts::Find(part_keys[p]))) {
+            return true;
+        }
         const vk::GraphicsPipelineLibraryCreateInfoEXT library_info = {.pNext = info.pNext,
                                                                        .flags = parts[p]};
         info.pNext = &library_info;
         info.flags |= vk::PipelineCreateFlagBits::eLibraryKHR;
         info.pDynamicState = &part_dynamic[p];
+        info.layout = *layout;
         auto [result, library] = device.createGraphicsPipelineUnique(pipeline_cache, info);
         if (result != vk::Result::eSuccess) {
             LOG_ERROR(Render_Vulkan, "Pipeline library part {} of {} failed: {}", p, debug_str,
                       vk::to_string(result));
             return false;
         }
-        libraries[p] = std::move(library);
+        found[p] = LibraryParts::Insert(part_keys[p], std::move(library), std::move(layout));
         return true;
     };
+    // The shader parts need only the view mask of the rendering info; the formats belong to the output part.
+    const vk::PipelineRenderingCreateInfo shader_rendering = {.viewMask = rendering.viewMask};
     const bool built =
         build(0, {.pVertexInputState = !instance.IsVertexInputDynamicState() ? &vertex_input_info : nullptr,
-                  .pInputAssemblyState = &input_assembly}) &&
-        build(1, {.pNext = &rendering,
+                  .pInputAssemblyState = &input_assembly}, {}) &&
+        build(1, {.pNext = &shader_rendering,
                   .stageCount = static_cast<u32>(pre_raster_stages.size()),
                   .pStages = pre_raster_stages.data(),
                   .pTessellationState = &tessellation_state,
                   .pViewportState = &viewport_info,
-                  .pRasterizationState = &rasterization,
-                  .layout = *pipeline_layout}) &&
-        build(2, {.pNext = &rendering,
+                  .pRasterizationState = &rasterization},
+              part_layout(vk::DescriptorSetLayout{}, *pre_raster_layout)) &&
+        build(2, {.pNext = &shader_rendering,
                   .stageCount = static_cast<u32>(fragment_stages.size()),
                   .pStages = fragment_stages.data(),
                   .pMultisampleState = &multisampling,
-                  .pDepthStencilState = depth_stencil,
-                  .layout = *pipeline_layout}) &&
+                  .pDepthStencilState = depth_stencil},
+              part_layout(*desc_layout, vk::DescriptorSetLayout{})) &&
         build(3, {.pNext = &rendering,
                   .pMultisampleState = &multisampling,
-                  .pColorBlendState = &color_blending});
+                  .pColorBlendState = &color_blending}, {});
     if (!built) {
         return; // the pipeline stays empty and its draws are skipped, as for a refused monolithic one
     }
-    const std::array<vk::Pipeline, 4> handles = {*libraries[0], *libraries[1], *libraries[2],
-                                                 *libraries[3]};
+    for (size_t p = 0; p < found.size(); ++p) {
+        library_parts[p] = found[p];
+    }
+    const std::array<vk::Pipeline, 4> handles = {*found[0]->pipeline, *found[1]->pipeline,
+                                                 *found[2]->pipeline, *found[3]->pipeline};
     const vk::PipelineLibraryCreateInfoKHR link_info = {
         .libraryCount = static_cast<u32>(handles.size()),
         .pLibraries = handles.data(),
@@ -579,6 +718,8 @@ void GraphicsPipeline::BuildFromLibraries(
     }
     pipeline = std::move(linked);
     SetObjectName(device, *pipeline, "Graphics Pipeline (libraries) {}", debug_str);
+    ++g_parts_linked;
+    ReportLibraryParts();
 }
 
 template <typename Attribute, typename Binding>
