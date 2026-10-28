@@ -61,12 +61,55 @@ u32 DefaultWorkerCount() {
     return std::clamp<u32>(BbThreads::Available() / 2, 1, 8);
 }
 
+/// bbport: the 64 KiB chunks of flattened user data are reused. Each was new (and zero-filled) on a worker and freed
+/// on the GPU thread when its submission retired: with a large pipeline cache nearly every draw is prepared, and the
+/// frees were ~17% of the GPU thread's samples (the heap lock, against the workers allocating). BB_PREP_CHUNK_POOL=0:
+/// the old new/delete.
+constexpr size_t ChunkWords = 16 * 1024;
+constexpr size_t ChunkPoolLimit = 512; // 32 MiB kept at most
+std::mutex chunk_pool_mutex;
+std::vector<std::unique_ptr<u32[]>> chunk_pool;
+
+bool ChunkPoolEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_PREP_CHUNK_POOL");
+        return !env || env[0] != '0';
+    }();
+    return on;
+}
+
+std::unique_ptr<u32[]> TakeChunk() {
+    if (ChunkPoolEnabled()) {
+        std::scoped_lock lk{chunk_pool_mutex};
+        if (!chunk_pool.empty()) {
+            auto chunk = std::move(chunk_pool.back());
+            chunk_pool.pop_back();
+            return chunk;
+        }
+        return std::unique_ptr<u32[]>(new u32[ChunkWords]); // only what is appended is ever read
+    }
+    return std::make_unique<u32[]>(ChunkWords);
+}
+
 /// Flattened user data of one submission: chunks never move, so the GPU thread can read a
 /// prepared draw's data while the worker keeps appending.
 struct FlatArena {
-    static constexpr size_t ChunkWords = 16 * 1024;
-    std::vector<std::unique_ptr<u32[]>> chunks;
+    std::vector<std::unique_ptr<u32[]>> chunks; ///< ChunkWords each (pooled)
+    std::vector<std::unique_ptr<u32[]>> large;  ///< single arrays larger than a chunk
     size_t used = ChunkWords;
+
+    FlatArena() = default;
+    FlatArena(FlatArena&&) = default;
+    FlatArena& operator=(FlatArena&& other) noexcept {
+        DrawPreparation::ReturnChunks(chunks);
+        chunks = std::move(other.chunks);
+        large = std::move(other.large);
+        used = other.used;
+        return *this;
+    }
+    ~FlatArena() {
+        DrawPreparation::ReturnChunks(chunks);
+    }
 
     const u32* Append(const std::vector<u32>& data) {
         return AppendArray(data.data(), data.size());
@@ -77,16 +120,22 @@ struct FlatArena {
     const T* AppendArray(const T* data, size_t count) {
         static_assert(std::is_trivially_copyable_v<T> && alignof(T) <= 8);
         const size_t words = (count * sizeof(T) + sizeof(u32) - 1) / sizeof(u32);
-        used = (used + 1) & ~size_t(1);
-        if (chunks.empty() || words > ChunkWords - std::min(used, ChunkWords)) {
-            chunks.push_back(std::make_unique<u32[]>(std::max(ChunkWords, words)));
-            used = 0;
+        u32* dst;
+        if (words > ChunkWords) {
+            large.push_back(std::make_unique<u32[]>(words));
+            dst = large.back().get();
+        } else {
+            used = (used + 1) & ~size_t(1);
+            if (chunks.empty() || words > ChunkWords - std::min(used, ChunkWords)) {
+                chunks.push_back(TakeChunk());
+                used = 0;
+            }
+            dst = chunks.back().get() + used;
+            used += words;
         }
-        u32* dst = chunks.back().get() + used;
         if (count) {
             std::memcpy(dst, data, count * sizeof(T));
         }
-        used += words;
         return reinterpret_cast<const T*>(dst);
     }
 };
@@ -200,6 +249,20 @@ void PrepareVertexInputs(const Shader::Info& vs, const Shader::Gcn::FetchShaderD
 }
 
 } // namespace
+
+void DrawPreparation::ReturnChunks(std::vector<std::unique_ptr<u32[]>>& chunks) {
+    if (chunks.empty() || !ChunkPoolEnabled()) {
+        return;
+    }
+    {
+        std::scoped_lock lk{chunk_pool_mutex};
+        while (!chunks.empty() && chunk_pool.size() < ChunkPoolLimit) {
+            chunk_pool.push_back(std::move(chunks.back()));
+            chunks.pop_back();
+        }
+    }
+    chunks.clear(); // past the limit: freed as before
+}
 
 DrawPreparation::DrawPreparation(PipelineCache& pipeline_cache_)
     : pipeline_cache{pipeline_cache_} {
@@ -588,6 +651,9 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
         }
         // The arena's chunks live as long as the submission.
         target->flat_chunks = std::move(arena.chunks);
+        target->flat_large = std::move(arena.large);
+        arena.chunks.clear();
+        arena.large.clear();
         position = target->seq + 1;
     }
 }
