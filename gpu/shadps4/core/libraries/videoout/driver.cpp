@@ -33,6 +33,7 @@
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
+void BbHitchFlip(); // gpu/shim/bbport_sampler.cpp
 
 namespace Vulkan {
 extern std::atomic<u64> g_bb_compile_ns;
@@ -392,6 +393,7 @@ void VideoOutDriver::Flip(const Request& req) {
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
+    BbHitchFlip(); // gpu/shim/bbport_sampler.cpp (BB_HITCH_MS): a long frame gets a report
 
     // bbport: BB_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
     static const bool frame_stats = EmulatorSettingsImpl::Flag("BB_FRAME_STATS", false);

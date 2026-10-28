@@ -227,6 +227,8 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
     }
     snprintf(out,size,"%p",(void *)address);
 }
+/* For the hitch report (gpu/shim/bbport_sampler.cpp): guest offset, red-zone thunk or module+offset. */
+void bb_describe_address(char *out, size_t size, uintptr_t address) { describe_address(out,size,address); }
 /* Every thread's stack into the log, once a session: called when the GPU stall report fires (a
  * wait for a tick nobody submits is a deadlock between the port's threads; a player's log then
  * shows which threads wait where). Each thread is suspended only while its registers and frames
@@ -2004,6 +2006,7 @@ int main(int argc, char **argv) {
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
     entered_game=1;
 #ifdef _WIN32
+    SetThreadDescription(GetCurrentThread(),L"bb:GuestMain");   /* found by name by the sampler (BB_HITCH_MS) */
     if (getenv("BB_WATCH")) CloseHandle(CreateThread(NULL,0,watch_thread,getenv("BB_WATCH"),0,NULL));
 #endif
     /* argv: the executable and, after sceSystemServiceLoadExec, the arguments it was given
