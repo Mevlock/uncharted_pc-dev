@@ -683,6 +683,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
       guest_markers_enabled{EmulatorSettings.IsVkGuestMarkersEnabled()} {
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
+    compute_prep = std::make_unique<ComputePreparation>(pipeline_cache);
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
     // Object motion first: it fixes the buffer addresses the motion shader variants embed.
     object_motion = std::make_unique<ObjectMotion>(instance, scheduler);

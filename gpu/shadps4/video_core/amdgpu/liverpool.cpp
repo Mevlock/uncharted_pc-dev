@@ -2304,6 +2304,10 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     auto& queue = mapped_queues[gnm_vqid];
 
     const auto vqid = gnm_vqid - 1;
+    if (rasterizer) {
+        // bbport (BB_PREP_ASYNC_COMPUTE=1): the queue's new compute programs start building on idle cores now.
+        rasterizer->GetComputePreparation().Submit(vqid, acb);
+    }
     const auto& task = ProcessCompute(acb, vqid);
     {
         std::scoped_lock lock{queue.m_access};
