@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -14,10 +15,14 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <tuple>
 
 #include <miniz.h>
 #include <SDL3/SDL_keyboard.h>
+
+#include "bbport_threads.h"
+#include "common/thread.h"
 
 // Our own copy of stb_truetype (ImGui's is internal to imgui_draw.cpp).
 #pragma GCC diagnostic push
@@ -1111,14 +1116,14 @@ bool Candidate(u32 width, u32 height, Format format) {
     return false;
 }
 
-const std::vector<Patch>* Find(u64 hash, u32 width, u32 height, u32 levels, Format format) {
+static const std::vector<Patch>* FindIn(Style style, u64 hash, u32 width, u32 height, u32 levels,
+                                         Format format) {
     if (Forced() == Force::Off) {
         return nullptr;
     }
     static std::mutex mutex;
     static std::map<std::tuple<u64, u32, Style>, std::vector<Patch>> built;
     static const std::vector<Patch> original;
-    const Style style = Shown();
     std::scoped_lock lock{mutex};
     const auto known_sheet = [&]() -> const Sheet* {
         for (const Sheet& sheet : sheets) {
@@ -1174,6 +1179,34 @@ const std::vector<Patch>* Find(u64 hash, u32 width, u32 height, u32 levels, Form
     auto& patches = built[key] = BuildPicture(*picture, levels, style);
     std::printf("Button prompts: %s drawn as %s (%u mip levels)\n", picture->name, look, levels);
     return &patches;
+}
+
+const std::vector<Patch>* Find(u64 hash, u32 width, u32 height, u32 levels, Format format) {
+    return FindIn(Shown(), hash, width, height, levels, format);
+}
+
+void Prebuild() {
+    // Drawing a sheet takes tens of milliseconds, which the game's first prompt waited for (a hitch). The device used
+    // is not known yet at start: both styles, for every known picture with the mip levels the games give them
+    // (sheets one level, single pictures a full chain).
+    std::thread([] {
+        Common::SetCurrentThreadName("bb:ButtonPrompts");
+        BbThreads::MakeBelowNormal();
+        const Force force = Forced();
+        for (const Style style : {Style::Keyboard, Style::Xbox}) {
+            if ((force == Force::Keyboard && style != Style::Keyboard) ||
+                (force == Force::Xbox && style != Style::Xbox)) {
+                continue;
+            }
+            for (const Sheet& sheet : sheets) {
+                FindIn(style, sheet.hash, sheet.width, sheet.height, 1, Format::Rgba8);
+            }
+            for (const Picture& picture : pictures) {
+                FindIn(style, picture.hash, picture.size, picture.size, u32(std::bit_width(picture.size)),
+                       Format::Bc1);
+            }
+        }
+    }).detach();
 }
 
 } // namespace VideoCore::ButtonPrompts
