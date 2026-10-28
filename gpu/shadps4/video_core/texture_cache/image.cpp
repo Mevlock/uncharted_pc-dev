@@ -176,6 +176,44 @@ void UniqueImage::Destroy() {
     }
 }
 
+// bbport (BB_IMAGE_POOL=1, experiment): images from VMA pools of 256 MiB blocks, not memory of their own where the driver
+// prefers that: such a vkAllocateMemory took 10-30 ms in the kernel on the drawing thread (a hitch where a new image
+// appeared). A pool with a set block size never allocates dedicated memory; an image it cannot hold (larger than a
+// block, or one the driver requires dedicated memory for) falls back to the default path.
+static VmaPool ImagePool(VmaAllocator allocator, const VkImageCreateInfo& image_ci) {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_IMAGE_POOL");
+        return env && env[0] == '1';
+    }();
+    if (!on) {
+        return VK_NULL_HANDLE;
+    }
+    VmaAllocationCreateInfo probe{};
+    probe.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    u32 type = 0;
+    if (vmaFindMemoryTypeIndexForImageInfo(allocator, &image_ci, &probe, &type) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+    static std::mutex mutex;
+    static std::vector<std::tuple<VmaAllocator, u32, VmaPool>> pools;
+    std::scoped_lock lk{mutex};
+    for (const auto& [a, t, pool] : pools) {
+        if (a == allocator && t == type) {
+            return pool;
+        }
+    }
+    VmaPoolCreateInfo pool_ci{};
+    pool_ci.memoryTypeIndex = type;
+    pool_ci.blockSize = u64{256} << 20;
+    VmaPool pool = VK_NULL_HANDLE;
+    if (vmaCreatePool(allocator, &pool_ci, &pool) != VK_SUCCESS) {
+        pool = VK_NULL_HANDLE;
+    }
+    pools.emplace_back(allocator, type, pool);
+    std::printf("Image pool: memory type %u, 256 MiB blocks%s\n", type, pool ? "" : " (failed, default allocation)");
+    return pool;
+}
+
 void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     this->image_ci = image_ci;
     ASSERT(!image);
@@ -211,8 +249,16 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
         estimate = device.getImageMemoryRequirements(req).memoryRequirements.size;
     }
     if (Vulkan::Vram::Allows(estimate)) {
-        result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image, &allocation,
-                                &alloc_info);
+        if (const VmaPool pool = ImagePool(allocator, image_ci_unsafe)) {
+            VmaAllocationCreateInfo pooled = alloc_ci;
+            pooled.pool = pool;
+            result = vmaCreateImage(allocator, &image_ci_unsafe, &pooled, &unsafe_image, &allocation,
+                                    &alloc_info);
+        }
+        if (result != VK_SUCCESS) {
+            result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image, &allocation,
+                                    &alloc_info);
+        }
     }
     if (result != VK_SUCCESS && !Vulkan::Vram::Legacy()) {
         // bbport: over the driver's budget. Evicting from here is not safe (the caller holds the
