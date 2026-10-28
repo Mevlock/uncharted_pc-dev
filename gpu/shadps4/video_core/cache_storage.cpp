@@ -14,6 +14,7 @@
 
 #include <miniz.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -24,11 +25,15 @@
 
 namespace {
 
-std::mutex submit_mutex{};
+// bbport: several writer threads (a first shader preparation writes ~25,000 files, 27 s on one thread). A file always
+// goes to the same thread (by its path), so the writes and removals of one file keep their order.
+struct IoQueue {
+    std::mutex mutex;
+    std::condition_variable_any cv;
+    std::queue<std::packaged_task<void()>> requests;
+};
+std::array<IoQueue, Storage::DataBase::IoWorkers> io_queues{};
 std::atomic<u32> num_requests{};
-std::condition_variable_any request_cv{};
-std::queue<std::packaged_task<void()>> req_queue{};
-std::mutex m_request{};
 
 mz_zip_archive zip_ar{};
 bool ar_is_read_only{true};
@@ -37,38 +42,43 @@ bool ar_is_read_only{true};
 
 namespace Storage {
 
-void ProcessIO(const std::stop_token& stoken) {
+void ProcessIO(const std::stop_token& stoken, u32 index) {
     Common::SetCurrentThreadName("shadPS4:PipelineCacheIO");
-
-    while (!stoken.stop_requested()) {
+    auto& io = io_queues[index];
+    while (true) {
+        std::packaged_task<void()> request{};
         {
-            std::unique_lock lk{submit_mutex};
-            Common::CondvarWait(request_cv, lk, stoken, [&] { return num_requests.load() != 0; });
-        }
-
-        if (stoken.stop_requested()) {
-            break;
-        }
-
-        while (num_requests.load() != 0) {
-            std::packaged_task<void()> request{};
-            {
-                std::scoped_lock lock{m_request};
-                if (req_queue.empty()) {
-                    continue;
-                }
-                request = std::move(req_queue.front());
-                req_queue.pop();
+            std::unique_lock lk{io.mutex};
+            Common::CondvarWait(io.cv, lk, stoken, [&] { return !io.requests.empty(); });
+            if (stoken.stop_requested()) {
+                return;
             }
-
-            if (request.valid()) {
-                request();
-                request.get_future().wait();
+            if (io.requests.empty()) {
+                continue;
             }
-
-            --num_requests;
+            request = std::move(io.requests.front());
+            io.requests.pop();
         }
+        if (request.valid()) {
+            request();
+            request.get_future().wait();
+        }
+        --num_requests;
     }
+}
+
+/// The writer of a file: always the same one for a path (one writer for an archive: miniz is not thread-safe).
+static void Enqueue(const std::filesystem::path& path, std::packaged_task<void()>&& request) {
+    const u32 index = EmulatorSettings.IsPipelineCacheArchived()
+                          ? 0
+                          : u32(std::filesystem::hash_value(path) % DataBase::IoWorkers);
+    auto& io = io_queues[index];
+    {
+        std::scoped_lock lock{io.mutex};
+        io.requests.emplace(std::move(request));
+        ++num_requests;
+    }
+    io.cv.notify_one();
 }
 
 constexpr std::string GetBlobFileExtension(BlobType type) {
@@ -124,7 +134,10 @@ void DataBase::Open() {
         directory = cache_path;
     }
 
-    io_worker = std::jthread{ProcessIO};
+    const u32 workers = EmulatorSettings.IsPipelineCacheArchived() ? 1 : IoWorkers;
+    for (u32 i = 0; i < workers; ++i) {
+        io_workers[i] = std::jthread{[i](std::stop_token stoken) { ProcessIO(stoken, i); }};
+    }
     opened = true;
 }
 
@@ -133,8 +146,12 @@ void DataBase::Close() {
         return;
     }
 
-    io_worker.request_stop();
-    io_worker.join();
+    for (auto& worker : io_workers) {
+        if (worker.joinable()) {
+            worker.request_stop();
+            worker.join();
+        }
+    }
 
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         mz_zip_writer_finalize_archive(&zip_ar);
@@ -189,13 +206,10 @@ bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector
                 }
             }
         }};
-        std::scoped_lock lock{m_request};
-        req_queue.emplace(std::move(request));
+        auto queued{path_};
+        queued.replace_extension(GetBlobFileExtension(type));
+        Enqueue(queued, std::move(request));
     }
-
-    std::scoped_lock lk{submit_mutex};
-    ++num_requests;
-    request_cv.notify_one();
     return true;
 }
 
@@ -319,6 +333,10 @@ std::vector<std::string> DataBase::ListBlobNames(BlobType type) {
     return names;
 }
 
+u32 DataBase::PendingWrites() const {
+    return num_requests.load();
+}
+
 void DataBase::Flush(u32 max_ms) {
     const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(max_ms);
     while (opened && num_requests.load() != 0 && std::chrono::steady_clock::now() < end) {
@@ -351,12 +369,8 @@ void DataBase::Remove(BlobType type, const std::string& name) {
             std::error_code error;
             std::filesystem::remove(path, error);
         }};
-        std::scoped_lock lock{m_request};
-        req_queue.emplace(std::move(request));
+        Enqueue(path, std::move(request));
     }
-    std::scoped_lock lk{submit_mutex};
-    ++num_requests;
-    request_cv.notify_one();
 }
 
 void DataBase::FinishPreload() {

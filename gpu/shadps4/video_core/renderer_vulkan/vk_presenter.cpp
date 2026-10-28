@@ -1061,7 +1061,14 @@ void PrepareShadersWithoutWindow(AmdGpu::Liverpool* liverpool) {
     // Every prepared shader and pipeline must reach the disk before the process ends (the exit flush waits at most
     // 3 s: a first preparation's ~20,000 writes were mostly lost and the next start built them again).
     const auto t_flush = std::chrono::steady_clock::now();
-    Storage::DataBase::Instance().Flush(120000);
+    auto& db = Storage::DataBase::Instance();
+    const u32 to_write = std::max<u32>(1, db.PendingWrites());
+    while (db.PendingWrites() != 0 && std::chrono::steady_clock::now() - t_flush < std::chrono::minutes(2)) {
+        BbOverlay::SetShaderPreparation(4, to_write - std::min(to_write, db.PendingWrites()), to_write);
+        BbOverlay::PrintPreparationProgress();
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+    BbOverlay::SetShaderPreparation(0, 0, 0);
     FlushPipelineCacheForExit();
     std::printf("Preparation only: cache written in %.1f s\n",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t_flush).count());

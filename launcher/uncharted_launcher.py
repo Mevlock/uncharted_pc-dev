@@ -2003,9 +2003,10 @@ class Launcher:
             return
         self.prep_bar['value'] = percent
         steps = {0: _('Starting…'), 1: _('Step 1 of 2: reading the shaders'),
-                 2: _('Step 2 of 2: compiling them for your graphics card'), 3: _('Finishing…')}
+                 2: _('Step 2 of 2: compiling them for your graphics card'), 3: _('Finishing…'),
+                 4: _('Saving the prepared shaders')}
         text = f'{steps.get(step, "")}   {percent} %'
-        if step in (1, 2) and total:
+        if step in (1, 2, 4) and total:
             text += f'   ({done} / {total})'
         if left.strip():
             text += f' · {left.strip()}'

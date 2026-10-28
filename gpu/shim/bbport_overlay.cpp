@@ -976,10 +976,17 @@ bool PreparationFinished() {
 
 // One bar for the whole preparation: step 1 (loading or building shaders) fills the first 15 %, step 2 (the driver
 // compiling pipelines, most of the time) the rest; between the steps it holds at 15 %.
+// Without a window (BB_PREPARE_ONLY) the cache is written before the process ends: saving (phase 4) is the last 15 %.
 static float PreparationFraction(int phase, u32 done, u32 total, bool finishing, bool between) {
+    static const bool saving = [] {
+        const char* env = std::getenv("BB_PREPARE_ONLY");
+        return env && env[0] == '1';
+    }();
     const float step_part = total ? float(done) / float(total) : 0.0f;
-    return finishing                  ? 1.0f
-           : phase == 2               ? 0.15f + 0.85f * step_part
+    const float compiled = saving ? 0.85f : 1.0f;
+    return phase == 4                 ? 0.85f + 0.15f * step_part
+           : finishing                ? 1.0f
+           : phase == 2               ? 0.15f + (compiled - 0.15f) * step_part
            : phase == 1 || phase == 3 ? 0.15f * step_part
            : between                  ? 0.15f
                                       : 0.0f;
@@ -1112,7 +1119,7 @@ void PrintPreparationProgress() {
     seen_step2 = seen_step2 || phase == 2;
     const bool finishing = PreparationFinished() || (phase == 0 && seen_step2);
     const bool between = phase == 0 && had_step && !seen_step2;
-    const int step = finishing ? 3 : phase == 2 || between ? 2 : had_step ? 1 : 0;
+    const int step = phase == 4 ? 4 : finishing ? 3 : phase == 2 || between ? 2 : had_step ? 1 : 0;
     const std::string eta = phase == 2 && total ? PreparationEta(done, total) : std::string{};
     std::printf("PREP %d %u %u %d|%s\n",
                 int(100.0f * PreparationFraction(phase, done, total, finishing, between)), done, total, step,
