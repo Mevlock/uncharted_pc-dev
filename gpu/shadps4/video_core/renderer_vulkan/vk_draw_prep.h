@@ -123,13 +123,20 @@ public:
     /// GPU thread: counts whether a prepared draw was used; prints every 5 s (BB_FRAME_STATS).
     void Count(bool used);
 
+    /// Any thread: flattened user data chunks back to the pool (vk_draw_prep.cpp, FlatArena).
+    static void ReturnChunks(std::vector<std::unique_ptr<u32[]>>& chunks);
+
     struct Submission {
+        ~Submission() {
+            ReturnChunks(flat_chunks);
+        }
         u64 seq{};
         std::vector<u32> commands;
         std::unique_ptr<PreparedDraw[]> draws;
         u32 num_draws{};
         u32 num_dispatches{};
-        std::vector<std::unique_ptr<u32[]>> flat_chunks; ///< from the claiming worker
+        std::vector<std::unique_ptr<u32[]>> flat_chunks; ///< from the claiming worker (pooled)
+        std::vector<std::unique_ptr<u32[]>> flat_large;  ///< arrays larger than a chunk
         u64 start_checksum{}, end_checksum{}; ///< set by the scanner
         AmdGpu::RegDelta delta;                ///< registers written, values at the end
         AmdGpu::ComputeProgram cs_start{}, cs_end{}; ///< compute program state, set by the scanner
