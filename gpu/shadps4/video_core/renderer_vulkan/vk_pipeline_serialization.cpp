@@ -589,6 +589,11 @@ struct ListedVariant {
     /// A predicted line: image setups by descriptor-table slot (imgslot=) instead of in translation order.
     std::vector<Shader::ImageSpecialization> slot_images;
     bool by_slot = false;
+    /// startps=<hash>.<perm>: a vertex shader whose bindings start where that listed pixel shader's end (the stage
+    /// bound before it), worked out when the pixel shader is built.
+    bool start_from_ps = false;
+    u64 start_ps_hash{};
+    size_t start_ps_perm{};
 };
 
 namespace {
@@ -661,6 +666,12 @@ static std::optional<ListedVariant> ParseVariantLine(const std::string& line) {
         if ((f.contains("swi") && !UnhexBytes(f["swi"], &rt.sw, sizeof(rt.sw))) ||
             (f.contains("start") && !UnhexBytes(f["start"], &v.spec.start, sizeof(v.spec.start)))) {
             return std::nullopt;
+        }
+        if (f.contains("startps")) {
+            const auto dot = f["startps"].find('.');
+            v.start_from_ps = true;
+            v.start_ps_hash = std::stoull(f["startps"].substr(0, dot), nullptr, 16);
+            v.start_ps_perm = dot == std::string::npos ? 0 : std::stoull(f["startps"].substr(dot + 1));
         }
         if (f.contains("imgslot")) {
             v.by_slot = true;
@@ -762,6 +773,10 @@ static void SaveShaderLocations(const std::filesystem::path& path, const ShaderL
 
 /// The code of the shader whose info block is at `at` in `f`, if that block still names `hash`. The code starts with
 /// s_mov_b32 vcc_hi, n where the info block is (n + 1) * 2 dwords on (AmdGpu::SearchBinaryInfo), or ends at the block.
+/// The shader type each shader's binary info block gives (0 pixel, 1 vertex, 4 compute), as its code is read.
+static std::mutex g_shader_types_mutex;
+static std::unordered_map<u64, u32> g_shader_types;
+
 static std::optional<std::vector<u32>> ReadShaderCodeAt(std::FILE* f, u64 at, u64 hash, u32 length,
                                                        std::vector<u32>* registers = nullptr) {
     if (at < 8 || length < 8 || length >= (1u << 22)) {
@@ -777,6 +792,12 @@ static std::optional<std::vector<u32>> ReadShaderCodeAt(std::FILE* f, u64 at, u6
     std::memcpy(&info_hash, bytes.data() + window + 16, 8);
     if (std::memcmp(bytes.data() + window, "OrbShdr", 7) != 0 || info_hash != hash) {
         return std::nullopt;
+    }
+    {
+        u32 bits;
+        std::memcpy(&bits, bytes.data() + window + 8, 4);
+        std::scoped_lock lk{g_shader_types_mutex};
+        g_shader_types[hash] = (bits >> 2) & 0xF;
     }
     s64 start = -1;
     for (u64 back = 8; back <= window; ++back) {
@@ -1217,11 +1238,42 @@ Shader::RuntimeInfo PipelineCache::RuntimeInfoFromRegisters(Shader::HwStage hw_s
 vk::ShaderModule PipelineCache::BuildListedVariant(const ListedVariant& v, std::span<const u32> program_code,
                                                    const std::vector<u32>& registers, std::vector<u32>& spv,
                                                    std::unique_ptr<Shader::Info>& info_out,
-                                                   Shader::StageSpecialization& spec_out) {
+                                                   Shader::StageSpecialization& spec_out,
+                                                   Shader::Backend::Bindings* binding_end) {
     static const std::vector<Shader::UdRead> no_reads;
     static const std::vector<u32> no_flat;
     static thread_local Shader::Pools list_pools;
     const auto& draw = v.spec.runtime_info;
+    // BB_VARIANT_TRACE=<file>: "start"/"done" per variant, flushed, to find one that brings the process down.
+    static std::FILE* trace = [] {
+        const char* path = std::getenv("BB_VARIANT_TRACE");
+        return path ? std::fopen(path, "w") : nullptr;
+    }();
+    static std::mutex trace_mutex;
+    const auto trace_line = [&](const char* what) {
+        if (trace) {
+            std::scoped_lock lk{trace_mutex};
+            std::fprintf(trace, "%s %016llx %u %zu\n", what, (unsigned long long)v.hash, u32(draw.hw_stage),
+                         v.perm);
+            std::fflush(trace);
+        }
+    };
+    trace_line("start");
+    // A line whose stage is not the shader's own (its binary info's type) is refused: translating a shader as another
+    // stage can bring the process down.
+    {
+        std::scoped_lock lk{g_shader_types_mutex};
+        const auto it = g_shader_types.find(v.hash);
+        const u32 want = draw.hw_stage == Shader::HwStage::Fragment ? 0
+                         : draw.hw_stage == Shader::HwStage::Vertex ? 1
+                         : draw.hw_stage == Shader::HwStage::Compute ? 4
+                                                                     : 99;
+        if (it == g_shader_types.end() || it->second != want) {
+            trace_line("wrong-stage");
+            info_out.reset();
+            return {};
+        }
+    }
     auto runtime_info = RuntimeInfoFromRegisters(draw.hw_stage, draw.sw_stage, registers, draw);
     static const std::array<u32, Shader::ShaderParams::NumShaderUserData> no_user_data{};
     const Shader::ShaderParams params{
@@ -1324,14 +1376,68 @@ vk::ShaderModule PipelineCache::BuildListedVariant(const ListedVariant& v, std::
     Shader::t_translation_replay = &replay;
     Shader::t_sharp_override = &overrides;
     const auto module = TranslateModule(*info, runtime_info, program_code, v.perm, binding, list_pools, spv);
+    if (binding_end) {
+        *binding_end = binding;
+    }
     // The specialization the game computes for this variant, from the same descriptors.
     info->RefreshFlatBuf();
     spec_out = Shader::StageSpecialization(*info, runtime_info, profile, v.spec.start);
     Shader::t_sharp_override = nullptr;
     Shader::t_translation_replay = nullptr;
     runtime_fault_recover = nullptr;
+    trace_line("done");
     info_out = std::move(info);
     return module;
+}
+
+/// Listed variants in two rounds: those whose bindings start where a listed pixel shader's end (startps=) are built
+/// after the others, with that start (lines whose pixel shader did not build are left out). `build(i, end)` builds
+/// listed[i], sets its end bindings and says whether it built.
+/// One listed variant built; an exception (the translator throws on what it cannot handle) only drops that variant.
+template <typename Fn>
+static bool BuildGuarded(Fn& build, size_t i, Shader::Backend::Bindings& end, const ListedVariant& v) {
+    try {
+        return build(i, end);
+    } catch (const std::exception& e) {
+        std::printf("Variant list: %016llx (hw %u) not built: %s\n", (unsigned long long)v.hash,
+                    u32(v.spec.runtime_info.hw_stage), e.what());
+    } catch (...) {
+        std::printf("Variant list: %016llx (hw %u) not built: exception\n", (unsigned long long)v.hash,
+                    u32(v.spec.runtime_info.hw_stage));
+    }
+    Shader::t_sharp_override = nullptr;
+    Shader::t_translation_replay = nullptr;
+    runtime_fault_recover = nullptr;
+    return false;
+}
+
+template <typename Fn>
+static void ForListedVariants(std::vector<ListedVariant>& listed, u32 threads, Fn&& build) {
+    std::vector<size_t> first, second;
+    for (size_t i = 0; i < listed.size(); ++i) {
+        (listed[i].start_from_ps ? second : first).push_back(i);
+    }
+    std::mutex ends_mutex;
+    std::map<std::pair<u64, size_t>, Shader::Backend::Bindings> ends;
+    ParallelFor(first.size(), threads, [&](size_t j) {
+        const auto& v = listed[first[j]];
+        Shader::Backend::Bindings end{};
+        if (BuildGuarded(build, first[j], end, v) && v.spec.runtime_info.hw_stage == Shader::HwStage::Fragment) {
+            std::scoped_lock lk{ends_mutex};
+            ends[{v.hash, v.perm}] = end;
+        }
+    });
+    std::vector<size_t> ready;
+    for (const size_t i : second) {
+        if (const auto it = ends.find({listed[i].start_ps_hash, listed[i].start_ps_perm}); it != ends.end()) {
+            listed[i].spec.start = it->second;
+            ready.push_back(i);
+        }
+    }
+    ParallelFor(ready.size(), threads, [&](size_t j) {
+        Shader::Backend::Bindings end{};
+        BuildGuarded(build, ready[j], end, listed[ready[j]]);
+    });
 }
 
 void PipelineCache::WarmUpThread() {
@@ -1652,21 +1758,21 @@ void PipelineCache::WarmUpThread() {
         std::atomic<u32> same{0}, differ{0}, no_reference{0}, no_code{0}, failed{0};
         std::mutex shown_mutex;
         u32 shown = 0;
-        ParallelFor(listed.size(), threads, [&](size_t i) {
+        ForListedVariants(listed, threads, [&](size_t i, Shader::Backend::Bindings& end) -> bool {
             const auto& v = listed[i];
             const auto it = code.find(v.hash);
             const auto rit = registers.find(v.hash);
             if (it == code.end() || rit == registers.end()) {
                 no_code.fetch_add(1, std::memory_order_relaxed);
-                return;
+                return false;
             }
             std::vector<u32> spv;
             std::unique_ptr<Shader::Info> built_info;
             Shader::StageSpecialization built_spec;
-            const auto module = BuildListedVariant(v, it->second, rit->second, spv, built_info, built_spec);
+            const auto module = BuildListedVariant(v, it->second, rit->second, spv, built_info, built_spec, &end);
             if (!built_info) {
                 failed.fetch_add(1, std::memory_order_relaxed);
-                return;
+                return false;
             }
             if (module) {
                 device.destroyShaderModule(module);
@@ -1689,6 +1795,7 @@ void PipelineCache::WarmUpThread() {
                                 (unsigned long long)v.hash, u32(draw.hw_stage), v.perm);
                 }
             }
+            return true;
         });
         std::printf("Variant list: %zu listed (%u unreadable lines); built from the game files: %u identical, %u "
                     "differ, %u without a reference, %u without code, %u faulted (%.0f ms)\n",
@@ -1925,7 +2032,7 @@ void PipelineCache::WarmUpThread() {
         std::mutex shipped_mutex;
         BbOverlay::SetShaderPreparation(1, 0, u32(listed.size()));
         std::vector<std::pair<u64, LoadedStage*>> new_stages;
-        ParallelFor(listed.size(), ship_threads, [&](size_t i) {
+        ForListedVariants(listed, ship_threads, [&](size_t i, Shader::Backend::Bindings& end) -> bool {
             const auto& v = listed[i];
             BbOverlay::SetShaderPreparation(1, progress.fetch_add(1, std::memory_order_relaxed) + 1,
                                             u32(listed.size()));
@@ -1933,15 +2040,15 @@ void PipelineCache::WarmUpThread() {
             const auto rit = registers.find(v.hash);
             if (it == code.end() || rit == registers.end()) {
                 no_code.fetch_add(1, std::memory_order_relaxed);
-                return;
+                return false;
             }
             std::vector<u32> spv;
             std::unique_ptr<Shader::Info> info;
             Shader::StageSpecialization spec;
-            const auto module = BuildListedVariant(v, it->second, rit->second, spv, info, spec);
+            const auto module = BuildListedVariant(v, it->second, rit->second, spv, info, spec, &end);
             if (!info || !module) {
                 failed.fetch_add(1, std::memory_order_relaxed);
-                return;
+                return false;
             }
             built.fetch_add(1, std::memory_order_relaxed);
             Program* program{};
@@ -1990,7 +2097,7 @@ void PipelineCache::WarmUpThread() {
                     stage.fetch_shader = existing_spec.fetch_shader_data;
                     new_stages.emplace_back(HashCombine(v.hash, v.perm), &stage);
                 }
-                return;
+                return true; // built (its end bindings count)
             }
             // Saved like a shader translated in play: the next launch loads it from the cache.
             const u64 perm_hash = HashCombine(v.hash, v.perm);
@@ -2006,6 +2113,7 @@ void PipelineCache::WarmUpThread() {
             stage.perm_idx = v.perm;
             stage.fetch_shader = spec.fetch_shader_data;
             new_stages.emplace_back(perm_hash, &stage);
+            return true;
         });
         for (const auto& [perm_hash, stage] : new_stages) {
             by_hash.emplace(perm_hash, stage);
