@@ -1779,6 +1779,17 @@ void PipelineCache::WarmUpThread() {
             }
             const auto& draw = v.spec.runtime_info;
             const u64 sum = BinaryChecksum(spv);
+            // BB_VARIANT_LIST_SUMS=<file>: each built line's binary checksum (offline scoring of predictions).
+            static std::FILE* sums = [] {
+                const char* path = std::getenv("BB_VARIANT_LIST_SUMS");
+                return path ? std::fopen(path, "w") : nullptr;
+            }();
+            if (sums) {
+                std::scoped_lock lk{shown_mutex};
+                std::fprintf(sums, "%016llx %u %zu %016llx\n", (unsigned long long)v.hash, u32(v.spec.runtime_info.hw_stage),
+                             v.perm, (unsigned long long)sum);
+                std::fflush(sums);
+            }
             const auto ref = stored_checksums.find(v.hash);
             const bool has_reference = !v.checksums.empty() || ref != stored_checksums.end();
             const bool ok = std::ranges::find(v.checksums, sum) != v.checksums.end() ||
