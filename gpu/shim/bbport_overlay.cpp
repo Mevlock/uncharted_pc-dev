@@ -1108,6 +1108,12 @@ void FullScreenPreparation() {
             ? fmt::format("{} / {}{}", done, total, phase == 2 ? PreparationEta(done, total) : std::string{})
             : std::string{};
     centered(count.c_str(), 1.1f, grey);
+    // Where it is switched off (the launcher's Advanced page). For now also the way out if a large shader cache
+    // causes trouble (temporary, while shader preparation is being polished).
+    ImGui::SetCursorPosY(h * 0.86f);
+    centered("If a large shader cache causes problems: in the launcher, clear the shader cache and turn off",
+             1.0f, grey);
+    centered("Advanced > Shader preparation.", 1.0f, grey);
     ImGui::End();
     ImGui::PopStyleColor(3);
 }
