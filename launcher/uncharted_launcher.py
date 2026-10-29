@@ -193,7 +193,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'anisotropy': '0',
+                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'skip_friends_notice': True, 'anisotropy': '0',
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
@@ -582,6 +582,8 @@ def game_environment(s, start=None):
         env['BB_SKIP_INTRO'] = '1'
     if s.get('unlock_chapters', False):
         env['BB_UNLOCK_CHAPTERS'] = '1'
+    if s.get('skip_friends_notice', True):
+        env['BB_OFFLINE_NPID'] = '1'
     if s.get('dev_menu', False):
         env['BB_DEV_MENU'] = '1'
     job_threads = str(s.get('job_threads') or 'auto')
@@ -1317,6 +1319,10 @@ class Launcher:
                    _('Every chapter in Chapter Select and the Brutal difficulty from the start, in all three '
                      'games. Saves and progress are not changed; turned off, the menus show your own progress. '
                      'By BilalReloaded.'))
+        self.check(f, 'skip_friends_notice', _("Skip the friends' stats notice"),
+                   _("Continue and New Game go straight into the game: the game gets a local player name "
+                     "instead of 'signed out' and does not stop on the notice that friends' stats are not "
+                     "available. Nothing goes online."))
 
     def build_display(self):
         f = self.page('display', _('Display'), _('How the game window is shown.'))
