@@ -60,8 +60,17 @@ void ProcessIO(const std::stop_token& stoken, u32 index) {
             io.requests.pop();
         }
         if (request.valid()) {
+            const auto start = std::chrono::steady_clock::now();
             request();
             request.get_future().wait();
+            // A write over a second: Windows held the file call (seen at an exit after a preparation, all writers
+            // stuck in create/rename; an antivirus scanning each new file is the likely cause).
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - start).count();
+            if (ms > 1000) {
+                std::printf("Shader cache: one write took %lld ms (writer %u, %u queued)\n",
+                            static_cast<long long>(ms), index, num_requests.load());
+            }
         }
         --num_requests;
     }

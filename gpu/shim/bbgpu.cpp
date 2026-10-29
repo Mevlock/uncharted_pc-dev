@@ -275,6 +275,10 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         }
         std::printf("Window closed (close button, Alt+F4 or system quit request)\n");
         std::fflush(stdout);
+        // bbport: gone from the screen at once; the shader cache's last writes (FlushPipelineCacheForExit, up to 10 s)
+        // happen behind it, so a slow disk never shows a window that does not respond.
+        SDL_HideWindow(window->GetSDLWindow());
+        SDL_PumpEvents();
         Vulkan::FlushPipelineCacheForExit();
 #ifdef _WIN32
         // bbport: _Exit is ExitProcess on Windows, which still runs every DLL's detach code with
