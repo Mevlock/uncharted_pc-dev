@@ -699,7 +699,16 @@ void PipelineCache::DriverCacheSaver(std::stop_token stop) {
 }
 
 void PipelineCache::SaveForExit() {
-    Storage::DataBase::Instance().Flush(3000);
+    // bbport: up to 30 s (was 3): right after a preparation thousands of shader files are still being written,
+    // and a game closed then lost them. Usually nothing is pending and this returns at once.
+    auto& db = Storage::DataBase::Instance();
+    if (const u32 pending = db.PendingWrites(); pending > 0) {
+        const auto start = std::chrono::steady_clock::now();
+        db.Flush(30000);
+        std::printf("Shader cache: %u writes finished at exit in %.1f s\n", pending,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+        std::fflush(stdout);
+    }
     if (driver_cache_dirty.load() != 0 && IsWarm()) {
         SaveDriverCache();
     }

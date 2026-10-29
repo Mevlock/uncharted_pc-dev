@@ -2555,9 +2555,17 @@ void PipelineCache::WarmUpThread() {
         std::printf("Preparation screen: shown for %.0f ms\n", elapsed_ms());
     }
     if (ship_list) {
-        if (std::FILE* f = std::fopen(prepared_marker.string().c_str(), "w")) {
-            std::fprintf(f, "%s\n", prepared_stamp.c_str());
-            std::fclose(f);
+        // The marker says the prepared shaders are on disk: in play, the writes still queued are waited for first
+        // (behind the game; the marker used to be written at once, and a game closed within seconds lost part of
+        // the cache while the next start trusted it). Without a window the process waits for them itself.
+        if (!prepare_only) {
+            db.Flush(120000);
+        }
+        if (db.PendingWrites() == 0 || prepare_only) {
+            if (std::FILE* f = std::fopen(prepared_marker.string().c_str(), "w")) {
+                std::fprintf(f, "%s\n", prepared_stamp.c_str());
+                std::fclose(f);
+            }
         }
     }
     // Without a window (BB_PREPARE_ONLY) the process saves the cache and ends now.
