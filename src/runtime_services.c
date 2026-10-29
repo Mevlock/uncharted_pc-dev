@@ -194,7 +194,56 @@ static ABI int32_t np_state(int32_t user,int32_t *state) {
     (void)user; *state=1; /* SIGNED_OUT */
     return 0;
 }
-static ABI int32_t np_signed_out(void) { NP_TRACE("signed-out answer"); return NP_SIGNED_OUT; }
+__attribute__((unused)) static ABI int32_t np_signed_out(void) { NP_TRACE("signed-out answer"); return NP_SIGNED_OUT; }
+/* One stub per NP function answered "signed out", so the trace names the call. */
+#define NP_SIGNED_OUT_STUB(name) static ABI int32_t np_so_##name(void) { NP_TRACE(#name); return NP_SIGNED_OUT; }
+NP_SIGNED_OUT_STUB(sceNpAuthGetAuthorizationCode)
+NP_SIGNED_OUT_STUB(sceNpCheckNpAvailability)
+NP_SIGNED_OUT_STUB(sceNpCheckPlus)
+NP_SIGNED_OUT_STUB(sceNpGetGamePresenceStatus)
+NP_SIGNED_OUT_STUB(sceNpGetNpId)
+NP_SIGNED_OUT_STUB(sceNpGetOnlineId)
+NP_SIGNED_OUT_STUB(sceNpGetParentalControlInfo)
+NP_SIGNED_OUT_STUB(sceNpLookupNpId)
+NP_SIGNED_OUT_STUB(sceNpMatching2ContextStart)
+NP_SIGNED_OUT_STUB(sceNpMatching2CreateContext)
+NP_SIGNED_OUT_STUB(sceNpMatching2CreateJoinRoom)
+NP_SIGNED_OUT_STUB(sceNpMatching2GetLobbyInfoList)
+NP_SIGNED_OUT_STUB(sceNpMatching2GetServerId)
+NP_SIGNED_OUT_STUB(sceNpMatching2GetWorldInfoList)
+NP_SIGNED_OUT_STUB(sceNpMatching2GrantRoomOwner)
+NP_SIGNED_OUT_STUB(sceNpMatching2JoinLobby)
+NP_SIGNED_OUT_STUB(sceNpMatching2JoinRoom)
+NP_SIGNED_OUT_STUB(sceNpMatching2KickoutRoomMember)
+NP_SIGNED_OUT_STUB(sceNpMatching2LeaveLobby)
+NP_SIGNED_OUT_STUB(sceNpMatching2LeaveRoom)
+NP_SIGNED_OUT_STUB(sceNpMatching2SearchRoom)
+NP_SIGNED_OUT_STUB(sceNpMatching2SetRoomDataExternal)
+NP_SIGNED_OUT_STUB(sceNpMatching2SetRoomDataInternal)
+NP_SIGNED_OUT_STUB(sceNpMatching2SetRoomMemberDataInternal)
+NP_SIGNED_OUT_STUB(sceNpMatching2SignalingGetConnectionStatus)
+NP_SIGNED_OUT_STUB(sceNpMatching2SignalingGetPingInfo)
+NP_SIGNED_OUT_STUB(sceNpScoreCensorComment)
+NP_SIGNED_OUT_STUB(sceNpScoreGetBoardInfo)
+NP_SIGNED_OUT_STUB(sceNpScoreGetGameData)
+NP_SIGNED_OUT_STUB(sceNpScoreGetRankingByNpIdPcId)
+NP_SIGNED_OUT_STUB(sceNpScoreGetRankingByRange)
+NP_SIGNED_OUT_STUB(sceNpScoreRecordGameData)
+NP_SIGNED_OUT_STUB(sceNpScoreRecordScore)
+NP_SIGNED_OUT_STUB(sceNpScoreSanitizeComment)
+NP_SIGNED_OUT_STUB(sceNpSignalingActivateConnection)
+NP_SIGNED_OUT_STUB(sceNpSignalingCreateContext)
+NP_SIGNED_OUT_STUB(sceNpSignalingGetConnectionStatus)
+NP_SIGNED_OUT_STUB(sceNpWebApiCreateContext)
+NP_SIGNED_OUT_STUB(sceNpWebApiCreatePushEventFilter)
+NP_SIGNED_OUT_STUB(sceNpWebApiCreateRequest)
+NP_SIGNED_OUT_STUB(sceNpWebApiGetHttpResponseHeaderValue)
+NP_SIGNED_OUT_STUB(sceNpWebApiGetHttpResponseHeaderValueLength)
+NP_SIGNED_OUT_STUB(sceNpWebApiGetHttpStatusCode)
+NP_SIGNED_OUT_STUB(sceNpWebApiReadData)
+NP_SIGNED_OUT_STUB(sceNpWebApiRegisterPushEventCallback)
+NP_SIGNED_OUT_STUB(sceNpWebApiSendRequest)
+NP_SIGNED_OUT_STUB(sceNpWebApiUtilityParseNpId)
 static ABI int32_t np_register(void *cb,void *arg) { NP_TRACE("register"); (void)cb; (void)arg; return new_id(); }
 static ABI void np_register_void(void *cb,void *arg) { NP_TRACE("register (void)"); (void)cb; (void)arg; }
 static ABI int32_t np_request(const void *param) { NP_TRACE("request"); (void)param; return new_id(); }
@@ -562,52 +611,52 @@ static const RuntimeExport exports[]={
     {"sceHttpSetEpoll",ok_void}, {"sceHttpUnsetEpoll",ok_void}, {"sceHttpWaitRequest",http_wait},
     {"sceHttpGetStatusCode",http_fail}, {"sceHttpGetResponseContentLength",http_fail},
     {"sceHttpReadData",http_fail},
-    {"sceNpGetState",np_state}, {"sceNpGetOnlineId",np_signed_out}, {"sceNpGetNpId",np_signed_out},
+    {"sceNpGetState",np_state}, {"sceNpGetOnlineId",np_so_sceNpGetOnlineId}, {"sceNpGetNpId",np_so_sceNpGetNpId},
     {"sceNpRegisterStateCallback",np_register}, {"sceNpUnregisterStateCallback",ok_void},
     {"sceNpRegisterGamePresenceCallback",np_register_void}, {"sceNpRegisterPlusEventCallback",np_register},
     {"sceNpUnregisterPlusEventCallback",ok_void}, {"sceNpCheckCallback",ok_void},
     {"sceNpSetNpTitleId",ok_void}, {"sceNpNotifyPlusFeature",ok_void}, {"sceNpSetContentRestriction",ok_void},
     {"sceNpCreateAsyncRequest",np_request}, {"sceNpDeleteRequest",ok_void}, {"sceNpAbortRequest",ok_void},
-    {"sceNpPollAsync",np_poll}, {"sceNpCheckNpAvailability",np_signed_out},
-    {"sceNpGetParentalControlInfo",np_signed_out}, {"sceNpCheckPlus",np_signed_out},
-    {"sceNpGetGamePresenceStatus",np_signed_out},
+    {"sceNpPollAsync",np_poll}, {"sceNpCheckNpAvailability",np_so_sceNpCheckNpAvailability},
+    {"sceNpGetParentalControlInfo",np_so_sceNpGetParentalControlInfo}, {"sceNpCheckPlus",np_so_sceNpCheckPlus},
+    {"sceNpGetGamePresenceStatus",np_so_sceNpGetGamePresenceStatus},
     {"sceNpCmpNpId",np_compare}, {"sceNpCmpOnlineId",np_compare},
     {"sceNpAuthCreateAsyncRequest",np_request}, {"sceNpAuthDeleteRequest",ok_void},
-    {"sceNpAuthPollAsync",np_poll}, {"sceNpAuthGetAuthorizationCode",np_signed_out},
+    {"sceNpAuthPollAsync",np_poll}, {"sceNpAuthGetAuthorizationCode",np_so_sceNpAuthGetAuthorizationCode},
     {"sceNpLookupCreateTitleCtx",np_request}, {"sceNpLookupDeleteTitleCtx",ok_void},
     {"sceNpLookupCreateAsyncRequest",np_request_ctx}, {"sceNpLookupDeleteRequest",ok_void},
-    {"sceNpLookupAbortRequest",ok_void}, {"sceNpLookupPollAsync",np_poll}, {"sceNpLookupNpId",np_signed_out},
+    {"sceNpLookupAbortRequest",ok_void}, {"sceNpLookupPollAsync",np_poll}, {"sceNpLookupNpId",np_so_sceNpLookupNpId},
     {"sceNpScoreCreateNpTitleCtx",np_request_ctx}, {"sceNpScoreDeleteNpTitleCtx",ok_void},
     {"sceNpScoreCreateRequest",np_request}, {"sceNpScoreDeleteRequest",ok_void}, {"sceNpScoreAbortRequest",ok_void},
     {"sceNpWebApiInitialize",lib_init_id}, {"sceNpWebApiTerminate",ok_void},
-    {"sceNpWebApiCreateContext",np_signed_out},
-    {"sceNpWebApiCreateRequest",np_signed_out}, {"sceNpWebApiSendRequest",np_signed_out},
+    {"sceNpWebApiCreateContext",np_so_sceNpWebApiCreateContext},
+    {"sceNpWebApiCreateRequest",np_so_sceNpWebApiCreateRequest}, {"sceNpWebApiSendRequest",np_so_sceNpWebApiSendRequest},
     {"sceNpWebApiDeleteRequest",ok_void}, {"sceNpWebApiAbortRequest",ok_void},
-    {"sceNpWebApiDeleteContext",ok_void}, {"sceNpWebApiReadData",np_signed_out},
-    {"sceNpWebApiGetHttpStatusCode",np_signed_out}, {"sceNpWebApiGetHttpResponseHeaderValue",np_signed_out},
-    {"sceNpWebApiGetHttpResponseHeaderValueLength",np_signed_out},
-    {"sceNpWebApiCreatePushEventFilter",np_signed_out}, {"sceNpWebApiDeletePushEventFilter",ok_void},
-    {"sceNpWebApiRegisterPushEventCallback",np_signed_out}, {"sceNpWebApiUnregisterPushEventCallback",ok_void},
-    {"sceNpWebApiUtilityParseNpId",np_signed_out},
-    {"sceNpMatching2ContextStart",np_signed_out}, {"sceNpMatching2ContextStop",ok_void},
+    {"sceNpWebApiDeleteContext",ok_void}, {"sceNpWebApiReadData",np_so_sceNpWebApiReadData},
+    {"sceNpWebApiGetHttpStatusCode",np_so_sceNpWebApiGetHttpStatusCode}, {"sceNpWebApiGetHttpResponseHeaderValue",np_so_sceNpWebApiGetHttpResponseHeaderValue},
+    {"sceNpWebApiGetHttpResponseHeaderValueLength",np_so_sceNpWebApiGetHttpResponseHeaderValueLength},
+    {"sceNpWebApiCreatePushEventFilter",np_so_sceNpWebApiCreatePushEventFilter}, {"sceNpWebApiDeletePushEventFilter",ok_void},
+    {"sceNpWebApiRegisterPushEventCallback",np_so_sceNpWebApiRegisterPushEventCallback}, {"sceNpWebApiUnregisterPushEventCallback",ok_void},
+    {"sceNpWebApiUtilityParseNpId",np_so_sceNpWebApiUtilityParseNpId},
+    {"sceNpMatching2ContextStart",np_so_sceNpMatching2ContextStart}, {"sceNpMatching2ContextStop",ok_void},
     {"sceNpMatching2DestroyContext",ok_void},
     {"sceNpMatching2RegisterContextCallback",ok_void}, {"sceNpMatching2RegisterLobbyEventCallback",ok_void},
     {"sceNpMatching2RegisterRoomEventCallback",ok_void}, {"sceNpMatching2RegisterSignalingCallback",ok_void},
     {"sceNpMatching2SetDefaultRequestOptParam",ok_void},
-    {"sceNpMatching2CreateJoinRoom",np_signed_out}, {"sceNpMatching2JoinRoom",np_signed_out},
-    {"sceNpMatching2LeaveRoom",np_signed_out}, {"sceNpMatching2SearchRoom",np_signed_out},
-    {"sceNpMatching2GetServerId",np_signed_out}, {"sceNpMatching2GetWorldInfoList",np_signed_out},
-    {"sceNpMatching2GetLobbyInfoList",np_signed_out}, {"sceNpMatching2JoinLobby",np_signed_out},
-    {"sceNpMatching2LeaveLobby",np_signed_out}, {"sceNpMatching2GrantRoomOwner",np_signed_out},
-    {"sceNpMatching2KickoutRoomMember",np_signed_out}, {"sceNpMatching2SetRoomDataExternal",np_signed_out},
-    {"sceNpMatching2SetRoomDataInternal",np_signed_out}, {"sceNpMatching2SetRoomMemberDataInternal",np_signed_out},
-    {"sceNpMatching2SignalingGetConnectionStatus",np_signed_out}, {"sceNpMatching2SignalingGetPingInfo",np_signed_out},
-    {"sceNpSignalingDeleteContext",ok_void}, {"sceNpSignalingActivateConnection",np_signed_out},
-    {"sceNpSignalingDeactivateConnection",ok_void}, {"sceNpSignalingGetConnectionStatus",np_signed_out},
-    {"sceNpScoreCensorComment",np_signed_out}, {"sceNpScoreSanitizeComment",np_signed_out},
-    {"sceNpScoreGetBoardInfo",np_signed_out}, {"sceNpScoreGetGameData",np_signed_out},
-    {"sceNpScoreGetRankingByNpIdPcId",np_signed_out}, {"sceNpScoreGetRankingByRange",np_signed_out},
-    {"sceNpScoreRecordGameData",np_signed_out}, {"sceNpScoreRecordScore",np_signed_out},
+    {"sceNpMatching2CreateJoinRoom",np_so_sceNpMatching2CreateJoinRoom}, {"sceNpMatching2JoinRoom",np_so_sceNpMatching2JoinRoom},
+    {"sceNpMatching2LeaveRoom",np_so_sceNpMatching2LeaveRoom}, {"sceNpMatching2SearchRoom",np_so_sceNpMatching2SearchRoom},
+    {"sceNpMatching2GetServerId",np_so_sceNpMatching2GetServerId}, {"sceNpMatching2GetWorldInfoList",np_so_sceNpMatching2GetWorldInfoList},
+    {"sceNpMatching2GetLobbyInfoList",np_so_sceNpMatching2GetLobbyInfoList}, {"sceNpMatching2JoinLobby",np_so_sceNpMatching2JoinLobby},
+    {"sceNpMatching2LeaveLobby",np_so_sceNpMatching2LeaveLobby}, {"sceNpMatching2GrantRoomOwner",np_so_sceNpMatching2GrantRoomOwner},
+    {"sceNpMatching2KickoutRoomMember",np_so_sceNpMatching2KickoutRoomMember}, {"sceNpMatching2SetRoomDataExternal",np_so_sceNpMatching2SetRoomDataExternal},
+    {"sceNpMatching2SetRoomDataInternal",np_so_sceNpMatching2SetRoomDataInternal}, {"sceNpMatching2SetRoomMemberDataInternal",np_so_sceNpMatching2SetRoomMemberDataInternal},
+    {"sceNpMatching2SignalingGetConnectionStatus",np_so_sceNpMatching2SignalingGetConnectionStatus}, {"sceNpMatching2SignalingGetPingInfo",np_so_sceNpMatching2SignalingGetPingInfo},
+    {"sceNpSignalingDeleteContext",ok_void}, {"sceNpSignalingActivateConnection",np_so_sceNpSignalingActivateConnection},
+    {"sceNpSignalingDeactivateConnection",ok_void}, {"sceNpSignalingGetConnectionStatus",np_so_sceNpSignalingGetConnectionStatus},
+    {"sceNpScoreCensorComment",np_so_sceNpScoreCensorComment}, {"sceNpScoreSanitizeComment",np_so_sceNpScoreSanitizeComment},
+    {"sceNpScoreGetBoardInfo",np_so_sceNpScoreGetBoardInfo}, {"sceNpScoreGetGameData",np_so_sceNpScoreGetGameData},
+    {"sceNpScoreGetRankingByNpIdPcId",np_so_sceNpScoreGetRankingByNpIdPcId}, {"sceNpScoreGetRankingByRange",np_so_sceNpScoreGetRankingByRange},
+    {"sceNpScoreRecordGameData",np_so_sceNpScoreRecordGameData}, {"sceNpScoreRecordScore",np_so_sceNpScoreRecordScore},
     {"sceNpScoreSetPlayerCharacterId",ok_void},
     {"sceVoiceCreatePort",voice_port}, {"sceVoiceDeletePort",ok_void},
     {"sceVoiceConnectIPortToOPort",ok_void}, {"sceVoiceDisconnectIPortFromOPort",ok_void},
@@ -615,9 +664,9 @@ static const RuntimeExport exports[]={
     {"sceVoiceReadFromOPort",voice_read}, {"sceVoiceWriteToIPort",voice_write},
     {"sceAudioInInput",audio_in_open}, {"sceAudioInClose",audio_in_open},
     {"sceNpMatching2Initialize",ok_void}, {"sceNpMatching2Terminate",ok_void},
-    {"sceNpMatching2CreateContext",np_signed_out},
+    {"sceNpMatching2CreateContext",np_so_sceNpMatching2CreateContext},
     {"sceNpSignalingInitialize",ok_void}, {"sceNpSignalingTerminate",ok_void},
-    {"sceNpSignalingCreateContext",np_signed_out},
+    {"sceNpSignalingCreateContext",np_so_sceNpSignalingCreateContext},
     {"sceCommonDialogInitialize",common_init},
     {"sceMsgDialogInitialize",msg_init}, {"sceMsgDialogOpen",msg_open},
     {"sceMsgDialogUpdateStatus",msg_status}, {"sceMsgDialogTerminate",msg_term},
