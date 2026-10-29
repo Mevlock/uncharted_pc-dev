@@ -1227,6 +1227,14 @@ static bool PendingFast() {
     return on;
 }
 
+static bool PendingBigList() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_PENDING_BIG_LIST");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
 void Rasterizer::PrunePendingWrites() {
     // Stage B's position is a cache line it writes for every packet: read it now and then. An
     // older value only keeps entries a little longer.
@@ -1259,6 +1267,18 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
         PrunePendingWrites();
         ++pending_stats[0];
         const VAddr first_block = address >> 16, last_block = (end - 1) >> 16;
+        if (last_block - first_block >= 32 && PendingBigList()) {
+            for (auto& write : pending_big_writes) {
+                if (address <= write.end && write.begin <= end) {
+                    write.begin = std::min(write.begin, address);
+                    write.end = std::max(write.end, end);
+                    write.position = position;
+                    return;
+                }
+            }
+            pending_big_writes.push_back({address, end, position});
+            return;
+        }
         if (last_block - first_block >= 32) {
             pending_big = position;
         } else {
@@ -1318,11 +1338,24 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
 
 bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
     if (PendingFast()) {
-        if (pending_writes.empty()) {
+        if (pending_writes.empty() && pending_big_writes.empty()) {
             return false;
         }
         PrunePendingWrites();
         const VAddr end = address + size;
+        if (!pending_big_writes.empty()) {
+            std::erase_if(pending_big_writes, [&](const PendingWrite& write) {
+                return write.position <= pending_done;
+            });
+            for (const auto& write : pending_big_writes) {
+                if (address < write.end && write.begin < end && !draw_pipe->Reached(write.position)) {
+                    return true;
+                }
+            }
+        }
+        if (pending_first == pending_writes.size()) {
+            return false;
+        }
         // The blocks first: no write still pending in any block of the range -> none overlaps.
         if (pending_big <= pending_done) {
             const VAddr first_block = address >> 16, last_block = (end - 1) >> 16;
@@ -2737,7 +2770,7 @@ void Rasterizer::PrintPipeStats() {
                 pending_stats[0] ? double(pending_stats[1]) / pending_stats[0] : 0.0,
                 pending_stats[2] / seconds,
                 pending_stats[2] ? double(pending_stats[3]) / pending_stats[2] : 0.0,
-                pending_writes.size());
+                pending_writes.size() + pending_big_writes.size());
     std::fill(std::begin(pending_stats), std::end(pending_stats), 0);
     {
         u64 total = 0;

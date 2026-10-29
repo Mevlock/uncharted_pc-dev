@@ -682,6 +682,10 @@ private:
     /// ranges over 32 blocks raise pending_big instead.
     std::array<u64, 4096> pending_blocks{};
     u64 pending_big = 0;
+    /// bbport: ranges over 32 blocks, kept apart (BB_PENDING_BIG_LIST=0: they disable the block
+    /// filter, as before): one big pending write used to send every check through the whole
+    /// list (U3 market: ~1M checks a second scanning 50-70 entries each).
+    std::vector<PendingWrite> pending_big_writes;
     void PrunePendingWrites();
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< bbport: extra bias of this draw's samplers
