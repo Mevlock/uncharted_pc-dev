@@ -1518,10 +1518,14 @@ static void replay_sample(PadData *d) {
     d->left_x=s->axes[0]; d->left_y=s->axes[1]; d->right_x=s->axes[2]; d->right_y=s->axes[3];
     d->l2=s->l2; d->r2=s->r2;
 }
-/* BB_DEV_MENU=1 (experiment, Uncharted 3 EU 1.02): F11 opens and closes Naughty Dog's developer menu, which
- * the retail game builds but gives no way to open: the menu's "open" byte (the camera code checks it) is
- * flipped. The menu root pointer sits at guest offset 0x142ee88; "Dev Menu" at 0xf60a72 tells that this is
- * the build these offsets are for (any other game or release is left alone). */
+/* BB_DEV_MENU=1 (experiment, Uncharted 3 1.02, EU and US): F11 opens and closes Naughty Dog's developer menu,
+ * which the retail game builds but gives no way to open: the menu's "open" byte (the camera code checks it) is
+ * flipped. Per build, the root pointers of both menus and where their names lie (the names tell which build
+ * this is; any other game or release is left alone). US = CUSA02320 / CUSA02344 (one executable). */
+static const struct { uintptr_t dev_name, quick_name, dev_root, quick_root; } dev_menu_builds[]={
+    {0xf60a72,0xfacfe0,0x142ee88,0x196cdd0},   /* EU CUSA02343 */
+    {0x1458d8a,0x1470aa3,0x17b4a38,0x1ae9ef8}, /* US CUSA02320, CUSA02344 */
+};
 static void dev_menu_key(void) {
     static int checked, on, f11_was_down, f8_was_down;
     if (!checked) { const char *e=getenv("BB_DEV_MENU"); on=e && e[0]=='1'; checked=1; }
@@ -1529,17 +1533,21 @@ static void dev_menu_key(void) {
     const bool *k=SDL_GetKeyboardState(NULL);
     const int f11=k && k[SDL_SCANCODE_F11], f8=k && k[SDL_SCANCODE_F8];
     /* F8: the "Quick Menu" (player and actor tools: Invincible Player, Reset Actors, ...), the game's second
-     * debug menu, built at the same start-up step; root pointer at guest offset 0x196cdd0. (Shift is a game
+     * debug menu, built at the same start-up step (root pointers in dev_menu_builds). (Shift is a game
      * key, taken by the keyboard bindings, so it cannot pick the menu.) */
     const int quick=f8 && !f8_was_down;
     if ((f11 && !f11_was_down) || quick) {
         const char *name=quick ? "Quick menu" : "Dev menu";
         const uintptr_t base=runtime_image_base();
-        if (!base || memcmp((const void *)(base+0xf60a72),"Dev Menu",9) ||
-            memcmp((const void *)(base+0xfacfe0),"Quick Menu",11)) {
-            printf("%s: not this game or release (the offsets are for Uncharted 3 EU 1.02)\n",name);
+        int build=-1;
+        for (int b=0;base && b<(int)(sizeof(dev_menu_builds)/sizeof(dev_menu_builds[0])) && build<0;++b)
+            if (!memcmp((const void *)(base+dev_menu_builds[b].dev_name),"Dev Menu",9) &&
+                !memcmp((const void *)(base+dev_menu_builds[b].quick_name),"Quick Menu",11)) build=b;
+        if (build<0) {
+            printf("%s: not this game or release (the offsets are for Uncharted 3 1.02, EU and US)\n",name);
         } else {
-            unsigned char *menu=*(unsigned char **)(base+(quick ? 0x196cdd0 : 0x142ee88));
+            unsigned char *menu=*(unsigned char **)(base+(quick ? dev_menu_builds[build].quick_root
+                                                                  : dev_menu_builds[build].dev_root));
             if (!menu) printf("%s: not built yet\n",name);
             else {
                 menu[0x90]^=1;

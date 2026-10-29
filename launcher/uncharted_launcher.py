@@ -1745,10 +1745,10 @@ class Launcher:
     def build_advanced(self):
         f = self.page('advanced', _('Advanced'), _('Maintenance and options for testing.'))
         self.check(f, 'close_on_play', _('Close the launcher when the game starts'))
-        self.check(f, 'dev_menu', _("Developer menus (experimental, Uncharted 3 EU only for now)"),
+        self.check(f, 'dev_menu', _("Developer menus (experimental, Uncharted 3 only for now)"),
                    _("Naughty Dog's own debug menus, left in the game: F11 the Dev Menu (with its Camera menu "
-                     "under Player Menu...), F8 the Quick Menu (Invincible Player, Infinite Ammo, Manual Camera, "
-                     "...). Navigate with the controller."))
+                     "under Player Menu... in the EU version), F8 the Quick Menu (Invincible Player, Infinite "
+                     "Ammo, ...). Navigate with the controller."))
         extra = self.ttk.Entry(f, textvariable=self.var('extra_env'), width=60)
         self.row(f, _('Environment'), extra, _('Extra variables for the game, NAME=value separated by spaces.'))
         self.section(f, _('Shader preparation'))
