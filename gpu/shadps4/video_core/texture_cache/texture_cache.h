@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <bitset>
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
@@ -264,8 +265,35 @@ public:
         HTile,
     };
 
+    /// bbport: a bit per hashed address of every registered metadata surface. Every compute
+    /// dispatch asks IsMeta/ClearMeta for each of its buffers (U3's skinning: ~8 per dispatch,
+    /// ~2.4M a second in a crowd) and nearly all miss; a clear bit answers without the map.
+    /// Bits are only set on registration and rebuilt after removals. BB_META_FILTER=0: off.
+    static u32 MetaFilterBit(VAddr address) {
+        return u32((address >> 8) * 0x9E3779B97F4A7C15ull >> 52);
+    }
+    bool MaybeMeta(VAddr address) const {
+        static const bool on = [] {
+            const char* env = std::getenv("BB_META_FILTER");
+            return !(env && env[0] == '0');
+        }();
+        return !on || meta_filter.test(MetaFilterBit(address));
+    }
+    void NoteMeta(VAddr address) {
+        meta_filter.set(MetaFilterBit(address));
+    }
+    void RebuildMetaFilter() {
+        meta_filter.reset();
+        for (const auto& [address, meta] : surface_metas) {
+            NoteMeta(address);
+        }
+    }
+
     /// Returns meta type if the specified address is a metadata surface.
     std::optional<MetaType> IsMeta(VAddr address) const {
+        if (!MaybeMeta(address)) {
+            return std::nullopt;
+        }
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             return it->second.type;
@@ -284,6 +312,9 @@ public:
 
     /// Clears all slices of the specified metadata surface.
     bool ClearMeta(VAddr address) {
+        if (!MaybeMeta(address) && !HtileLogOn()) {
+            return false;
+        }
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             it.value().clear_mask = u32(-1);
@@ -515,6 +546,7 @@ private:
         ImageId owner{};
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
+    std::bitset<4096> meta_filter; ///< see MaybeMeta
     /// bbport: most layers, and most bytes, a request for a depth array at an address asked for
     /// (PadDepthLayers).
     struct DepthArraySeen {

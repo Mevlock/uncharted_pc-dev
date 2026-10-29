@@ -1285,12 +1285,14 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     if (desc.info.meta_info.cmask_addr) {
         surface_metas.emplace(desc.info.meta_info.cmask_addr,
                               MetaDataInfo{.type = MetaType::CMask});
+        NoteMeta(desc.info.meta_info.cmask_addr);
         image.info.meta_info.cmask_addr = desc.info.meta_info.cmask_addr;
     }
 
     if (desc.info.meta_info.fmask_addr) {
         surface_metas.emplace(desc.info.meta_info.fmask_addr,
                               MetaDataInfo{.type = MetaType::FMask});
+        NoteMeta(desc.info.meta_info.fmask_addr);
         image.info.meta_info.fmask_addr = desc.info.meta_info.fmask_addr;
     }
 
@@ -1310,6 +1312,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
             desc.info.meta_info.htile_addr,
             MetaDataInfo{.type = MetaType::HTile, .clear_mask = image.info.meta_info.htile_clear_mask});
         meta.value().owner = image_id;
+        NoteMeta(desc.info.meta_info.htile_addr);
         if (added && image.info.resources.layers > 1) {
             HtileLog("htile %#llx registered for %#llx %ux%u layers %u, clear mask %#x\n",
                      static_cast<unsigned long long>(desc.info.meta_info.htile_addr),
@@ -2048,6 +2051,9 @@ void TextureCache::DeleteImage(ImageId image_id) {
         if (it != surface_metas.end() && (!it->second.owner || it->second.owner == image_id)) {
             surface_metas.erase(it);
         }
+    }
+    if (meta_info.cmask_addr || meta_info.fmask_addr || meta_info.htile_addr) {
+        RebuildMetaFilter();
     }
 
     {
