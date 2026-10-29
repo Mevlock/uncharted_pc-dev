@@ -273,6 +273,7 @@ static _Thread_local int wait_note_count;
 static _Thread_local uint64_t wait_caller, wait_arg; /* the guest's return address and the wait's argument */
 void runtime_wait_caller(uint64_t caller, uint64_t arg) { wait_caller=caller; wait_arg=arg; }
 double runtime_wait_begin(void) {
+    runtime_freeze_point();
     if (wait_timing<0) wait_timing=getenv("BB_PAD_TIMING")!=NULL;
     if (!wait_timing) return 0.0;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);

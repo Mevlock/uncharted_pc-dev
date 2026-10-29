@@ -59,6 +59,29 @@ static ThreadAttr *attributes;
 static GuestThread *threads;
 static _Thread_local GuestThread *current;
 static _Thread_local int32_t guest_errno;
+/* runtime_freeze_point (runtime.h): the game's own threads (created by it, and the main thread) stop there while the
+ * flag is set; host threads that only call guest callbacks (decoders, GPU interrupts) never do. */
+static _Thread_local int freezable;
+volatile int runtime_freeze_flag;
+static pthread_mutex_t freeze_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t freeze_cv=PTHREAD_COND_INITIALIZER;
+void runtime_freeze_wait(void) {
+    if (!freezable) return;
+    pthread_mutex_lock(&freeze_lock);
+    while (runtime_freeze_flag) pthread_cond_wait(&freeze_cv,&freeze_lock);
+    pthread_mutex_unlock(&freeze_lock);
+}
+void runtime_freeze_guest(int on) {
+    static int enabled=-1;
+    if (enabled<0) { const char *e=getenv("BB_PREP_FREEZE"); enabled=e && e[0]=='1'; }
+    if (!enabled) return;
+    pthread_mutex_lock(&freeze_lock);
+    runtime_freeze_flag=on;
+    if (!on) pthread_cond_broadcast(&freeze_cv);
+    pthread_mutex_unlock(&freeze_lock);
+    printf("Runtime: game threads %s (shader preparation page)\n",on ? "frozen" : "resumed");
+    fflush(stdout);
+}
 static void apply_affinity(GuestThread *t,int current_thread);
 static const unsigned char *tls_template;
 static uint64_t tls_filesz, tls_memsz, tls_align=16;
@@ -138,6 +161,7 @@ void runtime_thread_attach_host(const char *name) {
 static void set_host_name(const char *name);
 void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
+    freezable=1;
     snprintf(t->name,sizeof(t->name),"main");
     set_host_name(t->name);
 }
@@ -294,6 +318,7 @@ void runtime_set_guest_fpu(void) {
 static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
+    freezable=1;
     set_host_name(t->name);
     runtime_set_guest_fpu();
     if (t->attr.affinity!=0x7f) apply_affinity(t,1);
@@ -365,7 +390,7 @@ static ABI __attribute__((noreturn)) void thread_exit(void *value) {
     /* No host unwinder: guest frames have no registered FDEs. */
     exit_longjmp(t);
 }
-static ABI int32_t thread_yield(void) { sched_yield(); return 0; }
+static ABI int32_t thread_yield(void) { runtime_freeze_point(); sched_yield(); return 0; }
 static ABI int32_t thread_get_prio(GuestThread *t,int *prio) {
     if (!find_thread(t)) return ERR(3);
     if (!prio) return ERR(22);

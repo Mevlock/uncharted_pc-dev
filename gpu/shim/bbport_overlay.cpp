@@ -29,6 +29,9 @@
 #include "bbport_settings.h"
 #include <miniz.h>
 #include "imgui.h"
+
+// runtime_thread.c (BB_PREP_FREEZE): the game's threads wait while the preparation page shows.
+extern "C" void runtime_freeze_guest(int on);
 #include "imgui_internal.h"
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -958,6 +961,7 @@ void SetShaderPreparation(int phase, u32 done, u32 total) {
 
 void SetPreparationScreen(bool on) {
     prep_screen.store(on, std::memory_order_release);
+    runtime_freeze_guest(on ? 1 : 0); // BB_PREP_FREEZE=1: the game's threads wait for the page (runtime.h)
 }
 
 bool PreparationScreenActive() {
