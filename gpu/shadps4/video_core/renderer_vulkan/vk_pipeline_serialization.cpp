@@ -123,6 +123,27 @@ struct SavedInputs {
 };
 static thread_local SavedInputs t_saved_inputs{};
 
+// bbport (BB_PREPARE_ONLY): the "prepared" marker waits for the cache writes (PrepareShadersWithoutWindow flushes
+// them after the preparation ends; a marker written first survived a flush cut short and skipped the next page).
+static std::mutex deferred_marker_mutex;
+static std::filesystem::path deferred_marker;
+static std::string deferred_stamp;
+
+bool WriteDeferredPreparedMarker() {
+    std::scoped_lock lk{deferred_marker_mutex};
+    if (deferred_marker.empty() || Storage::DataBase::Instance().PendingWrites() != 0) {
+        return false;
+    }
+    std::FILE* f = std::fopen(deferred_marker.string().c_str(), "w");
+    if (!f) {
+        return false;
+    }
+    std::fprintf(f, "%s\n", deferred_stamp.c_str());
+    std::fclose(f);
+    deferred_marker.clear();
+    return true;
+}
+
 void RegisterShaderInputs(const Shader::Info& info, const std::vector<Shader::UdRead>& reads,
                           size_t perm_idx) {
     t_saved_inputs.pgm_hash = info.pgm_hash;
@@ -2354,6 +2375,10 @@ void PipelineCache::WarmUpThread() {
             Shader::StageSpecialization existing_spec;
             Program* existing_owner{};
             {
+                // The game is running (selection started at warm_done): GetProgram takes a new permutation's index
+                // from the module count under this program's claim and appends after compiling. Without the claim a
+                // listed permutation placed here could take that index first (two specializations, one stage hash).
+                AcquireClaim(v.hash);
                 std::unique_lock lk{programs_mutex};
                 auto [it_pgm, created] = program_cache.try_emplace(v.hash);
                 if (created) {
@@ -2377,6 +2402,8 @@ void PipelineCache::WarmUpThread() {
                     spec.info = &program->info;
                     modules[v.perm] = {module, spec};
                 }
+                lk.unlock();
+                ReleaseClaim(v.hash);
             }
             if (!program) {
                 taken.fetch_add(1, std::memory_order_relaxed);
@@ -2558,13 +2585,17 @@ void PipelineCache::WarmUpThread() {
         // The marker says the prepared shaders are on disk: in play, the writes still queued are waited for first
         // (behind the game; the marker used to be written at once, and a game closed within seconds lost part of
         // the cache while the next start trusted it). Without a window the process waits for them itself.
-        if (!prepare_only) {
+        if (prepare_only) {
+            std::scoped_lock lk{deferred_marker_mutex};
+            deferred_marker = prepared_marker;
+            deferred_stamp = prepared_stamp;
+        } else {
             db.Flush(120000);
-        }
-        if (db.PendingWrites() == 0 || prepare_only) {
-            if (std::FILE* f = std::fopen(prepared_marker.string().c_str(), "w")) {
-                std::fprintf(f, "%s\n", prepared_stamp.c_str());
-                std::fclose(f);
+            if (db.PendingWrites() == 0) {
+                if (std::FILE* f = std::fopen(prepared_marker.string().c_str(), "w")) {
+                    std::fprintf(f, "%s\n", prepared_stamp.c_str());
+                    std::fclose(f);
+                }
             }
         }
     }

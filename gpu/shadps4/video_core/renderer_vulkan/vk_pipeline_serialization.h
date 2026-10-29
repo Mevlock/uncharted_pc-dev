@@ -21,5 +21,8 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
 /// user data and the reads through table pointers), written into the variant's meta by RegisterShaderMeta.
 void RegisterShaderInputs(const Shader::Info& info, const std::vector<Shader::UdRead>& reads,
                           size_t perm_idx);
+/// bbport (BB_PREPARE_ONLY): writes the variant list's "prepared" marker the preparation left for after the cache
+/// writes, when none is pending any more. False when there was none to write or writes are still pending.
+bool WriteDeferredPreparedMarker();
 
 } // namespace Vulkan

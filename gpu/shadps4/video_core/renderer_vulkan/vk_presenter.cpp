@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/cache_storage.h"
+#include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
 
@@ -1070,8 +1071,11 @@ void PrepareShadersWithoutWindow(AmdGpu::Liverpool* liverpool) {
     }
     BbOverlay::SetShaderPreparation(0, 0, 0);
     FlushPipelineCacheForExit();
-    std::printf("Preparation only: cache written in %.1f s\n",
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_flush).count());
+    // Only a complete cache gets the "prepared" marker (else the next start prepares again).
+    const bool marked = WriteDeferredPreparedMarker();
+    std::printf("Preparation only: cache written in %.1f s (%u writes left; prepared marker %s)\n",
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_flush).count(),
+                db.PendingWrites(), marked ? "written" : "not written");
 }
 
 } // namespace Vulkan
