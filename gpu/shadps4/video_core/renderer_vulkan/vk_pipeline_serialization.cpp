@@ -1078,7 +1078,8 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
         u32 version{}, binary_version{};
         r.Read(version);
         r.Read(binary_version);
-        if (version < 13 || version > 15) {
+        // 16 (Info::cs_split_eligible, in former padding) reads like 15.
+        if (version < 13 || version > Serialization::ShaderMetaVersion) {
             return;
         }
         size_t perm_hash{}, perm_idx{};
