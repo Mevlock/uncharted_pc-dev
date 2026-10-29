@@ -1581,10 +1581,15 @@ void PipelineCache::WarmUpThread() {
     }
 
     u32 threads = std::clamp<u32>(BbThreads::Available() > 2 ? BbThreads::Available() - 2 : 1, 1, 16);
-    // While the preparation page shows, the game runs behind it (title, music): half the hardware threads, so its
-    // audio keeps up (with 14 of 16 the music stuttered and the game had 190 ms frames). Without a window
-    // (BB_PREPARE_ONLY) nothing else runs: all of them.
-    if (prep_screen) {
+    // While the preparation page shows, the game runs behind it (title, music). Its sound is silent until the page
+    // closes (runtime_audio.c, BB_PREP_MUTE), so the page takes all but two hardware threads as well. Audible
+    // (BB_PREP_MUTE=0): half of them, so the music keeps up (with 14 of 16 it stuttered). Without a window
+    // (BB_PREPARE_ONLY) nothing else runs: all but two.
+    static const bool prep_mute = [] {
+        const char* env = std::getenv("BB_PREP_MUTE");
+        return !(env && env[0] == '0');
+    }();
+    if (prep_screen && !prep_mute) {
         threads = std::max<u32>(1, BbThreads::Available() / 2);
     }
     if (const char* env = std::getenv("BB_WARM_THREADS")) { // 1 = the old serial load, for timing

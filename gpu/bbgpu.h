@@ -35,6 +35,8 @@ int bbgpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);
 int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int bbgpu_overlay_captures_input(void);
+/* 1 while the full-screen shader preparation page shows (the game runs behind it). */
+int bbgpu_preparation_screen(void);
 /* Button prompts (button_prompts.cpp), the device used last: 0 keyboard or mouse (pictures of the
  * bound keys), 1 a PlayStation controller (the game's own buttons), 2 an Xbox or other controller
  * (Xbox buttons). */

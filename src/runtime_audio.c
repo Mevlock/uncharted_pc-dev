@@ -8,6 +8,7 @@
  * ports only follow the clock. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "gpu/bbgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -234,8 +235,8 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
             /* The device drains the queue in quanta (21 ms on PipeWire), so the level
                is a sawtooth: its minimum over ~32 buffers is what gets controlled. */
             int qb=(int)queue_bytes, low=2*qb, queued=SDL_GetAudioStreamQueued(p->stream);
+            static const unsigned char silence[2048*8*4];
             if (queued<qb) {
-                static const unsigned char silence[2048*8*4];
                 SDL_PutAudioStreamData(p->stream,silence,low-queued<qb ? low-queued : qb);
                 queued=low;
             }
@@ -245,7 +246,14 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
                 p->window_count=0;
             }
             p->next_deadline_ns+=(uint64_t)p->adjust_ns;
-            SDL_PutAudioStreamData(p->stream,queue_data,qb);
+            /* bbport: silent while the shader preparation page shows (BB_PREP_MUTE=0: audible): the game's sound
+             * starts with the title screen, and the page can use the whole CPU (with the music playing behind it,
+             * preparation had to keep to half the threads or the music stuttered). The game's output goes on at
+             * its pace, only its samples are replaced. */
+            static int prep_mute=-1;
+            if (prep_mute<0) { const char *e=getenv("BB_PREP_MUTE"); prep_mute=!(e && e[0]=='0'); }
+            const int silent=prep_mute && bbgpu_preparation_screen() && qb<=(int)sizeof(silence);
+            SDL_PutAudioStreamData(p->stream,silent ? (const void *)silence : queue_data,qb);
         }
         ++buffers_out;
     }
