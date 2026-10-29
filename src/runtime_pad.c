@@ -1518,14 +1518,23 @@ static void replay_sample(PadData *d) {
     d->left_x=s->axes[0]; d->left_y=s->axes[1]; d->right_x=s->axes[2]; d->right_y=s->axes[3];
     d->l2=s->l2; d->r2=s->r2;
 }
-/* BB_DEV_MENU=1 (experiment, Uncharted 3 1.02, EU and US): F11 opens and closes Naughty Dog's developer menu,
- * which the retail game builds but gives no way to open: the menu's "open" byte (the camera code checks it) is
- * flipped. Per build, the root pointers of both menus and where their names lie (the names tell which build
- * this is; any other game or release is left alone). US = CUSA02320 / CUSA02344 (one executable). */
-static const struct { uintptr_t dev_name, quick_name, dev_root, quick_root; } dev_menu_builds[]={
-    {0xf60a72,0xfacfe0,0x142ee88,0x196cdd0},   /* EU CUSA02343 */
-    {0x1458d8a,0x1470aa3,0x17b4a38,0x1ae9ef8}, /* US CUSA02320, CUSA02344 */
+/* BB_DEV_MENU=1 (experiment, all three games 1.02, EU and US): F11 opens and closes Naughty Dog's developer menu,
+ * which the retail games build but give no way to open: the menu's "open" byte (the game's code checks it) is
+ * flipped. Per build, the root pointers of the menus, where their names lie (the names tell which build this
+ * is; any other game or release is left alone) and the open byte. Uncharted 1 has no Quick Menu (quick_name 0).
+ * US = CUSA02320 / CUSA02344 (one executable per game). */
+static const struct { uintptr_t dev_name, quick_name, dev_root, quick_root; unsigned open; } dev_menu_builds[]={
+    {0xf60a72,0xfacfe0,0x142ee88,0x196cdd0,0x90},   /* Uncharted 3 EU CUSA02343 */
+    {0x1458d8a,0x1470aa3,0x17b4a38,0x1ae9ef8,0x90}, /* Uncharted 3 US */
+    {0xb4eeab,0xb9700b,0xebbdc8,0xfaf1c0,0x90},     /* Uncharted 2 EU */
+    {0xe7cf5c,0xe96390,0x11160c8,0x1161ef8,0x90},   /* Uncharted 2 US */
+    {0x79eaf5,0,0xa8dbf0,0,0x88},                   /* Uncharted 1 EU */
+    {0x7962c5,0,0xa51af0,0,0x88},                   /* Uncharted 1 US */
 };
+static int dev_menu_name_at(uintptr_t base, size_t size, uintptr_t at, const char *name) {
+    const size_t n=strlen(name)+1;
+    return at && at+n<=size && !memcmp((const void *)(base+at),name,n);
+}
 static void dev_menu_key(void) {
     static int checked, on, f11_was_down, f8_was_down;
     if (!checked) { const char *e=getenv("BB_DEV_MENU"); on=e && e[0]=='1'; checked=1; }
@@ -1539,19 +1548,24 @@ static void dev_menu_key(void) {
     if ((f11 && !f11_was_down) || quick) {
         const char *name=quick ? "Quick menu" : "Dev menu";
         const uintptr_t base=runtime_image_base();
+        const size_t size=runtime_image_size();
         int build=-1;
         for (int b=0;base && b<(int)(sizeof(dev_menu_builds)/sizeof(dev_menu_builds[0])) && build<0;++b)
-            if (!memcmp((const void *)(base+dev_menu_builds[b].dev_name),"Dev Menu",9) &&
-                !memcmp((const void *)(base+dev_menu_builds[b].quick_name),"Quick Menu",11)) build=b;
+            if (dev_menu_name_at(base,size,dev_menu_builds[b].dev_name,"Dev Menu") &&
+                (!dev_menu_builds[b].quick_name ||
+                 dev_menu_name_at(base,size,dev_menu_builds[b].quick_name,"Quick Menu"))) build=b;
         if (build<0) {
-            printf("%s: not this game or release (the offsets are for Uncharted 3 1.02, EU and US)\n",name);
+            printf("%s: not this game or release (the offsets are for the 1.02 games, EU and US)\n",name);
+        } else if (quick && !dev_menu_builds[build].quick_root) {
+            printf("%s: this game has none\n",name);
         } else {
             unsigned char *menu=*(unsigned char **)(base+(quick ? dev_menu_builds[build].quick_root
                                                                   : dev_menu_builds[build].dev_root));
+            const unsigned open=dev_menu_builds[build].open;
             if (!menu) printf("%s: not built yet\n",name);
             else {
-                menu[0x90]^=1;
-                printf("%s: %s (menu at %p)\n",name,menu[0x90] ? "opened" : "closed",(void *)menu);
+                menu[open]^=1;
+                printf("%s: %s (menu at %p)\n",name,menu[open] ? "opened" : "closed",(void *)menu);
             }
         }
         fflush(stdout);

@@ -43,7 +43,9 @@ static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
 static size_t page_size;
+static size_t image_size;
 uintptr_t runtime_image_base(void) { return (uintptr_t)image; }
+size_t runtime_image_size(void) { return image_size; }
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
 static uint64_t module_count;
@@ -1885,6 +1887,7 @@ int main(int argc, char **argv) {
     }
     image = runtime_image_map(round_page(size) + isa_area, PROT_READ | PROT_WRITE);
     if (!image) image = allocate(round_page(size) + isa_area);
+    image_size = size;
 #ifdef _WIN32
     red_zone_reserve(image, size);
 #endif
