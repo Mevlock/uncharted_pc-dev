@@ -221,13 +221,18 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
 
     u32 meta_version{};
     meta.Read(meta_version);
-    if (meta_version != Serialization::ShaderMetaVersion) {
+    // bbport (variant lists from players' caches, BB_SPEC_DUMP only): metas of versions 12-14 hold the same
+    // specialization (v13 changed the binary only, v14 appended translation inputs, v15 a bit that reads 0 before);
+    // their binary version is not checked (the dump needs the specialization, not the binary).
+    static const bool legacy = std::getenv("BB_SPEC_DUMP") != nullptr;
+    if (meta_version != Serialization::ShaderMetaVersion &&
+        !(legacy && meta_version >= 12 && meta_version < Serialization::ShaderMetaVersion)) {
         return false;
     }
 
     u32 binary_version{};
     meta.Read(binary_version);
-    if (binary_version != Serialization::TranslatedBinaryVersion()) {
+    if (binary_version != Serialization::TranslatedBinaryVersion() && !legacy) {
         return false;
     }
 
@@ -243,7 +248,9 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     spec.Deserialize(ar);
     info.Deserialize(ar);
     u32 has_inputs{};
-    meta.Read(has_inputs);
+    if (meta_version >= 14) {
+        meta.Read(has_inputs);
+    }
     if (has_inputs) {
         ShaderInputs scratch;
         ShaderInputs& in = inputs ? *inputs : scratch;
