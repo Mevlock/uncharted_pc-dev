@@ -156,9 +156,22 @@ static ABI int32_t audio_close(int32_t handle) {
     pthread_mutex_unlock(&table_lock);
     return p ? 0 : error;
 }
+/* bbport: the game's sound while the shader preparation page shows (BB_PREP_AUDIO): 'a' audible (default: the page
+ * keeps to half the threads, or the music stuttered); experiments: 'm' mute (it plays on silently and is heard from
+ * where it got to), 'p' pause (the output call waits until the page closes; U3 then asserted in DestroyMutex,
+ * 0x80020010: a lock still held by the waiting sound thread). vk_pipeline_serialization.cpp reads the same switch for
+ * the thread count. */
+static char prep_audio_mode(void) {
+    static char mode;
+    if (!mode) { const char *e=getenv("BB_PREP_AUDIO"); mode=e && (e[0]=='m' || e[0]=='p') ? e[0] : 'a'; }
+    return mode;
+}
 /* `pace`: wait for this port's next period. sceAudioOutOutputs waits once for all its ports. */
 static int32_t output_port(int32_t handle, const void *data, int pace) {
     int32_t error=0;
+    if (prep_audio_mode()=='p') {
+        while (bbgpu_preparation_screen()) SDL_Delay(10);
+    }
     /* bbport: the game's audio output thread (FMOD's mixer) runs at high priority: shader preparation's 14
      * threads and the driver's compile threads starved it at normal priority (the music stuttered on the
      * preparation page). BB_AUDIO_PRIORITY=0 leaves it as the game made it. */
@@ -246,13 +259,9 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
                 p->window_count=0;
             }
             p->next_deadline_ns+=(uint64_t)p->adjust_ns;
-            /* bbport: silent while the shader preparation page shows (BB_PREP_MUTE=0: audible): the game's sound
-             * starts with the title screen, and the page can use the whole CPU (with the music playing behind it,
-             * preparation had to keep to half the threads or the music stuttered). The game's output goes on at
-             * its pace, only its samples are replaced. */
-            static int prep_mute=-1;
-            if (prep_mute<0) { const char *e=getenv("BB_PREP_MUTE"); prep_mute=!(e && e[0]=='0'); }
-            const int silent=prep_mute && bbgpu_preparation_screen() && qb<=(int)sizeof(silence);
+            /* BB_PREP_AUDIO=mute: silent while the preparation page shows; the game's output goes on at its pace,
+             * only its samples are replaced. */
+            const int silent=prep_audio_mode()=='m' && bbgpu_preparation_screen() && qb<=(int)sizeof(silence);
             SDL_PutAudioStreamData(p->stream,silent ? (const void *)silence : queue_data,qb);
         }
         ++buffers_out;
