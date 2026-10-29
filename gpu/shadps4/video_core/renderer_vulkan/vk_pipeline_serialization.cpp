@@ -1819,6 +1819,37 @@ void PipelineCache::WarmUpThread() {
         std::printf("Key list: %u keys added, %u already stored, %u unreadable, %u rect/quad lists left to the game (%s)\n",
                     added, known, bad, helpers, list);
     }
+    // bbport (BB_COMPUTE_LIST=<file>): compute pipeline keys, one hex value per line (what the c_<key>.key files hold:
+    // the compute shader's hash combined with its permutation), added to the stored ones. A new cache has none: the
+    // game's compute pipelines were built on the drawing thread at first use.
+    if (const char* list = std::getenv("BB_COMPUTE_LIST")) {
+        std::unordered_set<u64> have;
+        for (const auto& entry : stored) {
+            if (entry.parsed && entry.compute) {
+                have.insert(entry.ckey.value);
+            }
+        }
+        std::ifstream in{list};
+        u32 added = 0, known = 0;
+        for (std::string line; std::getline(in, line);) {
+            u64 value = 0;
+            try {
+                value = std::stoull(line, nullptr, 16);
+            } catch (const std::exception&) {
+                continue;
+            }
+            if (!have.insert(value).second) {
+                ++known;
+                continue;
+            }
+            auto& entry = stored.emplace_back();
+            entry.compute = true;
+            entry.ckey.value = value;
+            entry.parsed = true;
+            ++added;
+        }
+        std::printf("Compute list: %u keys added, %u already stored (%s)\n", added, known, list);
+    }
 
     // 2. The shader permutations those keys name, loaded once each.
     std::vector<u64> stage_hashes;

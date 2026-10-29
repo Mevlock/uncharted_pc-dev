@@ -617,6 +617,10 @@ def game_environment(s, start=None):
         tiling = lists[0].with_name(f'tiling_pipelines_{start}.txt')
         if tiling.is_file():
             env['BB_TILING_LIST'] = str(tiling)
+        # The compute pipelines (shaders/<game>_compute_keys.txt: one hash per line).
+        compute = lists[0].with_name(f'{start}_compute_keys.txt')
+        if compute.is_file():
+            env['BB_COMPUTE_LIST'] = str(compute)
         if preparation == 'background':
             env['BB_PREP_SCREEN'] = '0'
         elif str(s.get('preparation_speed') or 'all') == 'half':
