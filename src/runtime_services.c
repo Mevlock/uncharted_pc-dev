@@ -176,17 +176,30 @@ static ABI int32_t http_wait(void *handle,void *events,int32_t max,int64_t timeo
 }
 
 /* ---- NP (PSN): signed out ---- */
+/* bbport diagnosis: BB_NP_TRACE=1 prints each NP call (up to 400) with the game address it returns to, as an
+ * offset in the game's image: which code asks, and when (the friends-stats notice after Continue / New Game). */
+static void np_trace(const char *what,const void *ret) {
+    static int on=-1, lines;
+    if (on<0) { const char *e=getenv("BB_NP_TRACE"); on=e && e[0]=='1'; }
+    if (!on || lines>=400) return;
+    ++lines;
+    const uintptr_t base=runtime_image_base(), at=(uintptr_t)ret;
+    printf("NP trace: %s from %#llx\n",what,(unsigned long long)(at>=base && at-base<runtime_image_size() ? at-base : at));
+    fflush(stdout);
+}
+#define NP_TRACE(what) np_trace(what,__builtin_return_address(0))
 static ABI int32_t np_state(int32_t user,int32_t *state) {
+    NP_TRACE("GetState");
     if (!state) return NP_INVALID_ARGUMENT;
     (void)user; *state=1; /* SIGNED_OUT */
     return 0;
 }
-static ABI int32_t np_signed_out(void) { return NP_SIGNED_OUT; }
-static ABI int32_t np_register(void *cb,void *arg) { (void)cb; (void)arg; return new_id(); }
-static ABI void np_register_void(void *cb,void *arg) { (void)cb; (void)arg; }
-static ABI int32_t np_request(const void *param) { (void)param; return new_id(); }
-static ABI int32_t np_request_ctx(int32_t ctx,const void *param) { (void)ctx; (void)param; return new_id(); }
-static ABI int32_t np_poll(int32_t request,int32_t *result) { (void)request; if (result) *result=NP_SIGNED_OUT; return 0; }
+static ABI int32_t np_signed_out(void) { NP_TRACE("signed-out answer"); return NP_SIGNED_OUT; }
+static ABI int32_t np_register(void *cb,void *arg) { NP_TRACE("register"); (void)cb; (void)arg; return new_id(); }
+static ABI void np_register_void(void *cb,void *arg) { NP_TRACE("register (void)"); (void)cb; (void)arg; }
+static ABI int32_t np_request(const void *param) { NP_TRACE("request"); (void)param; return new_id(); }
+static ABI int32_t np_request_ctx(int32_t ctx,const void *param) { NP_TRACE("request (ctx)"); (void)ctx; (void)param; return new_id(); }
+static ABI int32_t np_poll(int32_t request,int32_t *result) { NP_TRACE("poll"); (void)request; if (result) *result=NP_SIGNED_OUT; return 0; }
 static ABI int32_t np_compare(const void *a,const void *b) {
     if (!a || !b) return NP_INVALID_ARGUMENT;
     return memcmp(a,b,16) ? (int32_t)0x80550609 : 0; /* NP_UTIL NOT_MATCH */
