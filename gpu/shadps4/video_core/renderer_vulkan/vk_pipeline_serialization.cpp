@@ -740,7 +740,11 @@ struct ShaderLocation {
 };
 struct ShaderLocations {
     std::vector<std::string> files; ///< relative to BB_APP0_DIR, '/' separated
-    std::unordered_map<u64, ShaderLocation> shaders;
+    std::unordered_map<u64, ShaderLocation> shaders; ///< the copy the code is read from (the first found)
+    /// The same shaders' copies under other top folders (the games share some, e.g. U1's and U2's particle shaders in
+    /// u1data and u2data): which games use a shader, for building each game's variant list. One per folder; never
+    /// read for code.
+    std::vector<std::pair<u64, ShaderLocation>> copies;
 };
 
 static std::filesystem::path ShaderLocationsPath(const std::filesystem::path& app0) {
@@ -749,7 +753,8 @@ static std::filesystem::path ShaderLocationsPath(const std::filesystem::path& ap
            ("shader_locations_" + app0.filename().string() + ".txt");
 }
 
-/// Text: "F <path>" lines number the files from 0, then "<hash hex> <file> <offset> <length>" per shader.
+/// Text: "F <path>" lines number the files from 0, then "<hash hex> <file> <offset> <length>" per shader: the copy
+/// read for its code first, then its copies under other top folders (older readers keep a hash's first line).
 static ShaderLocations LoadShaderLocations(const std::filesystem::path& path) {
     ShaderLocations locations;
     std::FILE* f = _wfopen(path.c_str(), L"rb");
@@ -770,7 +775,10 @@ static ShaderLocations LoadShaderLocations(const std::filesystem::path& path) {
         unsigned file, length;
         if (std::sscanf(line, "%llx %u %llu %u", &hash, &file, &at, &length) == 4 &&
             file < locations.files.size()) {
-            locations.shaders.emplace(hash, ShaderLocation{file, at, length});
+            const ShaderLocation loc{file, u64(at), length};
+            if (!locations.shaders.emplace(hash, loc).second) {
+                locations.copies.emplace_back(hash, loc);
+            }
         }
     }
     std::fclose(f);
@@ -788,7 +796,9 @@ static void SaveShaderLocations(const std::filesystem::path& path, const ShaderL
     }
     std::vector<std::pair<u64, ShaderLocation>> sorted(locations.shaders.begin(),
                                                        locations.shaders.end());
-    std::ranges::sort(sorted, {}, &std::pair<u64, ShaderLocation>::first);
+    sorted.insert(sorted.end(), locations.copies.begin(), locations.copies.end());
+    // By hash; the copy read for code (in `shaders`) stays first among a hash's lines.
+    std::ranges::stable_sort(sorted, {}, &std::pair<u64, ShaderLocation>::first);
     for (const auto& [hash, loc] : sorted) {
         std::fprintf(f, "%016llx %u %llu %u\n", (unsigned long long)hash, loc.file,
                      (unsigned long long)loc.at, loc.length);
@@ -870,6 +880,7 @@ static std::optional<std::vector<u32>> ReadShaderCodeAt(std::FILE* f, u64 at, u6
 /// Every shader info block in the game's files.
 static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u64* files_scanned) {
     ShaderLocations locations;
+    std::unordered_map<u64, std::vector<std::string>> tops; ///< the top folders a shader is noted under
     static constexpr size_t chunk = 64ull << 20;
     std::vector<char> buf(chunk + 64);
     std::error_code ec;
@@ -884,7 +895,9 @@ static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u6
         }
         ++*files_scanned;
         const u32 file = u32(locations.files.size());
-        bool any = false;
+        const auto relative = std::filesystem::relative(it->path(), app0, ec).generic_string();
+        const auto top = relative.substr(0, relative.find('/'));
+        bool any = false, added_copy = false;
         size_t carry = 0;
         u64 base = 0;
         while (true) {
@@ -907,10 +920,18 @@ static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u6
                 std::memcpy(&hash, p + 16, 8);
                 const u32 length = bits >> 8;
                 if (hash && length >= 8 && length < (1u << 22)) {
-                    any |= locations.shaders
-                               .try_emplace(hash, ShaderLocation{file, base + u64(p - buf.data()),
-                                                                 length})
-                               .second;
+                    const ShaderLocation loc{file, base + u64(p - buf.data()), length};
+                    const bool added = locations.shaders.try_emplace(hash, loc).second;
+                    // A copy under another top folder is noted once per folder.
+                    auto& noted = tops[hash];
+                    if (added) {
+                        noted.push_back(top);
+                    } else if (std::ranges::find(noted, top) == noted.end()) {
+                        noted.push_back(top);
+                        locations.copies.emplace_back(hash, loc);
+                        added_copy = true;
+                    }
+                    any |= added;
                 }
             }
             if (!got) {
@@ -921,9 +942,8 @@ static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u6
             base += scan_end;
         }
         std::fclose(f);
-        if (any) {
-            locations.files.push_back(
-                std::filesystem::relative(it->path(), app0, ec).generic_string());
+        if (any || added_copy) {
+            locations.files.push_back(relative);
         }
     }
     return locations;
@@ -1568,7 +1588,12 @@ void PipelineCache::WarmUpThread() {
         if (profile_data.size() == sizeof(Shader::Profile)) {
             std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
         }
-        if (profile_data.size() != sizeof(Shader::Profile) || cached_profile != profile) {
+        // bbport (BB_KEY_DUMP): a player's cache comes from another GPU or build; its keys are only read out as text,
+        // so it is kept instead of rebuilt.
+        static const bool key_dump = std::getenv("BB_KEY_DUMP") != nullptr;
+        if (key_dump && (profile_data.size() != sizeof(Shader::Profile) || cached_profile != profile)) {
+            std::printf("Pipeline cache: from another GPU or build; kept for BB_KEY_DUMP\n");
+        } else if (profile_data.size() != sizeof(Shader::Profile) || cached_profile != profile) {
             // bbport: upstream closed the cache for the session here, so it was never rewritten
             // and every later session compiled every shader again (stutters on each new area).
             // Start a fresh cache for this build and GPU instead.
@@ -2381,6 +2406,8 @@ void PipelineCache::WarmUpThread() {
             const auto module = BuildListedVariant(v, it->second, rit->second, spv, info, spec, &end);
             if (!info || !module) {
                 failed.fetch_add(1, std::memory_order_relaxed);
+                std::printf("Variant ship: listed variant %016llx perm %zu could not be built\n",
+                            static_cast<unsigned long long>(v.hash), v.perm);
                 return false;
             }
             built.fetch_add(1, std::memory_order_relaxed);
