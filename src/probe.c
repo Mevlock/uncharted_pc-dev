@@ -1538,9 +1538,29 @@ static volatile long body_log_max;
 /* kind 5: an object's "put all my bodies to sleep" (rdi = the object, not the world): only its caller is counted. */
 static struct { uint64_t caller; long count; } sleepall_callers[16];
 static SRWLOCK sleepall_lock=SRWLOCK_INIT;
+/* kind 7: the floating controller (EU 0x22cad0, rsi = the controller, its body at +0x30): the bodies it handled. */
+static uint64_t ctrl_bodies[128];
+static long ctrl_nbodies;
+/* kinds 8/9: a process creates / destroys its physics body (rdi = the process, e.g. a FloatingBarrel). */
+static uint64_t pb_create[64], pb_destroy[64];
+static long pb_ncreate, pb_ndestroy;
 static ABI void body_log(uint64_t world, uint64_t body, uint64_t caller, uint64_t kind) {
-    (void)body;
-    if (kind>=5) { /* 5: SleepAll(object), 6: a body's velocity/force set (flags bit 1, wakes it) */
+    if (kind==8 || kind==9) {
+        AcquireSRWLockExclusive(&sleepall_lock);
+        if (kind==8 && pb_ncreate<64) pb_create[pb_ncreate++]=world;
+        if (kind==9 && pb_ndestroy<64) pb_destroy[pb_ndestroy++]=world;
+        ReleaseSRWLockExclusive(&sleepall_lock);
+        return;
+    }
+    if (kind==7) {
+        const uint64_t b=*(volatile uint64_t *)(uintptr_t)(body+0x30);
+        AcquireSRWLockExclusive(&sleepall_lock);
+        long i=0;
+        while (i<ctrl_nbodies && ctrl_bodies[i]!=b) ++i;
+        if (i==ctrl_nbodies && ctrl_nbodies<128) ctrl_bodies[ctrl_nbodies++]=b;
+        ReleaseSRWLockExclusive(&sleepall_lock);
+    }
+    if (kind>=5) { /* 5: SleepAll(object), 6: a body's velocity/force set (flags bit 1, wakes it), 7: the controller */
         AcquireSRWLockExclusive(&sleepall_lock);
         const uint64_t at=(caller-(uint64_t)(uintptr_t)image) | (kind<<60);
         int k=0;
@@ -1570,6 +1590,20 @@ static ABI void body_log(uint64_t world, uint64_t body, uint64_t caller, uint64_
                    sleepall_callers[i].caller & ((1ull<<60)-1),sleepall_callers[i].count);
         printf("\n");
         memset(sleepall_callers,0,sizeof(sleepall_callers));
+    }
+    if (ctrl_nbodies) {
+        printf("Body log: floating controller bodies (%ld):",ctrl_nbodies);
+        for (long i=0; i<ctrl_nbodies; ++i) printf(" %#" PRIx64,ctrl_bodies[i]);
+        printf("\n");
+        ctrl_nbodies=0;
+    }
+    if (pb_ncreate || pb_ndestroy) {
+        printf("Body log: physics body created for:");
+        for (long i=0; i<pb_ncreate; ++i) printf(" %#" PRIx64,pb_create[i]);
+        printf("; destroyed for:");
+        for (long i=0; i<pb_ndestroy; ++i) printf(" %#" PRIx64,pb_destroy[i]);
+        printf("\n");
+        pb_ncreate=pb_ndestroy=0;
     }
     ReleaseSRWLockExclusive(&sleepall_lock);
     fflush(stdout);
@@ -1612,6 +1646,18 @@ static void patch_u1_sleep_log(uint64_t image_size) {
     /* a body's velocity/force set: or byte [rdi+0xfc],1 (7 bytes) | mov eax,[rsi+8]; mov [rdi+0x108],eax (EU 0x1da9a0) */
     const int64_t vel=find_masked("808ffc00000001 8b4608 898708010000",image_size);
     const int okV=vel>=0 && body_log_hook(image+vel,7,6);
+    /* the floating controller: push rbp; mov rbp,rsp; push r15 | push r14 r13 r12 rbx; sub rsp,0x438; mov r15,rsi; mov r13,rdi */
+    const int64_t ctl=find_masked("554889e5 4157 4156 4155 4154 53 4881ec38040000 4989f7 4989fd",image_size);
+    const int okC=ctl>=0 && body_log_hook(image+ctl,6,7);
+    printf("Body log: floating controller hooked %s (%#" PRIx64 ")\n",okC ? "yes" : "NO",(uint64_t)ctl);
+    /* a process's physics body: create (if [rdi+0x1e0] is empty) and the two destroy copies */
+    const int64_t mk=find_masked("554889e5 4157 4156 53 50 4189d7 4989f6 4889fb 4883bbe001000000",image_size);
+    const int okK=mk>=0 && body_log_hook(image+mk,6,8);
+    static const unsigned char kill[]={0x55,0x48,0x89,0xe5,0x53,0x50,0x48,0x89,0xfb,0x48,0x8b,0xb3,0xe0,0x01,0x00,0x00,0x48,0x85,0xf6,0x74};
+    int okD=0;
+    for (uint64_t i=0; i+sizeof(kill)<=image_size && okD<2; ++i)
+        if (!memcmp(image+i,kill,sizeof(kill))) okD+=body_log_hook(image+i,6,9);
+    printf("Body log: process body create hooked %s (%#" PRIx64 "), destroy hooked %d\n",okK ? "yes" : "NO",(uint64_t)mk,okD);
     printf("Body log: velocity setter hooked %s (%#" PRIx64 ")\n",okV ? "yes" : "NO",(uint64_t)vel);
     printf("Body log: hooked AddBody %s (%#" PRIx64 "), RemoveBody %s (%#" PRIx64 "), SleepAll %s (%#" PRIx64 ")\n",
            okA ? "yes" : "NO",(uint64_t)add,okR ? "yes" : "NO",(uint64_t)rem,okS ? "yes" : "NO",(uint64_t)all);
