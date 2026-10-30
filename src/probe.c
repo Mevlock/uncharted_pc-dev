@@ -1770,16 +1770,31 @@ static int body_log_hook(unsigned char *p, int n, int kind) {
     for (int i=5; i<n; ++i) p[i]=0x90;
     return 1;
 }
-/* Uncharted 1 (EU and US 1.02), experiment: BB_U1_PHYS_HZ=60 steps the rigid-body world at a fixed rate whatever the
- * frame rate. On frames shorter than a step the world step (EU 0x235350, dt in xmm0) returns at once as if it had
+/* Uncharted 1 (EU and US 1.02): the rigid-body integrator holds still any body slower than "Sticky Speed
+ * (nothing-moves speed)" or "Sticky Omega (nothing-rotates omega)", both 0.1 (EU 0x988674 / 0x988670, the game's own
+ * names). A body at rest gains g*dt per step: 0.16 m/s at 60 FPS gets it moving, 0.07 m/s at 144 FPS does not, so
+ * above 60 FPS bodies that should tip or drop off a ledge stay put and fall asleep (jet ski river barrels hanging in
+ * mid-air). Each world step scales both thresholds by min(1, 60*dt), so every step behaves as at 60 FPS.
+ * BB_U1_STICKY=0 keeps the game's values.
+ *
+ * Experiment (not for release: grenades fly off and ragdolls go wild): BB_U1_PHYS_HZ=60 steps the rigid-body world at
+ * a fixed rate whatever the frame rate. On frames shorter than a step the world step (EU 0x235350, dt in xmm0) returns at once as if it had
  * stepped (its own dt <= 1e-6 path would still run the controllers, the river current among them, with the last dt)
  * and the time is carried, so the world and its controllers see 1/60 s steps as on the PS4. Above 60 FPS some
  * floating barrels (jet ski river) otherwise stay frozen in mid-air until they fall asleep. */
 static float u1_phys_step, u1_phys_acc;
 static unsigned char u1_phys_skip;
+static float *u1_sticky_omega, *u1_sticky_speed, u1_sticky_omega0, u1_sticky_speed0;
+static volatile long u1_frame_no;
 static ABI float u1_phys_dt(float dt) {
     u1_phys_skip=0;
-    if (!(dt>0.0f) || dt>0.25f) return dt;
+    ++u1_frame_no;
+    if (u1_sticky_speed && dt>0.0f) {
+        const float scale=dt*60.0f<1.0f ? dt*60.0f : 1.0f;
+        *u1_sticky_omega=u1_sticky_omega0*scale;
+        *u1_sticky_speed=u1_sticky_speed0*scale;
+    }
+    if (!(u1_phys_step>0.0f) || !(dt>0.0f) || dt>0.25f) return dt;
     u1_phys_acc+=dt;
     if (u1_phys_acc<u1_phys_step*0.999f) { u1_phys_skip=1; return dt; }
     const float out=u1_phys_acc>=2.0f*u1_phys_step ? u1_phys_acc : u1_phys_step;
@@ -1787,16 +1802,93 @@ static ABI float u1_phys_dt(float dt) {
     if (u1_phys_acc<0.0f) u1_phys_acc=0.0f;
     return out;
 }
+/* BB_PHYS_REQ_LOG=1 (with BB_U1_PHYS_HZ): logs the requests game code leaves on a body for the next world step -
+ * 0x1da9a0 (vector at +0x100, flag 1) and 0x1daa00 (value at +0xf8, flag 2): frame, skipped or stepped, caller,
+ * body, vector. Up to 4000 lines. Reads only the registers. */
+static volatile long u1_req_lines;
+static ABI void u1_req_log(uint64_t body, uint64_t vec, uint64_t caller, uint64_t kind) {
+    if (caller-(uint64_t)(uintptr_t)image==0x22d810) return; /* the floating controller (EU), inside the step */
+    if (InterlockedIncrement(&u1_req_lines)>4000) return;
+    const float *v=(const float *)(uintptr_t)vec;
+    if (kind==1)
+        printf("Phys req: frame %ld %s vec body %#" PRIx64 " (%.3f %.3f %.3f) from %#" PRIx64 "\n",u1_frame_no,
+               u1_phys_skip ? "skip" : "step",body,v[0],v[1],v[2],caller-(uint64_t)(uintptr_t)image);
+    else
+        printf("Phys req: frame %ld %s val body %#" PRIx64 " from %#" PRIx64 "\n",u1_frame_no,u1_phys_skip ? "skip" : "step",
+               body,caller-(uint64_t)(uintptr_t)image);
+}
+/* kind 3: a process creates its physics body (EU 0x2a29d0: rdi = the process, rsi = launch vector, edx = use it) */
+static ABI void u1_create_log(uint64_t proc, uint64_t vec, uint64_t caller, uint64_t flag) {
+    if (InterlockedIncrement(&u1_req_lines)>4000) return;
+    const float *v=(const float *)(uintptr_t)vec;
+    const uint64_t art=*(const uint64_t *)(uintptr_t)(proc+0xf0);
+    const float *pos=art ? (const float *)(uintptr_t)(art+0x10) : NULL;
+    printf("Phys create: frame %ld %s proc %#" PRIx64 " vt %#" PRIx64 " use %d vec (%.3f %.3f %.3f) at (%.3f %.3f %.3f) from %#" PRIx64 "\n",
+           u1_frame_no,u1_phys_skip ? "skip" : "step",proc,*(const uint64_t *)(uintptr_t)proc-(uint64_t)(uintptr_t)image,
+           (int)(flag&0xff),v[0],v[1],v[2],pos ? pos[0] : 0.0f,pos ? pos[1] : 0.0f,pos ? pos[2] : 0.0f,
+           caller-(uint64_t)(uintptr_t)image);
+    fflush(stdout);
+}
+static int u1_req_hook_to(unsigned char *p, int n, int kind, uintptr_t host, int pass_rdx) {
+    unsigned char *t=near_image_memory(128);
+    if (!t) return 0;
+    size_t k=0;
+    static const unsigned char save[]={0x57,0x56,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53};
+    memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
+    if (pass_rdx) { t[k++]=0x48; t[k++]=0x89; t[k++]=0xd1; } /* mov rcx,rdx: the caller's third argument */
+    static const unsigned char ret_addr[]={0x48,0x8b,0x54,0x24,0x48}; /* mov rdx,[rsp+0x48] */
+    memcpy(t+k,ret_addr,sizeof(ret_addr)); k+=sizeof(ret_addr);
+    if (!pass_rdx) { t[k++]=0xb9; memcpy(t+k,&kind,4); k+=4; }
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8;
+    t[k++]=0xff; t[k++]=0xd0;
+    static const unsigned char restore[]={0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5a,0x59,0x58,0x5e,0x5f};
+    memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
+    memcpy(t+k,p,(size_t)n); k+=(size_t)n;
+    const uint64_t back=(uint64_t)(uintptr_t)(p+n);
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&back,8); k+=8;
+    const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+5));
+    p[0]=0xe9; memcpy(p+1,&to,4);
+    for (int i=5; i<n; ++i) p[i]=0x90;
+    return 1;
+}
+static int u1_req_hook(unsigned char *p, int n, int kind) { return u1_req_hook_to(p,n,kind,(uintptr_t)u1_req_log,0); }
 static void patch_u1_fixed_physics(uint64_t image_size) {
-    const char *hz=getenv("BB_U1_PHYS_HZ");
-    if (!hz || atoi(hz)<=0) return;
+    const char *rl=getenv("BB_PHYS_REQ_LOG");
+    if (rl && rl[0]=='1') {
+        const int64_t v1=find_masked("808ffc00000001 8b4608 898708010000",image_size);
+        const int64_t v2=find_masked("808ffc00000002 c5fa5f87f8000000",image_size);
+        const int ok1=v1>=0 && u1_req_hook(image+v1,7,1), ok2=v2>=0 && u1_req_hook(image+v2,7,2);
+        const int64_t mk=find_masked("554889e5 4157 4156 53 50 4189d7 4989f6 4889fb 4883bbe001000000",image_size);
+        const int ok3=mk>=0 && u1_req_hook_to(image+mk,6,3,(uintptr_t)u1_create_log,1);
+        printf("Phys req log: vector request %s, value request %s, body create %s\n",ok1 ? "yes" : "NO",ok2 ? "yes" : "NO",
+               ok3 ? "yes" : "NO");
+    }
+    const char *hz=getenv("BB_U1_PHYS_HZ"), *sticky=getenv("BB_U1_STICKY");
+    const int hz_on=hz && atoi(hz)>0, sticky_on=!(sticky && sticky[0]=='0');
+    if (!hz_on && !sticky_on) return;
     /* push rbp; mov rbp,rsp; push r14 | push rbx; sub rsp,0x10; mov r14,rsi; vmovss [rbp-0x14],xmm0; mov rbx,rdi;
      * mov dword [rbx+0x14eb4],0 */
     const int64_t at=find_masked("554889e5 4156 53 4883ec10 4989f6 c5fa1145ec 4889fb c783b44e010000000000",image_size);
-    if (at<0) { printf("U1 fixed physics step: world step not found\n"); return; }
+    if (at<0) return; /* not Uncharted 1 */
+    if (sticky_on) {
+        /* the integrator's tests: ... vaddss; lea rax,[omega]; vucomiss xmm0,[rax]; jae; mov qword [r15],0 and
+         * vmulss xmm3,xmm3,xmm3; vmulss xmm2,xmm2,xmm3; lea rax,[speed]; vmovss xmm3,[rax]; vmulss xmm3,xmm3,xmm3 */
+        const int64_t o=find_masked("c5f258c0 488d05???????? c5f82e00 73?? 49c70700000000",image_size);
+        const int64_t v=find_masked("c5e259db c5ea59d3 488d05???????? c5fa1018 c5e259db",image_size);
+        if (o>=0 && v>=0) {
+            int32_t d;
+            memcpy(&d,image+o+7,4); u1_sticky_omega=(float *)(image+o+11+d);
+            memcpy(&d,image+v+11,4); u1_sticky_speed=(float *)(image+v+15+d);
+            u1_sticky_omega0=*u1_sticky_omega; u1_sticky_speed0=*u1_sticky_speed;
+            printf("U1 physics: sticky speed %.3f and omega %.3f scale with the step (%#" PRIx64 ", %#" PRIx64 ")\n",
+                   u1_sticky_speed0,u1_sticky_omega0,(uint64_t)((unsigned char *)u1_sticky_speed-image),
+                   (uint64_t)((unsigned char *)u1_sticky_omega-image));
+        } else printf("U1 physics: sticky thresholds not found (%s), not scaled\n",o<0 ? "omega" : "speed");
+    }
+    if (!hz_on && !u1_sticky_speed) return;
     unsigned char *p=image+at, *t=near_image_memory(128);
     if (!t) return;
-    u1_phys_step=1.0f/(float)atoi(hz);
+    u1_phys_step=hz_on ? 1.0f/(float)atoi(hz) : 0.0f;
     size_t k=0;
     static const unsigned char save[]={0x57,0x56,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53};
     memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
@@ -1818,7 +1910,7 @@ static void patch_u1_fixed_physics(uint64_t image_size) {
     t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&back,8); k+=8;
     const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+5));
     p[0]=0xe9; memcpy(p+1,&to,4); p[5]=0x90;
-    printf("U1 fixed physics step: %d Hz (world step %#" PRIx64 ")\n",atoi(hz),(uint64_t)at);
+    if (hz_on) printf("U1 fixed physics step: %d Hz (world step %#" PRIx64 ")\n",atoi(hz),(uint64_t)at);
 }
 static void patch_u1_sleep_log(uint64_t image_size) {
     const char *on=getenv("BB_SLEEP_LOG");
