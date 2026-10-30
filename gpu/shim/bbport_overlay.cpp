@@ -334,7 +334,7 @@ void Menu() {
                             ImGuiCond_Appearing);
     ImGui::SetNextWindowSize(ImVec2(620.0f * base_scale, 0.0f), ImGuiCond_Appearing);
     bool keep_open = true;
-    if (!ImGui::Begin("Uncharted — PERF BUILD — settings  (Insert / L3+R3)###Uncharted — settings  (Insert / L3+R3)", &keep_open,
+    if (!ImGui::Begin("Uncharted — settings  (Insert / L3+R3)###Uncharted — settings  (Insert / L3+R3)", &keep_open,
                       ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         return;
@@ -533,8 +533,6 @@ void FpsCounter() {
     // 1%, MAX the slowest frame (5 seconds).
     ImGui::Text("%.0f FPS %.1fms  1%%L %.0f  MAX %.0fms", game_fps,
                 game_fps > 0.0f ? 1000.0f / game_fps : 0.0f, game_low_fps, game_worst_ms);
-    // Offline perf build (feature/native-batch).
-    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.1f, 1.0f), "PERF BUILD");
     // "DLSS 2288x960 Q  FG 2x 120": anti-aliasing, render size (Quality, Balanced,
     // Performance), and with frame generation adding frames (none in menus and movies) the
     // frames on screen.

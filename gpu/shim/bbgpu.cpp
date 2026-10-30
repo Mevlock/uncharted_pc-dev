@@ -248,9 +248,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
 #endif
         std::_Exit(0);
     }
-    // Offline perf build (feature/native-batch): marked so it is never mistaken for a release.
-    const std::string title =
-        std::string(config->title ? config->title : "Bloodborne") + " — PERF BUILD";
+    const std::string title = config->title ? config->title : "Bloodborne";
     s32 width = config->width, height = config->height;
     // bbport: BB_WINDOW_SIZE=WxH: the window's size (the game's frame is scaled to it, with
     // FSR 1 when BB_FSR1=1). Fullscreen uses the desktop's size.
