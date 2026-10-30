@@ -23,8 +23,8 @@ Pipeline::Pipeline(const Instance& instance_, Scheduler& scheduler_, DescriptorH
 Pipeline::~Pipeline() = default;
 
 
-void Pipeline::BindResources(DescriptorWrites& set_writes,
-                             const Shader::PushData& push_data) const {
+void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushData& push_data,
+                             size_t set1_first) const {
     const auto bind_point =
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
     const auto stage_flags = IsCompute() ? vk::ShaderStageFlagBits::eCompute : AllGraphicsStageBits;
@@ -32,6 +32,22 @@ void Pipeline::BindResources(DescriptorWrites& set_writes,
     scheduler.Record([layout, stage_flags, push_data](vk::CommandBuffer cmdbuf) {
         cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(push_data), &push_data);
     });
+
+    // bbport (BB_GPL): a split layout's set 1 (the pre-raster stages) comes from the descriptor heap; the
+    // writes before `set1_first` are set 0 and take the usual path below.
+    if (split_sets && set1_first < set_writes.size()) {
+        const auto set1 = desc_heap.Commit(*pre_raster_layout);
+        const std::span<vk::WriteDescriptorSet> writes1{set_writes.data() + set1_first,
+                                                        set_writes.size() - set1_first};
+        for (auto& write : writes1) {
+            write.dstSet = set1;
+        }
+        instance.GetDevice().updateDescriptorSets(writes1, {});
+        scheduler.Record([bind_point, layout, set1](vk::CommandBuffer cmdbuf) {
+            cmdbuf.bindDescriptorSets(bind_point, layout, 1, set1, {});
+        });
+        set_writes.resize(set1_first);
+    }
 
     // Bind descriptor set.
     if (set_writes.empty()) {

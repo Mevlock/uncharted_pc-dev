@@ -41,4 +41,7 @@ u32 Switches();
 /// now: empty when that is the game's own picture, null for images that are not known pictures.
 const std::vector<Patch>* Find(u64 hash, u32 width, u32 height, u32 levels, Format format);
 
+/// Draws every known picture ahead on a background thread, so the game's first prompt does not wait for it.
+void Prebuild();
+
 } // namespace VideoCore::ButtonPrompts

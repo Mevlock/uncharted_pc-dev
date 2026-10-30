@@ -8,6 +8,7 @@
  * ports only follow the clock. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "gpu/bbgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -155,9 +156,32 @@ static ABI int32_t audio_close(int32_t handle) {
     pthread_mutex_unlock(&table_lock);
     return p ? 0 : error;
 }
+/* bbport: the game's sound while the shader preparation page shows (BB_PREP_AUDIO): 'a' audible (default: the page
+ * keeps to half the threads, or the music stuttered); experiments: 'm' mute (it plays on silently and is heard from
+ * where it got to), 'p' pause (the output call waits until the page closes; U3 then asserted in DestroyMutex,
+ * 0x80020010: a lock still held by the waiting sound thread). vk_pipeline_serialization.cpp reads the same switch for
+ * the thread count. */
+static char prep_audio_mode(void) {
+    static char mode;
+    if (!mode) { const char *e=getenv("BB_PREP_AUDIO"); mode=e && (e[0]=='m' || e[0]=='p') ? e[0] : 'a'; }
+    return mode;
+}
 /* `pace`: wait for this port's next period. sceAudioOutOutputs waits once for all its ports. */
 static int32_t output_port(int32_t handle, const void *data, int pace) {
     int32_t error=0;
+    if (prep_audio_mode()=='p') {
+        while (bbgpu_preparation_screen()) SDL_Delay(10);
+    }
+    runtime_freeze_point();
+    /* bbport: the game's audio output thread (FMOD's mixer) runs at high priority: shader preparation's 14
+     * threads and the driver's compile threads starved it at normal priority (the music stuttered on the
+     * preparation page). BB_AUDIO_PRIORITY=0 leaves it as the game made it. */
+    static _Thread_local int boosted;
+    if (!boosted) {
+        const char *env=getenv("BB_AUDIO_PRIORITY");
+        boosted=1;
+        if (!env || env[0]!='0') SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH);
+    }
     pthread_mutex_lock(&table_lock);
     Port *p=port_of(handle,&error);
     pthread_mutex_unlock(&table_lock);
@@ -225,8 +249,8 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
             /* The device drains the queue in quanta (21 ms on PipeWire), so the level
                is a sawtooth: its minimum over ~32 buffers is what gets controlled. */
             int qb=(int)queue_bytes, low=2*qb, queued=SDL_GetAudioStreamQueued(p->stream);
+            static const unsigned char silence[2048*8*4];
             if (queued<qb) {
-                static const unsigned char silence[2048*8*4];
                 SDL_PutAudioStreamData(p->stream,silence,low-queued<qb ? low-queued : qb);
                 queued=low;
             }
@@ -236,7 +260,10 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
                 p->window_count=0;
             }
             p->next_deadline_ns+=(uint64_t)p->adjust_ns;
-            SDL_PutAudioStreamData(p->stream,queue_data,qb);
+            /* BB_PREP_AUDIO=mute: silent while the preparation page shows; the game's output goes on at its pace,
+             * only its samples are replaced. */
+            const int silent=prep_audio_mode()=='m' && bbgpu_preparation_screen() && qb<=(int)sizeof(silence);
+            SDL_PutAudioStreamData(p->stream,silent ? (const void *)silence : queue_data,qb);
         }
         ++buffers_out;
     }

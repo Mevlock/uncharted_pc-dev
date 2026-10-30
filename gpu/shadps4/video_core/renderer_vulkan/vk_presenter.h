@@ -170,4 +170,8 @@ private:
     std::atomic<double> game_frame_ms{16.7}; ///< written by the present thread
 };
 
+/// bbport (BB_PREPARE_ONLY, the launcher's Prepare shaders button): prepares the shader list without a window and
+/// without the game, printing the progress for the launcher; returns once the cache is saved.
+void PrepareShadersWithoutWindow(AmdGpu::Liverpool* liverpool);
+
 } // namespace Vulkan

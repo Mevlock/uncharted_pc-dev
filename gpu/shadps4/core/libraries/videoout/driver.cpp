@@ -15,6 +15,7 @@
 #include <sys/resource.h>
 #endif
 #include "common/assert.h"
+#include "bbport_overlay.h"
 #include "bbport_threads.h"
 #include "bbport_toggles.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -33,6 +34,7 @@
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
+void BbHitchFlip(); // gpu/shim/bbport_sampler.cpp
 
 namespace Vulkan {
 extern std::atomic<u64> g_bb_compile_ns;
@@ -392,6 +394,7 @@ void VideoOutDriver::Flip(const Request& req) {
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
+    BbHitchFlip(); // gpu/shim/bbport_sampler.cpp (BB_HITCH_MS): a long frame gets a report
 
     // bbport: BB_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
     static const bool frame_stats = EmulatorSettingsImpl::Flag("BB_FRAME_STATS", false);
@@ -957,7 +960,14 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
         }
         const bool flip_slot = movie || !frame_limit || now >= next_flip;
-        if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
+        // bbport: the full-screen preparation page is drawn opaque over whatever is presented; before the game opens
+        // its video port, blank frames carry it at half the vblank rate (holding the game's flips instead upset its
+        // frame rotation: the title flickered afterwards).
+        if (BbOverlay::PreparationScreenActive() && !main_port.is_open) {
+            if (vblank_status.count % 2 == 0) {
+                DrawBlankFrame();
+            }
+        } else if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (request && frame_limit) {
                 next_flip = std::max(next_flip + frame_period, now - frame_period);

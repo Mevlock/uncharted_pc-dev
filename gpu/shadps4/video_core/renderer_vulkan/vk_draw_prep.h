@@ -186,4 +186,45 @@ private:
     std::vector<std::jthread> workers;
 };
 
+/// bbport (BB_PREP_ASYNC_COMPUTE=1, feature/stutter): the async compute queues' pipelines built ahead. Draw preparation
+/// only scans the graphics queue, so a new compute program on an async queue (~90% of U3's dispatches) was built on the
+/// GPU thread when its dispatch was reached, one after another (a cold first run: bursts up to ~0.9 s). Here each
+/// submission's commands (and the indirect buffers they call) are copied on the game's submit thread; a scanner replays
+/// each queue's compute registers in order and hands every new program state to workers that build its pipeline
+/// (PipelineCache::PrepareComputePipeline) on idle cores.
+class ComputePreparation {
+public:
+    explicit ComputePreparation(PipelineCache& pipeline_cache);
+    ~ComputePreparation();
+
+    ComputePreparation(const ComputePreparation&) = delete;
+    ComputePreparation& operator=(const ComputePreparation&) = delete;
+
+    [[nodiscard]] bool Enabled() const noexcept {
+        return enabled;
+    }
+
+    /// Game submit thread: new commands of async compute queue `vqid` (before they are processed).
+    void Submit(u32 vqid, std::span<const u32> commands);
+
+private:
+    void ScanLoop(std::stop_token stop);
+    void WorkerLoop(std::stop_token stop, u32 index);
+
+    struct Batch {
+        u32 vqid;
+        std::vector<u32> commands;
+    };
+
+    PipelineCache& pipeline_cache;
+    bool enabled = false;
+    std::mutex mutex;
+    std::condition_variable_any batch_cv, job_cv;
+    std::deque<Batch> batches;              ///< guarded by `mutex`
+    std::deque<AmdGpu::ComputeProgram> jobs; ///< guarded by `mutex`
+    std::atomic<u64> prepared{0}, skipped{0};
+    std::jthread scanner;
+    std::vector<std::jthread> workers;
+};
+
 } // namespace Vulkan

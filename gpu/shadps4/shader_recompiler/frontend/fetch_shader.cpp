@@ -53,6 +53,11 @@ std::optional<FetchShaderData> ParseFetchShader(const Shader::Info& info) {
     if (!info.has_fetch_shader) {
         return std::nullopt;
     }
+    // bbport (shader variant list): a replayed translation uses the parse stored with the variant (the fetch
+    // shader's code is in game memory).
+    if (t_translation_replay && t_translation_replay->fetch) {
+        return *static_cast<const std::optional<FetchShaderData>*>(t_translation_replay->fetch);
+    }
 
     const auto* code = GetFetchShaderCode(info, info.fetch_shader_sgpr_base);
 

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 #include "common/assert.h"
@@ -67,6 +68,20 @@ vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device) {
     };
 
     auto [module_result, module] = device.createShaderModule(shader_info);
+    if (module_result != vk::Result::eSuccess) {
+        // The shader and its SPIR-V, for spirv-val: shader_module_failed_<hash>_<perm>.spv in the working folder.
+        std::printf("Shader module refused: program %016llx permutation %u, %zu words of SPIR-V (%s)\n",
+                    static_cast<unsigned long long>(t_spv_program_hash), t_spv_permutation, code.size(),
+                    vk::to_string(module_result).c_str());
+        char name[96];
+        std::snprintf(name, sizeof(name), "shader_module_failed_%016llx_%u.spv",
+                      static_cast<unsigned long long>(t_spv_program_hash), t_spv_permutation);
+        if (std::FILE* f = std::fopen(name, "wb")) {
+            std::fwrite(code.data(), sizeof(u32), code.size(), f);
+            std::fclose(f);
+        }
+        std::fflush(stdout);
+    }
     ASSERT_MSG(module_result == vk::Result::eSuccess, "Failed to compile SPIR-V shader: {}",
                vk::to_string(module_result));
     return module;

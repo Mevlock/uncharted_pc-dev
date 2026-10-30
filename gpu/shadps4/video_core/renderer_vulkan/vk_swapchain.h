@@ -34,6 +34,10 @@ public:
     /// Presents the current image and move to the next one
     bool Present();
 
+    /// bbport (hitch diagnosis): the last Present's waits for the async submissions and the queue lock, and the
+    /// present call itself (ms).
+    double last_async_ms = 0, last_queue_lock_ms = 0, last_present_call_ms = 0;
+
     vk::SurfaceKHR GetSurface() const {
         return surface;
     }

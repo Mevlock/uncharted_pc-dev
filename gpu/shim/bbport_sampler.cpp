@@ -7,11 +7,15 @@
 // BB_SAMPLE_THREADS=<name>,<name>: thread name prefixes instead of the GPU threads.
 // Each sample also notes its function and the three bb-probe.exe functions above it (unwind
 // tables), so the log shows time per function and the call paths into it, not only addresses.
+// BB_HITCH_MS=<ms>: the hitch catcher. The game's main thread, its submission and job threads and
+// the port's GPU threads are sampled every 2 ms into a ring; each frame longer than <ms> (guest
+// flip to flip, BbHitchFlip) prints, per thread, where it spent that frame: what stalled it.
 
 #ifdef _WIN32
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <map>
 #include <cstdio>
@@ -25,6 +29,8 @@
 #include <tlhelp32.h>
 
 #include "common/thread.h"
+
+extern "C" void bb_describe_address(char* out, size_t size, uintptr_t address); // src/probe.c
 
 namespace {
 
@@ -43,6 +49,24 @@ struct Sampled {
 };
 
 u64 image_begin = 0, image_end = 0;
+
+// The hitch catcher (BB_HITCH_MS): the samples of the last seconds, and the frame to report.
+struct HitchSample {
+    u64 ns;
+    u32 thread;
+    std::array<u64, 4> path;
+};
+constexpr size_t HitchRing = size_t{1} << 17;
+std::vector<HitchSample> hitch_ring;
+size_t hitch_next = 0;
+double hitch_ms = 0.0;
+std::atomic<u64> hitch_begin_ns{0}, hitch_end_ns{0}; ///< a frame to report (end 0: none)
+
+u64 NowNs() {
+    return static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count());
+}
 
 bool InImage(u64 address) {
     return address >= image_begin && address < image_end;
@@ -255,15 +279,89 @@ void Report(std::vector<Sampled>& threads, double seconds) {
     }
 }
 
+std::string HitchDescribe(u64 address) {
+    char text[160];
+    bb_describe_address(text, sizeof(text), static_cast<uintptr_t>(address));
+    return text;
+}
+
+/// The samples of one long frame, per thread: where each spent it, by call path (the guest's
+/// code has no unwind tables: its addresses are grouped by 256 bytes).
+void HitchReport(const std::vector<Sampled>& threads, u64 begin_ns, u64 end_ns) {
+    static u32 reports;
+    if (++reports > 200) {
+        return;
+    }
+    std::vector<std::map<std::array<u64, 4>, u32>> per_thread(threads.size());
+    std::vector<u32> totals(threads.size());
+    for (size_t k = 0; k < HitchRing; ++k) {
+        const HitchSample& s = hitch_ring[k];
+        if (s.ns < begin_ns || s.ns > end_ns || s.thread >= threads.size()) {
+            continue;
+        }
+        auto path = s.path;
+        HMODULE module = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(path[0]), &module)) {
+            path[0] &= ~u64{0xff};
+        }
+        ++per_thread[s.thread][path];
+        ++totals[s.thread];
+    }
+    std::printf("Hitch: %.1f ms frame; where each thread spent it (2 ms samples):\n",
+                (end_ns - begin_ns) / 1e6);
+    for (size_t t = 0; t < threads.size(); ++t) {
+        if (!totals[t]) {
+            continue;
+        }
+        std::vector<std::pair<std::array<u64, 4>, u32>> top(per_thread[t].begin(),
+                                                            per_thread[t].end());
+        std::ranges::sort(top, std::greater{}, &std::pair<std::array<u64, 4>, u32>::second);
+        std::printf("Hitch:   '%s' (%u):", threads[t].name.c_str(), totals[t]);
+        for (size_t i = 0; i < top.size() && i < 3; ++i) {
+            std::printf(" %s%.0f%% %s", i ? "| " : "", 100.0 * top[i].second / totals[t],
+                        HitchDescribe(top[i].first[0]).c_str());
+            for (size_t f = 1; f < 4 && top[i].first[f]; ++f) {
+                std::printf(" <- %#llx",
+                            static_cast<unsigned long long>(top[i].first[f] - image_begin));
+            }
+        }
+        std::printf("\n");
+    }
+}
+
 } // namespace
+
+/// Every guest flip (videoout driver): a frame longer than BB_HITCH_MS asks the sampler for a report.
+void BbHitchFlip() {
+    if (hitch_ms <= 0.0) {
+        return;
+    }
+    static u64 last;
+    const u64 now = NowNs();
+    if (last && now - last > static_cast<u64>(hitch_ms * 1e6) && !hitch_end_ns.load()) {
+        hitch_begin_ns.store(last);
+        hitch_end_ns.store(now);
+    }
+    last = now;
+}
 
 void BbSamplerStart() {
     const char* env = std::getenv("BB_SAMPLE_THREADS");
-    if (!env || !env[0] || env[0] == '0') {
+    const bool sampling = env && env[0] && env[0] != '0';
+    if (const char* h = std::getenv("BB_HITCH_MS")) {
+        hitch_ms = std::strtod(h, nullptr);
+    }
+    if (!sampling && hitch_ms <= 0.0) {
         return;
     }
     std::vector<std::string> prefixes;
-    if (env[0] == '1' && !env[1]) {
+    if (!sampling) {   // the hitch catcher alone: the threads a frame waits on
+        prefixes = {"bb:GuestMain", "Frame Submis", "NdJobWorker", "shadPS4:GpuCommandProcessor",
+                    "bb:DrawRec", "bb:VkRecorder", "bb:Present", "shadPS4:PresentThread"};
+        std::printf("Hitch catcher: frames over %.0f ms are reported (BB_HITCH_MS)\n", hitch_ms);
+    } else if (env[0] == '1' && !env[1]) {
         prefixes = {"shadPS4:GpuCommandProcessor", "bb:DrawRec", "bb:VkRecorder"};
     } else {
         for (std::string list = env; !list.empty();) {
@@ -279,7 +377,10 @@ void BbSamplerStart() {
         image_begin = base;
         image_end = base + nt->OptionalHeader.SizeOfImage;
     }
-    std::thread([prefixes] {
+    if (hitch_ms > 0.0) {
+        hitch_ring.assign(HitchRing, HitchSample{});
+    }
+    std::thread([prefixes, sampling] {
         Common::SetCurrentThreadName("bb:Sampler");
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
         HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr,
@@ -313,7 +414,20 @@ void BbSamplerStart() {
                 }
                 ResumeThread(threads[i].handle);
             }
-            for (size_t i = 0; i < threads.size(); ++i) {
+            if (hitch_ms > 0.0) {
+                const u64 ns = NowNs();
+                for (size_t i = 0; i < threads.size(); ++i) {
+                    if (rips[i]) {
+                        hitch_ring[hitch_next] = {ns, static_cast<u32>(i), callers[i]};
+                        hitch_next = (hitch_next + 1) % HitchRing;
+                    }
+                }
+                if (const u64 end = hitch_end_ns.load(); end && NowNs() > end + 5000000) {
+                    HitchReport(threads, hitch_begin_ns.load(), end);
+                    hitch_end_ns.store(0);
+                }
+            }
+            for (size_t i = 0; i < threads.size() && sampling; ++i) {
                 if (rips[i]) {
                     ++threads[i].hits[rips[i]];
                     ++threads[i].samples;
@@ -324,12 +438,12 @@ void BbSamplerStart() {
                     }
                 }
             }
-            if (now - window >= std::chrono::seconds(10)) {
+            if (sampling && now - window >= std::chrono::seconds(10)) {
                 Report(threads, std::chrono::duration<double>(now - window).count());
                 window = now;
             }
             LARGE_INTEGER due;
-            due.QuadPart = -10000; // 1 ms
+            due.QuadPart = sampling ? -10000 : -20000; // 1 ms (2 ms for the hitch catcher alone)
             if (timer && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
                 WaitForSingleObject(timer, INFINITE);
             } else {
@@ -342,5 +456,6 @@ void BbSamplerStart() {
 #else
 
 void BbSamplerStart() {}
+void BbHitchFlip() {}
 
 #endif

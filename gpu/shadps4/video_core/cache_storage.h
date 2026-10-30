@@ -7,6 +7,7 @@
 #include "common/singleton.h"
 #include "common/types.h"
 
+#include <array>
 #include <functional>
 #include <thread>
 #include <vector>
@@ -56,9 +57,14 @@ public:
     /// bbport: waits (at most `max_ms`) until the queued writes are on disk, so a game that
     /// ends right after a compile does not lose it.
     void Flush(u32 max_ms);
+    /// bbport: writes and removals still queued (the preparation's "saving" progress).
+    u32 PendingWrites() const;
+
+public:
+    static constexpr u32 IoWorkers = 4; ///< file writer threads (one for an archive)
 
 private:
-    std::jthread io_worker{};
+    std::array<std::jthread, 4> io_workers{};
     std::filesystem::path cache_path{};
     std::filesystem::path directory{}; ///< cache_path for a folder cache, empty for an archive
     bool opened{};

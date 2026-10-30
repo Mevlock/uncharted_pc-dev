@@ -4,6 +4,8 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
+#include <type_traits>
 #include <boost/container/static_vector.hpp>
 #include <xxhash.h>
 
@@ -46,6 +48,7 @@ struct GraphicsPipelineKey {
     u32 mrt_mask;
     u32 motion_vectors = 0;
     u32 ui_squeeze = 0; ///< bbport: ultrawide UI vertex shader (HwVertexRuntimeInfo::ui_squeeze_bits)
+    u32 split_sets = 0; ///< bbport (BB_GPL): split layout, fragment set 0 + pre-raster set 1 (PipelineSelection::split_sets)
     struct {
         AmdGpu::DepthBuffer::ZFormat z_format : 2;
         AmdGpu::DepthBuffer::StencilFormat stencil_format : 1;
@@ -69,6 +72,41 @@ struct GraphicsPipelineKey {
 
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);
+};
+
+/// bbport (BB_GPL): one shared pipeline-library part and the layout view it was built with.
+struct LibraryPart {
+    vk::UniquePipeline pipeline;
+    vk::UniquePipelineLayout layout;
+};
+
+/// bbport (BB_GPL): the parts built so far, by part key; shared by every pipeline linked from them.
+class LibraryParts {
+public:
+    static std::shared_ptr<LibraryPart> Find(u64 key);
+    /// Keeps the first part inserted under a key (two threads may build the same part at once).
+    static std::shared_ptr<LibraryPart> Insert(u64 key, vk::UniquePipeline pipeline,
+                                               vk::UniquePipelineLayout layout);
+};
+
+/// bbport (BB_GPL): the key of a part, hashed from the values it is built from.
+class PartKeyWriter {
+public:
+    explicit PartKeyWriter(u64 part) : hash{0x9E3779B97F4A7C15ull ^ part} {}
+    template <typename T>
+    void Add(const T& value) {
+        static_assert(std::is_trivially_copyable_v<T>);
+        const auto* bytes = reinterpret_cast<const u8*>(&value);
+        for (size_t i = 0; i < sizeof(T); ++i) {
+            hash = (hash ^ bytes[i]) * 0x100000001B3ull;
+        }
+    }
+    u64 Get() const {
+        return hash;
+    }
+
+private:
+    u64 hash;
 };
 
 class GraphicsPipeline : public Pipeline {
@@ -133,10 +171,25 @@ public:
 
 private:
     void BuildDescSetLayout(bool preloading);
+    /// bbport (BB_GPL): builds `pipeline` as four pipeline-library parts from the given state and links them.
+    void BuildFromLibraries(vk::Device device, vk::PipelineCache pipeline_cache,
+                            const std::string& debug_str,
+                            std::span<const vk::DynamicState> dynamic_states,
+                            std::span<const vk::PipelineShaderStageCreateInfo> shader_stages,
+                            const vk::PipelineVertexInputStateCreateInfo& vertex_input_info,
+                            const vk::PipelineInputAssemblyStateCreateInfo& input_assembly,
+                            const vk::PipelineTessellationStateCreateInfo& tessellation_state,
+                            const vk::PipelineViewportStateCreateInfo& viewport_info,
+                            const vk::PipelineRasterizationStateCreateInfo& rasterization,
+                            const vk::PipelineMultisampleStateCreateInfo& multisampling,
+                            const vk::PipelineDepthStencilStateCreateInfo* depth_stencil,
+                            const vk::PipelineColorBlendStateCreateInfo& color_blending,
+                            const vk::PipelineRenderingCreateInfo& rendering);
 
 private:
     GraphicsPipelineKey key;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
+    std::array<std::shared_ptr<LibraryPart>, 4> library_parts; ///< bbport (BB_GPL): the parts it was linked from
 };
 
 struct ClipDistanceShaderKey {

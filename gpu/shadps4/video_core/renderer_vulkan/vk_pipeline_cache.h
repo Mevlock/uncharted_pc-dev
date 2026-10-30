@@ -105,10 +105,14 @@ struct PipelineSelection {
     GraphicsPipelineKey graphics_key{};
     bool motion = false;
     bool ui_squeeze = false; ///< bbport: ultrawide UI draw (UiSqueezeDraw)
+    /// bbport (BB_GPL): select the split-layout variant: the pre-raster stages declare their resources in descriptor
+    /// set 1, numbered from 0 (the fragment stage keeps set 0), so each half can be a pipeline library of its own.
+    bool split_sets = false;
     DrawIndirectParams draw_indirect_params{};
     /// Compute program state of a worker's dispatch (the GPU thread reads its queue's own).
     const AmdGpu::ComputeProgram* cs{};
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
+    bool indirect_dispatch{}; ///< bbport: compute: workgroup count in GPU memory (WorkgroupSplit)
 };
 
 /// bbport: a draw-preparation worker's own program state (see vk_draw_prep.h).
@@ -129,6 +133,9 @@ struct PrepWorker {
 };
 
 struct PreparedDraw;
+
+/// bbport (shader variant list): one line of a variant list (vk_pipeline_serialization.cpp).
+struct ListedVariant;
 
 class PipelineCache {
 public:
@@ -172,7 +179,8 @@ public:
         return used_prepared;
     }
 
-    const ComputePipeline* GetComputePipeline();
+    /// bbport: `indirect`: the workgroup count is in GPU memory (no WorkgroupSplit).
+    const ComputePipeline* GetComputePipeline(bool indirect = false);
     /// bbport (native batch): the batched variant of `base`, the pipeline GetComputePipeline()
     /// just selected for the current compute registers (GPU command thread). Compiled once;
     /// null when the program cannot run batched. Never saved.
@@ -257,6 +265,17 @@ private:
     /// jumps back to a recovery point (sigsetjmp skips the ReleaseClaim calls in between).
     static size_t ClaimMark();
     void ReleaseClaimsAfter(size_t mark);
+    /// bbport (shader variant list): builds a listed variant from the game files and its line alone.
+    vk::ShaderModule BuildListedVariant(const ListedVariant& v, std::span<const u32> code,
+                                        const std::vector<u32>& registers, std::vector<u32>& spv,
+                                        std::unique_ptr<Shader::Info>& info,
+                                        Shader::StageSpecialization& spec,
+                                        Shader::Backend::Bindings* binding_end = nullptr);
+    /// bbport (shader variant list): BuildRuntimeInfo from the stage registers stored in front of a shader's code in
+    /// the game files, plus the per-draw state of `draw`.
+    Shader::RuntimeInfo RuntimeInfoFromRegisters(Shader::HwStage hw_stage, Shader::SwStage sw_stage,
+                                                 const std::vector<u32>& registers,
+                                                 const Shader::RuntimeInfo& draw);
     const Shader::RuntimeInfo& BuildRuntimeInfo(PipelineSelection& sel, Shader::HwStage stage,
                                                 Shader::SwStage l_stage);
 

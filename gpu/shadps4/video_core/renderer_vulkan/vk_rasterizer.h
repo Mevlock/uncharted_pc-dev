@@ -75,6 +75,10 @@ public:
     DrawPreparation& GetDrawPreparation() {
         return *draw_prep;
     }
+    /// bbport: the async compute queues' pipelines built ahead (BB_PREP_ASYNC_COMPUTE=1), fed by Liverpool::SubmitAsc.
+    ComputePreparation& GetComputePreparation() {
+        return *compute_prep;
+    }
     void DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u32 size, u32 max_count,
                       VAddr count_address, u16 vertex_sgpr_offset, u16 instance_sgpr_offset);
 
@@ -436,6 +440,7 @@ private:
     Common::SharedFirstMutex mapped_ranges_mutex;
     PipelineCache pipeline_cache;
     std::unique_ptr<DrawPreparation> draw_prep;
+    std::unique_ptr<ComputePreparation> compute_prep;
     std::unique_ptr<CameraMotion> camera_motion; // bbport: motion vectors (docs/upscaler.md)
     std::unique_ptr<SceneTargets> scene_targets;
     bool scene_started = false;
@@ -467,6 +472,7 @@ private:
     boost::container::static_vector<BoundBuffer, Shader::NUM_BUFFERS> bound_buffers;
 
     u32 set_write_index{};
+    size_t set1_first_write = ~size_t{0}; ///< bbport (BB_GPL): first write of a split layout's set 1
     Pipeline::DescriptorWrites set_writes;
     Shader::PushData push_data;
 

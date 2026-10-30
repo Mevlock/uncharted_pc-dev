@@ -430,6 +430,7 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
         info.hw.cs.tgid_enable = {cs_pgm.IsTgidEnabled(0), cs_pgm.IsTgidEnabled(1),
                                   cs_pgm.IsTgidEnabled(2)};
         info.hw.cs.shared_memory_size = cs_pgm.SharedMemSize();
+        info.hw.cs.indirect = sel.indirect_dispatch;
         break;
     }
     default:
@@ -526,6 +527,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
             return !instance.IsFragmentShaderBarycentricSupported() &&
                    instance.GetDriverID() == vk::DriverId::eNvidiaProprietary;
         }(),
+        .split_large_workgroups = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ||
                               instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
         .needs_buffer_offsets = instance.StorageMinAlignment() > 4,
@@ -699,7 +701,18 @@ void PipelineCache::DriverCacheSaver(std::stop_token stop) {
 }
 
 void PipelineCache::SaveForExit() {
-    Storage::DataBase::Instance().Flush(3000);
+    // bbport: up to 10 s (was 3): right after a preparation thousands of shader files are still being written, and a
+    // game closed then lost them. Usually nothing is pending and this returns at once. Not longer: the writes can stall
+    // in Windows' file calls (seen once, all writers blocked in create/rename), and whatever is left is prepared again
+    // at the next start (files are renamed into place whole; the prepared marker only follows complete writes).
+    auto& db = Storage::DataBase::Instance();
+    if (const u32 pending = db.PendingWrites(); pending > 0) {
+        const auto start = std::chrono::steady_clock::now();
+        db.Flush(10000);
+        std::printf("Shader cache at exit: %u writes pending, %u left after %.1f s\n", pending, db.PendingWrites(),
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+        std::fflush(stdout);
+    }
     if (driver_cache_dirty.load() != 0 && IsWarm()) {
         SaveDriverCache();
     }
@@ -762,8 +775,12 @@ struct CompileTimer {
         g_last_compile_ms.store(NowMs(), std::memory_order_relaxed);
         static const bool log = std::getenv("BB_COMPILE_LOG") != nullptr;
         if (log) {
-            std::printf("Compile: %s %016llx %u %.2f ms\n", kind,
-                        static_cast<unsigned long long>(id), extra, double(ns) / 1e6);
+            const auto wall = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::system_clock::now().time_since_epoch())
+                                  .count();
+            std::printf("Compile: %s %016llx %u %.2f ms at %lld\n", kind,
+                        static_cast<unsigned long long>(id), extra, double(ns) / 1e6,
+                        static_cast<long long>(wall));
         }
     }
 };
@@ -989,6 +1006,24 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         }
     }
     LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
+    {
+        // bbport (feature/stutter): why the GPU thread builds this one itself: no preparation for the draw, a worker
+        // still on it, a worker that failed, or a prepared pipeline that did not fit (BB_FRAME_STATS, every 5 s).
+        static std::atomic<u64> none{0}, pending{0}, failed{0}, mismatch{0};
+        const u32 state = prepared ? prepared->state.load(std::memory_order_acquire) : ~0u;
+        (state == ~0u ? none : state == PreparedDraw::Pending ? pending
+                              : state == PreparedDraw::Unavailable ? failed : mismatch) += 1;
+        static std::atomic<s64> last{0};
+        const s64 now = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+        s64 seen = last.load();
+        if (now - seen >= 5 && last.compare_exchange_strong(seen, now)) {
+            std::printf("GPU-thread pipeline builds: %llu with no preparation, %llu a worker was still on, "
+                        "%llu a worker failed, %llu prepared but not fitting\n",
+                        static_cast<unsigned long long>(none.load()), static_cast<unsigned long long>(pending.load()),
+                        static_cast<unsigned long long>(failed.load()), static_cast<unsigned long long>(mismatch.load()));
+        }
+    }
     CompileTimer timer{"gpipe", pipeline_hash, sel.graphics_key.motion_vectors};
     SpanTimer gfx_timer{g_bb_gfx_pipeline_ns};
     ++g_bb_gfx_pipelines;
@@ -1027,8 +1062,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     return result;
 }
 
-const ComputePipeline* PipelineCache::GetComputePipeline() {
+const ComputePipeline* PipelineCache::GetComputePipeline(bool indirect) {
     EnsureWarm();
+    sel.indirect_dispatch = indirect;
     if (!RefreshComputeKey()) {
         return nullptr;
     }
@@ -1365,6 +1401,9 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     const auto& regs = (*sel.regs);
     auto& key = sel.graphics_key;
     sel.fetch_shader = std::nullopt;
+    // bbport (BB_GPL=1, study step 2a): every graphics pipeline uses the split layout.
+    sel.split_sets = instance.IsGraphicsPipelineLibrary();
+    key.split_sets = sel.split_sets ? 1u : 0u;
 
     Shader::Backend::Bindings binding{};
     const auto bind_stage = [&](HwStage stage_in, SwStage stage_out) -> bool {
@@ -1398,6 +1437,12 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
     sel.modules.fill(nullptr);
 
     bind_stage(HwStage::Fragment, SwStage::Fragment);
+    if (sel.split_sets) {
+        // The pre-raster stages get descriptor set 1 of their own, numbered from 0; the push data counters
+        // (buffer offsets, user data) stay shared, as the push constant block is.
+        binding.unified = 0;
+        binding.descriptor_set = 1;
+    }
 
     const auto* fs_info = sel.infos[static_cast<u32>(SwStage::Fragment)];
     key.mrt_mask = fs_info ? fs_info->mrt_mask : 0u;
@@ -1704,6 +1749,8 @@ vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
 
     auto patch = GetShaderPatch(info.pgm_hash, info.hw_stage, perm_idx, "spv");
     const bool is_patched = patch && EmulatorSettings.IsPatchShaders();
+    t_spv_program_hash = info.pgm_hash;
+    t_spv_permutation = u32(perm_idx);
     if (is_patched) {
         LOG_INFO(Loader, "Loaded patch for {} shader {:#x}", info.hw_stage, info.pgm_hash);
         module = CompileSPV(*patch, instance.GetDevice());
@@ -1797,8 +1844,19 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     CompileTimer timer{&translate_pools == &pools ? "shader" : "shader-w", info.pgm_hash,
                        u32(perm_idx) | (u32(info.hw_stage) << 16) | (motion ? 0x80000000u : 0u)};
     std::vector<u32> spv;
+    // bbport (shader variant list): the reads this translation makes through user-data table pointers are
+    // recorded and stored with the variant's meta, with its user data, so it can be translated again from the
+    // code alone (TranslateFromRecord). Thread-local storage: a fault jumping out leaves nothing dangling.
+    static thread_local std::vector<Shader::UdRead> reads;
+    reads.clear();
+    Shader::t_translation_record = &reads;
     const auto module =
         TranslateModule(info, runtime_info, code, perm_idx, binding, translate_pools, spv);
+    Shader::t_translation_record = nullptr;
+    // The inputs are kept also for the shaders whose binary depends on settings (the scaled movie shader, the
+    // clamped bloom shader, ...): a variant list then holds them, and preparation translates them for the current
+    // settings, as the game would at first use.
+    RegisterShaderInputs(info, reads, perm_idx);
     if (SaveShaderBinary(info.pgm_hash, info.hw_stage)) {
         RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
     }

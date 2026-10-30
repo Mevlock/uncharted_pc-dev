@@ -74,6 +74,10 @@ void runtime_set_guest_fpu(void);
 int32_t runtime_guest_errno(int host_errno);
 void *runtime_low_map(size_t size, int prot);
 void *runtime_image_map(size_t size, int prot);
+/* The loaded game's image (guest offset 0), or 0 before it is mapped. */
+uintptr_t runtime_image_base(void);
+/* Its size in bytes (0 before it is mapped). */
+size_t runtime_image_size(void);
 /* Windows: reserves the PS4 user address range as a placeholder (no-op elsewhere). */
 void runtime_memory_reserve(void);
 uintptr_t runtime_ajm_resolve(const char *name);
@@ -115,6 +119,15 @@ const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
  * read prints the ones since the last read. runtime_wait_begin returns 0 when off. */
 double runtime_wait_begin(void);
 void runtime_wait_end(const char *what, double start);
+/* Shader preparation page (on by default; BB_PREP_FREEZE=0: off, the game runs behind the page): while it shows, the game's threads stop at their next wait,
+ * lock, yield or sound output (runtime_freeze_point; cooperative: never inside a host lock) and all go on together
+ * when it closes, so the game starts afterwards as if the page took no time. runtime_freeze_guest: the page's switch. */
+extern volatile int runtime_freeze_flag;
+void runtime_freeze_wait(void);
+static inline void runtime_freeze_point(void) {
+    if (__builtin_expect(runtime_freeze_flag, 0)) runtime_freeze_wait();
+}
+void runtime_freeze_guest(int on);
 void runtime_wait_print(double now);
 void runtime_wait_caller(uint64_t caller, uint64_t arg);
 #endif

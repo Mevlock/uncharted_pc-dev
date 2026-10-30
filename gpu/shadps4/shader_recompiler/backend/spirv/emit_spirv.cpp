@@ -395,10 +395,14 @@ void DefineEntryPoint(const Info& info, EmitContext& ctx, Id main) {
     case SwStage::Compute: {
         std::array<u32, 3> workgroup_size{ctx.runtime_info.hw.cs.workgroup_size};
         // bbport: a 1024-thread group takes Pascal's whole register file; emit two 512-thread
-        // groups instead and let the dispatcher double the grid (see cta_split.h).
-        workgroup_size[0] /= Shader::CtaSplitFactor(info.pgm_hash);
+        // groups instead and let the dispatcher double the grid (see cta_split.h). Not on top of the
+        // general split (WorkgroupSplit), which covers it.
+        if (ctx.workgroup_split == 1) {
+            workgroup_size[0] /= Shader::CtaSplitFactor(info.pgm_hash);
+        }
         execution_model = spv::ExecutionModel::GLCompute;
-        ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize, workgroup_size[0],
+        ctx.AddExecutionMode(main, spv::ExecutionMode::LocalSize,
+                             workgroup_size[0] / ctx.workgroup_split,
                              workgroup_size[1], workgroup_size[2]);
         break;
     }

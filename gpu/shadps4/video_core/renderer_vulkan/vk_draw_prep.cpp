@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <array>
+#include <unordered_set>
 
 #include "bbport_threads.h"
 #include "bbport_toggles.h"
@@ -585,6 +587,9 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 } else if (compute_prep && index < target->num_dispatches &&
                            (cs->dispatch_initiator & 1) &&
                            !target->dispatch_taken[index].exchange(true)) {
+                    // The same permutation the GPU thread selects (WorkgroupSplit).
+                    sel.indirect_dispatch =
+                        header->type3.opcode != AmdGpu::PM4ItOpcode::DispatchDirect;
                     pipeline_cache.PrepareComputePipeline(sel);
                 }
                 return;
@@ -676,6 +681,145 @@ void DrawPreparation::Count(bool was_used) {
                 static_cast<unsigned long long>(used), static_cast<unsigned long long>(unused),
                 worker_count, static_cast<unsigned long long>(rebases));
     used = unused = 0;
+}
+
+
+ComputePreparation::ComputePreparation(PipelineCache& pipeline_cache_) : pipeline_cache{pipeline_cache_} {
+    const char* env = std::getenv("BB_PREP_ASYNC_COMPUTE");
+    enabled = env && env[0] == '1';
+    if (!enabled) {
+        return;
+    }
+    const u32 count = std::clamp<u32>(BbThreads::Available() / 4, 1, 4);
+    scanner = std::jthread([this](std::stop_token stop) { ScanLoop(stop); });
+    for (u32 i = 0; i < count; ++i) {
+        workers.emplace_back([this, i](std::stop_token stop) { WorkerLoop(stop, i); });
+    }
+    std::printf("Compute preparation: async compute pipelines built ahead on %u threads "
+                "(BB_PREP_ASYNC_COMPUTE=1)\n", count);
+}
+
+ComputePreparation::~ComputePreparation() {
+    scanner.request_stop();
+    for (auto& worker : workers) {
+        worker.request_stop();
+    }
+    batch_cv.notify_all();
+    job_cv.notify_all();
+}
+
+void ComputePreparation::Submit(u32 vqid, std::span<const u32> commands) {
+    if (!enabled) {
+        return;
+    }
+    Batch batch{vqid, {}};
+    batch.commands.reserve(commands.size());
+    // The indirect buffers the ring calls hold the dispatches: their commands go in place of the call
+    // (they are written before the submission).
+    ForEachPacket(commands, [&](const AmdGpu::PM4Header* header) {
+        if (header->type3.opcode == AmdGpu::PM4ItOpcode::IndirectBuffer) {
+            const auto* ib = reinterpret_cast<const AmdGpu::PM4CmdIndirectBuffer*>(header);
+            const u32* data = ib->Address<const u32>();
+            if (data && ib->ib_size) {
+                batch.commands.insert(batch.commands.end(), data, data + ib->ib_size);
+            }
+            return;
+        }
+        const auto* words = reinterpret_cast<const u32*>(header);
+        batch.commands.insert(batch.commands.end(), words, words + header->type3.NumWords() + 1);
+    });
+    {
+        std::scoped_lock lock{mutex};
+        if (batches.size() >= 256) {
+            batches.pop_front(); // far behind: an older state is wrong at worst (a build wasted)
+        }
+        batches.push_back(std::move(batch));
+    }
+    batch_cv.notify_one();
+}
+
+void ComputePreparation::ScanLoop(std::stop_token stop) {
+    Common::SetCurrentThreadName("bb:ComputeScan");
+    BbThreads::MakeBackground();
+    std::array<AmdGpu::ComputeProgram, AmdGpu::Liverpool::NumTotalQueues> state{};
+    std::unordered_set<u64> queued; ///< program addresses already handed out
+    while (!stop.stop_requested()) {
+        Batch batch;
+        {
+            std::unique_lock lock{mutex};
+            batch_cv.wait(lock, stop, [&] { return !batches.empty(); });
+            if (stop.stop_requested()) {
+                return;
+            }
+            batch = std::move(batches.front());
+            batches.pop_front();
+        }
+        auto& cs = state[batch.vqid % state.size()];
+        ForEachPacket(batch.commands, [&](const AmdGpu::PM4Header* header) {
+            AmdGpu::Liverpool::ApplyComputeRegisterPacket(cs, header);
+            if (!IsDispatch(header->type3.opcode)) {
+                return;
+            }
+            if (header->type3.opcode == AmdGpu::PM4ItOpcode::DispatchDirect) {
+                const auto* dispatch = reinterpret_cast<const AmdGpu::PM4CmdDispatchDirect*>(header);
+                cs.dim_x = dispatch->dim_x;
+                cs.dim_y = dispatch->dim_y;
+                cs.dim_z = dispatch->dim_z;
+                cs.dispatch_initiator = dispatch->dispatch_initiator;
+            } else {
+                cs.dispatch_initiator =
+                    reinterpret_cast<const AmdGpu::PM4CmdDispatchIndirect*>(header)->dispatch_initiator;
+            }
+            // One early build per program: most programs have one variant, and the skinning program
+            // runs with other buffers at nearly every dispatch.
+            const u64 address = cs.address;
+            if (!(cs.dispatch_initiator & 1) || !address || !queued.insert(address).second) {
+                ++skipped;
+                return;
+            }
+            if (queued.size() > 16384) {
+                queued.clear();
+            }
+            {
+                std::scoped_lock lock{mutex};
+                if (jobs.size() >= 256) {
+                    return;
+                }
+                jobs.push_back(cs);
+            }
+            job_cv.notify_one();
+        });
+    }
+}
+
+void ComputePreparation::WorkerLoop(std::stop_token stop, u32 index) {
+    Common::SetCurrentThreadName(("bb:ComputePrep" + std::to_string(index)).c_str());
+    BbThreads::MakeBackground();
+    auto regs = std::make_unique<AmdGpu::Regs>();
+    PipelineSelection sel{};
+    sel.regs = regs.get();
+    PrepWorker prep_worker{};
+    sel.worker = &prep_worker;
+    while (!stop.stop_requested()) {
+        AmdGpu::ComputeProgram cs;
+        {
+            std::unique_lock lock{mutex};
+            job_cv.wait(lock, stop, [&] { return !jobs.empty(); });
+            if (stop.stop_requested()) {
+                return;
+            }
+            cs = jobs.front();
+            jobs.pop_front();
+        }
+        sel.cs = &cs;
+        pipeline_cache.PrepareComputePipeline(sel);
+        const u64 done = ++prepared;
+        if ((done & 63) == 0) {
+            std::printf("Compute preparation: %llu programs prepared, %llu dispatches skipped\n",
+                        static_cast<unsigned long long>(done),
+                        static_cast<unsigned long long>(skipped.load()));
+        }
+    }
 }
 
 } // namespace Vulkan

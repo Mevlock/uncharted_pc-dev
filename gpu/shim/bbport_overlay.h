@@ -42,6 +42,21 @@ void NoteGameFrame();
 /// trophy's icon file or empty). Notices are shown at the top of the screen one after the other.
 void NotifyTrophy(int grade, std::string game, std::string name, std::vector<unsigned char> png);
 
+/// Any thread (bbport shader variant list): progress of the background shader preparation, shown in a corner
+/// while it runs; `phase` 0 = none, 1 = shaders (`done` of `total`), 2 = pipelines.
+void SetShaderPreparation(int phase, u32 done, u32 total);
+
+/// Any thread: the full-screen preparation page instead of the corner box. While it is on, the presenter shows blank
+/// frames with the page and holds the game's flips (the game waits at its first frames until preparation is done).
+void SetPreparationScreen(bool on);
+bool PreparationScreenActive();
+
+/// Preparation without a window (BB_PREPARE_ONLY, the launcher's Prepare shaders button): the warm-up thread marks
+/// its end, and one thread prints the progress for the launcher's bar as "PREP <percent> <done> <total> <step>|<eta>".
+void SetPreparationFinished();
+bool PreparationFinished();
+void PrintPreparationProgress();
+
 /// The menu is open or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();
 

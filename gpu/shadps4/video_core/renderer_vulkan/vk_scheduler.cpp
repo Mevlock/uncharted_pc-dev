@@ -28,6 +28,8 @@
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "bbport_threads.h"
 
+#include <chrono>
+
 namespace Vulkan {
 
 namespace {
@@ -641,7 +643,22 @@ void Scheduler::SubmitOnRecorder(u64 signal_value) {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
+    // bbport (hitch diagnosis, BB_HITCH_MS): a submission that waits for the submit lock longer than the hitch
+    // threshold says so (the presenter holds it through the present call).
+    static const double slow_lock_ms = [] {
+        const char* env = std::getenv("BB_HITCH_MS");
+        return env ? std::atof(env) : 0.0;
+    }();
+    const auto lock_start = std::chrono::steady_clock::now();
     std::scoped_lock lk{submit_mutex};
+    if (slow_lock_ms > 0) {
+        const double waited =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lock_start).count();
+        if (waited > slow_lock_ms) {
+            std::printf("Submit lock: a submission (%s) waited %.1f ms\n", on_submit ? "draw scheduler" : "other",
+                        waited);
+        }
+    }
     // bbport: BB_SUBMIT_THREADS=1 names each thread that submits through this scheduler (once).
     static const bool submit_threads = std::getenv("BB_SUBMIT_THREADS") != nullptr;
     if (submit_threads) {

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <boost/container_hash/hash.hpp>
@@ -58,6 +60,9 @@ private:
                               const vk::DescriptorBufferInfo& params, u32 dim_x);
 
     vk::Pipeline GetTilingPipeline(const ImageInfo& info, bool is_tiler);
+    vk::UniquePipeline BuildTilingPipeline(const ImageInfo& info, bool is_tiler);
+    /// bbport: builds the (de)tilers listed in tiling_pipelines.txt (and BB_TILING_LIST) behind the game.
+    void PrebuildTilers(std::stop_token stop);
 
 private:
     const Vulkan::Instance& instance;
@@ -67,6 +72,8 @@ private:
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pl_layout;
     std::unordered_map<TilingKey, vk::UniquePipeline, TilingKey::Hash> tiling_pipelines;
+    std::mutex tiling_mutex; ///< tiling_pipelines: the GPU thread and the prebuild thread
+    std::jthread prebuild_thread;
 };
 
 } // namespace VideoCore

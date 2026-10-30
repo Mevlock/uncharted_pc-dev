@@ -78,6 +78,7 @@ static int32_t ensure_mutex(GuestMutex **mutex) {
     return e;
 }
 static ABI int32_t mutex_lock(GuestMutex **mutex) {
+    runtime_freeze_point();
     int32_t e = ensure_mutex(mutex);
     if (e) return e;
     e = orbis_error(pthread_mutex_lock(&(*mutex)->native));
@@ -99,6 +100,7 @@ static ABI int32_t mutex_unlock(GuestMutex **mutex) {
     return e;
 }
 static ABI int32_t mutex_destroy(GuestMutex **mutex) {
+    runtime_freeze_point();
     if (!mutex || (uintptr_t)*mutex == 2) return orbis_error(EINVAL);
     if ((uintptr_t)*mutex < 2) return 0;
     int e = pthread_mutex_destroy(&(*mutex)->native);
@@ -156,6 +158,7 @@ static ABI int32_t cond_destroy(GuestCond **cond) {
     return orbis_error(e);
 }
 static ABI int32_t cond_wait(GuestCond **cond, GuestMutex **mutex) {
+    runtime_freeze_point();
     runtime_wait_caller((uint64_t)(uintptr_t)__builtin_return_address(0), 0);
     int32_t e = ensure_cond(cond);
     if (e) return e;

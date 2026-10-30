@@ -294,6 +294,8 @@ public:
     Id tess_coord;
     std::array<Id, 30> patches{};
 
+    /// bbport: guest workgroups run as this many host workgroups (WorkgroupSplit).
+    u32 workgroup_split{1};
     Id workgroup_id{};
     /// Native batch (Profile::batched_compute): flat buffer index of this workgroup's entry, and
     /// of its user data and flat data (set in the prologue, DefineBufferProperties).

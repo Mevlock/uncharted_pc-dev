@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <fmt/format.h>
 
 #include <SDL3/SDL.h>
 #ifdef _WIN32
@@ -28,6 +29,9 @@
 #include "bbport_settings.h"
 #include <miniz.h>
 #include "imgui.h"
+
+// runtime_thread.c: the game's threads wait while the preparation page shows (BB_PREP_FREEZE=0: they run).
+extern "C" void runtime_freeze_guest(int on);
 #include "imgui_internal.h"
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -933,9 +937,244 @@ bool HandleEvent(const SDL_Event& event) {
     }
 }
 
+std::atomic<int> prep_phase{0};
+std::atomic<u32> prep_done{0};
+std::atomic<u32> prep_total{0};
+
+std::atomic<s64> prep_phase_start_ms{0};
+std::atomic<bool> prep_screen{false};
+
+s64 NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+void SetShaderPreparation(int phase, u32 done, u32 total) {
+    if (prep_phase.load(std::memory_order_relaxed) != phase) {
+        prep_phase_start_ms.store(NowMs(), std::memory_order_relaxed);
+    }
+    prep_done.store(done, std::memory_order_relaxed);
+    prep_total.store(total, std::memory_order_relaxed);
+    prep_phase.store(phase, std::memory_order_release);
+}
+
+void SetPreparationScreen(bool on) {
+    prep_screen.store(on, std::memory_order_release);
+    runtime_freeze_guest(on ? 1 : 0); // the game's threads wait for the page (runtime.h; BB_PREP_FREEZE=0: they run)
+}
+
+bool PreparationScreenActive() {
+    return prep_screen.load(std::memory_order_acquire);
+}
+
+static std::atomic<bool> prep_finished{false};
+
+void SetPreparationFinished() {
+    prep_finished.store(true, std::memory_order_release);
+}
+
+bool PreparationFinished() {
+    return prep_finished.load(std::memory_order_acquire);
+}
+
+// One bar for the whole preparation: step 1 (loading or building shaders) fills the first 15 %, step 2 (the driver
+// compiling pipelines, most of the time) the rest; between the steps it holds at 15 %.
+// Without a window (BB_PREPARE_ONLY) the cache is written before the process ends: saving (phase 4) is the last 15 %.
+static float PreparationFraction(int phase, u32 done, u32 total, bool finishing, bool between) {
+    static const bool saving = [] {
+        const char* env = std::getenv("BB_PREPARE_ONLY");
+        return env && env[0] == '1';
+    }();
+    const float step_part = total ? float(done) / float(total) : 0.0f;
+    const float compiled = saving ? 0.85f : 1.0f;
+    return phase == 4                 ? 0.85f + 0.15f * step_part
+           : finishing                ? 1.0f
+           : phase == 2               ? 0.15f + (compiled - 0.15f) * step_part
+           : phase == 1 || phase == 3 ? 0.15f * step_part
+           : between                  ? 0.15f
+                                      : 0.0f;
+}
+
+// "about 25 s left". Pipelines differ a lot in cost and finish in bursts on several threads, so the rate is taken over
+// the last ~10 s (half weight) and the whole phase (half weight); the shown value is recomputed once a second, eases
+// toward the estimate, counts down between updates and only rises slowly, so the countdown does not jump around.
+// Called from the overlay's draw (one thread).
+std::string PreparationEta(u32 done, u32 total) {
+    static s64 phase_start = -1, last_update = 0;
+    static double shown_s = -1.0;
+    static std::array<std::pair<s64, u32>, 24> samples{};  // (ms, done) every 0.5 s
+    static size_t next_sample = 0, num_samples = 0;
+    const s64 now = NowMs();
+    const s64 start = prep_phase_start_ms.load(std::memory_order_relaxed);
+    if (start != phase_start) {  // a new phase: start over
+        phase_start = start;
+        shown_s = -1.0;
+        num_samples = next_sample = 0;
+        last_update = 0;
+    }
+    const s64 elapsed = now - start;
+    if (done < 8 || total <= done || elapsed < 1500) {
+        return {};
+    }
+    const auto& newest = samples[(next_sample + samples.size() - 1) % samples.size()];
+    if (num_samples == 0 || now - newest.first >= 500) {
+        samples[next_sample] = {now, done};
+        next_sample = (next_sample + 1) % samples.size();
+        num_samples = std::min(num_samples + 1, samples.size());
+    }
+    if (now - last_update >= 1000 || shown_s < 0.0) {
+        const double overall = double(done) / double(elapsed);  // per ms
+        const auto& oldest = samples[num_samples < samples.size() ? 0 : next_sample];
+        const double recent = now > oldest.first && done > oldest.second
+                                  ? double(done - oldest.second) / double(now - oldest.first)
+                                  : overall;
+        const double estimate_s = double(total - done) / (0.5 * overall + 0.5 * recent) / 1000.0;
+        if (shown_s < 0.0) {
+            shown_s = estimate_s;
+        } else {
+            const double counted = std::max(0.0, shown_s - double(now - last_update) / 1000.0);
+            // ease toward the estimate; going up only a little per update
+            shown_s = estimate_s < counted ? counted + 0.3 * (estimate_s - counted)
+                                           : counted + std::min(1.0, 0.3 * (estimate_s - counted));
+        }
+        last_update = now;
+    }
+    const s64 left_s = s64(shown_s + 0.5);
+    if (left_s < 5) {
+        return "  a few seconds left";
+    }
+    if (left_s >= 60) {
+        const s64 rounded = (left_s + 4) / 5 * 5;
+        return fmt::format("  about {} min {} s left", rounded / 60, rounded % 60);
+    }
+    return fmt::format("  about {} s left", left_s);
+}
+
+// The full-screen page shown before the game starts (SetPreparationScreen): what is happening, that it happens once,
+// a progress bar with the step, the count and the countdown. Centred on a dark background.
+void FullScreenPreparation() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->Pos);
+    ImGui::SetNextWindowSize(viewport->Size);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.055f, 0.06f, 0.07f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.85f, 0.62f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.16f, 0.17f, 0.19f, 1.0f));
+    ImGui::Begin("##prep_screen", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    const float w = viewport->Size.x;
+    const float h = viewport->Size.y;
+    const auto centered = [&](const char* text, float scale, ImVec4 color) {
+        ImGui::SetWindowFontScale(scale);
+        const float tw = ImGui::CalcTextSize(text).x;
+        ImGui::SetCursorPosX((w - tw) * 0.5f);
+        ImGui::TextColored(color, "%s", text);
+    };
+    const ImVec4 white{0.95f, 0.95f, 0.95f, 1.0f};
+    const ImVec4 grey{0.62f, 0.64f, 0.67f, 1.0f};
+    const int phase = prep_phase.load(std::memory_order_acquire);
+    const u32 done = prep_done.load(std::memory_order_relaxed);
+    const u32 total = prep_total.load(std::memory_order_relaxed);
+    // After the last step the phase goes back to 0 while the page is still up: show it finished, not "Starting".
+    static bool had_step = false, seen_step2 = false;
+    had_step = had_step || phase != 0;
+    seen_step2 = seen_step2 || phase == 2;
+    const bool finishing = phase == 0 && seen_step2;
+    const bool between = phase == 0 && had_step && !seen_step2;  // step 1 done, step 2 not started yet
+
+    ImGui::SetCursorPosY(h * 0.36f);
+    centered("Preparing shaders", 2.4f, white);
+    ImGui::Dummy(ImVec2(0.0f, 8.0f * base_scale));
+    centered("This happens once, before your first launch. Later launches start straight away.", 1.15f, grey);
+    ImGui::Dummy(ImVec2(0.0f, 28.0f * base_scale));
+
+    const char* step = phase == 3   ? "Step 1 of 2: loading shaders"
+                       : phase == 1 ? "Step 1 of 2: building shaders from your game files"
+                       : phase == 2 || between ? "Step 2 of 2: compiling them for your graphics card"
+                       : finishing  ? "Finishing..."
+                                    : "Starting...";
+    centered(step, 1.2f, white);
+    ImGui::Dummy(ImVec2(0.0f, 10.0f * base_scale));
+    const float bar_w = std::min(w * 0.55f, 900.0f * base_scale);
+    ImGui::SetCursorPosX((w - bar_w) * 0.5f);
+    const float fraction = PreparationFraction(phase, done, total, finishing, between);
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::ProgressBar(fraction, ImVec2(bar_w, 22.0f * base_scale), "");
+    ImGui::Dummy(ImVec2(0.0f, 8.0f * base_scale));
+    // the countdown only in step 2: before it the remaining time cannot be told
+    const std::string count =
+        !finishing && total
+            ? fmt::format("{} / {}{}", done, total, phase == 2 ? PreparationEta(done, total) : std::string{})
+            : std::string{};
+    centered(count.c_str(), 1.1f, grey);
+    // Where it is switched off (the launcher's Advanced page). For now also the way out if a large shader cache
+    // causes trouble (temporary, while shader preparation is being polished).
+    ImGui::SetCursorPosY(h * 0.86f);
+    centered("If a large shader cache causes problems: in the launcher, clear the shader cache and turn off",
+             1.0f, grey);
+    centered("Advanced > Shader preparation.", 1.0f, grey);
+    ImGui::End();
+    ImGui::PopStyleColor(3);
+}
+
+// "PREP 37 1240 4496 2|  about 25 s left": the launcher's bar while preparing without a window (one thread, the
+// page's PreparationEta is not drawn then).
+void PrintPreparationProgress() {
+    const int phase = prep_phase.load(std::memory_order_acquire);
+    const u32 done = prep_done.load(std::memory_order_relaxed);
+    const u32 total = prep_total.load(std::memory_order_relaxed);
+    static bool had_step = false, seen_step2 = false;
+    had_step = had_step || phase != 0;
+    seen_step2 = seen_step2 || phase == 2;
+    const bool finishing = PreparationFinished() || (phase == 0 && seen_step2);
+    const bool between = phase == 0 && had_step && !seen_step2;
+    const int step = phase == 4 ? 4 : finishing ? 3 : phase == 2 || between ? 2 : had_step ? 1 : 0;
+    const std::string eta = phase == 2 && total ? PreparationEta(done, total) : std::string{};
+    std::printf("PREP %d %u %u %d|%s\n",
+                int(100.0f * PreparationFraction(phase, done, total, finishing, between)), done, total, step,
+                eta.c_str());
+    std::fflush(stdout);
+}
+
+// "Preparing shaders 1240 / 4496": bottom left while the variant list is built behind the game.
+void ShaderPreparation() {
+    if (prep_screen.load(std::memory_order_acquire)) {
+        FullScreenPreparation();
+        return;
+    }
+    const int phase = prep_phase.load(std::memory_order_acquire);
+    if (phase == 0) {
+        return;
+    }
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 24.0f * base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad,
+                                   viewport->WorkPos.y + viewport->WorkSize.y - pad),
+                            ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.65f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.0f * base_scale, 10.0f * base_scale));
+    ImGui::Begin("##prep", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::SetWindowFontScale(1.25f);
+    const u32 done = prep_done.load(std::memory_order_relaxed);
+    const u32 total = prep_total.load(std::memory_order_relaxed);
+    const char* what = phase == 1 ? "shaders" : "pipelines";
+    if (total == 0) {
+        ImGui::Text("Preparing %s", what);
+    } else {
+        ImGui::Text("Preparing %s %u / %u%s", what, done, total, PreparationEta(done, total).c_str());
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
 bool Visible() {
-    return initialized &&
-           (menu_open || text_entry_active || BbSettings::Get().show_fps || toast_busy);
+    return initialized && (menu_open || text_entry_active || BbSettings::Get().show_fps ||
+                           toast_busy || prep_phase.load(std::memory_order_relaxed) != 0 ||
+                           prep_screen.load(std::memory_order_relaxed));
 }
 
 void NotifyTrophy(int grade, std::string game, std::string name, std::vector<unsigned char> png) {
@@ -947,7 +1186,8 @@ void NotifyTrophy(int grade, std::string game, std::string name, std::vector<uns
 }
 
 bool CapturesInput() {
-    return menu_open || text_entry_active;
+    // the preparation page covers the game: its input is held so the title screen cannot be passed unseen
+    return menu_open || text_entry_active || prep_screen.load(std::memory_order_relaxed);
 }
 
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {
@@ -1030,6 +1270,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
         TextEntryBox();
     }
     TrophyToast();
+    ShaderPreparation();
     ImGui::Render();
 
     const vk::RenderingAttachmentInfo attachment{

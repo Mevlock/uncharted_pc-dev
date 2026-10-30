@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -75,11 +76,34 @@ struct InfoPersistent {
     bool has_fetch_shader{};
     bool has_bitwise_xor{};
     bool uses_dma{};
+    /// bbport: a compute shader whose workgroups may run as smaller ones (no shared memory, no
+    /// workgroup barriers, no workgroup index); see WorkgroupSplit in runtime_info.h.
+    bool cs_split_eligible{};
 
     InfoPersistent() = default;
     InfoPersistent(HwStage hw_stage_, SwStage sw_stage_, u64 pgm_hash_)
         : hw_stage{hw_stage_}, sw_stage{sw_stage_}, pgm_hash{pgm_hash_} {}
 };
+
+/// bbport (shader variant list): one read a translation made through a user-data table pointer (ReadUdReg:
+/// vertex fetch V#s, tessellation constants). Recorded while a variant is translated and stored with its meta,
+/// so the variant can be translated again from the shader code alone (no game memory needed).
+struct UdRead {
+    u32 ptr_index;
+    u32 dword_offset;
+    u32 size;
+    std::array<u32, 8> data;
+};
+/// bbport: replaying a recorded translation: the flattened user-data tables and the reads it made.
+struct TranslationReplay {
+    const std::vector<u32>* flat;
+    const std::vector<UdRead>* reads;
+    /// the parsed fetch shader (a std::optional<Gcn::FetchShaderData>), stored with the variant: the fetch shader
+    /// code itself is in game memory
+    const void* fetch;
+};
+inline thread_local std::vector<UdRead>* t_translation_record = nullptr;
+inline thread_local const TranslationReplay* t_translation_replay = nullptr;
 
 struct Info : InfoPersistent {
     struct AttributeFlags {
@@ -222,6 +246,34 @@ struct Info : InfoPersistent {
         T data;
         const auto ud = UserData();
         const u32* base = ud.data();
+        // bbport (shader variant list): during a replay the reads through a table pointer come from the record
+        // of the original translation, not from game memory (TranslationReplay).
+        if (ptr_index != IR::NumScalarRegs && t_translation_replay) {
+            static_assert(sizeof(T) <= sizeof(UdRead::data));
+            for (const auto& read : *t_translation_replay->reads) {
+                if (read.ptr_index == ptr_index && read.dword_offset == dword_offset &&
+                    read.size == sizeof(T)) {
+                    std::memcpy(&data, read.data.data(), sizeof(T));
+                    return data;
+                }
+            }
+            return T{};
+        }
+        if (ptr_index != IR::NumScalarRegs && t_translation_record) {
+            const T value = ReadUdRegDirect<T>(ptr_index, dword_offset);
+            UdRead read{ptr_index, dword_offset, static_cast<u32>(sizeof(T)), {}};
+            std::memcpy(read.data.data(), &value, sizeof(T));
+            t_translation_record->push_back(read);
+            return value;
+        }
+        return ReadUdRegDirect<T>(ptr_index, dword_offset);
+    }
+
+    template <typename T>
+    T ReadUdRegDirect(u32 ptr_index, u32 dword_offset) const noexcept {
+        T data;
+        const auto ud = UserData();
+        const u32* base = ud.data();
         if (ptr_index != IR::NumScalarRegs) {
             std::memcpy(&base, &ud[ptr_index], sizeof(base));
             base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
@@ -255,6 +307,12 @@ struct Info : InfoPersistent {
     }
 
     void RefreshFlatBuf() {
+        // bbport (shader variant list): a replay takes the flattened tables of the original translation.
+        if (t_translation_replay && t_translation_replay->flat) {
+            flattened_ud_buf = *t_translation_replay->flat;
+            flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+            return;
+        }
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
