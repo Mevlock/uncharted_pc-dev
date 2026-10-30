@@ -1544,12 +1544,93 @@ static long ctrl_nbodies;
 /* kinds 8/9: a process creates / destroys its physics body (rdi = the process, e.g. a FloatingBarrel). */
 static uint64_t pb_create[64], pb_destroy[64];
 static long pb_ncreate, pb_ndestroy;
-static ABI void body_log(uint64_t world, uint64_t body, uint64_t caller, uint64_t kind) {
+/* Per-process timeline: every process that creates a physics body, sampled each second; a line is printed when its
+ * state changes (body, world list, asleep, held, controller, destroys) or it moves. */
+typedef struct {
+    uint64_t proc, body, destroy_caller, destroy_caller2, vt0;
+    long vlog, dumped;
+    ULONGLONG created_at, ctrl_at;
+    long creates, destroys;
+    char last[160];
+} BarrelTrack;
+static BarrelTrack barrels[128];
+static long nbarrels;
+static BarrelTrack *barrel_find(uint64_t proc, int add) {
+    for (long i=0; i<nbarrels; ++i) if (barrels[i].proc==proc) return &barrels[i];
+    if (!add || nbarrels>=128) return NULL;
+    BarrelTrack *b=&barrels[nbarrels++];
+    memset(b,0,sizeof(*b));
+    b->proc=proc;
+    return b;
+}
+static uint64_t safe_read64(uint64_t at) {
+    uint64_t v=0;
+    SIZE_T got=0;
+    if (!ReadProcessMemory(GetCurrentProcess(),(LPCVOID)(uintptr_t)at,&v,8,&got) || got!=8) return 0;
+    return v;
+}
+static ULONGLONG barrel_t0;
+static const volatile float *barrel_dt; /* the physics step (EU 0x9887a4), found from the controller */
+static void barrel_report(void) {
+    static volatile LONG64 window;
+    const LONG64 now=(LONG64)GetTickCount64(), w=window;
+    if (!w) { InterlockedCompareExchange64(&window,now,0); return; }
+    if (now-w<1000 || InterlockedCompareExchange64(&window,now,w)!=w) return;
+    if (!barrel_t0) barrel_t0=(ULONGLONG)now;
+    const uint64_t world=body_log_world;
+    AcquireSRWLockExclusive(&sleepall_lock);
+    for (long i=0; i<nbarrels; ++i) {
+        BarrelTrack *b=&barrels[i];
+        const uint64_t p=b->proc;
+        const uint64_t body=*(volatile uint64_t *)(uintptr_t)(p+0x1e0), coll=*(volatile uint64_t *)(uintptr_t)(p+0x1e8);
+        if (*(volatile uint64_t *)(uintptr_t)p!=b->vt0) continue; /* freed or reused: not this barrel any more */
+        const uint64_t vptr=*(volatile uint64_t *)(uintptr_t)p-(uint64_t)(uintptr_t)image;
+        const unsigned flags98=*(volatile unsigned *)(uintptr_t)(p+0x98);
+        const float y=*(volatile float *)(uintptr_t)(p+0x1c4);
+        int inworld=-1, asleep=-1;
+        unsigned fc=0, still=0, still2=0, idx=0;
+        float invm=0;
+        if (body) {
+            idx=*(volatile uint16_t *)(uintptr_t)(body+0x134);
+            if (world) inworld=idx<*(volatile uint32_t *)(uintptr_t)(world+0x5b74) &&
+                               *(volatile uint64_t *)(uintptr_t)(world+0x5b80+8*(uint64_t)idx)==body;
+            asleep=(*(volatile uint8_t *)(uintptr_t)(body+0xb)&8)!=0;
+            fc=*(volatile uint32_t *)(uintptr_t)(body+0xfc);
+            invm=*(volatile float *)(uintptr_t)(body+0xec);
+            still=*(volatile uint16_t *)(uintptr_t)(body+0x136);
+            still2=*(volatile uint16_t *)(uintptr_t)(body+0x138);
+        }
+        const int ctrl_recent=b->ctrl_at && (ULONGLONG)now-b->ctrl_at<1500;
+        char line[160];
+        snprintf(line,sizeof(line),"vt %#" PRIx64 " body %#" PRIx64 " coll %s held %d world %d asleep %d fc %#x invm %.3g ctrl %s c%ld d%ld",
+                 vptr,body,coll ? "yes" : "no",(flags98>>3)&1,inworld,asleep,fc,invm,
+                 ctrl_recent ? "now" : b->ctrl_at ? "earlier" : "never",b->creates,b->destroys);
+        static float lasty[128];
+        if (strcmp(line,b->last) || (y-lasty[i]>0.5f || lasty[i]-y>0.5f)) {
+            printf("Barrel %#" PRIx64 " t=%.1f y=%.2f %s still %u/%u idx %u",p,(now-(LONG64)barrel_t0)/1000.0,y,line,still,still2,idx);
+            if (b->destroys) printf(" destroyed by %#" PRIx64 " <- %#" PRIx64,b->destroy_caller,b->destroy_caller2);
+            printf("\n");
+            memcpy(b->last,line,sizeof(line));
+            lasty[i]=y;
+        }
+    }
+    ReleaseSRWLockExclusive(&sleepall_lock);
+    fflush(stdout);
+}
+static ABI void body_log(uint64_t world, uint64_t body, uint64_t caller, uint64_t kind, uint64_t frame) {
     if (kind==8 || kind==9) {
         AcquireSRWLockExclusive(&sleepall_lock);
         if (kind==8 && pb_ncreate<64) pb_create[pb_ncreate++]=world;
         if (kind==9 && pb_ndestroy<64) pb_destroy[pb_ndestroy++]=world;
+        BarrelTrack *b=barrel_find(world,kind==8);
+        if (b && kind==8) { ++b->creates; b->created_at=GetTickCount64(); b->vt0=*(volatile uint64_t *)(uintptr_t)world; b->vlog=0; b->dumped=0; }
+        if (b && kind==9 && *(volatile uint64_t *)(uintptr_t)(world+0x1e0)) {
+            ++b->destroys;
+            b->destroy_caller=caller-(uint64_t)(uintptr_t)image;
+            b->destroy_caller2=safe_read64(frame+8)-(uint64_t)(uintptr_t)image;
+        }
         ReleaseSRWLockExclusive(&sleepall_lock);
+        barrel_report();
         return;
     }
     if (kind==7) {
@@ -1558,6 +1639,63 @@ static ABI void body_log(uint64_t world, uint64_t body, uint64_t caller, uint64_
         long i=0;
         while (i<ctrl_nbodies && ctrl_bodies[i]!=b) ++i;
         if (i==ctrl_nbodies && ctrl_nbodies<128) ctrl_bodies[ctrl_nbodies++]=b;
+        for (long j=0; j<nbarrels; ++j)
+            if (*(volatile uint64_t *)(uintptr_t)(barrels[j].proc+0x1e0)==b) barrels[j].ctrl_at=GetTickCount64();
+        static int dumped;
+        if (!dumped) {
+            dumped=1;
+            printf("Body log: first floating controller %#" PRIx64 ":",body);
+            for (int k=0; k<0x60; k+=8) printf(" %#" PRIx64,*(volatile uint64_t *)(uintptr_t)(body+k));
+            printf("\n");
+        }
+        ReleaseSRWLockExclusive(&sleepall_lock);
+        barrel_report();
+    }
+    if (kind==10) { /* a FloatingBarrel PrePhys state gets a message (rdi = the state, [rdi+8] = the barrel) */
+        if (*(volatile uint32_t *)(uintptr_t)body!=0x971e51ca) return;
+        const uint64_t proc=*(volatile uint64_t *)(uintptr_t)(world+8), base=(uint64_t)(uintptr_t)image;
+        printf("Barrel release: %#" PRIx64 " y=%.2f t=%.1f from %#" PRIx64,proc,*(volatile float *)(uintptr_t)(proc+0x1c4),
+               barrel_t0 ? (GetTickCount64()-barrel_t0)/1000.0 : 0.0,caller-base);
+        uint64_t f=frame;
+        for (int i=0; i<8 && f; ++i) {
+            const uint64_t r=safe_read64(f+8);
+            if (!r) break;
+            printf(" <- %#" PRIx64,r-base);
+            f=safe_read64(f);
+        }
+        printf("\n");
+        fflush(stdout);
+        return;
+    }
+    if (kind==11) { /* a barrel's motion update (rdi = its state, [rdi+8] = the barrel): its body's first 20 frames */
+        const uint64_t proc=*(volatile uint64_t *)(uintptr_t)(world+8);
+        const uint64_t bd=*(volatile uint64_t *)(uintptr_t)(proc+0x1e0);
+        if (!bd) return;
+        AcquireSRWLockExclusive(&sleepall_lock);
+        BarrelTrack *b=barrel_find(proc,0);
+        if (b && b->dumped<20 && *(volatile uint64_t *)(uintptr_t)proc==b->vt0) {
+            const int n=b->dumped++;
+            printf("Barrel frame: %#" PRIx64 " #%d +%llums y=%.4f dt=%.5f body",proc,n,
+                   (unsigned long long)(GetTickCount64()-b->created_at),*(volatile float *)(uintptr_t)(proc+0x1c4),
+                   barrel_dt ? *barrel_dt : 0.0f);
+            for (int k=0; k<0x158; k+=4) printf(" %08x",*(volatile uint32_t *)(uintptr_t)(bd+k));
+            printf("\n");
+        }
+        ReleaseSRWLockExclusive(&sleepall_lock);
+        return;
+    }
+    if (kind==6) { /* velocity set on a barrel's body in its first 3 s: rsi = the vector */
+        AcquireSRWLockExclusive(&sleepall_lock);
+        const ULONGLONG now=GetTickCount64();
+        for (long j=0; j<nbarrels; ++j) {
+            BarrelTrack *b=&barrels[j];
+            if (*(volatile uint64_t *)(uintptr_t)(b->proc+0x1e0)!=world || now-b->created_at>3000 || b->vlog>=60) continue;
+            ++b->vlog;
+            const volatile float *v=(const volatile float *)(uintptr_t)body;
+            printf("Barrel vel: %#" PRIx64 " +%llums y=%.3f v=(%.3f %.3f %.3f) dt=%.5f from %#" PRIx64 "\n",b->proc,
+                   (unsigned long long)(now-b->created_at),*(volatile float *)(uintptr_t)(b->proc+0x1c4),v[0],v[1],v[2],
+                   barrel_dt ? *barrel_dt : 0.0f,caller-(uint64_t)(uintptr_t)image);
+        }
         ReleaseSRWLockExclusive(&sleepall_lock);
     }
     if (kind>=5) { /* 5: SleepAll(object), 6: a body's velocity/force set (flags bit 1, wakes it), 7: the controller */
@@ -1618,6 +1756,7 @@ static int body_log_hook(unsigned char *p, int n, int kind) {
     static const unsigned char ret_addr[]={0x48,0x8b,0x54,0x24,0x48}; /* mov rdx,[rsp+0x48]: the caller (9 pushes) */
     memcpy(t+k,ret_addr,sizeof(ret_addr)); k+=sizeof(ret_addr);
     t[k++]=0xb9; memcpy(t+k,&kind,4); k+=4;              /* mov ecx, kind */
+    t[k++]=0x49; t[k++]=0x89; t[k++]=0xe8;              /* mov r8, rbp: the caller's frame */
     const uintptr_t host=(uintptr_t)body_log;
     t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8; /* movabs rax, body_log */
     t[k++]=0xff; t[k++]=0xd0;                            /* call rax */
@@ -1630,6 +1769,56 @@ static int body_log_hook(unsigned char *p, int n, int kind) {
     p[0]=0xe9; memcpy(p+1,&to,4);
     for (int i=5; i<n; ++i) p[i]=0x90;
     return 1;
+}
+/* Uncharted 1 (EU and US 1.02), experiment: BB_U1_PHYS_HZ=60 steps the rigid-body world at a fixed rate whatever the
+ * frame rate. On frames shorter than a step the world step (EU 0x235350, dt in xmm0) returns at once as if it had
+ * stepped (its own dt <= 1e-6 path would still run the controllers, the river current among them, with the last dt)
+ * and the time is carried, so the world and its controllers see 1/60 s steps as on the PS4. Above 60 FPS some
+ * floating barrels (jet ski river) otherwise stay frozen in mid-air until they fall asleep. */
+static float u1_phys_step, u1_phys_acc;
+static unsigned char u1_phys_skip;
+static ABI float u1_phys_dt(float dt) {
+    u1_phys_skip=0;
+    if (!(dt>0.0f) || dt>0.25f) return dt;
+    u1_phys_acc+=dt;
+    if (u1_phys_acc<u1_phys_step*0.999f) { u1_phys_skip=1; return dt; }
+    const float out=u1_phys_acc>=2.0f*u1_phys_step ? u1_phys_acc : u1_phys_step;
+    u1_phys_acc-=out;
+    if (u1_phys_acc<0.0f) u1_phys_acc=0.0f;
+    return out;
+}
+static void patch_u1_fixed_physics(uint64_t image_size) {
+    const char *hz=getenv("BB_U1_PHYS_HZ");
+    if (!hz || atoi(hz)<=0) return;
+    /* push rbp; mov rbp,rsp; push r14 | push rbx; sub rsp,0x10; mov r14,rsi; vmovss [rbp-0x14],xmm0; mov rbx,rdi;
+     * mov dword [rbx+0x14eb4],0 */
+    const int64_t at=find_masked("554889e5 4156 53 4883ec10 4989f6 c5fa1145ec 4889fb c783b44e010000000000",image_size);
+    if (at<0) { printf("U1 fixed physics step: world step not found\n"); return; }
+    unsigned char *p=image+at, *t=near_image_memory(128);
+    if (!t) return;
+    u1_phys_step=1.0f/(float)atoi(hz);
+    size_t k=0;
+    static const unsigned char save[]={0x57,0x56,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53};
+    memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
+    const uintptr_t host=(uintptr_t)u1_phys_dt;
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8; /* movabs rax, u1_phys_dt */
+    t[k++]=0xff; t[k++]=0xd0;                            /* call rax: xmm0 = u1_phys_dt(xmm0) */
+    static const unsigned char restore[]={0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5a,0x59,0x58,0x5e,0x5f};
+    memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
+    const uintptr_t skip=(uintptr_t)&u1_phys_skip;
+    t[k++]=0x50;                                         /* push rax */
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&skip,8); k+=8; /* movabs rax, &u1_phys_skip */
+    t[k++]=0x80; t[k++]=0x38; t[k++]=0x00;               /* cmp byte [rax],0 */
+    t[k++]=0x58;                                         /* pop rax */
+    t[k++]=0x74; t[k++]=0x06;                            /* je: step */
+    t[k++]=0xb8; t[k++]=1; t[k++]=0; t[k++]=0; t[k++]=0; /* mov eax,1: "stepped" */
+    t[k++]=0xc3;                                         /* ret */
+    memcpy(t+k,p,6); k+=6;                               /* push rbp; mov rbp,rsp; push r14 */
+    const uint64_t back=(uint64_t)(uintptr_t)(p+6);
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&back,8); k+=8;
+    const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+5));
+    p[0]=0xe9; memcpy(p+1,&to,4); p[5]=0x90;
+    printf("U1 fixed physics step: %d Hz (world step %#" PRIx64 ")\n",atoi(hz),(uint64_t)at);
 }
 static void patch_u1_sleep_log(uint64_t image_size) {
     const char *on=getenv("BB_SLEEP_LOG");
@@ -1649,6 +1838,11 @@ static void patch_u1_sleep_log(uint64_t image_size) {
     /* the floating controller: push rbp; mov rbp,rsp; push r15 | push r14 r13 r12 rbx; sub rsp,0x438; mov r15,rsi; mov r13,rdi */
     const int64_t ctl=find_masked("554889e5 4157 4156 4155 4154 53 4881ec38040000 4989f7 4989fd",image_size);
     const int okC=ctl>=0 && body_log_hook(image+ctl,6,7);
+    /* the controller's lea rax,[rip+dt] at +0x3e (EU 0x22cb0e -> 0x9887a4, the physics step) */
+    if (ctl>=0 && image[ctl+0x3e]==0x48 && image[ctl+0x3f]==0x8d && image[ctl+0x40]==0x05) {
+        int32_t d; memcpy(&d,image+ctl+0x41,4);
+        barrel_dt=(const volatile float *)(image+ctl+0x45+d);
+    }
     printf("Body log: floating controller hooked %s (%#" PRIx64 ")\n",okC ? "yes" : "NO",(uint64_t)ctl);
     /* a process's physics body: create (if [rdi+0x1e0] is empty) and the two destroy copies */
     const int64_t mk=find_masked("554889e5 4157 4156 53 50 4189d7 4989f6 4889fb 4883bbe001000000",image_size);
@@ -1657,6 +1851,18 @@ static void patch_u1_sleep_log(uint64_t image_size) {
     int okD=0;
     for (uint64_t i=0; i+sizeof(kill)<=image_size && okD<2; ++i)
         if (!memcmp(image+i,kill,sizeof(kill))) okD+=body_log_hook(image+i,6,9);
+    /* FloatingBarrel PrePhys message handler: cmp dword [rsi],0x971e51ca (6 bytes) | jne; mov rdi,[rdi+8]; mov rax,[rdi]; jmp [rax+0x18] */
+    const int64_t msg=find_masked("813eca511e97 75?? 488b7f08 488b07 ff6018",image_size);
+    const int okM=msg>=0 && body_log_hook(image+msg,6,10);
+    printf("Body log: barrel release message hooked %s (%#" PRIx64 ")\n",okM ? "yes" : "NO",(uint64_t)msg);
+    /* a physics process's motion update: push rbp; mov rbp,rsp; push r14 | push rbx; mov r14,rdi; mov rbx,[r14+8];
+     * mov rsi,[rbx+0x1e0]; test rsi,rsi (EU 0x2a2d50) */
+    static const unsigned char motion[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x49,0x89,0xfe,0x49,0x8b,0x5e,0x08,0x48,0x8b,0xb3,0xe0,0x01,0x00,0x00,0x48,0x85,0xf6};
+    int okF=0;
+    const int64_t mot=0;
+    for (uint64_t i=0; i+sizeof(motion)<=image_size && okF<4; ++i)
+        if (!memcmp(image+i,motion,sizeof(motion))) okF+=body_log_hook(image+i,6,11);
+    printf("Body log: motion update hooked %s (%#" PRIx64 ")\n",okF ? "yes" : "NO",(uint64_t)mot);
     printf("Body log: process body create hooked %s (%#" PRIx64 "), destroy hooked %d\n",okK ? "yes" : "NO",(uint64_t)mk,okD);
     printf("Body log: velocity setter hooked %s (%#" PRIx64 ")\n",okV ? "yes" : "NO",(uint64_t)vel);
     printf("Body log: hooked AddBody %s (%#" PRIx64 "), RemoveBody %s (%#" PRIx64 "), SleepAll %s (%#" PRIx64 ")\n",
@@ -2178,6 +2384,7 @@ int main(int argc, char **argv) {
         patch_collection_skip(image_end);
         patch_unlock_chapters(image_end);
         patch_u1_sleep_log(image_end);
+        patch_u1_fixed_physics(image_end);
         patch_job_sleep(image_end);
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
