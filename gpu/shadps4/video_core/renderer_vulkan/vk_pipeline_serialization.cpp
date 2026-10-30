@@ -1618,11 +1618,11 @@ void PipelineCache::WarmUpThread() {
     // audio keeps up (with 14 of 16 the music stuttered). The experiments BB_PREP_AUDIO=mute / pause (runtime_audio.c)
     // silence or hold the game's sound and take all but two. Without a window (BB_PREPARE_ONLY) nothing else runs: all
     // but two.
-    // BB_PREP_FREEZE=1 (experiment): the game's threads wait for the page (runtime_freeze_guest): all but two too.
+    // The game's threads wait for the page by default (runtime_freeze_guest; BB_PREP_FREEZE=0: they run): all but two too.
     static const bool prep_audible = [] {
         const char* env = std::getenv("BB_PREP_AUDIO");
         const char* freeze = std::getenv("BB_PREP_FREEZE");
-        return !(env && (env[0] == 'm' || env[0] == 'p')) && !(freeze && freeze[0] == '1');
+        return !(env && (env[0] == 'm' || env[0] == 'p')) && freeze && freeze[0] == '0';
     }();
     if (prep_screen && prep_audible) {
         threads = std::max<u32>(1, BbThreads::Available() / 2);

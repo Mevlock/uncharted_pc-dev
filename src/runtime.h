@@ -119,7 +119,7 @@ const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
  * read prints the ones since the last read. runtime_wait_begin returns 0 when off. */
 double runtime_wait_begin(void);
 void runtime_wait_end(const char *what, double start);
-/* BB_PREP_FREEZE=1 (experiment): while the shader preparation page shows, the game's threads stop at their next wait,
+/* Shader preparation page (on by default; BB_PREP_FREEZE=0: off, the game runs behind the page): while it shows, the game's threads stop at their next wait,
  * lock, yield or sound output (runtime_freeze_point; cooperative: never inside a host lock) and all go on together
  * when it closes, so the game starts afterwards as if the page took no time. runtime_freeze_guest: the page's switch. */
 extern volatile int runtime_freeze_flag;

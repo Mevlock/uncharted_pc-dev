@@ -73,7 +73,7 @@ void runtime_freeze_wait(void) {
 }
 void runtime_freeze_guest(int on) {
     static int enabled=-1;
-    if (enabled<0) { const char *e=getenv("BB_PREP_FREEZE"); enabled=e && e[0]=='1'; }
+    if (enabled<0) { const char *e=getenv("BB_PREP_FREEZE"); enabled=!(e && e[0]=='0'); }
     if (!enabled) return;
     pthread_mutex_lock(&freeze_lock);
     runtime_freeze_flag=on;
