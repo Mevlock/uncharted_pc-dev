@@ -1528,9 +1528,93 @@ static int sleep_log_hook(unsigned char *p, int kind) {
     p[0]=0xe9; memcpy(p+1,&to,4);
     return 1;
 }
+/* The physics world's body list (BB_SLEEP_LOG=1): AddBody(world, body, params) and RemoveBody(world, body). The list
+ * at world+0x5b80 holds at most 512 bodies (count at world+0x5b74); AddBody leaves a body out when it is full (it marks
+ * it with index 0x200 at body+0x134), and a body left out is never simulated (it hangs where it is). Each second:
+ * adds, adds refused because the list was full, removes, and the count. */
+static volatile long body_log_adds, body_log_full, body_log_removes;
+static volatile uint64_t body_log_world;
+static volatile long body_log_max;
+/* kind 5: an object's "put all my bodies to sleep" (rdi = the object, not the world): only its caller is counted. */
+static struct { uint64_t caller; long count; } sleepall_callers[16];
+static SRWLOCK sleepall_lock=SRWLOCK_INIT;
+static ABI void body_log(uint64_t world, uint64_t body, uint64_t caller, uint64_t kind) {
+    (void)body;
+    if (kind>=5) { /* 5: SleepAll(object), 6: a body's velocity/force set (flags bit 1, wakes it) */
+        AcquireSRWLockExclusive(&sleepall_lock);
+        const uint64_t at=(caller-(uint64_t)(uintptr_t)image) | (kind<<60);
+        int k=0;
+        while (k<16 && sleepall_callers[k].count && sleepall_callers[k].caller!=at) ++k;
+        if (k<16) { sleepall_callers[k].caller=at; ++sleepall_callers[k].count; }
+        ReleaseSRWLockExclusive(&sleepall_lock);
+        return;
+    }
+    body_log_world=world;
+    const uint32_t count=*(volatile uint32_t *)(uintptr_t)(world+0x5b74);
+    if (kind==3) { InterlockedIncrement(&body_log_adds); if (count>=0x200) InterlockedIncrement(&body_log_full); }
+    else InterlockedIncrement(&body_log_removes);
+    if ((long)count>body_log_max) body_log_max=(long)count;
+    static volatile LONG64 window;
+    const LONG64 now=(LONG64)GetTickCount64(), w=window;
+    if (!w) { InterlockedCompareExchange64(&window,now,0); return; }
+    if (now-w<1000 || InterlockedCompareExchange64(&window,now,w)!=w) return;
+    printf("Body log: %ld adds (%ld refused: world full), %ld removes in %.1f s; bodies in the world now %u (max %ld of 512)\n",
+           InterlockedExchange(&body_log_adds,0),InterlockedExchange(&body_log_full,0),InterlockedExchange(&body_log_removes,0),
+           (now-w)/1000.0,count,body_log_max);
+    body_log_max=0;
+    AcquireSRWLockExclusive(&sleepall_lock);
+    if (sleepall_callers[0].count) {
+        printf("Body log: SleepAll / velocity set, by caller:");
+        for (int i=0; i<16 && sleepall_callers[i].count; ++i)
+            printf(" %s@%#" PRIx64 " x%ld",(sleepall_callers[i].caller>>60)==5 ? "sleepall" : "velocity",
+                   sleepall_callers[i].caller & ((1ull<<60)-1),sleepall_callers[i].count);
+        printf("\n");
+        memset(sleepall_callers,0,sizeof(sleepall_callers));
+    }
+    ReleaseSRWLockExclusive(&sleepall_lock);
+    fflush(stdout);
+}
+/* Entry hook moving n whole instructions (no rip-relative, no branch) that calls body_log(rdi, rsi, return, kind). */
+static int body_log_hook(unsigned char *p, int n, int kind) {
+    unsigned char *t=near_image_memory(128);
+    if (!t) return 0;
+    size_t k=0;
+    static const unsigned char save[]={0x57,0x56,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53}; /* push rdi rsi rax rcx rdx r8-r11 */
+    memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
+    static const unsigned char ret_addr[]={0x48,0x8b,0x54,0x24,0x48}; /* mov rdx,[rsp+0x48]: the caller (9 pushes) */
+    memcpy(t+k,ret_addr,sizeof(ret_addr)); k+=sizeof(ret_addr);
+    t[k++]=0xb9; memcpy(t+k,&kind,4); k+=4;              /* mov ecx, kind */
+    const uintptr_t host=(uintptr_t)body_log;
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8; /* movabs rax, body_log */
+    t[k++]=0xff; t[k++]=0xd0;                            /* call rax */
+    static const unsigned char restore[]={0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5a,0x59,0x58,0x5e,0x5f};
+    memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
+    memcpy(t+k,p,(size_t)n); k+=(size_t)n;               /* the moved instructions */
+    const uint64_t back=(uint64_t)(uintptr_t)(p+n);
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&back,8); k+=8; /* jmp [rip]: p+n */
+    const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+5));
+    p[0]=0xe9; memcpy(p+1,&to,4);
+    for (int i=5; i<n; ++i) p[i]=0x90;
+    return 1;
+}
 static void patch_u1_sleep_log(uint64_t image_size) {
     const char *on=getenv("BB_SLEEP_LOG");
     if (!on || on[0]!='1') return;
+    /* AddBody: push rbp; mov rbp,rsp; push r15 | push r14; push rbx; push rax; mov r15,rdx; mov rbx,rsi; mov r14,rdi */
+    const int64_t add=find_masked("554889e5 4157 4156 53 50 4989d7 4889f3 4989fe 4885db",image_size);
+    /* RemoveBody: push rbp; mov rbp,rsp; push r15 | push r14; push r12; push rbx; mov r14,rsi; mov rbx,rdi */
+    const int64_t rem=find_masked("554889e5 4157 4156 4154 53 4989f6 4889fb 4d85f6 74?? 66418b8634010000",image_size);
+    /* an object's "all my bodies to sleep" (virtual): push rbp; mov rbp,rsp; push r14 | push rbx; mov r14,rdi;
+     * mov eax,[r14+0x10]; test eax,eax; je; xor ebx,ebx (EU 0x1ec940, US 0x1eceb0) */
+    const int64_t all=find_masked("554889e5 4156 53 4989fe 418b4610 85c0 74?? 31db",image_size);
+    const int okA=add>=0 && body_log_hook(image+add,6,3), okR=rem>=0 && body_log_hook(image+rem,6,4),
+              okS=all>=0 && body_log_hook(image+all,6,5);
+    /* a body's velocity/force set: or byte [rdi+0xfc],1 (7 bytes) | mov eax,[rsi+8]; mov [rdi+0x108],eax (EU 0x1da9a0) */
+    const int64_t vel=find_masked("808ffc00000001 8b4608 898708010000",image_size);
+    const int okV=vel>=0 && body_log_hook(image+vel,7,6);
+    printf("Body log: velocity setter hooked %s (%#" PRIx64 ")\n",okV ? "yes" : "NO",(uint64_t)vel);
+    printf("Body log: hooked AddBody %s (%#" PRIx64 "), RemoveBody %s (%#" PRIx64 "), SleepAll %s (%#" PRIx64 ")\n",
+           okA ? "yes" : "NO",(uint64_t)add,okR ? "yes" : "NO",(uint64_t)rem,okS ? "yes" : "NO",(uint64_t)all);
     const int64_t at=find_masked("80670bf7c3 6666666666662e0f1f840000000000 804f0b08c3",image_size);
     if (at<0) return; /* not Uncharted 1 (or not unique) */
     /* body setter: or byte [rdi+0xb],8; ret (5 bytes, moved whole: the thunk's copy returns) */
