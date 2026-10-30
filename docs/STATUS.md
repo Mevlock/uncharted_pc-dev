@@ -1,4 +1,4 @@
-# Status of this fork (October 2026)
+# Status of this fork (October 2026, 0.3.6.30)
 
 This fork may not be maintained for long. This page says what is where, what is finished and what
 was left half-way, so anyone can pick it up. Everything here is GPL like the rest of the port.
@@ -6,8 +6,8 @@ was left half-way, so anyone can pick it up. Everything here is GPL like the res
 ## Branches
 | Branch | What it is |
 |---|---|
-| `perf/recorder` | The release line: every `v0.3.6.x` tag is built from it by GitHub Actions (`.github/workflows/build.yml`). `dev` (the default branch, shown on the front page) follows it. |
-| `perf/build` | The release line plus the CPU-side performance work (published as `-perf` test builds). Kept in sync by merging the release line into it. |
+| `perf/recorder` | The release line: every `v0.3.6.x` tag is built from it by GitHub Actions (`.github/workflows/build.yml`). `dev` (the default branch, shown on the front page) follows it. Since 0.3.6.30 it holds the performance work and the shader preparation. |
+| `perf/build` | The former perf test-build line (0.3.6.27-perf1, 0.3.6.29-perf2); merged into the release line in 0.3.6.30 and no longer updated. |
 | `main`, others | Older lines, kept for history. |
 
 Release notes for every build: `docs/releases/<tag>.md`. Bug investigations: `docs/bug_reports/`.
@@ -23,14 +23,17 @@ Release notes for every build: `docs/releases/<tag>.md`. Bug investigations: `do
 - Crash and rendering fixes listed in the release notes, for the EU (CUSA02343) and US / EU-Russian
   (CUSA02320 / CUSA02344) versions alike: every code-pattern hook is matched in both.
 
-## The performance work (`perf/build` branch)
-How it works is explained in `docs/PERF_BUILD.md` on that branch and its release notes. In short: the
-translation of the game's GPU command stream runs as three threads (command processor, draw
-recorder, Vulkan recorder, since 0.3.6.20); the perf work moves constant-data copies to a collector
-thread, trims per-draw work and batches fence hand-offs between the stages (perf1: about +22% where
-the CPU sets the pace, a few percent to +13% at native resolution on a fast GPU). perf2 (0.3.6.29-perf2)
-adds asynchronous submission, a faster pending-write list, one lock per resource-table walk and
-write-fault read-back on the faulting thread: about +6% (Uncharted 2 and 3) to +13% (slow CPU) more.
+## The performance work (in the release line since 0.3.6.30)
+Players: [PERFORMANCE.md](PERFORMANCE.md). Developers: `docs/PERF_BUILD.md`. In short: the translation of the game's
+GPU command stream runs as three threads (command processor, draw recorder, Vulkan recorder, since 0.3.6.20); the perf
+work moves constant-data copies to a collector thread, trims per-draw work, batches fence hand-offs, submits
+asynchronously, reads write faults back on the faulting thread, and (0.3.6.30) uses a Windows SRW lock in the
+pipeline cache.
+
+## Shader preparation (since 0.3.6.30)
+Variant lists per game and shader location indexes per version (`shaders/`), built at the first start on a preparation
+page: `docs/SHADER_PREPARATION.md`. The lists come from scripted checkpoint tours of all three games (EU and US) plus
+hand-played clean-cache sessions; anything they miss is still built the old way when it first appears.
 
 Half-done or not started, with where to begin:
 - **Starting the GPU on a frame earlier** (the GPU still idles part of each frame at high frame

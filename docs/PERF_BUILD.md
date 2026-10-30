@@ -1,8 +1,9 @@
 # The perf build: how it works, what it measured, where to pick it up
 
 This document is for developers who want to understand, reuse or continue the CPU-side
-performance work in this fork's `perf` branch. Players: see the release notes
-(`docs/releases/*-perf*.md`) instead.
+performance work in this fork. It began on a separate `perf` branch with its own test builds
+(0.3.6.27-perf1, 0.3.6.29-perf2); **from 0.3.6.30 all of it is in the normal release line.**
+Players: see [PERFORMANCE.md](PERFORMANCE.md) for the gains in plain terms, and the release notes.
 
 The work is GPL like the rest of the port; take whatever is useful.
 
@@ -103,6 +104,22 @@ After perf1 a causal profile showed stage A ~54% and stage B fully critical. per
   windows go on probation (page-table watch bit) before they are given back, a range used again
   before its unbind keeps its own memory (`BB_ARENA_UNBIND_DEFER=0`, `BB_ARENA_PROBATION=0`).
 
+### 2.8 0.3.6.30: the pipeline-cache lock (`BB_SRW_LOCKS`, on; `=0` off)
+`PipelineCache::programs_mutex` and `pipelines_mutex` were `std::shared_mutex`. In libc++ on Windows that is a mutex
+plus two condition variables, so every shared lock takes and releases the inner mutex and readers on several threads
+queue behind each other. Profiling stage A while it decodes the async compute queues in U3's crowd: ~19% of that time
+was `lock_shared` in `GetProgram`/`FindProgram` (2-3 per dispatch), against the draw-preparation workers' lookups.
+`Common::SrwSharedMutex` (`common/srw_shared_mutex.h`) wraps a Windows SRW lock (one atomic per shared lock).
+Shader preparation made it matter more: with its variant lists the old lock cost the release build ~4% mean / ~10%
+worst window in U3's crowd against the release line (profile: the extra time was contention on that lock); with SRW
+both match. `BB_SRW_RANGES=1` (the buffer cache's GPU-modified ranges, `LockedRangeSet`) is the same wrapper, off:
+no measurable gain.
+
+Tried at the same time and dropped (all within noise in the crowd): a compute specialization memo (`BB_SPEC_MEMO`),
+compute `WAIT_REG_MEM` without a drain (`BB_COMPUTE_WRM_MET`, `BB_COMPUTE_WRM_PENDING`). Decoding the async compute
+queues on a second stage A thread was not built: ~30% of compute decode is shared per-dispatch bookkeeping (ring
+pushes, pending-write tracking) and ~10% drains, only ~7% PM4 parsing, so a second thread would mostly contend.
+
 ## 3. Measurements
 
 All on one PC: RTX 5080, 16-thread CPU, Windows 11, EU versions unless noted, DLSS, frame generation
@@ -125,6 +142,11 @@ Performance, frame generation off, uncapped: U3 square 145.6 -> 155.6 (+6.9%); U
 (about +2%, within the noise of that spot). The release build of perf2 repeated these on its release
 day: U3 square 155.7 and 156.2, U2 museum 159.0, U1 jungle 207.3. After perf2 the causal profile has
 stage A ~62% and stage B ~75% critical: both are now limits.
+
+0.3.6.30, SRW lock, U3 market route (street checkpoint + 44 s recorded route through the crowd), DLSS Performance,
+uncapped, ABBA on the release line: mean 173.6 -> 185.2 (+6.7%), worst 5 s window 100.5 -> 114.6 (+14%), market
+117.0 -> 120.8 (+3.2%); slow-CPU simulation 103.3 -> 104.3 (+1%, noise). Release branch with shader preparation
+vs the release line, both with SRW, warm caches: 183.9 vs 186.6 mean, 114.6 vs 113.3 worst window (equal within noise).
 
 Frame times, U3 square at 1920x1080 uncapped: slowest 1% 12.6 ms -> 9.3 ms; frames over 1.5x the
 median in 2 minutes: 12 -> 0.
