@@ -11,7 +11,7 @@
 
 namespace Common {
 
-/// bbport (BB_SRW_LOCKS=1): a shared mutex over a Windows slim reader/writer lock. libc++'s
+/// bbport (BB_SRW_LOCKS, on by default): a shared mutex over a Windows slim reader/writer lock. libc++'s
 /// std::shared_mutex is a mutex and two condition variables: every shared lock takes and releases
 /// that mutex, so readers on several threads (the GPU thread, the draw-preparation workers)
 /// queue behind each other. An SRW lock takes a shared lock with one atomic operation. Same
@@ -76,8 +76,9 @@ public:
 private:
     static bool Srw() {
         static const bool on = [] {
+            // BB_SRW_LOCKS (pipeline cache): on unless =0. BB_SRW_RANGES: off unless =1 (no measurable gain).
             const char* env = std::getenv(Switch == 0 ? "BB_SRW_LOCKS" : "BB_SRW_RANGES");
-            return env && env[0] == '1';
+            return Switch == 0 ? !(env && env[0] == '0') : (env && env[0] == '1');
         }();
         return on;
     }
