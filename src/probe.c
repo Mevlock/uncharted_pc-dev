@@ -933,6 +933,15 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         const RuntimeGuestCallback *c=&callbacks[i];
         if (!mapped(segments,ns,c->offset,c->signature_size) ||
             memcmp(image+c->offset,c->signature,c->signature_size)) continue;
+        /* BB_SKIP_CALLBACKS=<text;text>: leave out the callbacks and patches whose name contains one of them (tests) */
+        const char *skip=getenv("BB_SKIP_CALLBACKS");
+        if (skip && *skip) {
+            char list[512];
+            snprintf(list,sizeof(list),"%s",skip);
+            int skipped=0;
+            for (char *tok=strtok(list,";"); tok; tok=strtok(NULL,";")) if (*tok && strstr(c->name,tok)) skipped=1;
+            if (skipped) { printf("Callbacks: %s at %#" PRIx64 " SKIPPED (BB_SKIP_CALLBACKS)\n",c->name,c->offset); continue; }
+        }
         if (!c->callback) {
             memcpy(image+c->offset,c->patch,c->moved);
             printf("Callbacks: %s at %#" PRIx64 " (patch)\n",c->name,c->offset);
@@ -1852,6 +1861,30 @@ static int u1_req_hook_to(unsigned char *p, int n, int kind, uintptr_t host, int
     return 1;
 }
 static int u1_req_hook(unsigned char *p, int n, int kind) { return u1_req_hook_to(p,n,kind,(uintptr_t)u1_req_log,0); }
+/* Uncharted 2 (EU and US 1.02), tests: BB_U2_INVINCIBLE=1 keeps the Quick Menu's "Invincible Player" on (a byte of
+ * the debug options block: EU image+0xe654e7, US +0x104f877; its menu item's name is checked first), so a scripted
+ * or unattended run through a fight cannot die. */
+static volatile unsigned char *u2_invincible;
+static DWORD WINAPI u2_invincible_thread(LPVOID unused) {
+    (void)unused;
+    for (;;) { *u2_invincible=1; Sleep(100); }
+    return 0;
+}
+static void patch_u2_invincible(uint64_t image_size) {
+    const char *env=getenv("BB_U2_INVINCIBLE");
+    if (!env || env[0]!='1') return;
+    static const struct { uint64_t name, flag; const char *release; } builds[]={
+        {0xb9703b,0xe654e7,"EU"}, {0xe963c0,0x104f877,"US"},
+    };
+    for (size_t i=0;i<sizeof(builds)/sizeof(*builds);++i) {
+        if (builds[i].name+18>image_size || builds[i].flag>=image_size ||
+            memcmp(image+builds[i].name,"Invincible Player",18)) continue;
+        u2_invincible=image+builds[i].flag;
+        CreateThread(NULL,0,u2_invincible_thread,NULL,0,NULL);
+        printf("U2 invincible player: on (%s, %#" PRIx64 ")\n",builds[i].release,builds[i].flag);
+        return;
+    }
+}
 static void patch_u1_fixed_physics(uint64_t image_size) {
     const char *rl=getenv("BB_PHYS_REQ_LOG");
     if (rl && rl[0]=='1') {
@@ -2148,6 +2181,29 @@ static void patch_u2_convoy_ticks(uint64_t image_size) {
         printf("Convoy ticks: the convoy's speed controller counts at least one tick per frame (%#" PRIx64 ")\n",(uint64_t)at);
         return;
     }
+}
+/* U2 chapter 21 (convoy): Elena's truck sinks 2-4 m into the snow for ~0.5 s after a bump. The bump
+ * plays an animation on the truck by adding a node to its animation blend (US 0x399700, EU 0x102330:
+ * node, anim, params). Adding a node copies the params' bool at +0x11 into bit 2 of the previous
+ * node's flags as (flag << 2). The play-animation call the convoy uses (US 0xa21b20) never writes
+ * that bool: it is whatever was on the stack. With 0x64 there, 0x64 << 2 = 0x90 also sets bit 4 of
+ * the previous node, "the reference frame follows the object", so the rail animation that keeps the
+ * truck on its rail now takes the truck's own last position as its base each frame and the bump's
+ * offsets pile up (traced: flags 0xc8 -> 0xd8 at each sink, 0x64 at +0x11 each time). PS4 stack
+ * contents differ (the PS4 version does not sink). Only bit 0 of the bool is used:
+ *   and cl, 1; shl cl, 2; and byte [rax+0x80], 0xfb; or [rax+0x80], cl; nop  (same 20 bytes)
+ * Builds 102 US and EU. BB_CONVOY_SINK=0: off. */
+static void patch_u2_convoy_sink(uint64_t image_size) {
+    const char *env=getenv("BB_CONVOY_SINK");
+    if (env && env[0]=='0') return;
+    /* (mov cl, [r+0x11];) mov dl, [rax+0x80]; shl cl, 2; and dl, 0xfb; or dl, cl; mov [rax+0x80], dl */
+    const int64_t at=find_masked("11 8a9080000000 c0e102 80e2fb 08ca 889080000000",image_size);
+    if (at==-2) { printf("Convoy sink: pattern not unique, not patched\n"); return; }
+    if (at<0) return;
+    static const unsigned char code[20]={0x80,0xe1,0x01, 0xc0,0xe1,0x02, 0x80,0xa0,0x80,0x00,0x00,0x00,0xfb,
+                                         0x08,0x88,0x80,0x00,0x00,0x00, 0x90};
+    memcpy(image+at+1,code,sizeof(code));
+    printf("Convoy sink: animation node flag uses only bit 0 of its bool (%#" PRIx64 ")\n",(uint64_t)at+1);
 }
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
@@ -2509,6 +2565,7 @@ int main(int argc, char **argv) {
         patch_unlock_chapters(image_end);
         patch_u1_sleep_log(image_end);
         patch_u1_fixed_physics(image_end);
+        patch_u2_invincible(image_end);
         patch_job_sleep(image_end);
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
@@ -2518,6 +2575,7 @@ int main(int argc, char **argv) {
         for (uint64_t s=0;s<ns;++s)
             if ((segments[s].flags&1) && segments[s].address==0) { runtime_patch_ultrawide(image, segments[s].size, image_end); runtime_patch_resolution(image, segments[s].size, image_end); break; }
         patch_u2_convoy_ticks(image_end);
+        patch_u2_convoy_sink(image_end);
     }
     /* Before the red-zone patch (red_zone.c moves code into thunks; the table holds the original
      * places). The stubs step 256 bytes below rsp before saving anything, past the red zone. */
