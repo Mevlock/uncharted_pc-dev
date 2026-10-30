@@ -43,9 +43,6 @@ static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
 static size_t page_size;
-static size_t image_size;
-uintptr_t runtime_image_base(void) { return (uintptr_t)image; }
-size_t runtime_image_size(void) { return image_size; }
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
 static uint64_t module_count;
@@ -2132,39 +2129,6 @@ static void patch_job_lock_wait(uint64_t image_size) {
  *   test cl,1; je +8; mov rdx,[rdi]; mov rcx,[rcx+rdx-1]; movzx esi,byte [rax+2]; <set rdx>; call rcx
  * where <set rdx> is `mov rdx, r15` (1.02, 3 bytes) or `lea rdx,[rbp-0x60]` (1.00, 4 bytes).
  * By soni424, with drakolordx7's 1.00 variant (their community fork, cbeb43e6 + 9e2ab8fd). */
-static void patch_null_binding_handler(uint64_t image_size);
-/* BB_DEV_MENU=1 (experiment, Uncharted 3 EU 1.02): the debug camera manager (Manual Camera, ...) is created at start
- * only when a check at guest offset 0x160527 says a heap (0x152b310, apparently the debug memory pool) exists, which
- * retail lacks: the je at 0x16052e that skips it is removed. Its menu items are attached to a "Camera..." item the
- * retail Dev Menu does not have: the name looked up at 0x12c22b is pointed at "Player Menu..." (0xf60afe), an item
- * the root has and leaves empty. */
-static void patch_dev_menu_camera(uint64_t image_size) {
-    const char *env = getenv("BB_DEV_MENU");
-    if (!env || env[0] != '1' || image_size < 0x1000000) return;
-    static const unsigned char skip_je[] = {0x74, 0x2c};                               /* je 0x16055c */
-    static const unsigned char camera_name[] = {0x48, 0x8d, 0x35, 0x5b, 0x0f, 0xe3, 0x00}; /* lea rsi, "Camera..." */
-    if (memcmp(image + 0x16052e, skip_je, sizeof(skip_je)) || memcmp(image + 0x12c22b, camera_name, sizeof(camera_name)) ||
-        memcmp(image + 0xf5d18d, "Camera...", 10) || memcmp(image + 0xf60afe, "Player Menu...", 15)) {
-        printf("Dev menu: camera items not patched (not Uncharted 3 EU 1.02)\n");
-        return;
-    }
-    /* It allocates in memory context 8 (the debug pool, absent in retail: a null pool at the first allocation);
-     * the menus' own context 0x13 (the Debug DMENU pool, as the menu builder at 0x160046 uses) instead, at the
-     * three context switches on its path (mov dword [rbp-..], 8). */
-    static const unsigned int context_imm[] = {0x160536, 0x12be5c, 0x12c1e4};
-    for (unsigned i = 0; i < 3; ++i) {
-        if (memcmp(image + context_imm[i], "\x08\x00\x00\x00", 4)) {
-            printf("Dev menu: camera items not patched (context switch %#x differs)\n", context_imm[i]);
-            return;
-        }
-    }
-    for (unsigned i = 0; i < 3; ++i) image[context_imm[i]] = 0x13;
-    image[0x16052e] = 0x66; /* 2-byte nop: the camera manager is always created */
-    image[0x16052f] = 0x90;
-    const int32_t disp = (int32_t)(0xf60afe - (0x12c22b + 7));
-    memcpy(image + 0x12c22b + 3, &disp, 4);
-    printf("Dev menu: debug camera manager created (menu memory), its items under Player Menu...\n");
-}
 static void patch_null_binding_handler(uint64_t image_size) {
     static const unsigned char head[]={0xf6,0xc1,0x01,0x74,0x08,0x48,0x8b,0x17,0x48,0x8b,0x4c,0x11,0xff,
                                        0x0f,0xb6,0x70,0x02};      /* 17 bytes, common to both */
@@ -2524,7 +2488,6 @@ int main(int argc, char **argv) {
     }
     image = runtime_image_map(round_page(size) + isa_area, PROT_READ | PROT_WRITE);
     if (!image) image = allocate(round_page(size) + isa_area);
-    image_size = size;
 #ifdef _WIN32
     red_zone_reserve(image, size);
 #endif
@@ -2614,7 +2577,6 @@ int main(int argc, char **argv) {
         patch_job_sleep(image_end);
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
-        patch_dev_menu_camera(image_end);
         patch_rdtsc(image_end);
         /* Ultrawide and field of view (runtime_ultrawide.c): the code segment at address 0. */
         for (uint64_t s=0;s<ns;++s)
