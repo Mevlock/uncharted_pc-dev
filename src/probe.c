@@ -1475,17 +1475,18 @@ static ABI int job_lock_wait(uint64_t counter, uint64_t a, uint32_t b) {
  * 0x1da900, US 0x1dae70). Each second: how many went to sleep, by caller (guest image offset of the return address),
  * and the bodies first put to sleep in that second. For the jet ski barrels that freeze in mid-air above 60 FPS. */
 static volatile long sleep_log_calls;
-static struct { uint64_t caller; long count; } sleep_log_callers[16];
+static struct { uint64_t caller; long count; int kind; } sleep_log_callers[16];
 static uint64_t sleep_log_bodies[64];
 static long sleep_log_nbodies;
 static SRWLOCK sleep_log_lock=SRWLOCK_INIT;
-static ABI void sleep_log(uint64_t body, uint64_t caller) {
+/* kind: 0 the body setter, 1 the island node helper (node and its parents), 2 the island subtree helper. */
+static ABI void sleep_log(uint64_t body, uint64_t caller, uint64_t kind) {
     AcquireSRWLockExclusive(&sleep_log_lock);
     ++sleep_log_calls;
     const uint64_t at=caller-(uint64_t)(uintptr_t)image;
     int k=0;
-    while (k<16 && sleep_log_callers[k].count && sleep_log_callers[k].caller!=at) ++k;
-    if (k<16) { sleep_log_callers[k].caller=at; ++sleep_log_callers[k].count; }
+    while (k<16 && sleep_log_callers[k].count && (sleep_log_callers[k].caller!=at || sleep_log_callers[k].kind!=(int)kind)) ++k;
+    if (k<16) { sleep_log_callers[k].caller=at; sleep_log_callers[k].kind=(int)kind; ++sleep_log_callers[k].count; }
     if (sleep_log_nbodies<64) sleep_log_bodies[sleep_log_nbodies++]=body;
     static ULONGLONG window;
     const ULONGLONG now=GetTickCount64();
@@ -1493,7 +1494,8 @@ static ABI void sleep_log(uint64_t body, uint64_t caller) {
     if (now-window>=1000) {
         printf("Sleep log: %ld bodies put to sleep in %.1f s; by caller:",sleep_log_calls,(now-window)/1000.0);
         for (int i=0; i<16 && sleep_log_callers[i].count; ++i)
-            printf(" %#" PRIx64 " x%ld",sleep_log_callers[i].caller,sleep_log_callers[i].count);
+            printf(" %s@%#" PRIx64 " x%ld",sleep_log_callers[i].kind==0 ? "body" : sleep_log_callers[i].kind==1 ? "node" : "subtree",
+                   sleep_log_callers[i].caller,sleep_log_callers[i].count);
         printf("\nSleep log: bodies:");
         for (long i=0; i<sleep_log_nbodies; ++i) printf(" %#" PRIx64,sleep_log_bodies[i]);
         printf("\n");
@@ -1503,29 +1505,44 @@ static ABI void sleep_log(uint64_t body, uint64_t caller) {
     }
     ReleaseSRWLockExclusive(&sleep_log_lock);
 }
-static void patch_u1_sleep_log(uint64_t image_size) {
-    const char *on=getenv("BB_SLEEP_LOG");
-    if (!on || on[0]!='1') return;
-    const int64_t at=find_masked("80670bf7c3 6666666666662e0f1f840000000000 804f0b08c3",image_size);
-    if (at<0) return; /* not Uncharted 1 (or not unique) */
-    unsigned char *p=image+at+20; /* the setter */
+/* Entry hook: the first 5 bytes at p (whole instructions, no rip-relative or branch) move into a thunk that logs
+ * (rdi, the return address, kind) and then runs them and jumps back to p+5. */
+static int sleep_log_hook(unsigned char *p, int kind) {
     unsigned char *t=near_image_memory(128);
-    if (!t) { printf("Sleep log: no thunk memory, not hooked\n"); return; }
+    if (!t) return 0;
     size_t k=0;
     static const unsigned char save[]={0x57,0x56,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53}; /* push rdi rsi rax rcx rdx r8-r11 */
     memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
     static const unsigned char ret_addr[]={0x48,0x8b,0x74,0x24,0x48}; /* mov rsi,[rsp+0x48]: the caller (9 pushes) */
     memcpy(t+k,ret_addr,sizeof(ret_addr)); k+=sizeof(ret_addr);
+    t[k++]=0xba; memcpy(t+k,&kind,4); k+=4;              /* mov edx, kind */
     const uintptr_t host=(uintptr_t)sleep_log;
     t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8; /* movabs rax, sleep_log */
     t[k++]=0xff; t[k++]=0xd0;                            /* call rax (rsp is 16-byte aligned here) */
     static const unsigned char restore[]={0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5a,0x59,0x58,0x5e,0x5f};
     memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
-    static const unsigned char orig[]={0x80,0x4f,0x0b,0x08,0xc3}; /* or byte [rdi+0xb],8; ret */
-    memcpy(t+k,orig,sizeof(orig)); k+=sizeof(orig);
+    memcpy(t+k,p,5); k+=5;                               /* the moved instructions */
+    const uint64_t back=(uint64_t)(uintptr_t)(p+5);
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&back,8); k+=8; /* jmp [rip]: p+5 */
     const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+5));
     p[0]=0xe9; memcpy(p+1,&to,4);
-    printf("Sleep log: physics sleep setter hooked (%#" PRIx64 ")\n",(uint64_t)(at+20));
+    return 1;
+}
+static void patch_u1_sleep_log(uint64_t image_size) {
+    const char *on=getenv("BB_SLEEP_LOG");
+    if (!on || on[0]!='1') return;
+    const int64_t at=find_masked("80670bf7c3 6666666666662e0f1f840000000000 804f0b08c3",image_size);
+    if (at<0) return; /* not Uncharted 1 (or not unique) */
+    /* body setter: or byte [rdi+0xb],8; ret (5 bytes, moved whole: the thunk's copy returns) */
+    const int ok0=sleep_log_hook(image+at+20,0);
+    /* island node helper: mov al,[rdi+0xb]; test al,8 | jne ...; or al,8; mov [rdi+0xb],al */
+    const int64_t node=find_masked("8a470b a808 75?? 0c08 88470b",image_size);
+    const int ok1=node>=0 && sleep_log_hook(image+node,1);
+    /* island subtree helper: push rbp; mov rbp,rsp; push rbx | push rax; mov rbx,rdi; or byte [rbx+0xb],8 */
+    const int64_t sub=find_masked("554889e5 53 50 4889fb 804b0b08",image_size);
+    const int ok2=sub>=0 && sleep_log_hook(image+sub,2);
+    printf("Sleep log: hooked body setter %s (%#" PRIx64 "), node helper %s (%#" PRIx64 "), subtree helper %s (%#" PRIx64 ")\n",
+           ok0 ? "yes" : "NO",(uint64_t)(at+20),ok1 ? "yes" : "NO",(uint64_t)node,ok2 ? "yes" : "NO",(uint64_t)sub);
 }
 /* US 1.02 (CUSA02320, as CUSA02344), all three games: the try is inlined (counter r15, target r14,
  * mode ebx) and the worker check is in al:
