@@ -4,6 +4,7 @@
 #pragma once
 
 #include <map>
+#include "common/srw_shared_mutex.h"
 
 #include "bbport_copy.h"
 
@@ -309,7 +310,7 @@ private:
         }
 
     private:
-        mutable std::shared_mutex mutex;
+        mutable Common::SrwSharedMutexT<1> mutex; ///< BB_SRW_RANGES=1: a slim reader/writer lock
         RangeSet set;
     };
     LockedRangeSet gpu_modified_ranges;
