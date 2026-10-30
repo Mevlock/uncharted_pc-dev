@@ -40,11 +40,10 @@ NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
 VERSION = '0.3.6.29'  # fork: upstream 0.3.6 + this fork's changes
-RELEASES_API = 'https://api.github.com/repos/Supermedo/uncharted_pc/releases/latest'
-RELEASES_PAGE = 'https://github.com/Supermedo/uncharted_pc/releases/latest'
-# Fork: no update check. The releases above are upstream's: installing one would replace this
-# fork's build with the official one.
-UPDATES = False
+# Fork: updates come from this fork's own releases (the latest one; -pre tags are published as normal releases).
+RELEASES_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases/latest'
+RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
+UPDATES = True
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'uncharted-update'
 # Never copied over an installation by an update (the package does not hold them either).
 USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log')
