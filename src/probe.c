@@ -1470,6 +1470,45 @@ static ABI int job_lock_wait(uint64_t counter, uint64_t a, uint32_t b) {
     return 0;
 #undef try_lock
 }
+/* Uncharted 1 (EU and US 1.02), BB_PHYS_SLEEP_SCALE=0: off. The physics engine puts a rigid body to sleep
+ * once two per-body counters of still steps (u16 at +0x136, +0x138) pass two globals, 10 and 30 steps, tuned for
+ * 30/60 FPS. Above 60 FPS a body moves less per step, so a body that has only just started to move (the jet ski
+ * section's floating barrels, held in the air until the player comes close and then let go) reaches them first and
+ * freezes in mid-air until something hits it. The globals are scaled to the game's frame rate, so a body sleeps
+ * after the same time as at 60 FPS (144 FPS: 24 and 72). Found through the wake function, which reads both:
+ *   movzx eax,[rdi+0x136]; lea rcx,[rip+limit1]; mov ecx,[rcx]; cmp eax,ecx; cmovb ecx,eax; shr ecx,1;
+ *   mov [rdi+0x136],cx; movzx eax,[rdi+0x138]; lea rcx,[rip+limit2]
+ * The game has two copies of it; both name the same globals (EU 0x9887ac/0x9887b0, US 0x94c72c/0x94c730). */
+static void patch_u1_physics_sleep(uint64_t image_size) {
+    const char *off=getenv("BB_PHYS_SLEEP_SCALE");
+    if (off && off[0]=='0') return;
+    static const unsigned char head[]={0x0f,0xb7,0x87,0x36,0x01,0x00,0x00,0x48,0x8d,0x0d};
+    static const unsigned char mid[]={0x8b,0x09,0x39,0xc8,0x0f,0x42,0xc8,0xd1,0xe9,0x66,0x89,0x8f,0x36,0x01,0x00,0x00,
+                                      0x0f,0xb7,0x87,0x38,0x01,0x00,0x00,0x48,0x8d,0x0d};
+    int64_t limit1=-1, limit2=-1;
+    for (uint64_t i=0; i+0x2c<=image_size; ++i) {
+        if (memcmp(image+i,head,sizeof(head)) || memcmp(image+i+0x0e,mid,sizeof(mid))) continue;
+        int32_t d1,d2; memcpy(&d1,image+i+0x0a,4); memcpy(&d2,image+i+0x28,4);
+        const int64_t a1=(int64_t)i + 0x0e + d1, a2=(int64_t)i + 0x2c + d2;
+        if (limit1>=0 && (a1!=limit1 || a2!=limit2)) { printf("Physics sleep: two different limits, not patched\n"); return; }
+        limit1=a1; limit2=a2;
+    }
+    if (limit1<0) return; /* not Uncharted 1 */
+    if (limit2<0 || (uint64_t)limit2+4>image_size) { printf("Physics sleep: limits outside the image, not patched\n"); return; }
+    /* The game's frame rate: the launcher's limit when it is below the display rate, else the display rate. */
+    double rate=60;
+    const char *hz=getenv("BB_VBLANK_HZ"), *cap=getenv("BB_FPS_LIMIT");
+    if (hz && atof(hz)>0) rate=atof(hz);
+    if (cap && atof(cap)>0 && atof(cap)<rate) rate=atof(cap);
+    int32_t was1,was2; memcpy(&was1,image+limit1,4); memcpy(&was2,image+limit2,4);
+    if (was1!=10 || was2!=30) { printf("Physics sleep: limits are %d/%d, not 10/30: not patched\n",was1,was2); return; }
+    if (rate<=60) return;
+    int32_t now1=(int32_t)(10*rate/60+0.5), now2=(int32_t)(30*rate/60+0.5);
+    if (now2>60000) { now1=20000; now2=60000; } /* the counters are 16-bit */
+    memcpy(image+limit1,&now1,4); memcpy(image+limit2,&now2,4);
+    printf("Physics sleep: bodies sleep after the same time as at 60 FPS: %d/%d steps at %.0f FPS (were 10/30)\n",
+           now1,now2,rate);
+}
 /* US 1.02 (CUSA02320, as CUSA02344), all three games: the try is inlined (counter r15, target r14,
  * mode ebx) and the worker check is in al:
  *   mov rcx,[r15+0x20]; cmp ebx,1; jne; cmp rcx,r14; setle cl; jmp; test ebx,ebx; jne; cmp rcx,r14;
@@ -1973,6 +2012,7 @@ int main(int argc, char **argv) {
         patch_eop_tick_wait(image_end);
         patch_collection_skip(image_end);
         patch_unlock_chapters(image_end);
+        patch_u1_physics_sleep(image_end);
         patch_job_sleep(image_end);
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
