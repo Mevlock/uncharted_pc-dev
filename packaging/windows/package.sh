@@ -58,6 +58,8 @@ ldd "$dest/bin/bb-probe.exe" "$dest/bin/bb-gpu-capabilities.exe" |
 # Only what run.py runs to prepare a game (Bloodborne's patch and mod tools stay out).
 cp scripts/prepare.py scripts/link_modules.py scripts/link_libc.py scripts/content_profile.py scripts/trophies.py scripts/isa_rewrite.py "$dest/scripts/"
 cp run.py LICENSE "$dest/"
+# Shader preparation: the variant lists, pipeline keys and shader location indexes per release.
+cp -r shaders "$dest/"
 # The commit this build is made from: the launcher writes it at the top of last_run.log.
 git rev-parse --short HEAD > "$dest/commit.txt" 2>/dev/null || rm -f "$dest/commit.txt"
 cp packaging/windows/README-Uncharted.txt "$dest/README.txt"
