@@ -1470,6 +1470,63 @@ static ABI int job_lock_wait(uint64_t counter, uint64_t a, uint32_t b) {
     return 0;
 #undef try_lock
 }
+/* Uncharted 1 (EU and US 1.02), diagnosis: BB_SLEEP_LOG=1 logs every rigid body the physics engine puts to sleep
+ * (the 5-byte setter `or byte [rdi+0xb],8; ret` that follows the clearer `and byte [rdi+0xb],0xf7; ret`; EU
+ * 0x1da900, US 0x1dae70). Each second: how many went to sleep, by caller (guest image offset of the return address),
+ * and the bodies first put to sleep in that second. For the jet ski barrels that freeze in mid-air above 60 FPS. */
+static volatile long sleep_log_calls;
+static struct { uint64_t caller; long count; } sleep_log_callers[16];
+static uint64_t sleep_log_bodies[64];
+static long sleep_log_nbodies;
+static SRWLOCK sleep_log_lock=SRWLOCK_INIT;
+static ABI void sleep_log(uint64_t body, uint64_t caller) {
+    AcquireSRWLockExclusive(&sleep_log_lock);
+    ++sleep_log_calls;
+    const uint64_t at=caller-(uint64_t)(uintptr_t)image;
+    int k=0;
+    while (k<16 && sleep_log_callers[k].count && sleep_log_callers[k].caller!=at) ++k;
+    if (k<16) { sleep_log_callers[k].caller=at; ++sleep_log_callers[k].count; }
+    if (sleep_log_nbodies<64) sleep_log_bodies[sleep_log_nbodies++]=body;
+    static ULONGLONG window;
+    const ULONGLONG now=GetTickCount64();
+    if (!window) window=now;
+    if (now-window>=1000) {
+        printf("Sleep log: %ld bodies put to sleep in %.1f s; by caller:",sleep_log_calls,(now-window)/1000.0);
+        for (int i=0; i<16 && sleep_log_callers[i].count; ++i)
+            printf(" %#" PRIx64 " x%ld",sleep_log_callers[i].caller,sleep_log_callers[i].count);
+        printf("\nSleep log: bodies:");
+        for (long i=0; i<sleep_log_nbodies; ++i) printf(" %#" PRIx64,sleep_log_bodies[i]);
+        printf("\n");
+        fflush(stdout);
+        sleep_log_calls=0; sleep_log_nbodies=0; memset(sleep_log_callers,0,sizeof(sleep_log_callers));
+        window=now;
+    }
+    ReleaseSRWLockExclusive(&sleep_log_lock);
+}
+static void patch_u1_sleep_log(uint64_t image_size) {
+    const char *on=getenv("BB_SLEEP_LOG");
+    if (!on || on[0]!='1') return;
+    const int64_t at=find_masked("80670bf7c3 6666666666662e0f1f840000000000 804f0b08c3",image_size);
+    if (at<0) return; /* not Uncharted 1 (or not unique) */
+    unsigned char *p=image+at+20; /* the setter */
+    unsigned char *t=near_image_memory(128);
+    if (!t) { printf("Sleep log: no thunk memory, not hooked\n"); return; }
+    size_t k=0;
+    static const unsigned char save[]={0x57,0x56,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53}; /* push rdi rsi rax rcx rdx r8-r11 */
+    memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
+    static const unsigned char ret_addr[]={0x48,0x8b,0x74,0x24,0x48}; /* mov rsi,[rsp+0x48]: the caller (9 pushes) */
+    memcpy(t+k,ret_addr,sizeof(ret_addr)); k+=sizeof(ret_addr);
+    const uintptr_t host=(uintptr_t)sleep_log;
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8; /* movabs rax, sleep_log */
+    t[k++]=0xff; t[k++]=0xd0;                            /* call rax (rsp is 16-byte aligned here) */
+    static const unsigned char restore[]={0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5a,0x59,0x58,0x5e,0x5f};
+    memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
+    static const unsigned char orig[]={0x80,0x4f,0x0b,0x08,0xc3}; /* or byte [rdi+0xb],8; ret */
+    memcpy(t+k,orig,sizeof(orig)); k+=sizeof(orig);
+    const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+5));
+    p[0]=0xe9; memcpy(p+1,&to,4);
+    printf("Sleep log: physics sleep setter hooked (%#" PRIx64 ")\n",(uint64_t)(at+20));
+}
 /* US 1.02 (CUSA02320, as CUSA02344), all three games: the try is inlined (counter r15, target r14,
  * mode ebx) and the worker check is in al:
  *   mov rcx,[r15+0x20]; cmp ebx,1; jne; cmp rcx,r14; setle cl; jmp; test ebx,ebx; jne; cmp rcx,r14;
@@ -1973,6 +2030,7 @@ int main(int argc, char **argv) {
         patch_eop_tick_wait(image_end);
         patch_collection_skip(image_end);
         patch_unlock_chapters(image_end);
+        patch_u1_sleep_log(image_end);
         patch_job_sleep(image_end);
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
