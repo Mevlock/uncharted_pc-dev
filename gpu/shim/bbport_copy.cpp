@@ -15,6 +15,7 @@
 
 #include "bbport_toggles.h"
 #include "common/thread.h"
+#include "common/srw_shared_mutex.h"
 
 namespace BbCopy {
 namespace {
@@ -212,8 +213,8 @@ private:
     }
 
     std::vector<std::thread> threads;
-    std::mutex mutex;
-    std::condition_variable cv;
+    Common::SrwMutex mutex; ///< BB_SRW_MUTEX=1: an SRW lock
+    std::condition_variable_any cv;
     std::shared_ptr<Job> current;
     u64 generation = 0;
     bool stop = false;

@@ -29,6 +29,7 @@
 #include "bbport_threads.h"
 
 #include <chrono>
+#include "common/srw_shared_mutex.h"
 
 namespace Vulkan {
 
@@ -94,7 +95,7 @@ struct GpuBusy {
 };
 } // namespace
 
-std::mutex Scheduler::submit_mutex;
+Common::SrwMutex Scheduler::submit_mutex;
 
 extern void (*g_gpu_stall_report)();
 extern "C" void (*bbgpu_thread_stack_dump)(const char* reason); // bbgpu.cpp

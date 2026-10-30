@@ -313,8 +313,8 @@ private:
     /// bbport: guards graphics_pipelines (draw-preparation workers insert into it).
     Common::SrwSharedMutex pipelines_mutex;
     static constexpr u64 PipelineClaimTag = 0x9E3779B97F4A7C15ull;
-    std::mutex claim_mutex;
-    std::condition_variable claim_cv;
+    Common::SrwMutex claim_mutex;
+    std::condition_variable_any claim_cv;
     std::unordered_map<u64, std::thread::id> claims; ///< id -> the thread building it
     bool worker_compile = true; ///< BB_PREP_COMPILE=0 keeps all compiles on the GPU thread
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
