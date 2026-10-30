@@ -173,15 +173,6 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
         while (bbgpu_preparation_screen()) SDL_Delay(10);
     }
     runtime_freeze_point();
-    /* bbport: the game's audio output thread (FMOD's mixer) runs at high priority: shader preparation's 14
-     * threads and the driver's compile threads starved it at normal priority (the music stuttered on the
-     * preparation page). BB_AUDIO_PRIORITY=0 leaves it as the game made it. */
-    static _Thread_local int boosted;
-    if (!boosted) {
-        const char *env=getenv("BB_AUDIO_PRIORITY");
-        boosted=1;
-        if (!env || env[0]!='0') SDL_SetCurrentThreadPriority(SDL_THREAD_PRIORITY_HIGH);
-    }
     pthread_mutex_lock(&table_lock);
     Port *p=port_of(handle,&error);
     pthread_mutex_unlock(&table_lock);
