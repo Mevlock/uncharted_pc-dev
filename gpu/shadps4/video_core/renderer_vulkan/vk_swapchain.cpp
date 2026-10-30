@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include "bbport_settings.h"
 #include "common/assert.h"
@@ -137,11 +138,22 @@ bool Swapchain::Present() {
         .pImageIndices = &image_index,
     };
 
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::time_point a, Clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    const auto t0 = Clock::now();
     WaitAsyncSubmits();
+    const auto t1 = Clock::now();
     vk::Result result;
     {
         std::scoped_lock queue_lk{g_graphics_queue_mutex};
+        const auto t2 = Clock::now();
         result = instance.GetPresentQueue().presentKHR(present_info);
+        const auto t3 = Clock::now();
+        last_async_ms = ms(t0, t1);
+        last_queue_lock_ms = ms(t1, t2);
+        last_present_call_ms = ms(t2, t3);
     }
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;

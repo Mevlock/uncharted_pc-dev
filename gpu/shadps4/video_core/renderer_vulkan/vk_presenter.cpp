@@ -977,11 +977,46 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
     }
     scheduler.Flush(info);
 
+    // bbport (hitch diagnosis, BB_HITCH_MS): a present slower than the hitch threshold prints where its time went.
+    // BB_PRESENT_GPU_WAIT=1 (experiment): wait for the GPU to finish this frame before taking the submit lock, which
+    // every scheduler's submissions share (a present that blocks while holding it stalls the draw recording thread),
+    // and log that wait too.
+    static const double slow_ms = [] {
+        const char* env = std::getenv("BB_HITCH_MS");
+        return env ? std::atof(env) : 0.0;
+    }();
+    static const bool gpu_wait = [] {
+        const char* env = std::getenv("BB_PRESENT_GPU_WAIT");
+        return env && env[0] == '1';
+    }();
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::time_point a, Clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    const auto t0 = Clock::now();
+    if (gpu_wait) {
+        scheduler.Wait(scheduler.CurrentTick() - 1);
+    }
+    const auto t1 = Clock::now();
+
     // Present to swapchain.
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
+        const auto t2 = Clock::now();
         if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        }
+        const auto t3 = Clock::now();
+        if (slow_ms > 0 && ms(t0, t3) > slow_ms) {
+            char gpu_done[32] = "(not waited)";
+            if (gpu_wait) {
+                std::snprintf(gpu_done, sizeof(gpu_done), "%.1f ms", ms(t0, t1));
+            }
+            std::printf("Present slow: %.1f ms: GPU done after %s, submit lock %.1f ms, async submits %.1f ms, "
+                        "queue lock %.1f ms, present call %.1f ms\n",
+                        ms(t0, t3), gpu_done,
+                        ms(t1, t2), swapchain.last_async_ms, swapchain.last_queue_lock_ms,
+                        swapchain.last_present_call_ms);
         }
     }
     return true;
