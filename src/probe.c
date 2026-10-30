@@ -701,6 +701,8 @@ typedef struct { volatile uint64_t calls, rdi, rsi, rdx, rcx, r8, r15; uint64_t 
 static GuestHook *guest_hooks;
 static size_t guest_hook_count;
 static uint64_t guest_image_size;
+uintptr_t runtime_image_base(void) { return (uintptr_t)image; }
+size_t runtime_image_size(void) { return (size_t)guest_image_size; }
 /* A pointer argument into the image (or guest memory the tracker knows) shown as text. */
 static void print_hook_string(const char *name, uint64_t value) {
     const unsigned char *p=(const unsigned char *)(uintptr_t)value;
