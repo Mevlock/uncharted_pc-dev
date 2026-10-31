@@ -124,6 +124,35 @@ def isa_rewrite_args(probe, out):
     return ['--isa-rewrite', table]
 
 
+def adopt_saves_cache(old, new):
+    """Up to 0.3.6.31 the shader cache lived in the saves folder (old); now it lives in the install (new). Copy what
+    the install lacks from the saves folder once: the game folders (<title id>-<build>) and the shader locations
+    (shader_locations_<title id>.txt). Without them the first start rebuilds every shader and, with no saved
+    locations, may read all the game files (many minutes on a hard drive). The saves folder keeps its copy for
+    older versions. Each folder is copied aside and renamed, so a cut copy is redone next time."""
+    import shutil
+    try:
+        if not old.is_dir() or old.resolve() == new.resolve():
+            return
+        new.mkdir(parents=True, exist_ok=True)
+        for item in sorted(old.iterdir()):
+            target = new / item.name
+            if target.exists():
+                continue
+            if item.is_dir() and '.' not in item.name:
+                print(f'Shader cache: copying {item.name} from the saves folder ...', flush=True)
+                partial = new / f'{item.name}.copying'
+                shutil.rmtree(partial, ignore_errors=True)
+                shutil.copytree(item, partial)
+                partial.rename(target)
+            elif item.is_file() and item.name.startswith('shader_locations_') and item.suffix == '.txt':
+                shutil.copy2(item, target)
+                print(f'Shader cache: copied {item.name} from the saves folder', flush=True)
+    except OSError as error:
+        print(f'Shader cache: could not copy from the saves folder ({error}); the shaders are built again',
+              flush=True)
+
+
 def main():
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == '--after':
@@ -173,7 +202,9 @@ def main():
     env.setdefault('BB_GPU_USER_DIR', str(user_dir))
     # The shader cache stays beside this install even when the saves (BB_USER_DIR) are elsewhere: each version of the
     # port keeps its own (BB_GPU_CACHE_DIR overrides).
-    env.setdefault('BB_GPU_CACHE_DIR', str((data / 'user' / 'cache').resolve()))
+    if 'BB_GPU_CACHE_DIR' not in env:
+        env['BB_GPU_CACHE_DIR'] = str((data / 'user' / 'cache').resolve())
+        adopt_saves_cache(user_dir / 'cache', Path(env['BB_GPU_CACHE_DIR']))
     env.setdefault('BB_VBLANK_HZ', '60')
     loadexec = out_root / 'loadexec.txt'
     env['BB_LOADEXEC_FILE'] = str(loadexec)
