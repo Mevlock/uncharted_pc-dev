@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bbport_causal.h"
 #include <map>
 #include <deque>
 #include <set>
@@ -2438,6 +2439,18 @@ static bool StageBStats() {
     }();
     return on;
 }
+// bbport diagnosis (BB_BIND_MEMO_STATS=1): how often a stage binds exactly the buffers (V#s) it
+// bound before, and whether the CPU wrote any read-only one since: the ceiling of a binding memo.
+// Counts: clean repeat, repeat with CPU writes, new; stage B only.
+static bool BindMemoStats() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_BIND_MEMO_STATS");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+static std::array<u64, 1 << 16> g_bind_memo_keys{};
+static std::array<std::atomic<u64>, 3> g_bind_memo_counts{};
 // Native batch append (BB_FRAME_STATS): sharps, hazard check, groups + written obtain, inputs,
 // table + pages.
 static std::array<std::atomic<u64>, 5> g_append_cycles{};
@@ -2850,6 +2863,17 @@ void Rasterizer::PrintPipeStats() {
         gfx + asc) {
         std::printf("\n  dispatches: graphics queue %.0f/s, compute queues %.0f/s", gfx / seconds,
                     asc / seconds);
+    }
+    std::printf("\n  causal sites: compute dispatches %.0f/s, graphics draws %.0f/s, stage B packets %.0f/s",
+                BbCausal::g_hits[0].exchange(0) / seconds, BbCausal::g_hits[1].exchange(0) / seconds,
+                BbCausal::g_hits[2].exchange(0) / seconds);
+    if (BindMemoStats()) {
+        const u64 clean = g_bind_memo_counts[0].exchange(0), dirty = g_bind_memo_counts[1].exchange(0),
+                  fresh = g_bind_memo_counts[2].exchange(0);
+        const double all = std::max<u64>(1, clean + dirty + fresh);
+        std::printf("\n  binding memo ceiling: %.0f stage bindings/s, same buffers %.1f%% (clean) + %.1f%% "
+                    "(CPU wrote one since), new %.1f%%",
+                    all / seconds, 100.0 * clean / all, 100.0 * dirty / all, 100.0 * fresh / all);
     }
     std::printf("\n  stage A waits over 0.5%%:");
     for (const auto& [function, lines] : drain_sites) {
@@ -6044,6 +6068,31 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         set_write.descriptorType = vk::DescriptorType::eStorageBuffer;
         set_write.pBufferInfo = &buffer_infos.back();
         ++binding.buffer;
+    }
+    if (BindMemoStats() && DrawPipe::OnStageB() && !stage.buffers.empty()) {
+        u64 key = stage.pgm_hash * 0x9E3779B97F4A7C15ull;
+        bool cpu_written = false;
+        for (u32 i = 0; i < stage.buffers.size(); ++i) {
+            const auto& desc = stage.buffers[i];
+            if (desc.IsSpecial()) {
+                key = (key ^ (0x100 + i)) * 0x100000001B3ull;
+                continue;
+            }
+            const auto v = sharp_of(i);
+            u64 words[2];
+            std::memcpy(words, &v, sizeof(words));
+            key = (key ^ words[0]) * 0x100000001B3ull;
+            key = (key ^ words[1] ^ (u64(desc.is_written) << 63)) * 0x100000001B3ull;
+            if (!cpu_written && !desc.is_written && v.base_address && v.GetSize() &&
+                !(num_ring_stages && FindRingBinding(stage, i))) {
+                cpu_written = buffer_cache.IsRegionCpuModified(v.base_address, v.GetSize());
+            }
+        }
+        key |= 1;
+        auto& slot = g_bind_memo_keys[(key >> 7) % g_bind_memo_keys.size()];
+        const u32 kind = slot == key ? (cpu_written ? 1 : 0) : 2;
+        slot = key;
+        g_bind_memo_counts[kind].fetch_add(1, std::memory_order_relaxed);
     }
 }
 

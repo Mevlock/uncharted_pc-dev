@@ -7,6 +7,7 @@
 #include <sys/resource.h>
 #endif
 #include <time.h>
+#include "bbport_causal.h"
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
 #include "bbport_trace.h"
@@ -1311,6 +1312,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break; // registers: ApplyGraphicsRegisterPacket
             }
             case PM4ItOpcode::DrawIndex2: {
+                BbCausal::Spin(BbCausal::SlowAGfx());
+                BbCausal::Count(1);
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
                 }
@@ -1324,6 +1327,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::DrawIndexOffset2: {
+                BbCausal::Spin(BbCausal::SlowAGfx());
+                BbCausal::Count(1);
                 const auto* draw_index_off =
                     reinterpret_cast<const PM4CmdDrawIndexOffset2*>(header);
                 if (DebugState.DumpingCurrentReg()) {
@@ -1340,6 +1345,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::DrawIndexAuto: {
+                BbCausal::Spin(BbCausal::SlowAGfx());
+                BbCausal::Count(1);
                 const auto* draw_index = reinterpret_cast<const PM4CmdDrawIndexAuto*>(header);
                 if (DebugState.DumpingCurrentReg()) {
                     DebugState.PushRegsDump(base_addr, reinterpret_cast<uintptr_t>(header), regs);
@@ -2066,6 +2073,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 break;
             }
             g_dispatches_asc.fetch_add(1, std::memory_order_relaxed);
+            BbCausal::Spin(BbCausal::SlowACompute());
+            BbCausal::Count(0);
             const auto cmd_address = reinterpret_cast<const void*>(header);
             rasterizer->ScopeMarker("asc[{}]:{}:DispatchDirect",
                                     fmt::make_format_args(vqid, cmd_address),

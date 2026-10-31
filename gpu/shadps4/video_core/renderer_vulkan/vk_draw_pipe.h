@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdlib>
+#include "bbport_causal.h"
 #include "bbport_threads.h"
 #include "bbport_wait.h"
 
@@ -230,6 +231,8 @@ private:
                 consumed.store(at, std::memory_order_release);
                 continue;
             }
+            BbCausal::Spin(BbCausal::SlowB());
+            BbCausal::Count(2);
             const u64 start = __rdtsc();
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
             // The last packet so far: work owed to other threads is paid before stage A can see
