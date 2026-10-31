@@ -12,8 +12,8 @@ import prepare
 
 NOP = '90'
 # SHA-1 of the game code: the segments a SELF loads, not its signature header or the metadata a dumper adds at the
-# end (launcher KNOWN_GAME_CODE). EU: EU 1.02 (CUSA02343), also US 1.00 (CUSA02320 before its update). US: US 1.02
-# (CUSA02320, EU/Russian CUSA02344).
+# end (launcher GAME_CODE). EU: the original 1.00 build (EU CUSA02343 dumps, US 1.00); US: the 1.02 build (US 1.02
+# CUSA02320, EU/Russian CUSA02344).
 EU = {'eboot.bin': 'cd749c2f217a842200a9867f7c8af0973c990a74',
       'big2-ps4_Shipping.elf': '1616597c9cf8b4b6d50d7cbf3aeb3677efba6587',
       'big3-ps4_Shipping.elf': '1d949b215bb036fe685511aca4f560d63dd50442'}

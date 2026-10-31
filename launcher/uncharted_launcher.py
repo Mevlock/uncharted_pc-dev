@@ -333,23 +333,28 @@ def shaders_prepared(s, key):
     return False
 
 
-SUPPORTED_GAME_VERSION = '01.02'  # param.sfo APP_VER of the collection the port is made for
 
 
-# SHA-1 of the game code the port is made for: the segments an executable loads (eboot, Uncharted 2, Uncharted 3),
-# not its signature header or the metadata a dumper adds at the end. Two builds: the EU 1.02 one (CUSA02343), which
-# is also US 1.00 (CUSA02320 before its update), and the US 1.02 one (CUSA02320 = EU/Russian CUSA02344). A param.sfo
-# version only counts when the code is not one of these (some 1.02 dumps keep a param.sfo saying 01.00).
-KNOWN_GAME_CODE = {
-    'cd749c2f217a842200a9867f7c8af0973c990a74', '1616597c9cf8b4b6d50d7cbf3aeb3677efba6587',
-    '1d949b215bb036fe685511aca4f560d63dd50442', 'fd024eaeb58c4b778613b54a9e69f6fbc8615a68',
-    'de8ce6e778f39b3c2914fd71f1df7117282f62e2', 'fed1f511d51613df108101b8a09397beebc70f0c',
+# The two builds of the game code, by SHA-1 of the segments an executable loads (eboot, Uncharted 2, Uncharted 3; not
+# its signature header or the metadata a dumper adds at the end), or of the whole file for an executable that is not
+# signed. 1.00: the original build, in every region (US 1.00; EU dumps whose files were never updated, even when
+# their param.sfo says 01.02). 1.02: the updated build (US 1.02 CUSA02320, EU/Russian CUSA02344).
+GAME_CODE = {
+    'cd749c2f217a842200a9867f7c8af0973c990a74': '1.00', '1616597c9cf8b4b6d50d7cbf3aeb3677efba6587': '1.00',
+    '1d949b215bb036fe685511aca4f560d63dd50442': '1.00', 'fd024eaeb58c4b778613b54a9e69f6fbc8615a68': '1.02',
+    'de8ce6e778f39b3c2914fd71f1df7117282f62e2': '1.02', 'fed1f511d51613df108101b8a09397beebc70f0c': '1.02',
+    '855ac7a96de3e21587fd01e458baeb53c488fa71': '1.00', 'c8b4c0c0c2485246c5373e7445af12d9c4f639a7': '1.00',
+    '783e53a7ca38aaa5da74bbd32b00e1891020f86a': '1.00', 'd81e699fac808ebd4a1689c108b9a75571c3d62b': '1.02',
+    '5c6e20a2296de593635c585c941e2455b10d7c5f': '1.02', '6b66880c4ad373915f939af62194a71d3b56800d': '1.02',
 }
-# SHA-1 of whole 1.02 executables, for files that are not signed executables (no segments to hash).
-KNOWN_102_EXECUTABLES = {
-    '855ac7a96de3e21587fd01e458baeb53c488fa71', 'c8b4c0c0c2485246c5373e7445af12d9c4f639a7',
-    '783e53a7ca38aaa5da74bbd32b00e1891020f86a', 'd81e699fac808ebd4a1689c108b9a75571c3d62b',
-    '5c6e20a2296de593635c585c941e2455b10d7c5f', '6b66880c4ad373915f939af62194a71d3b56800d',
+# Where the shaders sit in each known game's files (shaders/<file>), by title id and game code. The data files differ
+# between versions and regions, so a pair without an index gets no shader preparation (it would read all its files
+# first: many minutes on a hard drive).
+SHADER_INDEXES = {
+    ('CUSA02343', '1.00'): 'shader_locations_CUSA02343.txt',
+    ('CUSA02320', '1.00'): 'shader_locations_CUSA02320_100.txt',
+    ('CUSA02320', '1.02'): 'shader_locations_CUSA02320.txt',
+    ('CUSA02344', '1.02'): 'shader_locations_CUSA02344.txt',
 }
 _executable_hashes = {}
 
@@ -394,33 +399,29 @@ def game_executable(s, key):
     return exe if exe.is_file() else None
 
 
-def unsupported_version(s, key):
-    """The game's version when the port is not made for its code (1.00 EU, say), else ''. The game patches and the
-    shader lists are made for the 1.02 code; on other code the shader preparation is skipped (its shaders are not
-    where the shipped locations say, so the game would read all its files first: many minutes on a hard drive)."""
-    info = game_info(game_folder(s, key))
-    version = (info or {}).get('version', '?')
-    if version in ('?', SUPPORTED_GAME_VERSION):
-        return ''
+def game_code(s, key):
+    """'1.00' or '1.02' for a known build of the game's executable, '' for an unknown one, None without one."""
     exe = game_executable(s, key)
-    if not exe:
-        return ''
-    digest = executable_hash(exe)
-    return '' if digest in KNOWN_GAME_CODE or digest in KNOWN_102_EXECUTABLES else version
+    return GAME_CODE.get(executable_hash(exe), '') if exe else None
 
 
-def shader_locations(lists, info):
-    """Where the shaders sit in this release's files: shaders/shader_locations_<title id>.txt, or
-    shader_locations_<title id>_<version>.txt for game data of another version (US 1.00: the 1.02 code, other data),
-    or None."""
+def unsupported_version(s, key):
+    """The game's version when the shader preparation cannot be used on this copy (no shader index for its title and
+    game code), else ''."""
+    info = game_info(game_folder(s, key))
     if not info:
-        return None
-    version = info.get('version', '?')
-    if version not in ('?', SUPPORTED_GAME_VERSION):
-        own = lists[0].with_name(f"shader_locations_{info['id']}_{version.replace('.', '').lstrip('0')}.txt")
-        if own.is_file():
-            return own
-    return lists[0].with_name(f"shader_locations_{info['id']}.txt")
+        return ''
+    code = game_code(s, key)
+    if code is None or (info['id'], code) in SHADER_INDEXES:
+        return ''
+    return info.get('version', '?')
+
+
+def shader_locations(lists, s, key):
+    """shaders/<index> for this copy's title and game code, or None."""
+    info = game_info(game_folder(s, key))
+    name = SHADER_INDEXES.get((info['id'], game_code(s, key))) if info else None
+    return lists[0].with_name(name) if name else None
 
 
 def game_folder(s, key):
@@ -703,7 +704,7 @@ def game_environment(s, start=None):
         if lists[1].is_file():
             env['BB_KEY_LIST'] = str(lists[1])
         # Where the shaders sit in this release's files: no scan of the whole game folder on the first preparation.
-        locations = shader_locations(lists, game_info(game_folder(s, start)))
+        locations = shader_locations(lists, s, start)
         if locations and locations.is_file():
             env['BB_SHADER_LOCATIONS'] = str(locations)
         # The texture (de)tiling pipelines the game uses, built ahead (shaders/tiling_pipelines_<game>.txt).
@@ -2102,9 +2103,8 @@ class Launcher:
             if missing:
                 ready += '\n' + _('Not in this folder: ') + ', '.join(missing)
             if unsupported_version(s, start):
-                ready += '\n' + _('This port needs version {} of the game; yours is {}. Shader preparation is off '
-                                  'and some fixes may not apply: please update the game.').format(
-                    SUPPORTED_GAME_VERSION, info['version'])
+                ready += '\n' + _('Shader preparation is off for this copy of the game (version {}): the port '
+                                  'does not know where its shaders are yet.').format(info['version'])
         self.ready.configure(text=ready)
         self.update_prep_status()
         if not self.process:
@@ -2135,8 +2135,7 @@ class Launcher:
         prepared = shaders_prepared(s, s['start'])
         version = unsupported_version(s, s['start'])
         if version:
-            text, colour = _('{}: off for game version {} (the shader lists are for {}).').format(
-                title, version, SUPPORTED_GAME_VERSION), MUTED
+            text, colour = _('{}: off for this game version ({}).').format(title, version), MUTED
         elif prepared is None:
             text, colour = _('{}: no shader list for this game yet.').format(title), MUTED
         elif prepared:
@@ -2165,8 +2164,8 @@ class Launcher:
             return
         version = unsupported_version(self.current(), self.current()['start'])
         if prepare and version:
-            self.messagebox.showinfo(NAME, _('The shader lists are for version {} of the game; yours is {}. '
-                                             'Please update the game.').format(SUPPORTED_GAME_VERSION, version))
+            self.messagebox.showinfo(NAME, _('Shader preparation is not available for this copy of the game '
+                                             '(version {}).').format(version))
             return
         self.collect()
         folder = game_folder(self.app, self.app['start'])
@@ -2569,12 +2568,12 @@ def log_header(settings, start=None):
     start = start or settings.get('start')
     info = game_info(game_folder(settings, start)) if start else None
     game = f"Game: {info['id']} version {info['version']}" if info else 'Game: folder not found'
-    if info and unsupported_version(settings, start):
-        game += f' (NOT SUPPORTED: the port needs {SUPPORTED_GAME_VERSION}; shader preparation is off)'
-    elif info and info['version'] != SUPPORTED_GAME_VERSION:
+    if info:
+        code = game_code(settings, start)
         lists = shader_list(start)
-        locations = shader_locations(lists, info) if lists else None
-        game += ' (1.02 game code' + (f'; shader locations {locations.name}' if locations and locations.is_file() else '') + ')'
+        locations = shader_locations(lists, settings, start) if lists else None
+        game += f' (game code {code})' if code else ' (game code unknown)' if code == '' else ''
+        game += f'; shader locations {locations.name}' if locations else '; shader preparation off: no index for it'
     return (f'Port: {NAME} {build} in {PORT_DIR}, starting {start}\n'
             f'Folders: saves {saves}, shader cache {DATA_DIR / "user" / "cache"}\n{game}\n')
 
