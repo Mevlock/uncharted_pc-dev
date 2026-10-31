@@ -343,12 +343,14 @@ void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id 
     const Id image = ctx.OpLoad(texture.image_type, image_ptr);
     Id texel = texture.is_integer ? ctx.OpBitcast(color_type, color) : color;
     if (!texture.is_integer && BbNanGuard::BloomClampShader(ctx.info.pgm_hash)) {
-        // bbport: the bloom bright pass's output: NaN -> 0, then at most BloomClamp().
+        // bbport: the bloom bright pass's output: NaN -> 0, then 0 to BloomClamp(). Bloom is light added to the
+        // scene, so a negative value darkens it: a player's RTX 5060 (driver 621.01) got soft black blobs where the
+        // pass wrote below zero, spread by the bloom blur (U3 ch22 cistern); -limit was let through before.
         const Id zero{ctx.ConstF32(0.0f, 0.0f, 0.0f, 0.0f)};
         const float limit_value = BbNanGuard::BloomClamp();
         const Id limit{ctx.ConstF32(limit_value, limit_value, limit_value, limit_value)};
         texel = ctx.OpSelect(color_type, ctx.OpIsNan(ctx.U1[4], texel), zero, texel);
-        texel = ctx.OpFClamp(color_type, texel, ctx.OpFNegate(color_type, limit), limit);
+        texel = ctx.OpFClamp(color_type, texel, zero, limit);
         if (BbNanGuard::BloomOff()) {
             texel = zero;
         }
