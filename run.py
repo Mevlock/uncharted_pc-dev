@@ -171,6 +171,9 @@ def main():
     user_dir.mkdir(parents=True, exist_ok=True)
     # GPU caches (shaders, pipelines) beside the saves; read before main(), so set here.
     env.setdefault('BB_GPU_USER_DIR', str(user_dir))
+    # The shader cache stays beside this install even when the saves (BB_USER_DIR) are elsewhere: each version of the
+    # port keeps its own (BB_GPU_CACHE_DIR overrides).
+    env.setdefault('BB_GPU_CACHE_DIR', str((data / 'user' / 'cache').resolve()))
     env.setdefault('BB_VBLANK_HZ', '60')
     loadexec = out_root / 'loadexec.txt'
     env['BB_LOADEXEC_FILE'] = str(loadexec)

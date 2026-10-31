@@ -310,7 +310,7 @@ def shader_list(key):
 def shader_cache_dirs(s, key):
     """The game's shader cache folders (<title id>-<build>, not the dotted backups)."""
     info = game_info(game_folder(s, key))
-    root = Path(s['user_dir'] or DATA_DIR / 'user') / 'cache'
+    root = DATA_DIR / 'user' / 'cache'
     if not info or not root.is_dir():
         return []
     return [p for p in root.glob(f"{info['id']}*") if p.is_dir() and '.' not in p.name]
@@ -2144,7 +2144,7 @@ class Launcher:
     def clear_cache(self):
         if self.process:
             return
-        shutil.rmtree(Path(self.app['user_dir'] or DATA_DIR / 'user') / 'cache', ignore_errors=True)
+        shutil.rmtree(DATA_DIR / 'user' / 'cache', ignore_errors=True)
         self.messagebox.showinfo(NAME, _('Shader cache cleared. The next start stutters for a while as it is rebuilt.'))
 
     def shortcut(self):

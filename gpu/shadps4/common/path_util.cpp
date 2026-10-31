@@ -129,7 +129,15 @@ static auto UserPaths = [] {
     create_path(PathType::MetaDataDir, user_dir / METADATA_DIR);
     create_path(PathType::CustomTrophy, user_dir / CUSTOM_TROPHY);
     create_path(PathType::CustomConfigs, user_dir / CUSTOM_CONFIGS);
-    create_path(PathType::CacheDir, user_dir / CACHE_DIR);
+    // bbport: the shader and pipeline caches stay with the install (BB_GPU_CACHE_DIR, set by run.py) even when the
+    // saves are elsewhere: a cache from another version of the port is rebuilt anyway, and versions side by side
+    // would keep throwing each other's away.
+    if (const char* cache_dir = std::getenv("BB_GPU_CACHE_DIR"); cache_dir && *cache_dir) {
+        std::filesystem::create_directories(cache_dir);
+        paths.insert_or_assign(PathType::CacheDir, fs::path(cache_dir));
+    } else {
+        create_path(PathType::CacheDir, user_dir / CACHE_DIR);
+    }
     create_path(PathType::FontsDir, user_dir / FONTS_DIR);
     create_path(PathType::TrophyDir, user_dir / TROPHY_DIR);
     create_path(PathType::HomeDir, user_dir / HOME_DIR);
