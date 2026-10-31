@@ -342,41 +342,64 @@ KNOWN_102_EXECUTABLES = {
     '783e53a7ca38aaa5da74bbd32b00e1891020f86a', 'd81e699fac808ebd4a1689c108b9a75571c3d62b',
     '5c6e20a2296de593635c585c941e2455b10d7c5f', '6b66880c4ad373915f939af62194a71d3b56800d',
 }
+# SHA-1 of the US 1.00 executables (CUSA02320: eboot, Uncharted 2, Uncharted 3). Their shaders are the 1.02 ones at
+# other places in the game files: the preparation reads shaders/shader_locations_CUSA02320_100.txt instead.
+KNOWN_100_EXECUTABLES = {
+    '6c3827681cf75c3944bd1866f1dbffb6b2dc4083', 'a4c672b8e5bfc0abe092de355d74c041c9f30851',
+    'cc13e94f86ed9e9a714d8e3d11e7d6a53a4f9e0a',
+}
 _executable_hashes = {}
 
 
-def known_102_executable(path):
-    """The executable is one of the 1.02 builds (hashed once per file size and date)."""
+def executable_hash(path):
+    """SHA-1 of an executable (hashed once per file size and date), or '' when it cannot be read."""
     import hashlib
     try:
         stat = path.stat()
     except OSError:
-        return False
+        return ''
     key = (str(path), stat.st_size, stat.st_mtime)
     if key not in _executable_hashes:
         digest = hashlib.sha1()
-        with open(path, 'rb') as f:
-            for block in iter(lambda: f.read(1 << 20), b''):
-                digest.update(block)
+        try:
+            with open(path, 'rb') as f:
+                for block in iter(lambda: f.read(1 << 20), b''):
+                    digest.update(block)
+        except OSError:
+            return ''
         _executable_hashes[key] = digest.hexdigest()
-    return _executable_hashes[key] in KNOWN_102_EXECUTABLES
+    return _executable_hashes[key]
+
+
+def game_executable(s, key):
+    """The game's executable (eboot.bin for a game dumped on its own), or None."""
+    folder = game_folder(s, key)
+    exe = Path(folder) / next(e for k, _t, _s, e in GAMES if k == key)
+    if not exe.is_file():
+        exe = Path(folder) / 'eboot.bin'
+    return exe if exe.is_file() else None
+
+
+def known_100_game(s, key):
+    """The game is the US 1.00 build, whose shaders the port has locations for."""
+    exe = game_executable(s, key)
+    return bool(exe) and executable_hash(exe) in KNOWN_100_EXECUTABLES
 
 
 def unsupported_version(s, key):
-    """The game's version when it is not the one the port is made for (1.00), else ''. The game patches and the
-    shader lists are made for 1.02; on another version the shader preparation is skipped (its shaders are not where
-    the shipped locations say, so the game would read all its files first: many minutes on a hard drive)."""
-    folder = game_folder(s, key)
-    info = game_info(folder)
+    """The game's version when the shader preparation cannot be used on it, else ''. The game patches and the shader
+    lists are made for 1.02 (US 1.00 has its own shader locations); on another version the shader preparation is
+    skipped (its shaders are not where the shipped locations say, so the game would read all its files first: many
+    minutes on a hard drive)."""
+    info = game_info(game_folder(s, key))
     version = (info or {}).get('version', '?')
     if version in ('?', SUPPORTED_GAME_VERSION):
         return ''
-    exe = Path(folder) / next(e for k, _t, _s, e in GAMES if k == key)
-    if not exe.is_file():
-        exe = Path(folder) / 'eboot.bin'   # a game dumped on its own
-    if not exe.is_file():
+    exe = game_executable(s, key)
+    if not exe:
         return ''
-    return '' if known_102_executable(exe) else version
+    digest = executable_hash(exe)
+    return '' if digest in KNOWN_102_EXECUTABLES or digest in KNOWN_100_EXECUTABLES else version
 
 
 def game_folder(s, key):
@@ -659,7 +682,8 @@ def game_environment(s, start=None):
         # Where the shaders sit in this release's files (shaders/shader_locations_<title id>.txt): no scan of the
         # whole game folder on the first preparation.
         info = game_info(game_folder(s, start))
-        locations = lists[0].with_name(f"shader_locations_{info['id']}.txt") if info else None
+        build = '_100' if known_100_game(s, start) else ''
+        locations = lists[0].with_name(f"shader_locations_{info['id']}{build}.txt") if info else None
         if locations and locations.is_file():
             env['BB_SHADER_LOCATIONS'] = str(locations)
         # The texture (de)tiling pipelines the game uses, built ahead (shaders/tiling_pipelines_<game>.txt).
@@ -1896,6 +1920,9 @@ class Launcher:
                 ready += '\n' + _('This port needs version {} of the game; yours is {}. Shader preparation is off '
                                   'and some fixes may not apply: please update the game.').format(
                     SUPPORTED_GAME_VERSION, info['version'])
+            elif known_100_game(s, start):
+                ready += '\n' + _('This port is made for version {} of the game; yours is 1.00. Some fixes may not '
+                                  'apply: please update the game.').format(SUPPORTED_GAME_VERSION)
         self.ready.configure(text=ready)
         self.update_prep_status()
         if not self.process:
@@ -2362,6 +2389,8 @@ def log_header(settings, start=None):
     game = f"Game: {info['id']} version {info['version']}" if info else 'Game: folder not found'
     if info and unsupported_version(settings, start):
         game += f' (NOT SUPPORTED: the port needs {SUPPORTED_GAME_VERSION}; shader preparation is off)'
+    elif info and known_100_game(settings, start):
+        game += ' (US 1.00 executables: 1.00 shader locations)'
     elif info and info['version'] != SUPPORTED_GAME_VERSION:
         game += ' (1.02 executables)'
     return (f'Port: {NAME} {build} in {PORT_DIR}, starting {start}\n'
