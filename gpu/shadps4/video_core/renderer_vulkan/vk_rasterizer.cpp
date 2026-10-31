@@ -2871,9 +2871,10 @@ void Rasterizer::PrintPipeStats() {
         std::printf("\n  dispatches: graphics queue %.0f/s, compute queues %.0f/s", gfx / seconds,
                     asc / seconds);
     }
-    std::printf("\n  causal sites: compute dispatches %.0f/s, graphics draws %.0f/s, stage B packets %.0f/s",
+    std::printf("\n  causal sites: compute dispatches %.0f/s, graphics draws %.0f/s, stage B packets %.0f/s, "
+                "recorded commands %.0f/s",
                 BbCausal::g_hits[0].exchange(0) / seconds, BbCausal::g_hits[1].exchange(0) / seconds,
-                BbCausal::g_hits[2].exchange(0) / seconds);
+                BbCausal::g_hits[2].exchange(0) / seconds, BbCausal::g_hits[3].exchange(0) / seconds);
     if (BindMemoStats()) {
         const u64 clean = g_bind_memo_counts[0].exchange(0), dirty = g_bind_memo_counts[1].exchange(0),
                   fresh = g_bind_memo_counts[2].exchange(0);

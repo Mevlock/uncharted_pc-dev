@@ -1,6 +1,7 @@
 // bbport diagnosis: causal profiling. A switch adds a busy wait of N ns to one kind of work; how much the frame rate
 // drops shows how much making that work faster would gain (BB_SLOW_ACOMPUTE_NS: stage A, each async compute
-// dispatch; BB_SLOW_AGFX_NS: stage A, each graphics draw; BB_SLOW_B_NS: stage B, each packet).
+// dispatch; BB_SLOW_AGFX_NS: stage A, each graphics draw; BB_SLOW_B_NS: stage B, each packet; BB_SLOW_REC_NS:
+// the Vulkan recorder, each recorded command).
 #pragma once
 #include <atomic>
 #include <chrono>
@@ -27,9 +28,10 @@ inline std::uint64_t Ticks(const char* name) {
     return ticks;
 }
 
-/// Items that reached each site (0 compute dispatch, 1 graphics draw, 2 stage B packet), with or without a delay;
+/// Items that reached each site (0 compute dispatch, 1 graphics draw, 2 stage B packet, 3 recorded command), with or
+/// without a delay;
 /// printed (and reset) with BB_FRAME_STATS.
-inline std::atomic<std::uint64_t> g_hits[3];
+inline std::atomic<std::uint64_t> g_hits[4];
 
 inline void Count(int site) {
     g_hits[site].fetch_add(1, std::memory_order_relaxed);
@@ -46,6 +48,10 @@ inline std::uint64_t SlowAGfx() {
 }
 inline std::uint64_t SlowB() {
     static const std::uint64_t ticks = Ticks("BB_SLOW_B_NS");
+    return ticks;
+}
+inline std::uint64_t SlowRec() {
+    static const std::uint64_t ticks = Ticks("BB_SLOW_REC_NS");
     return ticks;
 }
 

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "bbport_causal.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -632,6 +633,8 @@ public:
     void Execute(vk::CommandBuffer cmdbuf) {
         for (CommandBase* command = first; command;) {
             CommandBase* const next = command->next;
+            BbCausal::Spin(BbCausal::SlowRec());
+            BbCausal::Count(3);
             command->Execute(cmdbuf);
             command->~CommandBase();
             command = next;
