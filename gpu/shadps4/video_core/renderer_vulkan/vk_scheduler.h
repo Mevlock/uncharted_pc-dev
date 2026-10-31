@@ -27,7 +27,6 @@
 #include "video_core/amdgpu/regs_primitive.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
-#include "common/srw_shared_mutex.h"
 
 namespace tracy {
 class VkCtxScope;
@@ -955,7 +954,7 @@ public:
         priority_pending_ops_cv.notify_one();
     }
 
-    static Common::SrwMutex submit_mutex;
+    static std::mutex submit_mutex;
 
 private:
     /// `invalidate_dynamic` false on the recording thread (the dynamic state is the caller's).
@@ -995,7 +994,7 @@ private:
     u32 pending_polls = 0; // bbport
     std::atomic<u32> num_pending_ops{0}; ///< bbport: pending_ops.size(), checked without the lock
     std::queue<PendingOp> priority_pending_ops;
-    Common::SrwMutex priority_pending_ops_mutex;
+    std::mutex priority_pending_ops_mutex;
     std::condition_variable_any priority_pending_ops_cv;
     std::jthread priority_pending_ops_thread;
     RenderState render_state;
@@ -1003,7 +1002,7 @@ private:
     // bbport: threaded recording
     std::unique_ptr<RecordChunk> record_chunk;
     std::vector<std::unique_ptr<RecordChunk>> full_chunks;
-    Common::SrwMutex recorder_mutex;
+    std::mutex recorder_mutex;
     std::condition_variable_any recorder_cv;
     std::condition_variable_any recorder_idle_cv;
     std::deque<std::unique_ptr<RecordChunk>> recorder_queue;

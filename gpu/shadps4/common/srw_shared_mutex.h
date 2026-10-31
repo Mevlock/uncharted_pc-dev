@@ -4,7 +4,6 @@
 #pragma once
 
 #include <cstdlib>
-#include <mutex>
 #include <shared_mutex>
 #ifdef _WIN32
 #include <windows.h>
@@ -90,51 +89,5 @@ private:
 };
 
 using SrwSharedMutex = SrwSharedMutexT<0>;
-
-/// bbport (BB_SRW_MUTEX=1, measurement): an exclusive mutex over a Windows slim reader/writer lock for the
-/// hot per-fence and per-submission locks (std::mutex here is winpthreads': heavier to take and release).
-/// Same rules as std::mutex: not recursive. Chosen once per process.
-class SrwMutex {
-public:
-    void lock() {
-#ifdef _WIN32
-        if (On()) {
-            AcquireSRWLockExclusive(&srw);
-            return;
-        }
-#endif
-        fallback.lock();
-    }
-    bool try_lock() {
-#ifdef _WIN32
-        if (On()) {
-            return TryAcquireSRWLockExclusive(&srw) != 0;
-        }
-#endif
-        return fallback.try_lock();
-    }
-    void unlock() {
-#ifdef _WIN32
-        if (On()) {
-            ReleaseSRWLockExclusive(&srw);
-            return;
-        }
-#endif
-        fallback.unlock();
-    }
-
-private:
-    static bool On() {
-        static const bool on = [] {
-            const char* env = std::getenv("BB_SRW_MUTEX");
-            return env && env[0] == '1';
-        }();
-        return on;
-    }
-#ifdef _WIN32
-    SRWLOCK srw = SRWLOCK_INIT;
-#endif
-    std::mutex fallback;
-};
 
 } // namespace Common

@@ -391,8 +391,8 @@ private:
         u64 seq;
         std::function<void()> fn;
     };
-    Common::SrwMutex landing_mutex;
-    std::condition_variable_any landing_cv, landing_done_cv;
+    std::mutex landing_mutex;
+    std::condition_variable landing_cv, landing_done_cv;
     std::deque<std::shared_ptr<Landing>> landing_queue; ///< registered, not yet landed
     std::deque<GatedLabel> gated_labels;                 ///< labels waiting for a landing
     u64 landing_registered_seq{0}, landing_done_seq{0};

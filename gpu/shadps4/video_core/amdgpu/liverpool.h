@@ -24,7 +24,6 @@
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/regs.h"
 #include "bbport_toggles.h"
-#include "common/srw_shared_mutex.h"
 
 namespace Vulkan {
 class Rasterizer;
@@ -345,7 +344,7 @@ private:
     std::atomic<bool> work_retired{true};
     std::atomic<u32> num_commands{};
     std::atomic<bool> submit_done{};
-    Common::SrwMutex submit_mutex; ///< BB_SRW_MUTEX=1: an SRW lock
+    std::mutex submit_mutex;
     std::condition_variable_any submit_cv;
     std::queue<Common::UniqueFunction<void>> command_queue{};
     std::queue<Common::UniqueFunction<void>> ordered_queue{}; ///< SendOrderedCommand
