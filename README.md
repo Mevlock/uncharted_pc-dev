@@ -102,3 +102,5 @@ sleep, the render target heap move, chapter unlocks), [G3545](https://github.com
 
 Also used: FSR-Vulkan and the AMD FidelityFX SDK, NVIDIA DLSS, Intel XeSS, Videodec2 and the DLSS bridge from
 IFreemz's shadPS4 Bloodborne build.
+
+The launcher's pictures (the game scenes, the map banner, the compass emblem and the icon) are original artwork drawn by code (packaging/windows/make_uncharted_art.py); no official art or game images are included.
