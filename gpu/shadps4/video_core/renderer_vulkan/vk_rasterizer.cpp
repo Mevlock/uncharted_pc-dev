@@ -1243,7 +1243,10 @@ static bool PendingBigList() {
 void Rasterizer::PrunePendingWrites() {
     // Stage B's position is a cache line it writes for every packet: read it now and then. An
     // older value only keeps entries a little longer.
-    if ((pending_refresh++ & 15) == 0 || pending_first == pending_writes.size()) {
+    // (With only big writes pending the throttle holds too: they are checked against
+    // pending_done, and Reached() decides a hit.)
+    if ((pending_refresh++ & 15) == 0 ||
+        (pending_first == pending_writes.size() && pending_big_writes.empty())) {
         pending_done = draw_pipe->Consumed();
     }
     // Positions grow in note order (a merge below only raises a recent entry's: it then leaves
@@ -1273,6 +1276,10 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
         ++pending_stats[0];
         const VAddr first_block = address >> 16, last_block = (end - 1) >> 16;
         if (last_block - first_block >= 32 && PendingBigList()) {
+            // Done entries go here too: with few overlap checks between notes the list grew.
+            std::erase_if(pending_big_writes, [&](const PendingWrite& write) {
+                return write.position <= pending_done;
+            });
             for (auto& write : pending_big_writes) {
                 if (address <= write.end && write.begin <= end) {
                     write.begin = std::min(write.begin, address);
@@ -5476,8 +5483,8 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     }
 
     // Buffers must have the same size and each thread of the dispatch must copy 1 dword of data
-    const AmdGpu::Buffer buf0 = desc0.GetSharp(info);
-    const AmdGpu::Buffer buf1 = desc1.GetSharp(info);
+    const AmdGpu::Buffer buf0 = ComputeSharp(info, 0);
+    const AmdGpu::Buffer buf1 = ComputeSharp(info, 1);
     if (buf0.GetSize() != buf1.GetSize() || cs_pgm.dim_x != (buf0.GetSize() / 256)) {
         return false;
     }
@@ -5529,8 +5536,8 @@ bool Rasterizer::IsComputeImageClear(const Pipeline* pipeline) {
     }
 
     // First buffer must have size of vec4 and second the size of a single layer
-    const AmdGpu::Buffer buf0 = desc0.GetSharp(info);
-    const AmdGpu::Buffer buf1 = desc1.GetSharp(info);
+    const AmdGpu::Buffer buf0 = ComputeSharp(info, 0);
+    const AmdGpu::Buffer buf1 = ComputeSharp(info, 1);
     const u32 buf1_bpp = AmdGpu::NumBitsPerBlock(buf1.GetDataFmt());
     if (buf0.GetSize() != 16 || (cs_pgm.dim_x * 128ULL * (buf1_bpp / 8)) != buf1.GetSize()) {
         return false;

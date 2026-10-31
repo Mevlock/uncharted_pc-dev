@@ -283,10 +283,13 @@ public:
         meta_filter.set(MetaFilterBit(address));
     }
     void RebuildMetaFilter() {
-        meta_filter.reset();
+        // Built aside and copied in: a reader on another thread (the texture helper) sees each
+        // word old or new, never cleared for a surface still registered.
+        std::bitset<4096> rebuilt;
         for (const auto& [address, meta] : surface_metas) {
-            NoteMeta(address);
+            rebuilt.set(MetaFilterBit(address));
         }
+        meta_filter = rebuilt;
     }
 
     /// Returns meta type if the specified address is a metadata surface.
