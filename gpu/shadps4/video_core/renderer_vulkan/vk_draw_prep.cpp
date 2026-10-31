@@ -58,10 +58,11 @@ u32 DefaultWorkerCount() {
     if (const char* env = std::getenv("BB_PREP_WORKERS")) {
         return static_cast<u32>(std::clamp(std::atoi(env), 0, 16));
     }
-    // A quarter of the hardware threads (16-thread desktop 4, Steam Deck 2). Half was slower: U3's market
-    // route, warm cache, ABBA 2026-10-31: 16 threads 8 -> 4 workers +3.8% mean, +4.3% worst window; 8 threads
-    // at 60% clock 4 -> 2 workers +4.5% / +3.6% (the workers take cores from the game's own threads).
-    return std::clamp<u32>(BbThreads::Available() / 4, 1, 8);
+    // At most 4 (half the hardware threads below 8). More took cores from the game's own threads: U3's market
+    // route, ABBA 2026-10-31, 16 threads 8 -> 4 workers +3.8% mean / +4.3% worst window warm, and on a cold
+    // cache fewer hitches. Fewer than 4 was worse cold: 8 threads at 60% clock, 4 -> 2 workers +4.5% warm but
+    // cold 57% more compiles in play, worst frame 98 -> 116 ms, -6% fps.
+    return std::clamp<u32>(BbThreads::Available() / 2, 1, 4);
 }
 
 /// bbport: the 64 KiB chunks of flattened user data are reused. Each was new (and zero-filled) on a worker and freed
