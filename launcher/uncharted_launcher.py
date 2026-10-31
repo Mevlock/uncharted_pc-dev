@@ -18,6 +18,7 @@ import queue
 import re
 import runpy
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -334,25 +335,27 @@ def shaders_prepared(s, key):
 SUPPORTED_GAME_VERSION = '01.02'  # param.sfo APP_VER of the collection the port is made for
 
 
-# SHA-1 of the 1.02 executables (EU CUSA02343; US CUSA02320 = EU/Russian CUSA02344). Some 1.02 dumps keep a
-# param.sfo saying 01.00 (CUSA02344 here), so a version other than 01.02 only counts when the executable is not one
-# of these.
+# SHA-1 of the game code the port is made for: the segments an executable loads (eboot, Uncharted 2, Uncharted 3),
+# not its signature header or the metadata a dumper adds at the end. Two builds: the EU 1.02 one (CUSA02343), which
+# is also US 1.00 (CUSA02320 before its update), and the US 1.02 one (CUSA02320 = EU/Russian CUSA02344). A param.sfo
+# version only counts when the code is not one of these (some 1.02 dumps keep a param.sfo saying 01.00).
+KNOWN_GAME_CODE = {
+    'cd749c2f217a842200a9867f7c8af0973c990a74', '1616597c9cf8b4b6d50d7cbf3aeb3677efba6587',
+    '1d949b215bb036fe685511aca4f560d63dd50442', 'fd024eaeb58c4b778613b54a9e69f6fbc8615a68',
+    'de8ce6e778f39b3c2914fd71f1df7117282f62e2', 'fed1f511d51613df108101b8a09397beebc70f0c',
+}
+# SHA-1 of whole 1.02 executables, for files that are not signed executables (no segments to hash).
 KNOWN_102_EXECUTABLES = {
     '855ac7a96de3e21587fd01e458baeb53c488fa71', 'c8b4c0c0c2485246c5373e7445af12d9c4f639a7',
     '783e53a7ca38aaa5da74bbd32b00e1891020f86a', 'd81e699fac808ebd4a1689c108b9a75571c3d62b',
     '5c6e20a2296de593635c585c941e2455b10d7c5f', '6b66880c4ad373915f939af62194a71d3b56800d',
 }
-# SHA-1 of the US 1.00 executables (CUSA02320: eboot, Uncharted 2, Uncharted 3). Their shaders are the 1.02 ones at
-# other places in the game files: the preparation reads shaders/shader_locations_CUSA02320_100.txt instead.
-KNOWN_100_EXECUTABLES = {
-    '6c3827681cf75c3944bd1866f1dbffb6b2dc4083', 'a4c672b8e5bfc0abe092de355d74c041c9f30851',
-    'cc13e94f86ed9e9a714d8e3d11e7d6a53a4f9e0a',
-}
 _executable_hashes = {}
 
 
 def executable_hash(path):
-    """SHA-1 of an executable (hashed once per file size and date), or '' when it cannot be read."""
+    """SHA-1 of an executable's game code (hashed once per file size and date): its loaded segments when it is a
+    signed executable, else the whole file; '' when it cannot be read."""
     import hashlib
     try:
         stat = path.stat()
@@ -363,9 +366,19 @@ def executable_hash(path):
         digest = hashlib.sha1()
         try:
             with open(path, 'rb') as f:
-                for block in iter(lambda: f.read(1 << 20), b''):
-                    digest.update(block)
-        except OSError:
+                head = f.read(0x20)
+                if head[:4] == b'\x4f\x15\x3d\x1d' and len(head) == 0x20:
+                    count, = struct.unpack_from('<H', head, 0x18)
+                    entries = [struct.unpack('<QQQQ', f.read(32)) for _ in range(count)]
+                    for props, offset, size, _memsz in entries:
+                        if props & 0x800:   # a segment with data in the file
+                            f.seek(offset)
+                            digest.update(f.read(size))
+                else:
+                    f.seek(0)
+                    for block in iter(lambda: f.read(1 << 20), b''):
+                        digest.update(block)
+        except (OSError, struct.error):
             return ''
         _executable_hashes[key] = digest.hexdigest()
     return _executable_hashes[key]
@@ -380,17 +393,10 @@ def game_executable(s, key):
     return exe if exe.is_file() else None
 
 
-def known_100_game(s, key):
-    """The game is the US 1.00 build, whose shaders the port has locations for."""
-    exe = game_executable(s, key)
-    return bool(exe) and executable_hash(exe) in KNOWN_100_EXECUTABLES
-
-
 def unsupported_version(s, key):
-    """The game's version when the shader preparation cannot be used on it, else ''. The game patches and the shader
-    lists are made for 1.02 (US 1.00 has its own shader locations); on another version the shader preparation is
-    skipped (its shaders are not where the shipped locations say, so the game would read all its files first: many
-    minutes on a hard drive)."""
+    """The game's version when the port is not made for its code (1.00 EU, say), else ''. The game patches and the
+    shader lists are made for the 1.02 code; on other code the shader preparation is skipped (its shaders are not
+    where the shipped locations say, so the game would read all its files first: many minutes on a hard drive)."""
     info = game_info(game_folder(s, key))
     version = (info or {}).get('version', '?')
     if version in ('?', SUPPORTED_GAME_VERSION):
@@ -399,7 +405,21 @@ def unsupported_version(s, key):
     if not exe:
         return ''
     digest = executable_hash(exe)
-    return '' if digest in KNOWN_102_EXECUTABLES or digest in KNOWN_100_EXECUTABLES else version
+    return '' if digest in KNOWN_GAME_CODE or digest in KNOWN_102_EXECUTABLES else version
+
+
+def shader_locations(lists, info):
+    """Where the shaders sit in this release's files: shaders/shader_locations_<title id>.txt, or
+    shader_locations_<title id>_<version>.txt for game data of another version (US 1.00: the 1.02 code, other data),
+    or None."""
+    if not info:
+        return None
+    version = info.get('version', '?')
+    if version not in ('?', SUPPORTED_GAME_VERSION):
+        own = lists[0].with_name(f"shader_locations_{info['id']}_{version.replace('.', '').lstrip('0')}.txt")
+        if own.is_file():
+            return own
+    return lists[0].with_name(f"shader_locations_{info['id']}.txt")
 
 
 def game_folder(s, key):
@@ -679,11 +699,8 @@ def game_environment(s, start=None):
         env['BB_VARIANT_SHIP'] = str(lists[0])
         if lists[1].is_file():
             env['BB_KEY_LIST'] = str(lists[1])
-        # Where the shaders sit in this release's files (shaders/shader_locations_<title id>.txt): no scan of the
-        # whole game folder on the first preparation.
-        info = game_info(game_folder(s, start))
-        build = '_100' if known_100_game(s, start) else ''
-        locations = lists[0].with_name(f"shader_locations_{info['id']}{build}.txt") if info else None
+        # Where the shaders sit in this release's files: no scan of the whole game folder on the first preparation.
+        locations = shader_locations(lists, game_info(game_folder(s, start)))
         if locations and locations.is_file():
             env['BB_SHADER_LOCATIONS'] = str(locations)
         # The texture (de)tiling pipelines the game uses, built ahead (shaders/tiling_pipelines_<game>.txt).
@@ -1920,9 +1937,6 @@ class Launcher:
                 ready += '\n' + _('This port needs version {} of the game; yours is {}. Shader preparation is off '
                                   'and some fixes may not apply: please update the game.').format(
                     SUPPORTED_GAME_VERSION, info['version'])
-            elif known_100_game(s, start):
-                ready += '\n' + _('This port is made for version {} of the game; yours is 1.00. Some fixes may not '
-                                  'apply: please update the game.').format(SUPPORTED_GAME_VERSION)
         self.ready.configure(text=ready)
         self.update_prep_status()
         if not self.process:
@@ -2389,10 +2403,10 @@ def log_header(settings, start=None):
     game = f"Game: {info['id']} version {info['version']}" if info else 'Game: folder not found'
     if info and unsupported_version(settings, start):
         game += f' (NOT SUPPORTED: the port needs {SUPPORTED_GAME_VERSION}; shader preparation is off)'
-    elif info and known_100_game(settings, start):
-        game += ' (US 1.00 executables: 1.00 shader locations)'
     elif info and info['version'] != SUPPORTED_GAME_VERSION:
-        game += ' (1.02 executables)'
+        lists = shader_list(start)
+        locations = shader_locations(lists, info) if lists else None
+        game += ' (1.02 game code' + (f'; shader locations {locations.name}' if locations and locations.is_file() else '') + ')'
     return (f'Port: {NAME} {build} in {PORT_DIR}, starting {start}\n'
             f'Folders: saves {saves}, shader cache {DATA_DIR / "user" / "cache"}\n{game}\n')
 
