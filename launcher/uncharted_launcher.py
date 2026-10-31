@@ -39,7 +39,7 @@ CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.6.31'  # fork: upstream 0.3.6 + this fork's changes
+VERSION = '0.3.6.32'  # fork: upstream 0.3.6 + this fork's changes
 # Fork: updates come from this fork's own releases (the latest one; -pre tags are published as normal releases).
 RELEASES_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases/latest'
 RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
@@ -2293,7 +2293,9 @@ def log_header(settings, start=None):
     except OSError:
         commit = ''
     build = f'{VERSION} ({commit})' if commit else VERSION
-    return f'Port: {NAME} {build} in {PORT_DIR}, starting {start or settings.get("start")}\n'
+    saves = Path(settings.get('user_dir') or DATA_DIR / 'user')
+    return (f'Port: {NAME} {build} in {PORT_DIR}, starting {start or settings.get("start")}\n'
+            f'Folders: saves {saves}, shader cache {DATA_DIR / "user" / "cache"}\n')
 
 
 def open_run_log(log_dir, keep=5):
