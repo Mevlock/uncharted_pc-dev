@@ -200,7 +200,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'pad_invert_y': False, 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
-                'trophy_game': 'u1',
+                'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')}}
 
 
@@ -758,6 +758,10 @@ class Launcher:
         self.ui_calls = queue.Queue()
         self.banner_key = self.banner_scaled = self.cover_image = None
         self.card_hot = None
+        try:
+            self.configure_art()
+        except Exception:
+            pass
         self.info, self.available = None, {}
         self.update_box = None
         root.title(f'{NAME} — The Nathan Drake Collection for Windows · by {AUTHOR}')
@@ -1206,6 +1210,9 @@ class Launcher:
         self.hero = tk.Canvas(page, height=self.px(260), bg=SURFACE, highlightthickness=0, bd=0)
         self.hero.pack(fill='x')
         self.hero.bind('<Configure>', self._sync_hero_height)
+        self.hero.bind('<Button-1>', lambda _e: self.edit_launcher_art(
+            'art_banner', _('Collection banner'), (1600, 450), 'banner'))
+        self.hero.configure(cursor='hand2')
         shell = tk.Frame(page, bg=SURFACE)
         shell.pack(fill='both', expand=True, padx=self.px(22), pady=(self.px(6), self.px(10)))
         head = tk.Frame(shell, bg=SURFACE)
@@ -1305,6 +1312,15 @@ class Launcher:
             card.create_image(x, 0, image=image, anchor='nw')
         else:
             card.create_rectangle(0, 0, w, h, fill=CARD, outline=LINE)
+        if hot:
+            label = _('Change image')
+            box_w = max(self.px(108), len(label) * self.px(7))
+            card.create_rectangle(w - box_w - self.px(12), self.px(12), w - self.px(12), self.px(42),
+                                  fill='#120d09', outline=GOLD_DIM, tags='edit_art')
+            card.create_text(w - box_w // 2 - self.px(12), self.px(27), text=label, fill=TEXT,
+                             font=self.font_ui_sm, tags='edit_art')
+            card.tag_bind('edit_art', '<Button-1>', lambda _e, k=key: self.edit_launcher_art(
+                f'art_{k}', _('Change image'), (600, 900), k))
 
     def _sync_hero_height(self, _event=None):
         """Keep the header at the banner's 16:9 aspect ratio."""
@@ -1323,7 +1339,7 @@ class Launcher:
         start = self.var('start').get()
         title, subtitle = next((t, sub) for k, t, sub, _e in GAMES if k == start)
         game_dir = game_folder(self.current(), start)
-        key = (w, h, start, game_dir)
+        key = (w, h, start, game_dir, self.app.get('art_banner', ''))
         if self.banner_key != key:
             self.banner_key = key
             # The collection banner (original art that comes with the port), else the scene.
@@ -1339,6 +1355,139 @@ class Launcher:
                       font=self.font_brand_sm)
         c.create_text(w - self.px(24), h - self.px(14), text=f'{_(title)}  ·  {_(subtitle)}',
                       anchor='se', fill='#f8eedb', font=self.font_brand_md)
+        c.create_text(w - self.px(24), self.px(18), text=_('Change image'), anchor='ne', fill='#d6c9ae',
+                      font=self.font_ui_sm)
+
+    def configure_art(self):
+        import uncharted_art
+        crops = self.app.get('art_crops', {})
+        uncharted_art.set_custom_art({
+            'collection_banner.jpg': self.app.get('art_banner', ''),
+            'u1.jpg': self.app.get('art_u1', ''),
+            'u2.jpg': self.app.get('art_u2', ''),
+            'u3.jpg': self.app.get('art_u3', ''),
+        }, {
+            'collection_banner.jpg': crops.get('banner', {}),
+            'u1.jpg': crops.get('u1', {}),
+            'u2.jpg': crops.get('u2', {}),
+            'u3.jpg': crops.get('u3', {}),
+        })
+
+    def image_path(self, title, current=''):
+        """Choose and validate a local image."""
+        chosen = self.filedialog.askopenfilename(
+            title=title, initialdir=str(Path(current).parent) if current else str(PORT_DIR),
+            filetypes=[(_('Image files'), '*.png *.jpg *.jpeg *.webp'), (_('All files'), '*.*')])
+        if not chosen:
+            return ''
+        try:
+            from PIL import Image
+            with Image.open(chosen) as image:
+                image.verify()
+        except (OSError, ValueError) as error:
+            self.messagebox.showerror(NAME, _('This image could not be opened: {}').format(error))
+            return ''
+        return str(Path(chosen))
+
+    def edit_art(self, key, title, size, crop_key):
+        """Preview, position and save one local image without copying it into the port."""
+        from PIL import Image, ImageTk
+        import uncharted_art
+
+        window = self.tk.Toplevel(self.root)
+        window.title(title)
+        window.configure(bg=PANEL)
+        window.transient(self.root)
+        window.grab_set()
+        window.resizable(False, False)
+        path = self.tk.StringVar(value=self.app.get(key, ''))
+        saved = self.app.setdefault('art_crops', {}).get(crop_key, {})
+        result = {'value': None}
+        zoom = self.tk.DoubleVar(value=float(saved.get('zoom', 1.0)))
+        focus_x = self.tk.DoubleVar(value=float(saved.get('x', 0.5)))
+        focus_y = self.tk.DoubleVar(value=float(saved.get('y', 0.5)))
+        preview_w = self.px(560)
+        preview_h = max(self.px(180), round(preview_w * size[1] / size[0]))
+        if preview_h > self.px(390):
+            preview_h = self.px(390)
+            preview_w = round(preview_h * size[0] / size[1])
+        shell = self.tk.Frame(window, bg=PANEL)
+        shell.pack(padx=self.px(24), pady=self.px(22))
+        self.tk.Label(shell, text=title, bg=PANEL, fg=TEXT, font=self.font_title).pack(anchor='w')
+        self.tk.Label(shell, text=_('Click the picture or Choose image; Restore goes back to the original.'),
+                      bg=PANEL, fg=MUTED, font=self.font_ui).pack(anchor='w', pady=(2, self.px(12)))
+        canvas = self.tk.Canvas(shell, width=preview_w, height=preview_h, bg=BG, highlightthickness=2,
+                                highlightbackground=GOLD_DIM, bd=0, cursor='hand2')
+        canvas.pack()
+        preview = {'photo': None}
+
+        def redraw(*_args):
+            canvas.delete('all')
+            try:
+                with Image.open(path.get()) as source:
+                    crop = {'zoom': zoom.get(), 'x': focus_x.get(), 'y': focus_y.get()}
+                    image = uncharted_art.crop_image(source.convert('RGB'), (preview_w, preview_h), crop)
+                preview['photo'] = ImageTk.PhotoImage(image)
+                canvas.create_image(0, 0, image=preview['photo'], anchor='nw')
+            except (OSError, ValueError, self.tk.TclError):
+                preview['photo'] = None
+                canvas.create_text(preview_w // 2, preview_h // 2, text=_('Original picture'), fill=MUTED,
+                                   font=self.font_ui_md)
+            canvas.create_rectangle(1, 1, preview_w - 2, preview_h - 2, outline=GOLD, width=2)
+
+        def choose():
+            chosen = self.image_path(title, path.get())
+            if chosen:
+                path.set(chosen)
+
+        controls = self.tk.Frame(shell, bg=PANEL)
+        controls.pack(fill='x', pady=(self.px(14), 0))
+        for row, (label, variable, start, end, step) in enumerate((
+                (_('Zoom'), zoom, 1.0, 3.0, 0.01), (_('Horizontal position'), focus_x, 0.0, 1.0, 0.01),
+                (_('Vertical position'), focus_y, 0.0, 1.0, 0.01))):
+            self.tk.Label(controls, text=label, bg=PANEL, fg=TEXT, font=self.font_ui,
+                          width=20, anchor='w').grid(row=row, column=0, sticky='w', pady=2)
+            self.tk.Scale(controls, variable=variable, from_=start, to=end, resolution=step,
+                          orient='horizontal', showvalue=False, length=self.px(380), bg=PANEL,
+                          fg=TEXT, troughcolor=CARD_HI, activebackground=GOLD, highlightthickness=0,
+                          command=redraw).grid(row=row, column=1, sticky='ew', pady=2)
+        buttons = self.tk.Frame(shell, bg=PANEL)
+        buttons.pack(fill='x', pady=(self.px(16), 0))
+        self.pill(buttons, _('Choose image'), choose, background=PANEL).pack(side='left')
+
+        def restore():
+            path.set('')
+            zoom.set(1.0)
+            focus_x.set(0.5)
+            focus_y.set(0.5)
+
+        self.pill(buttons, _('Restore'), restore, kind='ghost', background=PANEL).pack(side='left', padx=(6, 0))
+        self.pill(buttons, _('Cancel'), window.destroy, kind='ghost', background=PANEL).pack(side='right')
+
+        def save():
+            result['value'] = (path.get(), {'zoom': zoom.get(), 'x': focus_x.get(), 'y': focus_y.get()})
+            window.destroy()
+
+        self.pill(buttons, _('Save changes'), save, kind='primary', background=PANEL).pack(side='right', padx=(0, 6))
+        canvas.bind('<Button-1>', lambda _event: choose())
+        for variable in (path, zoom, focus_x, focus_y):
+            variable.trace_add('write', redraw)
+        redraw()
+        window.bind('<Escape>', lambda _event: window.destroy())
+        window.wait_window()
+        return result['value']
+
+    def edit_launcher_art(self, key, title, size, crop_key):
+        """Change image: the player's own picture for a cover or the banner (kept where it is, not copied)."""
+        result = self.edit_art(key, title, size, crop_key)
+        if not result:
+            return
+        self.app[key], self.app.setdefault('art_crops', {})[crop_key] = result
+        self.collect()
+        self.configure_art()
+        self.banner_key = self.banner_scaled = None
+        self.card_images = {}
+        self.refresh()
 
     def photo_collection_banner(self, width, height):
         try:
