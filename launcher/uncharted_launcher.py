@@ -697,6 +697,10 @@ def game_environment(s, start=None):
     env['BB_CHEATS'] = ','.join([f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
                                  if s.get(f'{game}_infinite_{cheat}')] +
                                 [f'{game}:devmode' for game, _t, _s, _e in GAMES if s.get(f'{game}_devmode')])
+    # Developer mode also opens Naughty Dog's menus, which the games build but never open: F11 the Dev Menu, F8 the
+    # Quick Menu (runtime_pad.c).
+    if any(s.get(f'{game}_devmode') for game, _t, _s, _e in GAMES):
+        env['BB_DEV_MENU'] = '1'
     # Shader preparation: the game builds its shader list once, before play (a full-screen page) or behind it.
     lists = shader_list(start)
     preparation = str(s.get('shader_preparation') or 'before')
@@ -2007,7 +2011,7 @@ class Launcher:
             self.section(f, f'{title} · {subtitle}')
             self.check(f, f'{game}_infinite_health', _('Infinite Health'))
             self.check(f, f'{game}_infinite_ammo', _('Infinite Ammo'))
-            self.check(f, f'{game}_devmode', _("Developer mode (Naughty Dog's debug menu and debug text)"))
+            self.check(f, f'{game}_devmode', _("Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu"))
 
     def build_advanced(self):
         f = self.page('advanced', _('Advanced'), _('Maintenance and options for testing.'))
