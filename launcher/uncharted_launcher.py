@@ -201,7 +201,8 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'pad_invert_y': False, 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
-                **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')}}
+                **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
+                **{f'{game}_devmode': False for game, _t, _s, _e in GAMES}}
 
 
 def _(text):
@@ -693,8 +694,9 @@ def game_environment(s, start=None):
     env['BB_FRAME_GEN'] = str(s.get('frame_generation') or 'off')
     env['BB_FRAME_GEN_MULTIPLIER'] = str(s.get('frame_gen_multiplier') or '2')
     env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
-    env['BB_CHEATS'] = ','.join(f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
-                                if s.get(f'{game}_infinite_{cheat}'))
+    env['BB_CHEATS'] = ','.join([f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
+                                 if s.get(f'{game}_infinite_{cheat}')] +
+                                [f'{game}:devmode' for game, _t, _s, _e in GAMES if s.get(f'{game}_devmode')])
     # Shader preparation: the game builds its shader list once, before play (a full-screen page) or behind it.
     lists = shader_list(start)
     preparation = str(s.get('shader_preparation') or 'before')
@@ -2005,6 +2007,7 @@ class Launcher:
             self.section(f, f'{title} · {subtitle}')
             self.check(f, f'{game}_infinite_health', _('Infinite Health'))
             self.check(f, f'{game}_infinite_ammo', _('Infinite Ammo'))
+            self.check(f, f'{game}_devmode', _("Developer mode (Naughty Dog's debug menu and debug text)"))
 
     def build_advanced(self):
         f = self.page('advanced', _('Advanced'), _('Maintenance and options for testing.'))

@@ -38,6 +38,26 @@ PATCHES = {
     US['big3-ps4_Shipping.elf']: {'health': (0x9f9295, '4180bfa7000000007436', 'e9320300009090909090'),
                                   'ammo': (0xd517ac, '4c8d257d92aa0066418b442462', '40b701e9110100009090909090')},
 }
+# devmode: Naughty Dog's developer mode (the debug menu, the game's own debug text). The check
+# "cmp byte [m+A],0 / jne skip / mov cl,[m+B] / test cl,cl / je skip" becomes "mov byte [m+A],0 / jmp / mov byte [m+B],1 /
+# jmp": the two flags are set and the developer path runs. On the 1.00 code byte for byte DeathRGH's GoldHEN "Enable
+# Debug Menu" (GoldHEN offsets = these + 0x400000); on the 1.02 code the same edit of its check (another register).
+DEVMODE = {
+    EU['eboot.bin']: (0x2cf8b0, '4180bfe8470000000f85ac0e0000418a8f4448000084c90f849d0e0000',
+                      '41c687e847000000eb04ac0e000041c6874448000001eb05849d0e0000'),
+    US['eboot.bin']: (0x2cfea0, '4180bfe8470000000f85ac0e0000418a8f4448000084c90f849d0e0000',
+                      '41c687e847000000eb04ac0e000041c6874448000001eb05849d0e0000'),
+    EU['big2-ps4_Shipping.elf']: (0x14c4fd, '80b921480000000f85c10b00008a898c48000084c90f84b30b0000',
+                                  'c6812148000000eb04c10b0000c6818c48000001eb0584b30b0000'),
+    US['big2-ps4_Shipping.elf']: (0x3f8f4b, '4180bc2421480000000f85741a0000418a8c248c48000084c90f84641a0000',
+                                  '41c684242148000000eb04741a000041c684248c48000001eb0584641a0000'),
+    EU['big3-ps4_Shipping.elf']: (0x16218d, '80b9014c0000000f85c10b00008a89fc4b000084c90f84b30b0000',
+                                  'c681014c000000eb04c10b0000c681fc4b000001eb0584b30b0000'),
+    US['big3-ps4_Shipping.elf']: (0x56cb8b, '4180bc24014c0000000f85551a0000418a8c24fc4b000084c90f84451a0000',
+                                  '41c68424014c000000eb04551a000041c68424fc4b000001eb0584451a0000'),
+}
+for _code, _patch in DEVMODE.items():
+    PATCHES[_code]['devmode'] = _patch
 
 
 def code_hash(data):

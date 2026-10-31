@@ -132,7 +132,7 @@ class PatchFileTests(unittest.TestCase):
         for sha, table in self.cheats.PATCHES.items():
             spans = []
             for name, (address, original, replacement) in table.items():
-                self.assertIn(name, ('health', 'ammo'))
+                self.assertIn(name, ('health', 'ammo', 'devmode'))
                 self.assertEqual(len(bytes.fromhex(original)), len(bytes.fromhex(replacement)))
                 self.assertNotEqual(original, replacement)
                 spans.append((address, address + len(bytes.fromhex(original))))
