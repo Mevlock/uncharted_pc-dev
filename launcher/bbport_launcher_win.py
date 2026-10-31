@@ -1432,7 +1432,7 @@ class Launcher:
         if self.process:
             return
         import shutil
-        cache = Path(self.app['user_dir'] or DATA_DIR / 'user') / 'cache'
+        cache = DATA_DIR / 'user' / 'cache'
         shutil.rmtree(cache, ignore_errors=True)
         self.messagebox.showinfo('Bloodborne', _('Shader cache cleared. The next start stutters for a few minutes while '
                                                  'it is rebuilt.', 'Кэш шейдеров очищен. Следующий запуск несколько '
