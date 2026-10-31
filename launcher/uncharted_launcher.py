@@ -352,6 +352,7 @@ GAME_CODE = {
 # first: many minutes on a hard drive).
 SHADER_INDEXES = {
     ('CUSA02343', '1.00'): 'shader_locations_CUSA02343.txt',
+    ('CUSA02343', '1.02'): 'shader_locations_CUSA02343_102.txt',
     ('CUSA02320', '1.00'): 'shader_locations_CUSA02320_100.txt',
     ('CUSA02320', '1.02'): 'shader_locations_CUSA02320.txt',
     ('CUSA02344', '1.02'): 'shader_locations_CUSA02344.txt',
