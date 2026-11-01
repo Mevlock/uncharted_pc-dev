@@ -206,11 +206,12 @@ static size_t save_protections(uintptr_t start, uintptr_t end, ProtRun **runs, s
 }
 /* A partial map/unmap of a view (below) unmaps the whole view and maps the untouched pages back:
  * for that moment other threads (guest threads, GPU copy threads, draw preparation) found pages
- * missing that were never unmapped (a fatal fault), and the pages came back writable before
- * their GPU write tracking was restored (an untracked write). Faults inside the window wait for
- * the carve to end and retry (runtime_memory_wait_carve, from the fault handler); the pages come
- * back read-only until their saved protections are restored. Carves run under the write lock,
- * so one at a time. */
+ * missing that were never unmapped (a fatal fault). Faults inside the window wait for the carve
+ * to end and retry (runtime_memory_wait_carve, from the fault handler). The pages come back
+ * writable (a view can't be raised above the protection it was mapped with: read-only first
+ * stopped the game at the first partial unmap) and get their saved protections, GPU write
+ * tracking included, right after each side is mapped: a write in that short gap is still not
+ * tracked. Carves run under the write lock, so one at a time. */
 static volatile uintptr_t carve_lo, carve_hi;
 static volatile DWORD carve_thread;
 static volatile LONG carve_active;
@@ -219,6 +220,13 @@ int runtime_memory_wait_carve(uintptr_t address) {
     if (address<carve_lo || address>=carve_hi || GetCurrentThreadId()==carve_thread) return 0;
     while (InterlockedCompareExchange(&carve_active,0,0)) YieldProcessor();
     return 1;
+}
+static void restore_protections(const ProtRun *runs, size_t from, size_t to) {
+    for (size_t i=from;i<to;++i) {
+        DWORD old;
+        if (runs[i].protect!=PAGE_READWRITE && !VirtualProtect((void *)runs[i].start,runs[i].end-runs[i].start,runs[i].protect,&old))
+            win_fail("restoring page protection",runs[i].start,runs[i].end-runs[i].start);
+    }
 }
 /* Leaves [a,b) as exactly one unmapped placeholder; returns its region index. */
 static size_t carve_host(uintptr_t a, uintptr_t b) {
@@ -252,7 +260,8 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
         region_insert(at+1,(HostRegion){a,hi,0,0});
         if (keep_left) {
             regions[at].phys=left.phys; regions[at].mapped=1;
-            view_map(&regions[at],PAGE_READONLY);
+            view_map(&regions[at],PAGE_READWRITE);
+            restore_protections(runs,0,left_runs);
         }
         ++at;
     }
@@ -262,16 +271,11 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
         region_insert(at+1,(HostRegion){b,hi,0,0});
         if (keep_right) {
             regions[at+1].phys=right.phys+(b-right.start); regions[at+1].mapped=1;
-            view_map(&regions[at+1],PAGE_READONLY);
+            view_map(&regions[at+1],PAGE_READWRITE);
+            restore_protections(runs,left_runs,nruns);
         }
     }
-    for (size_t i=0;i<nruns;++i) {
-        DWORD old;
-        if (runs[i].protect!=PAGE_READONLY && !VirtualProtect((void *)runs[i].start,runs[i].end-runs[i].start,runs[i].protect,&old))
-            win_fail("restoring page protection",runs[i].start,runs[i].end-runs[i].start);
-    }
     if (keep_left || keep_right) InterlockedExchange(&carve_active,0);
-    (void)left_runs;
     free(runs);
     return at;
 }
