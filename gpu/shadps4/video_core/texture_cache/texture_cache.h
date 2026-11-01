@@ -318,6 +318,12 @@ public:
 
     /// Returns true if a slice of the specified metadata surface has been cleared.
     bool IsMetaCleared(VAddr address, u32 slice) const {
+        // Every draw asks this and TouchMeta for each target, mostly with no metadata surface
+        // (address 0 or a clear filter bit): those answer without the lock (slow CPU A/B
+        // 2026-11-01: -2.3% with four locked lookups per draw on the recording thread).
+        if (!address || !MaybeMeta(address)) {
+            return false;
+        }
         std::scoped_lock lock{meta_mutex};
         const auto& it = surface_metas.find(address);
         if (it != surface_metas.end()) {
@@ -378,6 +384,9 @@ public:
 
     /// Updates the state of a slice of the specified metadata surface.
     bool TouchMeta(VAddr address, u32 slice, bool is_clear) {
+        if (!address || !MaybeMeta(address)) {
+            return false; // see IsMetaCleared
+        }
         std::scoped_lock lock{meta_mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
