@@ -20,6 +20,8 @@ import subprocess
 import sys
 
 PORT = Path(__file__).resolve().parent
+sys.path.insert(0, str(PORT / 'scripts'))
+import cheats
 EXECUTABLES = {'u1': 'eboot.bin', 'u2': 'big2-ps4_Shipping.elf', 'u3': 'big3-ps4_Shipping.elf'}
 LOADEXEC_EXIT = 101  # runtime_services.c: the game asked for another executable
 
@@ -79,6 +81,12 @@ def locate(env, name):
     return folder, name
 
 
+def game_cheats(enabled, exe):
+    """BB_CHEATS ("u1:health,u2:ammo") reduced to the running executable's own entries ("health")."""
+    key = next((k for k, name in EXECUTABLES.items() if name == exe), None)
+    return ','.join(c.split(':', 1)[1] for c in enabled.split(',') if key and c.startswith(f'{key}:'))
+
+
 def prepare(game, exe, out):
     """boot-linked.bin for one executable, kept until the executable or the scripts change."""
     out.mkdir(parents=True, exist_ok=True)
@@ -122,6 +130,35 @@ def isa_rewrite_args(probe, out):
             fail(f'{missing}\nThe game needs its instructions rewritten for this processor, which needs the Python '
                  'package iced-x86 (pip install iced-x86) in the Python that runs this script.')
     return ['--isa-rewrite', table]
+
+
+def adopt_saves_cache(old, new):
+    """Up to 0.3.6.31 the shader cache lived in the saves folder (old); now it lives in the install (new). Copy what
+    the install lacks from the saves folder once: the game folders (<title id>-<build>) and the shader locations
+    (shader_locations_<title id>.txt). Without them the first start rebuilds every shader and, with no saved
+    locations, may read all the game files (many minutes on a hard drive). The saves folder keeps its copy for
+    older versions. Each folder is copied aside and renamed, so a cut copy is redone next time."""
+    import shutil
+    try:
+        if not old.is_dir() or old.resolve() == new.resolve():
+            return
+        new.mkdir(parents=True, exist_ok=True)
+        for item in sorted(old.iterdir()):
+            target = new / item.name
+            if target.exists():
+                continue
+            if item.is_dir() and '.' not in item.name:
+                print(f'Shader cache: copying {item.name} from the saves folder ...', flush=True)
+                partial = new / f'{item.name}.copying'
+                shutil.rmtree(partial, ignore_errors=True)
+                shutil.copytree(item, partial)
+                partial.rename(target)
+            elif item.is_file() and item.name.startswith('shader_locations_') and item.suffix == '.txt':
+                shutil.copy2(item, target)
+                print(f'Shader cache: copied {item.name} from the saves folder', flush=True)
+    except OSError as error:
+        print(f'Shader cache: could not copy from the saves folder ({error}); the shaders are built again',
+              flush=True)
 
 
 def main():
@@ -173,11 +210,14 @@ def main():
     env.setdefault('BB_GPU_USER_DIR', str(user_dir))
     # The shader cache stays beside this install even when the saves (BB_USER_DIR) are elsewhere: each version of the
     # port keeps its own (BB_GPU_CACHE_DIR overrides).
-    env.setdefault('BB_GPU_CACHE_DIR', str((data / 'user' / 'cache').resolve()))
+    if 'BB_GPU_CACHE_DIR' not in env:
+        env['BB_GPU_CACHE_DIR'] = str((data / 'user' / 'cache').resolve())
+        adopt_saves_cache(user_dir / 'cache', Path(env['BB_GPU_CACHE_DIR']))
     env.setdefault('BB_VBLANK_HZ', '60')
     loadexec = out_root / 'loadexec.txt'
     env['BB_LOADEXEC_FILE'] = str(loadexec)
     guest_argv = None
+    all_cheats = env.setdefault('BB_CHEATS_ALL', env.get('BB_CHEATS', ''))
     while True:
         game, file = locate(env, exe)
         if not game:
@@ -197,10 +237,14 @@ def main():
                        *(['--own'] if env.get(f'BB_GAME_DIR_{key.upper()}') else []))
         this = ['--run'] if getattr(sys, 'frozen', False) else [str(Path(__file__).resolve())]
         env['BB_EXE'] = exe
+        env['BB_CHEATS'] = game_cheats(all_cheats, exe)
+        patches = cheats.build(game / exe, out, [c for c in env['BB_CHEATS'].split(',') if c])
         env['BB_RESTART_COMMAND'] = subprocess.list2cmdline([sys.executable, *this, '--after', str(os.getpid()), *args])
         command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                    '--app0', str(game), '--user', str(user_dir), '--timeout', env.get('BB_TIMEOUT', '0')]
         command += isa_rewrite_args(probe, out)
+        if patches:
+            command += ['--patches', str(patches)]
         if guest_argv:
             command += ['--guest-argv', str(guest_argv)]
         if key and (trophy_dir / 'trophies.txt').is_file():

@@ -18,6 +18,7 @@ import queue
 import re
 import runpy
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -39,7 +40,7 @@ CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.6.31'  # fork: upstream 0.3.6 + this fork's changes
+VERSION = '0.3.6.36'  # fork: upstream 0.3.6 + this fork's changes
 # Fork: updates come from this fork's own releases (the latest one; -pre tags are published as normal releases).
 RELEASES_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases/latest'
 RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
@@ -199,7 +200,9 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'pad_invert_y': False, 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
-                'trophy_game': 'u1'}
+                'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
+                **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
+                **{f'{game}_devmode': False for game, _t, _s, _e in GAMES}}
 
 
 def _(text):
@@ -329,6 +332,98 @@ def shaders_prepared(s, key):
         except OSError:
             pass
     return False
+
+
+
+
+# The two builds of the game code, by SHA-1 of the segments an executable loads (eboot, Uncharted 2, Uncharted 3; not
+# its signature header or the metadata a dumper adds at the end), or of the whole file for an executable that is not
+# signed. 1.00: the original build, in every region (US 1.00; EU dumps whose files were never updated, even when
+# their param.sfo says 01.02). 1.02: the updated build (US 1.02 CUSA02320, EU/Russian CUSA02344).
+GAME_CODE = {
+    'cd749c2f217a842200a9867f7c8af0973c990a74': '1.00', '1616597c9cf8b4b6d50d7cbf3aeb3677efba6587': '1.00',
+    '1d949b215bb036fe685511aca4f560d63dd50442': '1.00', 'fd024eaeb58c4b778613b54a9e69f6fbc8615a68': '1.02',
+    'de8ce6e778f39b3c2914fd71f1df7117282f62e2': '1.02', 'fed1f511d51613df108101b8a09397beebc70f0c': '1.02',
+    '855ac7a96de3e21587fd01e458baeb53c488fa71': '1.00', 'c8b4c0c0c2485246c5373e7445af12d9c4f639a7': '1.00',
+    '783e53a7ca38aaa5da74bbd32b00e1891020f86a': '1.00', 'd81e699fac808ebd4a1689c108b9a75571c3d62b': '1.02',
+    '5c6e20a2296de593635c585c941e2455b10d7c5f': '1.02', '6b66880c4ad373915f939af62194a71d3b56800d': '1.02',
+}
+# Where the shaders sit in each known game's files (shaders/<file>), by title id and game code. The data files differ
+# between versions and regions, so a pair without an index gets no shader preparation (it would read all its files
+# first: many minutes on a hard drive).
+SHADER_INDEXES = {
+    ('CUSA02343', '1.00'): 'shader_locations_CUSA02343.txt',
+    ('CUSA02343', '1.02'): 'shader_locations_CUSA02343_102.txt',
+    ('CUSA02320', '1.00'): 'shader_locations_CUSA02320_100.txt',
+    ('CUSA02320', '1.02'): 'shader_locations_CUSA02320.txt',
+    ('CUSA02344', '1.02'): 'shader_locations_CUSA02344.txt',
+}
+_executable_hashes = {}
+
+
+def executable_hash(path):
+    """SHA-1 of an executable's game code (hashed once per file size and date): its loaded segments when it is a
+    signed executable, else the whole file; '' when it cannot be read."""
+    import hashlib
+    try:
+        stat = path.stat()
+    except OSError:
+        return ''
+    key = (str(path), stat.st_size, stat.st_mtime)
+    if key not in _executable_hashes:
+        digest = hashlib.sha1()
+        try:
+            with open(path, 'rb') as f:
+                head = f.read(0x20)
+                if head[:4] == b'\x4f\x15\x3d\x1d' and len(head) == 0x20:
+                    count, = struct.unpack_from('<H', head, 0x18)
+                    entries = [struct.unpack('<QQQQ', f.read(32)) for _ in range(count)]
+                    for props, offset, size, _memsz in entries:
+                        if props & 0x800:   # a segment with data in the file
+                            f.seek(offset)
+                            digest.update(f.read(size))
+                else:
+                    f.seek(0)
+                    for block in iter(lambda: f.read(1 << 20), b''):
+                        digest.update(block)
+        except (OSError, struct.error):
+            return ''
+        _executable_hashes[key] = digest.hexdigest()
+    return _executable_hashes[key]
+
+
+def game_executable(s, key):
+    """The game's executable (eboot.bin for a game dumped on its own), or None."""
+    folder = game_folder(s, key)
+    exe = Path(folder) / next(e for k, _t, _s, e in GAMES if k == key)
+    if not exe.is_file():
+        exe = Path(folder) / 'eboot.bin'
+    return exe if exe.is_file() else None
+
+
+def game_code(s, key):
+    """'1.00' or '1.02' for a known build of the game's executable, '' for an unknown one, None without one."""
+    exe = game_executable(s, key)
+    return GAME_CODE.get(executable_hash(exe), '') if exe else None
+
+
+def unsupported_version(s, key):
+    """The game's version when the shader preparation cannot be used on this copy (no shader index for its title and
+    game code), else ''."""
+    info = game_info(game_folder(s, key))
+    if not info:
+        return ''
+    code = game_code(s, key)
+    if code is None or (info['id'], code) in SHADER_INDEXES:
+        return ''
+    return info.get('version', '?')
+
+
+def shader_locations(lists, s, key):
+    """shaders/<index> for this copy's title and game code, or None."""
+    info = game_info(game_folder(s, key))
+    name = SHADER_INDEXES.get((info['id'], game_code(s, key))) if info else None
+    return lists[0].with_name(name) if name else None
 
 
 def game_folder(s, key):
@@ -599,17 +694,24 @@ def game_environment(s, start=None):
     env['BB_FRAME_GEN'] = str(s.get('frame_generation') or 'off')
     env['BB_FRAME_GEN_MULTIPLIER'] = str(s.get('frame_gen_multiplier') or '2')
     env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
+    env['BB_CHEATS'] = ','.join([f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
+                                 if s.get(f'{game}_infinite_{cheat}')] +
+                                [f'{game}:devmode' for game, _t, _s, _e in GAMES if s.get(f'{game}_devmode')])
+    # Developer mode also opens Naughty Dog's menus, which the games build but never open: F11 the Dev Menu, F8 the
+    # Quick Menu (runtime_pad.c).
+    if any(s.get(f'{game}_devmode') for game, _t, _s, _e in GAMES):
+        env['BB_DEV_MENU'] = '1'
     # Shader preparation: the game builds its shader list once, before play (a full-screen page) or behind it.
     lists = shader_list(start)
     preparation = str(s.get('shader_preparation') or 'before')
+    if unsupported_version(s, start):
+        preparation = 'off'
     if lists and preparation != 'off':
         env['BB_VARIANT_SHIP'] = str(lists[0])
         if lists[1].is_file():
             env['BB_KEY_LIST'] = str(lists[1])
-        # Where the shaders sit in this release's files (shaders/shader_locations_<title id>.txt): no scan of the
-        # whole game folder on the first preparation.
-        info = game_info(game_folder(s, start))
-        locations = lists[0].with_name(f"shader_locations_{info['id']}.txt") if info else None
+        # Where the shaders sit in this release's files: no scan of the whole game folder on the first preparation.
+        locations = shader_locations(lists, s, start)
         if locations and locations.is_file():
             env['BB_SHADER_LOCATIONS'] = str(locations)
         # The texture (de)tiling pipelines the game uses, built ahead (shaders/tiling_pipelines_<game>.txt).
@@ -635,17 +737,17 @@ def game_environment(s, start=None):
 
 
 # ---------------------------------------------------------------------------------------------
-# Surfaces: near-black base, raised panels, Uncharted gold accent.
+# Surfaces: an old leather journal by lamplight: dark warm browns, parchment text, brass accent.
 
-BG, PANEL, SURFACE, CARD, LINE = '#08090a', '#0c0d0f', '#0f1012', '#17181b', '#26282c'
-TEXT, MUTED, GOLD, GOLD_HI, GOLD_DIM = '#f3efe6', '#8e8a82', '#e7c36a', '#f3d78a', '#a88942'
-CARD_HI = '#202226'
+BG, PANEL, SURFACE, CARD, LINE = '#0d0a07', '#110d09', '#15100b', '#1e1710', '#352a1d'
+TEXT, MUTED, GOLD, GOLD_HI, GOLD_DIM = '#f3e9d4', '#9c8e76', '#e2a64a', '#f4c46e', '#a5762f'
+CARD_HI = '#271e15'
 COLORS = {'surface': SURFACE, 'card': CARD, 'card_hi': CARD_HI, 'line': LINE, 'text': TEXT, 'muted': MUTED,
-          'gold': GOLD, 'gold_hi': GOLD_HI, 'track': '#2c2e33', 'knob': '#9a958b', 'knob_on': '#f7f1e2',
-          'button': '#25272b', 'button_hi': '#30333a'}
+          'gold': GOLD, 'gold_hi': GOLD_HI, 'track': '#33281c', 'knob': '#a3957d', 'knob_on': '#fbf1dc',
+          'button': '#2a2117', 'button_hi': '#36291c'}
 # Sidebar icons (Segoe Fluent Icons on Windows 11, Segoe MDL2 Assets on Windows 10).
 NAV_ICONS = {'play': '\ue768', 'game': '\ue7fc', 'display': '\ue7f4', 'controls': '\ue765',
-             'trophies': '\ue734', 'advanced': '\ue713', 'log': '\ue8a5'}
+             'cheats': '\ue945', 'trophies': '\ue734', 'advanced': '\ue713', 'log': '\ue8a5'}
 # Trophy grades as the console colours them (the platinum cool white-blue, the rest metal).
 TROPHY_COLORS = {'P': '#9fd0f5', 'G': GOLD, 'S': '#cfd3da', 'B': '#cf8548'}
 RUST, RUST_HI = GOLD, GOLD_HI
@@ -664,6 +766,10 @@ class Launcher:
         self.ui_calls = queue.Queue()
         self.banner_key = self.banner_scaled = self.cover_image = None
         self.card_hot = None
+        try:
+            self.configure_art()
+        except Exception:
+            pass
         self.info, self.available = None, {}
         self.update_box = None
         root.title(f'{NAME} — The Nathan Drake Collection for Windows · by {AUTHOR}')
@@ -799,7 +905,7 @@ class Launcher:
                     lightcolor=CARD_HI, darkcolor=CARD_HI, background=CARD_HI, arrowsize=14)
         s.map('TCombobox', fieldbackground=[('readonly', CARD_HI)], foreground=[('readonly', TEXT)],
               selectbackground=[('readonly', CARD_HI)], selectforeground=[('readonly', TEXT)],
-              bordercolor=[('focus', GOLD_DIM)], lightcolor=[('focus', GOLD_DIM)], background=[('active', '#2a2c31')])
+              bordercolor=[('focus', GOLD_DIM)], lightcolor=[('focus', GOLD_DIM)], background=[('active', '#30251a')])
         s.configure('TEntry', foreground=TEXT, insertcolor=TEXT, padding=(8, 5), fieldbackground=CARD_HI,
                     bordercolor=CARD_HI, lightcolor=CARD_HI, darkcolor=CARD_HI)
         s.map('TEntry', bordercolor=[('focus', GOLD_DIM)], lightcolor=[('focus', GOLD_DIM)])
@@ -807,11 +913,11 @@ class Launcher:
         s.map('TButton', background=[('active', '#322c24'), ('disabled', PANEL)], foreground=[('disabled', MUTED)])
         s.configure('Play.TButton', background=GOLD, foreground='#1a1408', font=('Segoe UI', 13, 'bold'),
                     padding=(42, 12), borderwidth=0)
-        s.map('Play.TButton', background=[('active', '#f3d78a'), ('disabled', '#3a3428')],
+        s.map('Play.TButton', background=[('active', '#f4c46e'), ('disabled', '#3a3428')],
               foreground=[('disabled', '#8a8070'), ('active', '#1a1408')])
-        s.configure('Vertical.TScrollbar', background='#2a2c31', arrowcolor=MUTED, troughcolor=SURFACE,
-                    bordercolor=SURFACE, lightcolor='#2a2c31', darkcolor='#2a2c31', gripcount=0, arrowsize=12)
-        s.map('Vertical.TScrollbar', background=[('active', '#3a3d44')])
+        s.configure('Vertical.TScrollbar', background='#30251a', arrowcolor=MUTED, troughcolor=SURFACE,
+                    bordercolor=SURFACE, lightcolor='#30251a', darkcolor='#30251a', gripcount=0, arrowsize=12)
+        s.map('Vertical.TScrollbar', background=[('active', '#463624')])
         s.configure('Gold.Horizontal.TProgressbar', background=GOLD, troughcolor=CARD_HI, bordercolor=CARD_HI,
                     lightcolor=GOLD, darkcolor=GOLD_DIM, thickness=self.px(10))
 
@@ -978,19 +1084,29 @@ class Launcher:
         side.pack(side='left', fill='y')
         side.pack_propagate(False)
         brand_wrap = side_w - 36
+        self.emblem_image = None
+        try:
+            from PIL import ImageTk
+            import uncharted_art
+            mark = uncharted_art.emblem(self.px(64))
+            self.emblem_image = ImageTk.PhotoImage(mark) if mark else None
+        except Exception:
+            self.emblem_image = None
+        if self.emblem_image:
+            tk.Label(side, image=self.emblem_image, bg=BG, bd=0).pack(anchor='w', padx=14, pady=(22, 0))
         tk.Label(side, text='UNCHARTED', bg=BG, fg=GOLD, font=self.font_brand_lg, anchor='w').pack(
-            anchor='w', padx=18, pady=(28, 0))
+            anchor='w', padx=18, pady=(10 if self.emblem_image else 28, 0))
         tk.Label(side, text='NATHAN DRAKE', bg=BG, fg=MUTED, font=self.font_brand_sm, anchor='w').pack(
             anchor='w', padx=18, pady=(8, 0))
         tk.Label(side, text='COLLECTION', bg=BG, fg=MUTED, font=self.font_brand_sm, anchor='w').pack(
             anchor='w', padx=18, pady=(1, 0))
         tk.Label(side, text=_('by {}').format(AUTHOR), bg=BG, fg=TEXT, font=self.font_ui_md,
                  anchor='w', wraplength=brand_wrap, justify='left').pack(anchor='w', padx=18, pady=(10, 0))
-        tk.Label(side, text=_('version {}').format(VERSION), bg=BG, fg='#5c564c', font=self.font_ui_sm,
-                 anchor='w').pack(anchor='w', padx=18, pady=(1, 16))
-        tk.Frame(side, bg=LINE, height=1).pack(fill='x', padx=18, pady=(0, 14))
+        tk.Label(side, text=_('version {}').format(VERSION), bg=BG, fg='#6e604c', font=self.font_ui_sm,
+                 anchor='w').pack(anchor='w', padx=18, pady=(1, 0))
+        tk.Frame(side, bg=LINE, height=1).pack(fill='x', padx=18, pady=(16, 14))
         self.nav, self.nav_pills, self.nav_icons, self.nav_marks, self.current_page = {}, {}, {}, {}, None
-        for name, title in (('play', _('Play')), ('game', _('Game')), ('display', _('Display')),
+        for name, title in (('play', _('Play')), ('game', _('Game')), ('cheats', _('Cheats')), ('display', _('Display')),
                             ('controls', _('Controls')), ('trophies', _('Trophies')), ('advanced', _('Advanced')),
                             ('log', _('Log'))):
             row = tk.Frame(side, bg=BG, cursor='hand2')
@@ -1051,15 +1167,16 @@ class Launcher:
         self.build_display()
         self.build_controls()
         self.build_trophies()
+        self.build_cheats()
         self.build_advanced()
         self.build_log()
         self.refresh()
 
     def _nav_style(self, name, active=False, hover=False):
         if active:
-            bg, fg, icon = '#17181b', TEXT, GOLD
+            bg, fg, icon = '#1e1710', TEXT, GOLD
         elif hover:
-            bg, fg, icon = '#111214', TEXT, TEXT
+            bg, fg, icon = '#120d09', TEXT, TEXT
         else:
             bg, fg, icon = BG, MUTED, MUTED
         self.nav_pills[name].configure(bg=bg)
@@ -1101,6 +1218,9 @@ class Launcher:
         self.hero = tk.Canvas(page, height=self.px(260), bg=SURFACE, highlightthickness=0, bd=0)
         self.hero.pack(fill='x')
         self.hero.bind('<Configure>', self._sync_hero_height)
+        self.hero.bind('<Button-1>', lambda _e: self.edit_launcher_art(
+            'art_banner', _('Collection banner'), (1600, 450), 'banner'))
+        self.hero.configure(cursor='hand2')
         shell = tk.Frame(page, bg=SURFACE)
         shell.pack(fill='both', expand=True, padx=self.px(22), pady=(self.px(6), self.px(10)))
         head = tk.Frame(shell, bg=SURFACE)
@@ -1200,6 +1320,15 @@ class Launcher:
             card.create_image(x, 0, image=image, anchor='nw')
         else:
             card.create_rectangle(0, 0, w, h, fill=CARD, outline=LINE)
+        if hot:
+            label = _('Change image')
+            box_w = max(self.px(108), len(label) * self.px(7))
+            card.create_rectangle(w - box_w - self.px(12), self.px(12), w - self.px(12), self.px(42),
+                                  fill='#120d09', outline=GOLD_DIM, tags='edit_art')
+            card.create_text(w - box_w // 2 - self.px(12), self.px(27), text=label, fill=TEXT,
+                             font=self.font_ui_sm, tags='edit_art')
+            card.tag_bind('edit_art', '<Button-1>', lambda _e, k=key: self.edit_launcher_art(
+                f'art_{k}', _('Change image'), (600, 900), k))
 
     def _sync_hero_height(self, _event=None):
         """Keep the header at the banner's 16:9 aspect ratio."""
@@ -1218,13 +1347,11 @@ class Launcher:
         start = self.var('start').get()
         title, subtitle = next((t, sub) for k, t, sub, _e in GAMES if k == start)
         game_dir = game_folder(self.current(), start)
-        key = (w, h, start, game_dir)
+        key = (w, h, start, game_dir, self.app.get('art_banner', ''))
         if self.banner_key != key:
             self.banner_key = key
-            # The collection banner when this machine has it (launcher art is not distributed),
-            # otherwise the background art of the player's own dump.
-            self.banner_scaled = self.photo_collection_banner(w, h) or \
-                self.scaled_art(Path(game_dir or '.') / 'sce_sys' / 'pic1.png', w)
+            # The collection banner (original art that comes with the port), else the scene.
+            self.banner_scaled = self.photo_collection_banner(w, h) or self.photo_hero(start, w, h)
             self.cover_image = None
         if self.banner_scaled:
             c.create_image(w // 2, h // 2, image=self.banner_scaled)
@@ -1235,7 +1362,140 @@ class Launcher:
         c.create_text(self.px(24), h - self.px(14), text=sub, anchor='sw', fill=GOLD,
                       font=self.font_brand_sm)
         c.create_text(w - self.px(24), h - self.px(14), text=f'{_(title)}  ·  {_(subtitle)}',
-                      anchor='se', fill='#f6f1e6', font=self.font_brand_md)
+                      anchor='se', fill='#f8eedb', font=self.font_brand_md)
+        c.create_text(w - self.px(24), self.px(18), text=_('Change image'), anchor='ne', fill='#d6c9ae',
+                      font=self.font_ui_sm)
+
+    def configure_art(self):
+        import uncharted_art
+        crops = self.app.get('art_crops', {})
+        uncharted_art.set_custom_art({
+            'collection_banner.jpg': self.app.get('art_banner', ''),
+            'u1.jpg': self.app.get('art_u1', ''),
+            'u2.jpg': self.app.get('art_u2', ''),
+            'u3.jpg': self.app.get('art_u3', ''),
+        }, {
+            'collection_banner.jpg': crops.get('banner', {}),
+            'u1.jpg': crops.get('u1', {}),
+            'u2.jpg': crops.get('u2', {}),
+            'u3.jpg': crops.get('u3', {}),
+        })
+
+    def image_path(self, title, current=''):
+        """Choose and validate a local image."""
+        chosen = self.filedialog.askopenfilename(
+            title=title, initialdir=str(Path(current).parent) if current else str(PORT_DIR),
+            filetypes=[(_('Image files'), '*.png *.jpg *.jpeg *.webp'), (_('All files'), '*.*')])
+        if not chosen:
+            return ''
+        try:
+            from PIL import Image
+            with Image.open(chosen) as image:
+                image.verify()
+        except (OSError, ValueError) as error:
+            self.messagebox.showerror(NAME, _('This image could not be opened: {}').format(error))
+            return ''
+        return str(Path(chosen))
+
+    def edit_art(self, key, title, size, crop_key):
+        """Preview, position and save one local image without copying it into the port."""
+        from PIL import Image, ImageTk
+        import uncharted_art
+
+        window = self.tk.Toplevel(self.root)
+        window.title(title)
+        window.configure(bg=PANEL)
+        window.transient(self.root)
+        window.grab_set()
+        window.resizable(False, False)
+        path = self.tk.StringVar(value=self.app.get(key, ''))
+        saved = self.app.setdefault('art_crops', {}).get(crop_key, {})
+        result = {'value': None}
+        zoom = self.tk.DoubleVar(value=float(saved.get('zoom', 1.0)))
+        focus_x = self.tk.DoubleVar(value=float(saved.get('x', 0.5)))
+        focus_y = self.tk.DoubleVar(value=float(saved.get('y', 0.5)))
+        preview_w = self.px(560)
+        preview_h = max(self.px(180), round(preview_w * size[1] / size[0]))
+        if preview_h > self.px(390):
+            preview_h = self.px(390)
+            preview_w = round(preview_h * size[0] / size[1])
+        shell = self.tk.Frame(window, bg=PANEL)
+        shell.pack(padx=self.px(24), pady=self.px(22))
+        self.tk.Label(shell, text=title, bg=PANEL, fg=TEXT, font=self.font_title).pack(anchor='w')
+        self.tk.Label(shell, text=_('Click the picture or Choose image; Restore goes back to the original.'),
+                      bg=PANEL, fg=MUTED, font=self.font_ui).pack(anchor='w', pady=(2, self.px(12)))
+        canvas = self.tk.Canvas(shell, width=preview_w, height=preview_h, bg=BG, highlightthickness=2,
+                                highlightbackground=GOLD_DIM, bd=0, cursor='hand2')
+        canvas.pack()
+        preview = {'photo': None}
+
+        def redraw(*_args):
+            canvas.delete('all')
+            try:
+                with Image.open(path.get()) as source:
+                    crop = {'zoom': zoom.get(), 'x': focus_x.get(), 'y': focus_y.get()}
+                    image = uncharted_art.crop_image(source.convert('RGB'), (preview_w, preview_h), crop)
+                preview['photo'] = ImageTk.PhotoImage(image)
+                canvas.create_image(0, 0, image=preview['photo'], anchor='nw')
+            except (OSError, ValueError, self.tk.TclError):
+                preview['photo'] = None
+                canvas.create_text(preview_w // 2, preview_h // 2, text=_('Original picture'), fill=MUTED,
+                                   font=self.font_ui_md)
+            canvas.create_rectangle(1, 1, preview_w - 2, preview_h - 2, outline=GOLD, width=2)
+
+        def choose():
+            chosen = self.image_path(title, path.get())
+            if chosen:
+                path.set(chosen)
+
+        controls = self.tk.Frame(shell, bg=PANEL)
+        controls.pack(fill='x', pady=(self.px(14), 0))
+        for row, (label, variable, start, end, step) in enumerate((
+                (_('Zoom'), zoom, 1.0, 3.0, 0.01), (_('Horizontal position'), focus_x, 0.0, 1.0, 0.01),
+                (_('Vertical position'), focus_y, 0.0, 1.0, 0.01))):
+            self.tk.Label(controls, text=label, bg=PANEL, fg=TEXT, font=self.font_ui,
+                          width=20, anchor='w').grid(row=row, column=0, sticky='w', pady=2)
+            self.tk.Scale(controls, variable=variable, from_=start, to=end, resolution=step,
+                          orient='horizontal', showvalue=False, length=self.px(380), bg=PANEL,
+                          fg=TEXT, troughcolor=CARD_HI, activebackground=GOLD, highlightthickness=0,
+                          command=redraw).grid(row=row, column=1, sticky='ew', pady=2)
+        buttons = self.tk.Frame(shell, bg=PANEL)
+        buttons.pack(fill='x', pady=(self.px(16), 0))
+        self.pill(buttons, _('Choose image'), choose, background=PANEL).pack(side='left')
+
+        def restore():
+            path.set('')
+            zoom.set(1.0)
+            focus_x.set(0.5)
+            focus_y.set(0.5)
+
+        self.pill(buttons, _('Restore'), restore, kind='ghost', background=PANEL).pack(side='left', padx=(6, 0))
+        self.pill(buttons, _('Cancel'), window.destroy, kind='ghost', background=PANEL).pack(side='right')
+
+        def save():
+            result['value'] = (path.get(), {'zoom': zoom.get(), 'x': focus_x.get(), 'y': focus_y.get()})
+            window.destroy()
+
+        self.pill(buttons, _('Save changes'), save, kind='primary', background=PANEL).pack(side='right', padx=(0, 6))
+        canvas.bind('<Button-1>', lambda _event: choose())
+        for variable in (path, zoom, focus_x, focus_y):
+            variable.trace_add('write', redraw)
+        redraw()
+        window.bind('<Escape>', lambda _event: window.destroy())
+        window.wait_window()
+        return result['value']
+
+    def edit_launcher_art(self, key, title, size, crop_key):
+        """Change image: the player's own picture for a cover or the banner (kept where it is, not copied)."""
+        result = self.edit_art(key, title, size, crop_key)
+        if not result:
+            return
+        self.app[key], self.app.setdefault('art_crops', {})[crop_key] = result
+        self.collect()
+        self.configure_art()
+        self.banner_key = self.banner_scaled = None
+        self.card_images = {}
+        self.refresh()
 
     def photo_collection_banner(self, width, height):
         try:
@@ -1443,7 +1703,7 @@ class Launcher:
             self.ttk.Label(table, text=_(title)).grid(row=r, column=0, sticky='w', padx=(0, 24), pady=3)
             for slot in (0, 1):
                 button = self.tk.Button(table, width=16, relief='flat', bg=CARD_HI, fg=TEXT,
-                                        activebackground='#2a2c31', activeforeground=TEXT,
+                                        activebackground='#30251a', activeforeground=TEXT,
                                         font=self.font_ui, cursor='hand2', bd=0, padx=8, pady=4,
                                         command=lambda a=action, i=slot: self.capture_key(a, i))
                 button.grid(row=r, column=1 + slot * 2, sticky='w', pady=3)
@@ -1745,6 +2005,14 @@ class Launcher:
                 pass
         self.root.after(1500, self.poll_trophies)
 
+    def build_cheats(self):
+        f = self.page('cheats', _('Cheats'), _('Each cheat only affects its own game; changes apply when the game starts.'))
+        for game, title, subtitle, _exe in GAMES:
+            self.section(f, f'{title} · {subtitle}')
+            self.check(f, f'{game}_infinite_health', _('Infinite Health'))
+            self.check(f, f'{game}_infinite_ammo', _('Infinite Ammo'))
+            self.check(f, f'{game}_devmode', _("Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu"))
+
     def build_advanced(self):
         f = self.page('advanced', _('Advanced'), _('Maintenance and options for testing.'))
         self.check(f, 'close_on_play', _('Close the launcher when the game starts'))
@@ -1812,7 +2080,7 @@ class Launcher:
         self.pill(head, _('Copy'), self.copy_log, background=SURFACE, padding=(16, 6)).pack(side='right')
         body = tk.Frame(shell, bg=SURFACE)
         body.pack(fill='both', expand=True, padx=self.px(26), pady=(0, self.px(8)))
-        self.log = tk.Text(body, bg=CARD, fg='#d9d4ca', insertbackground=TEXT, font=('Cascadia Mono', 9), wrap='none',
+        self.log = tk.Text(body, bg=CARD, fg='#e3d6bd', insertbackground=TEXT, font=('Cascadia Mono', 9), wrap='none',
                            relief='flat', state='disabled', highlightbackground=LINE, highlightthickness=1,
                            padx=self.px(12), pady=self.px(10))
         bar = self.ttk.Scrollbar(body, orient='vertical', command=self.log.yview)
@@ -1842,6 +2110,9 @@ class Launcher:
             ready = f"{info['title']} · {info['id']} · {_('version')} {info['version']}"
             if missing:
                 ready += '\n' + _('Not in this folder: ') + ', '.join(missing)
+            if unsupported_version(s, start):
+                ready += '\n' + _('Shader preparation is off for this copy of the game (version {}): the port '
+                                  'does not know where its shaders are yet.').format(info['version'])
         self.ready.configure(text=ready)
         self.update_prep_status()
         if not self.process:
@@ -1870,7 +2141,10 @@ class Launcher:
         s = self.current()
         title = next(t for k, t, _s, _e in GAMES if k == s['start'])
         prepared = shaders_prepared(s, s['start'])
-        if prepared is None:
+        version = unsupported_version(s, s['start'])
+        if version:
+            text, colour = _('{}: off for this game version ({}).').format(title, version), MUTED
+        elif prepared is None:
             text, colour = _('{}: no shader list for this game yet.').format(title), MUTED
         elif prepared:
             text, colour = _('{}: shaders prepared.').format(title), GOLD
@@ -1895,6 +2169,11 @@ class Launcher:
             return
         if prepare and not shader_list(self.current()['start']):
             self.messagebox.showinfo(NAME, _('There is no shader list for this game yet.'))
+            return
+        version = unsupported_version(self.current(), self.current()['start'])
+        if prepare and version:
+            self.messagebox.showinfo(NAME, _('Shader preparation is not available for this copy of the game '
+                                             '(version {}).').format(version))
             return
         self.collect()
         folder = game_folder(self.app, self.app['start'])
@@ -2293,7 +2572,18 @@ def log_header(settings, start=None):
     except OSError:
         commit = ''
     build = f'{VERSION} ({commit})' if commit else VERSION
-    return f'Port: {NAME} {build} in {PORT_DIR}, starting {start or settings.get("start")}\n'
+    saves = Path(settings.get('user_dir') or DATA_DIR / 'user')
+    start = start or settings.get('start')
+    info = game_info(game_folder(settings, start)) if start else None
+    game = f"Game: {info['id']} version {info['version']}" if info else 'Game: folder not found'
+    if info:
+        code = game_code(settings, start)
+        lists = shader_list(start)
+        locations = shader_locations(lists, settings, start) if lists else None
+        game += f' (game code {code})' if code else ' (game code unknown)' if code == '' else ''
+        game += f'; shader locations {locations.name}' if locations else '; shader preparation off: no index for it'
+    return (f'Port: {NAME} {build} in {PORT_DIR}, starting {start}\n'
+            f'Folders: saves {saves}, shader cache {DATA_DIR / "user" / "cache"}\n{game}\n')
 
 
 def open_run_log(log_dir, keep=5):

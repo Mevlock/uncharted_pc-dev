@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Pictures for the Uncharted launcher (Pillow).
 
-- card_scene() / banner_scene(): the three cover posters in launcher/art (u1, u2, u3).
-  card_scene shows the whole poster. banner_scene blurs it into a wide header.
-  If a file is missing, card_scene falls back to a painted scene;
+- card_scene() / banner_scene(): the three game scenes in launcher/covers (u1, u2, u3), original
+  art drawn by packaging/windows/make_uncharted_art.py (no game images). card_scene shows the
+  whole scene, banner_scene blurs it into a wide header. If a file is missing, card_scene falls
+  back to a simpler painted scene;
 - cover(): the collection's box art from the player's own game folder (sce_sys/icon0.png);
 - steam_artwork(): Steam library pictures for the non-Steam shortcut, made from the same files of
   the player's game folder (cover, wide header, hero banner).
@@ -163,20 +164,41 @@ POSTERS = {'u1': 'u1.jpg', 'u2': 'u2.jpg', 'u3': 'u3.jpg'}
 COLLECTION_BANNER = 'collection_banner.jpg'
 _LOADED = {}
 _BANNER = None
+_CUSTOM_ART = {}
+_CUSTOM_CROPS = {}
+
+
+def set_custom_art(paths, crops=None):
+    """Use local files chosen in the launcher, without copying or packaging them."""
+    global _BANNER, _CUSTOM_ART, _CUSTOM_CROPS
+    custom = {name: str(path) for name, path in paths.items() if path}
+    crop_values = crops or {}
+    if custom != _CUSTOM_ART or crop_values != _CUSTOM_CROPS:
+        _CUSTOM_ART = custom
+        _CUSTOM_CROPS = crop_values
+        _LOADED.clear()
+        _BANNER = None
 
 
 def art_directories():
-    """Where covers are looked for, first match per file wins: the art folder next to
-    Uncharted.exe (frozen) and launcher/art, the player's own covers that are never distributed;
-    then the covers that come with the port (launcher/covers, bundled as covers)."""
+    """Where the pictures are looked for: only the original art that comes with the port
+    (launcher/covers, bundled as covers). Pictures a player picks with "Change image" are
+    loaded from their own path (set_custom_art)."""
     here = Path(__file__).resolve().parent
     bundle = Path(getattr(sys, '_MEIPASS', here))
-    own = [Path(sys.executable).resolve().parent / 'art'] if getattr(sys, 'frozen', False) else []
-    return own + [here / 'art', bundle / 'covers', here / 'covers']
+    return [bundle / 'covers', here / 'covers']
 
 
 def load_art(name):
-    """The first `name` in art_directories() as RGB, or None (painted scene / dump art instead)."""
+    """The player's picture for `name`, else the first `name` in art_directories(), as RGB, or None (painted scene
+    instead)."""
+    custom = _CUSTOM_ART.get(name)
+    if custom:
+        try:
+            with Image.open(custom) as image:
+                return image.convert('RGB')
+        except OSError:
+            pass
     for directory in art_directories():
         try:
             with Image.open(directory / name) as image:
@@ -203,6 +225,20 @@ def _cover(image, size, focus=(0.5, 0.42)):
     return scaled.crop((left, top, left + w, top + h))
 
 
+def crop_image(image, size, crop=None):
+    """Fill ``size`` using a saved zoom and focal point from the artwork editor."""
+    crop = crop or {}
+    zoom = max(1.0, min(3.0, float(crop.get('zoom', 1.0))))
+    focus = (max(0.0, min(1.0, float(crop.get('x', 0.5)))),
+             max(0.0, min(1.0, float(crop.get('y', 0.5)))))
+    w, h = size
+    scale = max(w / image.width, h / image.height) * zoom
+    scaled = image.resize((math.ceil(image.width * scale), math.ceil(image.height * scale)), Image.LANCZOS)
+    left = max(0, min(scaled.width - w, round(focus[0] * scaled.width - w / 2)))
+    top = max(0, min(scaled.height - h, round(focus[1] * scaled.height - h / 2)))
+    return scaled.crop((left, top, left + w, top + h))
+
+
 def _fit(image, width, height, background=(9, 9, 9)):
     """The whole picture inside width×height, centred. Nothing is cropped."""
     scale = min(width / image.width, height / image.height)
@@ -214,11 +250,14 @@ def _fit(image, width, height, background=(9, 9, 9)):
 
 
 def card_scene(key, width, height):
-    """The whole cover poster fitted to the card, or a painted scene if the file is missing."""
+    """The whole cover poster fitted to the card (the player's picture filling it as they cropped it), or a painted
+    scene if the file is missing."""
     width, height = max(width, 8), max(height, 8)
     image = _load_scene(key)
     if image is None:
         image = SCENES[key](width * 2, height * 2).resize((width, height), Image.LANCZOS)
+    elif POSTERS[key] in _CUSTOM_ART:
+        return crop_image(image, (width, height), _CUSTOM_CROPS.get(POSTERS[key]))
     return _fit(image, width, height)
 
 
@@ -295,8 +334,8 @@ def poster_tile(key, width, height, title, subtitle, *, selected=False, hover=Fa
                                            fill=(page[0], page[1], page[2], 245))
     canvas.alpha_composite(foot, (pad, pad + poster_h))
     draw = ImageDraw.Draw(canvas)
-    title_color = (231, 195, 106) if selected else (246, 241, 230)
-    sub_color = (231, 195, 106) if selected else (154, 145, 127)
+    title_color = (226, 166, 74) if selected else (248, 238, 219)
+    sub_color = (226, 166, 74) if selected else (156, 142, 118)
     title_x = pad + max(8, (width - title_font.getlength(title)) / 2)
     sub_x = pad + max(8, (width - sub_font.getlength(subtitle)) / 2)
     title_y = pad + poster_h + 8
@@ -309,13 +348,17 @@ def poster_tile(key, width, height, title, subtitle, *, selected=False, hover=Fa
 
 
 def collection_banner(width, height, page=(5, 5, 5)):
-    """Legacy of Thieves-style header art, cropped to width×height with a soft bottom fade."""
+    """The collection banner (an old map), cropped to width×height with a soft bottom fade."""
     global _BANNER
     if _BANNER is None:
         _BANNER = load_art(COLLECTION_BANNER) or False
     if not _BANNER:
         return None
-    image = _cover(_BANNER, (max(width, 8), max(height, 8)), (0.50, 0.42))
+    size = (max(width, 8), max(height, 8))
+    if COLLECTION_BANNER in _CUSTOM_ART:
+        image = crop_image(_BANNER, size, _CUSTOM_CROPS.get(COLLECTION_BANNER))
+    else:
+        image = _cover(_BANNER, size, (0.50, 0.42))
     w, h = image.size
     shade = Image.new('L', (1, h))
     pixels = shade.load()
@@ -340,7 +383,7 @@ def hero_backdrop(key, width, height, page=(10, 10, 10)):
     vignette = vignette.filter(ImageFilter.GaussianBlur(max(20, width // 30)))
     dark = Image.new('RGB', image.size, (4, 3, 2))
     image = Image.composite(dark, image, vignette.point(lambda v: int((255 - v) * 0.55)))
-    gold = Image.new('RGB', (width, 1), (231, 195, 106))
+    gold = Image.new('RGB', (width, 1), (226, 166, 74))
     gold = gold.resize((width, height))
     gold_mask = Image.linear_gradient('L').resize((width, height)).point(lambda v: int(v * 0.08))
     image = Image.composite(gold, image, gold_mask)
@@ -426,3 +469,16 @@ if __name__ == '__main__':  # preview: python uncharted_art.py out.png [game fol
         sheet.paste(_framed(cover(sys.argv[2]), (200, 300)), (0, 225))
         sheet.paste(_framed(cover(sys.argv[2]), (640, 300)), (210, 225))
     sheet.save(sys.argv[1])
+
+
+def emblem(side):
+    """The brass compass emblem (covers/emblem.png) at side×side, or None."""
+    for directory in art_directories():
+        path = directory / 'emblem.png'
+        if path.is_file():
+            try:
+                with Image.open(path) as image:
+                    return image.convert('RGBA').resize((side, side), Image.LANCZOS)
+            except OSError:
+                return None
+    return None

@@ -99,6 +99,9 @@ int runtime_savedata_pick(int32_t user, const char *title, const char (*names)[3
 void runtime_thread_attach_host(const char *name);
 uintptr_t runtime_fiber_resolve(const char *name);
 void runtime_fiber_report(void);
+/* For fault reports (no allocation, any thread): the guest thread and fiber running here, or NULL. */
+const char *runtime_thread_name_here(void);
+const char *runtime_fiber_name_here(void);
 /* Host functions the loader runs at the start of matching guest functions (probe.c): the code
  * at `offset` must equal `signature`; `moved` bytes of whole position-independent instructions
  * move to the thunk. The callback gets the guest's rdi, rsi and r14 there and the image base.

@@ -187,7 +187,17 @@ uint32_t ComputePixelIndexWithinMicroTile(uint32_t x, uint32_t y, uint32_t z) {
         p3 = z0;
         p4 = y1;
         p5 = z1;
-#elif BITS_PER_PIXEL == 64 || BITS_PER_PIXEL == 128
+#elif BITS_PER_PIXEL == 64
+        // bbport: the order the games' own CPU tiler writes 64 bpp thick textures in (measured on
+        // U2's SSAO noise, a 4x4x12 R32G32 Thick1DThick volume). The addrlib order below put the
+        // noise vectors in the wrong pixels: AO biased by x & 3, 8 px vertical bars on bright snow.
+        p0 = x0;
+        p1 = y0;
+        p2 = x1;
+        p3 = z0;
+        p4 = z1;
+        p5 = y1;
+#elif BITS_PER_PIXEL == 128
         p0 = x0;
         p1 = y0;
         p2 = z0;

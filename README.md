@@ -7,7 +7,7 @@
 Uncharted 1, 2 and 3 from the PS4 collection, running natively on Windows 10 and 11. The original PS4 game
 code runs directly on your PC and the graphics are translated to Vulkan.
 
-**[⬇ Download 0.3.6.31](https://github.com/Mevlock/uncharted_pc-dev/releases/latest)** ·
+**[⬇ Download 0.3.6.36](https://github.com/Mevlock/uncharted_pc-dev/releases/latest)** ·
 [What's new](docs/releases/v0.3.6.30.md) · [How much faster](docs/PERFORMANCE.md) · [Known issues](#known-issues) · [How the shader preparation works](docs/SHADER_PREPARATION.md)
 
 > **No game files are included.** You need your own decrypted dump of the collection, version 1.02:
@@ -102,3 +102,5 @@ sleep, the render target heap move, chapter unlocks), [G3545](https://github.com
 
 Also used: FSR-Vulkan and the AMD FidelityFX SDK, NVIDIA DLSS, Intel XeSS, Videodec2 and the DLSS bridge from
 IFreemz's shadPS4 Bloodborne build.
+
+The launcher's pictures (the game scenes, the map banner, the compass emblem and the icon) are original artwork drawn by code (packaging/windows/make_uncharted_art.py); no official art or game images are included.
