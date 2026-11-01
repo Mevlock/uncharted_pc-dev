@@ -1097,6 +1097,13 @@ void ScanDcb(std::span<const u32> dcb, int depth) {
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
                                            u64 seq) {
     FIBER_ENTER(dcb_task_name);
+    // bbport: a new submission: the guest may have rewritten memory the last one streamed
+    // without a fault (a page it wrote before stays writable), e.g. constants after seeing the
+    // last submission's label. The stream copy memo keyed on the command buffer only kept the old
+    // copy for this one (code review 2026-11-01).
+    if (rasterizer) {
+        rasterizer->GetBufferCache().ForgetStreamCopies();
+    }
     // Top-level buffers enqueued for the draw preparation workers (nested IBs are not).
     Vulkan::DrawPreparation* draw_prep =
         seq != NoSeq && rasterizer ? &rasterizer->GetDrawPreparation() : nullptr;
@@ -1850,6 +1857,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
+    if (rasterizer) {
+        rasterizer->GetBufferCache().ForgetStreamCopies(); // see ProcessGraphics
+    }
     auto& queue = asc_queues[{vqid}];
 
     struct IndirectPatch {
