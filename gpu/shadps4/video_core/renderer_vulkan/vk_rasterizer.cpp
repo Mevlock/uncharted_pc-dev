@@ -6306,6 +6306,29 @@ static void ForceAnisotropy(AmdGpu::Sampler& sharp, bool is_depth, bool scene) {
     sharp.max_aniso.Assign(ratio);
 }
 
+// bbport: the games' SSAO (half-size compute passes, four variants) point-samples the full-size
+// depth and normals at offsets that land on texel edges; on PC the occlusion beats into 32 px
+// vertical bars on bright snow (Uncharted 2's convoy, the bank beside the truck). Their samplers
+// filter linearly instead. BB_SSAO_LINEAR=0: the game's point sampling.
+static void SmoothSsaoDepth(AmdGpu::Sampler& sharp, bool is_depth, u64 pgm_hash) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_SSAO_LINEAR");
+        return !(env && env[0] == '0');
+    }();
+    static constexpr u32 ssao_shaders[] = {0x3f1210b1u, 0xd0aca433u, 0xa0b87e41u, 0x12ed77bfu};
+    if (!enabled || is_depth ||
+        std::ranges::find(ssao_shaders, static_cast<u32>(pgm_hash)) == std::end(ssao_shaders)) {
+        return;
+    }
+    const auto linear = [](AmdGpu::Filter f) {
+        return f == AmdGpu::Filter::Point       ? AmdGpu::Filter::Bilinear
+               : f == AmdGpu::Filter::AnisoPoint ? AmdGpu::Filter::AnisoLinear
+                                                 : f;
+    };
+    sharp.xy_min_filter.Assign(linear(sharp.xy_min_filter));
+    sharp.xy_mag_filter.Assign(linear(sharp.xy_mag_filter));
+}
+
 void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
                               Shader::Backend::Bindings& binding, u32& write_index) {
     for (u32 sampler_index = 0; sampler_index < stage.samplers.size(); ++sampler_index) {
@@ -6313,6 +6336,7 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
         ForceAnisotropy(ssharp, sampler.is_depth, material_draw);
+        SmoothSsaoDepth(ssharp, sampler.is_depth, stage.pgm_hash);
         const auto vk_sampler = texture_cache.GetSampler(
             ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
