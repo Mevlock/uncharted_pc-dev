@@ -158,6 +158,7 @@ void runtime_thread_attach_host(const char *name) {
     GuestThread *t=runtime_thread_current();
     snprintf(t->name,sizeof(t->name),"%s",name ? name : "host");
 }
+const char *runtime_thread_name_here(void) { return current ? current->name : NULL; }
 static void set_host_name(const char *name);
 void runtime_thread_attach_main(void) {
     GuestThread *t=runtime_thread_current();
