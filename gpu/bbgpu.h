@@ -37,6 +37,8 @@ int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 int bbgpu_overlay_captures_input(void);
 /* 1 while the full-screen shader preparation page shows (the game runs behind it). */
 int bbgpu_preparation_screen(void);
+/* The shader cache's last writes, before the process ends without destructors (runtime_quit). */
+void bbgpu_prepare_exit(void);
 /* Button prompts (button_prompts.cpp), the device used last: 0 keyboard or mouse (pictures of the
  * bound keys), 1 a PlayStation controller (the game's own buttons), 2 an Xbox or other controller
  * (Xbox buttons). */

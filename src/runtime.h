@@ -26,6 +26,10 @@ void runtime_mutex_report(void);
 uintptr_t runtime_memory_resolve(const char *name);
 void runtime_memory_report(void);
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+/* Ends the process: log flushed, shader cache saved, no destructors and (Windows) no DLL detach
+ * code (TerminateProcess; ExitProcess could hang in libsrt's detach, and exit()'s destructors
+ * waited for the GPU). Every exit of the game and every STOP go through it. */
+__attribute__((noreturn)) void runtime_quit(int code);
 /* Fault handler: a fault inside a partial remap in progress waits for it; returns 1 to retry. */
 int runtime_memory_wait_carve(uintptr_t address);
 const char *runtime_import_name(const char *name);
