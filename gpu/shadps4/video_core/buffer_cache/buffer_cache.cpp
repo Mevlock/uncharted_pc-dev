@@ -1631,6 +1631,24 @@ bool BufferCache::WaitLandingTick(u64 tick) {
     return false;
 }
 
+void BufferCache::ForgetUnmapped(VAddr device_addr, u64 size) {
+    DrainSharedLandings();
+    {
+        std::scoped_lock lk{landing_mutex};
+        if (landing_registered_seq > landing_done_seq) {
+            unmapped_while_landing.push_back(
+                {device_addr, device_addr + size, landing_registered_seq});
+        }
+    }
+    gpu_modified_ranges.Subtract(device_addr, size);
+    shared_gpu_ranges.Subtract(device_addr, size);
+    for (auto it = shared_before.lower_bound(device_addr);
+         it != shared_before.end() && it->first < device_addr + size;) {
+        it = shared_before.erase(it);
+    }
+    memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+}
+
 bool BufferCache::ExecuteLanding(Landing& landing) {
     auto& side = *side_queue;
     if (!WaitLandingTick(landing.tick)) {
@@ -1698,6 +1716,21 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
     }
     Vulkan::Check(side.device.resetFences(*slot->fence));
     slot->staging.Invalidate(0, total);
+    // Targets the guest unmapped after this landing was registered get nothing (ForgetUnmapped).
+    std::vector<std::pair<VAddr, VAddr>> gone;
+    {
+        std::scoped_lock lk{landing_mutex};
+        for (const auto& range : unmapped_while_landing) {
+            if (range.seq >= landing.seq) {
+                gone.emplace_back(range.lo, range.hi);
+            }
+        }
+    }
+    const auto unmapped = [&gone](VAddr target, u64 size) {
+        return std::ranges::any_of(gone, [&](const auto& range) {
+            return target < range.second && range.first < target + size;
+        });
+    };
     if (landing.shared) {
         // Only the bytes the guest has not rewritten since the page was handed over.
         SharedLanded done{.tick = landing.tick};
@@ -1705,6 +1738,10 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
         for (size_t i = 0; i < landing.copies.size(); ++i) {
             const u64 size = landing.copies[i].size;
             const VAddr target = landing.targets[i];
+            if (unmapped(target, size)) {
+                done.ranges.push_back({target, target + size, false});
+                continue;
+            }
             const u8* gpu = slot->staging.mapped_data.data() + landing.copies[i].dstOffset;
             const u8* before = landing.before.data() + landing.copies[i].dstOffset;
             now.resize(size);
@@ -1723,6 +1760,9 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
         shared_landed_pending.store(true, std::memory_order_release);
     } else {
         for (size_t i = 0; i < landing.copies.size(); ++i) {
+            if (unmapped(landing.targets[i], landing.copies[i].size)) {
+                continue;
+            }
             memory->TryWriteBacking(reinterpret_cast<void*>(landing.targets[i]),
                                     slot->staging.mapped_data.data() + landing.copies[i].dstOffset,
                                     landing.copies[i].size);
@@ -1762,6 +1802,8 @@ void BufferCache::LandingWorker() {
         ExecuteLanding(*landing);
         lk.lock();
         landing_done_seq = landing->seq;
+        std::erase_if(unmapped_while_landing,
+                      [this](const UnmappedRange& range) { return range.seq <= landing_done_seq; });
         landing_done.store(landing->seq, std::memory_order_release);
         landing_done_cv.notify_all();
     }

@@ -7621,8 +7621,20 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     // per level load). The caches are changed on the command processor thread, between draws:
     // a texture freed while that thread was preparing a draw with it reached the GPU destroyed
     // (device lost reading an invalid address).
+    // BB_UNMAP_V2 (default on): the range's GPU data is dropped, not handled as a guest write
+    // (that queued landings merging old GPU bytes into a later mapping there, or read the range
+    // back with a full GPU wait), and copies still reading guest memory finish first: the host
+    // unmap follows this (code review 2026-11-01).
+    static const bool v2 = [] {
+        const char* env = std::getenv("BB_UNMAP_V2");
+        return !(env && env[0] == '0');
+    }();
     const auto unmap = [this, addr, size] {
         DrainDrawPipe();
+        if (v2) {
+            scheduler.WaitHostCopies();
+            buffer_cache.ForgetUnmapped(addr, size);
+        }
         buffer_cache.InvalidateMemory(addr, size, true);
         texture_cache.UnmapMemory(addr, size);
     };

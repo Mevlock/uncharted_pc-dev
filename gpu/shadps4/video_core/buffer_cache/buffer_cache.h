@@ -112,6 +112,12 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
 
+    /// bbport: the guest unmapped [device_addr, +size): the GPU's data for it is dropped, not read
+    /// back as for a guest write, and landings registered before are kept from merging GPU bytes
+    /// into the range (a new mapping may be there by then). GPU command thread, before
+    /// InvalidateMemory. BB_UNMAP_V2=0: off.
+    void ForgetUnmapped(VAddr device_addr, u64 size);
+
     /// bbport diagnosis (BB_FORCE_VB_UPLOAD): the next ObtainBuffer copies this range from guest
     /// memory again (regions the GPU did not write).
     void ForceUpload(VAddr device_addr, u64 size);
@@ -396,6 +402,12 @@ private:
     std::deque<std::shared_ptr<Landing>> landing_queue; ///< registered, not yet landed
     std::deque<GatedLabel> gated_labels;                 ///< labels waiting for a landing
     u64 landing_registered_seq{0}, landing_done_seq{0};
+    /// Ranges unmapped while landings up to `seq` were registered and not landed (landing_mutex).
+    struct UnmappedRange {
+        VAddr lo, hi;
+        u64 seq;
+    };
+    std::vector<UnmappedRange> unmapped_while_landing;
     std::atomic<u64> landing_registered{0}, landing_done{0};
     bool landing_stop{false}, gate_running{false};
     std::atomic<u32> gate_outstanding{0}; ///< labels queued or running on the landing thread

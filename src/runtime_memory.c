@@ -373,17 +373,60 @@ static void queue_hook(int kind, uintptr_t address, uint64_t size) {
     }
     pending[pending_count++]=(PendingHook){kind,address,size};
 }
+/* bbport: the GPU hooks run one at a time, in the order they were queued. Several threads drain
+ * the queue, and each popped one hook and ran it outside the lock: an UNMAP and the MAP of the
+ * same range that followed it could run in the opposite order, and the GPU side then took live
+ * memory for unmapped (code review 2026-11-01). Taken without the region lock held; nests on
+ * one thread (a hook that maps memory). */
+static pthread_mutex_t hook_mutex=PTHREAD_MUTEX_INITIALIZER;
+static __thread unsigned hook_depth;
+static void hooks_lock(void) { if (!hook_depth++) pthread_mutex_lock(&hook_mutex); }
+static void hooks_unlock(void) { if (!--hook_depth) pthread_mutex_unlock(&hook_mutex); }
 /* Runs queued GPU notifications; callers invoke it after dropping the lock. */
 static void flush_hooks(void) {
+    hooks_lock();
     for (;;) {
         write_lock();
-        if (!pending_count) { write_unlock(); return; }
+        if (!pending_count) { write_unlock(); break; }
         PendingHook h=pending[0];
         memmove(pending,pending+1,--pending_count*sizeof(*pending));
         GpuRange hook = h.kind==HOOK_MAP ? hook_map : h.kind==HOOK_UNMAP ? hook_unmap : hook_invalidate;
         write_unlock();
         if (hook) hook(h.address,h.size);
     }
+    hooks_unlock();
+}
+/* bbport (BB_UNMAP_V2=0: as before): memory leaves only after the GPU side forgot it. Only
+ * sceKernelMunmap did that; releasing direct memory, batch unmaps and fixed maps over live
+ * mappings told the GPU afterwards (release: after the pages were zeroed) or never (a fixed map
+ * replacing a mapping), so GPU and copy threads could still read the range, and the GPU kept
+ * caching the old contents (code review 2026-11-01). */
+static size_t vma_index(uintptr_t a);
+static int unmap_v2(void) {
+    static int value=-1;
+    if (value<0) { const char *v=getenv("BB_UNMAP_V2"); value=!(v && v[0]=='0'); }
+    return value;
+}
+/* Tells the GPU side about every live mapping in [start,end) before the caller removes or
+ * replaces it; called without the region lock (the hook waits for the GPU command thread). */
+static void pre_unmap(uintptr_t start, uintptr_t end) {
+    if (!hook_unmap || !unmap_v2() || start>=end) return;
+    hooks_lock();
+    for (uintptr_t at=start; at<end;) {
+        uintptr_t found[32][2]; size_t n=0;
+        read_lock();
+        for (size_t i=vma_index(at); i<vma_count && vmas[i].start<end && n<32; ++i) {
+            if (vmas[i].kind==KIND_RESERVED) continue;
+            found[n][0]=vmas[i].start>at ? vmas[i].start : at;
+            found[n][1]=vmas[i].end<end ? vmas[i].end : end;
+            ++n;
+        }
+        read_unlock();
+        if (!n) break;
+        for (size_t i=0;i<n;++i) hook_unmap(found[i][0],found[i][1]-found[i][0]);
+        at=found[n-1][1];
+    }
+    hooks_unlock();
 }
 static int flex_test(uint64_t page) { return (int)((flex_bitmap[page/64]>>(page%64))&1); }
 static void flex_set(uint64_t first, uint64_t count, int used) {
@@ -556,6 +599,8 @@ static int memory_log(void) {
 }
 static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
     void *requested=out ? *out : NULL;
+    if ((flags & MAP_FIXED_FLAG) && requested && size && !((uintptr_t)requested%PAGE))
+        pre_unmap((uintptr_t)requested,(uintptr_t)requested+align_up(size,PAGE));
     write_lock();
     int32_t result=map_direct_locked(out,size,prot,flags,physical,alignment);
     write_unlock();
@@ -573,7 +618,7 @@ static ABI int32_t direct_map_named(void **out, uint64_t size, int prot, int fla
 static int32_t unmap_locked(uintptr_t start, uint64_t size) {
     if (start%PAGE || !size) return INVALID;
     uint64_t end=start+align_up(size,PAGE);
-    for (size_t i=vma_index(start); i<vma_count && vmas[i].start<end; ++i)
+    for (size_t i=vma_index(start); i<vma_count && vmas[i].start<end && !unmap_v2(); ++i)
         if (vmas[i].kind!=KIND_RESERVED) {
             uintptr_t a=vmas[i].start>start ? vmas[i].start : start, b=vmas[i].end<end ? vmas[i].end : end;
             queue_hook(HOOK_UNMAP,a,b-a);
@@ -587,7 +632,11 @@ static int32_t unmap_locked(uintptr_t start, uint64_t size) {
 }
 static ABI int32_t direct_unmap(void *address, uint64_t size) {
     /* The GPU forgets the range before it disappears (as shadPS4's early GPU unmap). */
-    if (hook_unmap && !((uintptr_t)address%PAGE) && size) hook_unmap((uintptr_t)address,align_up(size,PAGE));
+    if (unmap_v2()) {
+        if (!((uintptr_t)address%PAGE) && size) pre_unmap((uintptr_t)address,(uintptr_t)address+align_up(size,PAGE));
+    } else if (hook_unmap && !((uintptr_t)address%PAGE) && size) {
+        hook_unmap((uintptr_t)address,align_up(size,PAGE));
+    }
     write_lock();
     size_t before=pending_count;
     int32_t result=unmap_locked((uintptr_t)address,size);
@@ -599,6 +648,22 @@ static ABI int32_t direct_unmap(void *address, uint64_t size) {
 static ABI int32_t direct_release(uint64_t start, uint64_t size) {
     if (start % PAGE || size % PAGE) return INVALID;
     if (!size) return 0;
+    if (unmap_v2() && hook_unmap) {
+        /* The guest ranges mapping the released pages, before the pages go (and are zeroed). */
+        uintptr_t (*ranges)[2]=NULL; size_t n=0, capacity=0;
+        read_lock();
+        for (size_t i=0; i<vma_count; ++i) {
+            const Vma *v=&vmas[i];
+            uint64_t length=v->end-v->start;
+            if (v->kind!=KIND_DIRECT || v->phys>=start+size || start>=v->phys+length) continue;
+            uint64_t a=v->phys>start ? v->phys : start, b=v->phys+length<start+size ? v->phys+length : start+size;
+            if (n==capacity) { capacity=capacity ? capacity*2 : 16; ranges=realloc(ranges,capacity*sizeof(*ranges)); }
+            ranges[n][0]=v->start+(a-v->phys); ranges[n][1]=v->start+(b-v->phys); ++n;
+        }
+        read_unlock();
+        for (size_t i=0;i<n;++i) pre_unmap(ranges[i][0],ranges[i][1]);
+        free(ranges);
+    }
     write_lock();
     if (!direct_range_allocated(start,size)) { write_unlock(); return INVALID; }
     /* Mappings of released physical pages disappear with them. */
@@ -642,6 +707,8 @@ static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int fl
 }
 static ABI int32_t map_flexible(void **inout, uint64_t size, int prot, int flags) {
     if (memory_log()) printf("Memory: map flexible want=%p size=0x%" PRIx64 " prot=0x%x flags=0x%x\n",inout ? *inout : NULL,size,prot,flags);
+    if ((flags & MAP_FIXED_FLAG) && inout && *inout && size && !((uintptr_t)*inout%PAGE))
+        pre_unmap((uintptr_t)*inout,(uintptr_t)*inout+align_up(size,PAGE));
     write_lock();
     int32_t result=map_flexible_locked(inout,size,prot,flags);
     write_unlock();
@@ -735,9 +802,17 @@ static ABI int32_t direct_memory_type(uint64_t phys, int *type, void **start, vo
 static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, int flags) {
     if (!entries || count<0) return INVALID;
     int32_t result=0; int done=0;
-    write_lock();
+    const int per_entry=unmap_v2();
+    if (!per_entry) write_lock();
     for (; done<count; ++done) {
         BatchEntry *e=&entries[done];
+        if (per_entry) {
+            /* Maps are fixed here (or MAP_FIXED): what they replace is announced like an unmap. */
+            if ((e->operation==1 || ((e->operation==0 || e->operation==3) && (flags & MAP_FIXED_FLAG))) &&
+                e->length && !((uintptr_t)e->start%PAGE))
+                pre_unmap((uintptr_t)e->start,(uintptr_t)e->start+align_up(e->length,PAGE));
+            write_lock();
+        }
         if (memory_log())
             printf("Memory: batch op=%d start=%p length=0x%" PRIx64 " offset=0x%" PRIx64 " prot=0x%x type=%d flags=0x%x\n",
                    (int)e->operation,e->start,(uint64_t)e->length,(uint64_t)e->offset,(unsigned)(uint8_t)e->prot,(int)e->type,flags);
@@ -749,9 +824,10 @@ static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, in
         case 4: result=protect_locked((uintptr_t)e->start,e->length,(uint8_t)e->prot,e->type); break;
         default: result=INVALID;
         }
+        if (per_entry) write_unlock();
         if (result) break;
     }
-    write_unlock();
+    if (!per_entry) write_unlock();
     flush_hooks();
     if (processed) *processed=done;
     return result;
