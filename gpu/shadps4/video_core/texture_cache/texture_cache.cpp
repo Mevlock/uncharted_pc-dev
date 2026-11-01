@@ -460,9 +460,14 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         reuse.reset();
         RegisterImage(new_image_id);
 
+        // bbport (marks-jhojan, upstream PR #742): insert grows the slot vector when it is full and
+        // moves every image to new storage, so cache_image may point at freed memory now: look
+        // both images up again (U2 crash in this function 68 minutes into a session).
+        Image& old_image = slot_images[cache_image_id];
+
         // Inherit image usage
         auto& new_image = slot_images[new_image_id];
-        new_image.usage = cache_image.usage;
+        new_image.usage = old_image.usage;
         new_image.flags &= ~ImageFlagBits::Dirty;
         // When creating a depth buffer through overlap resolution don't clear it on first use.
         new_image.info.meta_info.htile_clear_mask = 0;
@@ -471,7 +476,6 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         // old image erased it and the new one started with no slice cleared: U3 grows its point
         // light shadow array a layer at a time (512x512 x 48 above 1080p), so the cubes in layers
         // 12 and up kept a depth of 0 and shadowed everything (the hand torch lit a trapezoid).
-        Image& old_image = slot_images[cache_image_id];
         const VAddr old_htile = old_image.info.meta_info.htile_addr;
         if (old_htile &&
             (!new_image.info.meta_info.htile_addr || new_image.info.meta_info.htile_addr == old_htile)) {
@@ -732,8 +736,10 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
                     RefreshImage(slot_images[merged_image_id]);
                     TrackImage(merged_image_id);
                 }
+                // bbport: the insert above can move every image (see ResolveDepthOverlap), so
+                // the cached image is looked up again.
                 auto& merged_image = slot_images[merged_image_id];
-                runtime.CopyMip(&cache_image, &merged_image, mip, slice);
+                runtime.CopyMip(&slot_images[cache_image_id], &merged_image, mip, slice);
                 FreeImage(cache_image_id);
             }
         }
@@ -996,7 +1002,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             view_mip = -1;
             view_slice = -1;
 
-            const auto& merged_info = image_id ? slot_images[image_id].info : info;
+            // bbport (upstream PR #742): a copy, not a reference into slot_images: ResolveOverlap
+            // can insert an image (ExpandImage, ResolveDepthOverlap), which moves every image.
+            const ImageInfo merged_info = image_id ? slot_images[image_id].info : info;
             const auto before = slot_images[cache_id].info;
             auto [overlap_image_id, overlap_view_mip, overlap_view_slice] =
                 ResolveOverlap(merged_info, desc.type, cache_id, image_id);
@@ -1339,10 +1347,12 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
         }
         Image& stencil_image = slot_images[stencil_id];
         TouchImage(stencil_image);
-        stencil_image.AssociateDepth(image_id, image.image_uid);
+        // bbport (upstream PR #742): the insert above can move every image, so image is looked
+        // up again.
+        stencil_image.AssociateDepth(image_id, slot_images[image_id].image_uid);
     }
 
-    return image.FindView(desc.view_info, false);
+    return slot_images[image_id].FindView(desc.view_info, false);
 }
 
 namespace {
