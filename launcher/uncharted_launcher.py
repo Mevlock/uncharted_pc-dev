@@ -2190,17 +2190,35 @@ class Launcher:
             # No window and no game (BB_PREPARE_ONLY): the progress comes back as PREP lines for the bar.
             env['BB_PREPARE_ONLY'] = '1'
             env.setdefault('BB_VARIANT_SHIP', str(shader_list(self.app['start'])[0]))
+        # The launcher closing itself after the start (close_on_play): the game writes its log file
+        # itself. Through a pipe nobody read once the launcher was gone, the scripts' next print
+        # (a game switch in the collection menu, an in-game restart) failed and the next game
+        # never started (review 2026-11-01).
+        closing = bool(self.app.get('close_on_play')) and not prepare
+        output, log = subprocess.PIPE, None
+        if closing:
+            try:
+                log = open_run_log(Path(self.app.get('user_dir') or DATA_DIR / 'user'))
+                log.write(log_header(self.app))
+                log.flush()
+                output = log
+            except OSError:
+                output = subprocess.DEVNULL
         try:
             self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=env,
-                                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                            stdin=subprocess.DEVNULL, stdout=output,
                                             stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
         except OSError as error:
             self.append(_('Could not start: {}').format(error) + '\n')
             self.process = None
             return
+        finally:
+            if log:
+                log.close()  # the game has its own handle
         self.job = GameJob(self.process)
         self.entered, self.last_problem, self.stopping = False, '', False
-        threading.Thread(target=self.read_output, args=(self.process,), daemon=True).start()
+        if not closing:
+            threading.Thread(target=self.read_output, args=(self.process,), daemon=True).start()
         self.play_button.configure(state='disabled')
         self.stop_button.configure(state='normal')
         self.preparing = prepare
@@ -2210,7 +2228,7 @@ class Launcher:
             self.prep_status.configure(text=_('Preparing shaders…'), fg=GOLD)
         self.status.configure(text=_('Preparing shaders…') if prepare
                               else _('Preparing the game; it opens in its own window…'), fg=GOLD)
-        if self.app.get('close_on_play'):
+        if closing:
             self.root.after(5000, self.root.destroy)
 
     def read_output(self, process):
