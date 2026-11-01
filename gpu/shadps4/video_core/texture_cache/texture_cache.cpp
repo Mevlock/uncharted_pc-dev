@@ -2063,7 +2063,7 @@ void TextureCache::DeleteImage(ImageId image_id) {
         }
     }
     if (meta_info.cmask_addr || meta_info.fmask_addr || meta_info.htile_addr) {
-        RebuildMetaFilter();
+        MarkMetaFilterStale(); // rebuilt by the next NoteMeta, on the registering thread
     }
 
     {

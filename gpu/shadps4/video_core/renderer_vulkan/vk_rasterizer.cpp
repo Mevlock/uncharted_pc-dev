@@ -5586,10 +5586,13 @@ VAddr WatchedGpuWrite() {
 }
 } // namespace
 
+// Off by default (review 2026-11-01): InvalidateMemoryFromGPU(lo, hi - lo) only marks images that start at the
+// span's lowest address, so a cached image at another view's base address stayed stale (the per-view calls it
+// replaced each matched their own base). BB_SPAN_INVALIDATE=1: the span-wide call (experiment).
 static bool SpanInvalidate() {
     static const bool on = [] {
         const char* env = std::getenv("BB_SPAN_INVALIDATE");
-        return !(env && env[0] == '0');
+        return env && env[0] == '1';
     }();
     return on;
 }

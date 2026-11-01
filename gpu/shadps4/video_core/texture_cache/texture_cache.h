@@ -279,8 +279,18 @@ public:
         }();
         return !on || meta_filter.test(MetaFilterBit(address));
     }
+    /// Registrations run on the GPU thread; a deletion (also from UnmapMemory on a guest thread)
+    /// only marks the filter stale, and the rebuild happens here, before the next bit is set: a
+    /// rebuild racing a registration lost that bit (review 2026-11-01). Until then the filter
+    /// keeps extra bits, which only costs a map lookup.
     void NoteMeta(VAddr address) {
+        if (meta_filter_stale.exchange(false, std::memory_order_acq_rel)) {
+            RebuildMetaFilter();
+        }
         meta_filter.set(MetaFilterBit(address));
+    }
+    void MarkMetaFilterStale() {
+        meta_filter_stale.store(true, std::memory_order_release);
     }
     void RebuildMetaFilter() {
         // Built aside and copied in: a reader on another thread (the texture helper) sees each
@@ -550,6 +560,7 @@ private:
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
     std::bitset<4096> meta_filter; ///< see MaybeMeta
+    std::atomic<bool> meta_filter_stale{false}; ///< a deletion since the last rebuild (NoteMeta)
     /// bbport: most layers, and most bytes, a request for a depth array at an address asked for
     /// (PadDepthLayers).
     struct DepthArraySeen {

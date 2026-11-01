@@ -33,7 +33,16 @@ inline std::uint64_t Ticks(const char* name) {
 /// printed (and reset) with BB_FRAME_STATS.
 inline std::atomic<std::uint64_t> g_hits[4];
 
+/// Only with BB_FRAME_STATS (review 2026-11-01): otherwise three busy threads did a locked add on one shared cache
+/// line for every draw, packet and recorded command, for counts nobody printed.
 inline void Count(int site) {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_FRAME_STATS");
+        return env && env[0] == '1';
+    }();
+    if (!on) {
+        return;
+    }
     g_hits[site].fetch_add(1, std::memory_order_relaxed);
 }
 
