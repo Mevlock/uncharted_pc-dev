@@ -468,6 +468,9 @@ static int emulate_movbe(CONTEXT *c) {
 static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     DWORD code=record->ExceptionCode;
+    if (code==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2 &&
+        runtime_memory_wait_carve((uintptr_t)record->ExceptionInformation[1]))
+        return EXCEPTION_CONTINUE_EXECUTION; /* the page was briefly remapped (runtime_memory.c) */
     if (code==EXCEPTION_ILLEGAL_INSTRUCTION && is_patched_rdtsc((uintptr_t)info->ContextRecord->Rip)) {
         const uint64_t tsc=runtime_guest_tsc();
         info->ContextRecord->Rax=(uint32_t)tsc;
