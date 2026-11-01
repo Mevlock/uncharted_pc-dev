@@ -246,6 +246,12 @@ struct PageManager::Impl {
             // recording thread waited for those copies (U2 froze). They read guest memory as it
             // is, as without precise read-backs; the game's threads get the GPU data.
             if (!is_gpu_thread && !runtime_thread_is_guest()) {
+                // A read of memory that isn't mapped (any more) is not a tracked page: re-protecting
+                // it changes nothing and the thread faulted again forever (review 2026-11-01). It
+                // goes on to the speculative-read recovery or the crash report instead.
+                if (!rasterizer->IsMapped(addr, 1)) {
+                    return false;
+                }
                 const VAddr page = addr & ~VAddr{4095};
                 const bool writable = rasterizer->GetBufferCache().IsRegionCpuModified(page, 4096);
                 runtime_memory_gpu_protect(page, 4096, 1, writable ? 1 : 0);
