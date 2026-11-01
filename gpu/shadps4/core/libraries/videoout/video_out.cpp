@@ -16,6 +16,7 @@
 #include "core/libraries/videoout/videoout_error.h"
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -384,16 +385,22 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
             // do: the frame is prepared with that thread's draw scheduler, which no other thread
             // may record into (a thread of their own did, at the same time as the command
             // thread: GPU crashes writing to 0x0 and a null record chunk, U1 at 144 FPS).
+            // Deferred signals (SignalAfterHostCopies) also raise it on the GPU copy threads, the
+            // landing thread or a thread helping in BbCopy::WaitAll (review 2026-11-01): only the
+            // GPU command thread and the draw recording thread (stage B) flip in place.
             // BB_EOP_FLIP_STRESS=1 (diagnosis): every end-of-pipe flip goes that way.
             static const bool stress = [] {
                 const char* env = std::getenv("BB_EOP_FLIP_STRESS");
                 return env && env[0] == '1';
             }();
-            if (stress || Vulkan::Scheduler::OnRecorderThread()) {
+            const bool in_place = (AmdGpu::Liverpool::OnProcessorThread() ||
+                                   Vulkan::DrawPipe::OnStageB()) &&
+                                  !Vulkan::Scheduler::OnRecorderThread();
+            if (stress || !in_place) {
                 static std::atomic<u32> posted{0};
                 if (posted.fetch_add(1, std::memory_order_relaxed) == 0) {
-                    std::printf("VideoOut: an end-of-pipe flip was raised on the Vulkan recording "
-                                "thread: handed to the GPU command thread\n");
+                    std::printf("VideoOut: an end-of-pipe flip was raised off the GPU command and "
+                                "draw recording threads: handed to the GPU command thread\n");
                 }
                 liverpool->SendCommand(submit);
             } else {
