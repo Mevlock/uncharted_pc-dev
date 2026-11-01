@@ -49,6 +49,23 @@ static constexpr u32 ShaderMetaVersion = 16u; // bbport: BufferSpecialization::c
 static constexpr u32 PipelineKeyVersion = 8u; // bbport: GraphicsPipelineKey::split_sets; Info layout (cs_split_eligible)
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
+/// Translator switches read where they are used; each set to its non-default value sets a bit
+/// (bits 28-31: the ReadConst window above reaches bit 27).
+/// An A/B run with one of them saved its shaders under the normal version, and later default
+/// runs loaded them (BB_LDS_BOUNDS=0 undid the U3 chapter 2 flicker fix; review 2026-11-01).
+static u32 TranslatorSwitchBits() {
+    static const u32 bits = [] {
+        const auto set = [](const char* name) {
+            const char* env = std::getenv(name);
+            return env && env[0] == '1';
+        };
+        const char* lds = std::getenv("BB_LDS_BOUNDS");
+        return (lds && std::atoi(lds) == 0 ? 1u << 28 : 0u) |
+               (set("BB_NO_ADDR64") ? 1u << 29 : 0u) | (set("BB_SATURATE_NAN") ? 1u << 30 : 0u) |
+               (set("BB_INLINE_FETCH") ? 1u << 31 : 0u);
+    }();
+    return bits;
+}
 static u32 TranslatedBinaryVersion() {
     // The optional 512-thread CTA split (BB_PASCAL_CTA_SPLIT, cta_split.h) changes one shader;
     // the ReadConst window size (BB_READCONST_WINDOW_DWORDS) changes every shader with one, and
@@ -56,7 +73,7 @@ static u32 TranslatedBinaryVersion() {
     return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0u : 0x10000u) |
            (Shader::CtaSplitEnabled() ? 0x20000u : 0u) |
            (Shader::WaveLdsBarriers() ? 0u : 0x40000u) |
-           ((Shader::ReadConstWindowDwords() >> 8) << 20);
+           ((Shader::ReadConstWindowDwords() >> 8) << 20) | TranslatorSwitchBits();
 }
 } // namespace Serialization
 
