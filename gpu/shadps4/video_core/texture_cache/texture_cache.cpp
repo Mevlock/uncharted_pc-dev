@@ -301,6 +301,9 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size, bool before_write) 
             // Untrack the image, so that the range is unprotected and the guest can write freely.
             NoteCpuWrite(image, addr, size, before_write);
             image.flags |= ImageFlagBits::CpuDirty;
+            // bbport: only the written page stops being watched when the page check can
+            // decide; untracking the whole image hid writes to its other pages, and the check
+            // passed the image as unchanged (code review 2026-11-01).
             if (refresh_log && True(image.flags & ImageFlagBits::GpuModified)) {
                 std::scoped_lock stats_lock{refresh_mutex};
                 auto& stat = RefreshStatOf(image);
@@ -310,7 +313,9 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size, bool before_write) 
                 stat.write_min = std::min(stat.write_min, offset);
                 stat.write_max = std::max(stat.write_max, offset + size);
             }
-            UntrackImage(image_id);
+            if (!PunchWatchHole(image, addr)) {
+                UntrackImage(image_id);
+            }
         } else if (pages_end < image_end) {
             // This page access may or may not modify the image.
             // We should not mark it as dirty now. If it really was modified
@@ -1499,6 +1504,8 @@ void TextureCache::RefreshImage(Image& image) {
     const auto write_pages = std::move(image.cpu_write_pages);
     const bool whole_check_needed = std::exchange(image.whole_check_needed, false);
     image.cpu_write_pages.clear();
+    // The pages written since are watched again: the next write to any page faults.
+    RestoreWatchHoles(image);
     if (is_gpu_modified && !is_gpu_dirty && !whole_check_needed && !write_pages.empty() &&
         False(image.flags & ImageFlagBits::MaybeCpuDirty)) {
         const bool unchanged = std::ranges::all_of(write_pages, [&](const auto& page) {
@@ -1710,8 +1717,41 @@ void TextureCache::TrackImageTail(ImageId image_id) {
     tracker.UpdatePageWatchers<1>(addr, size);
 }
 
+bool TextureCache::PunchWatchHole(Image& image, VAddr addr) {
+    // BB_WATCH_HOLES=0: the whole image is untracked at the first write, as before.
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_WATCH_HOLES");
+        return !(env && env[0] == '0');
+    }();
+    const VAddr page = addr & ~VAddr{0xfff};
+    if (!enabled || image.whole_check_needed || !image.IsTracked() ||
+        page >= image.track_addr_end || page + 0x1000 <= image.track_addr ||
+        std::ranges::none_of(image.cpu_write_pages,
+                             [page](const auto& noted) { return noted.first == page; })) {
+        RestoreWatchHoles(image);
+        return false;
+    }
+    if (std::ranges::find(image.watch_holes, page) != image.watch_holes.end()) {
+        return true;
+    }
+    image.watch_holes.push_back(page);
+    tracker.UpdatePageWatchers<false>(page, 0x1000);
+    return true;
+}
+
+void TextureCache::RestoreWatchHoles(Image& image) {
+    if (image.watch_holes.empty()) {
+        return;
+    }
+    for (const VAddr page : image.watch_holes) {
+        tracker.UpdatePageWatchers<true>(page, 0x1000);
+    }
+    image.watch_holes.clear();
+}
+
 void TextureCache::UntrackImage(ImageId image_id) {
     auto& image = slot_images[image_id];
+    RestoreWatchHoles(image);
     if (!image.IsTracked()) {
         return;
     }
@@ -1726,6 +1766,7 @@ void TextureCache::UntrackImage(ImageId image_id) {
 
 void TextureCache::UntrackImageHead(ImageId image_id) {
     auto& image = slot_images[image_id];
+    RestoreWatchHoles(image);
     const auto image_begin = image.info.guest_address;
     if (!image.IsTracked() || image_begin < image.track_addr) {
         return;
@@ -1744,6 +1785,7 @@ void TextureCache::UntrackImageHead(ImageId image_id) {
 
 void TextureCache::UntrackImageTail(ImageId image_id) {
     auto& image = slot_images[image_id];
+    RestoreWatchHoles(image);
     const auto image_end = image.info.guest_address + image.info.guest_size;
     if (!image.IsTracked() || image.track_addr_end < image_end) {
         return;

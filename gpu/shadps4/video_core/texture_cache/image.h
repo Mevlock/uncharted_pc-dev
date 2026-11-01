@@ -212,6 +212,10 @@ public:
     /// when a write came another way or too many pages were written.
     boost::container::small_vector<std::pair<VAddr, u64>, 4> cpu_write_pages;
     bool whole_check_needed = false;
+    /// bbport: noted pages whose write watch this image dropped on its own (the rest of the image
+    /// stays watched, so writes to other pages fault and are noted too). TextureCache::
+    /// RestoreWatchHoles adds the watches back before the tracked range changes.
+    boost::container::small_vector<VAddr, 8> watch_holes;
 
 private:
     static Common::IncrementalIdProvider<u64> global_image_uid;

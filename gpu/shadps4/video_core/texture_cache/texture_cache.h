@@ -493,6 +493,10 @@ private:
     void UntrackImage(ImageId image_id);
     void UntrackImageHead(ImageId image_id);
     void UntrackImageTail(ImageId image_id);
+    /// bbport: see Image::watch_holes. PunchWatchHole returns false when the whole image has to be
+    /// untracked instead.
+    bool PunchWatchHole(Image& image, VAddr addr);
+    void RestoreWatchHoles(Image& image);
 
     void MarkAsMaybeDirty(ImageId image_id, Image& image);
 
