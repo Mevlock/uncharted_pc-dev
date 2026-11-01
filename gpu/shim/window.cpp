@@ -27,6 +27,10 @@ int mouse_wheel{};
 u32 mouse_buttons{};
 std::atomic<bool> mouse_look{false}, mouse_captured{false};
 bool window_focused{true};
+// The game window is in front (Windows' own answer, set each event poll): the controller is read
+// only then (runtime_pad.c, bbgpu_window_foreground). SDL's keyboard focus can be lost while the
+// window stays in front, and with it SDL dropped the gamepad events (from BilalReloaded's port).
+std::atomic<bool> window_foreground{true};
 
 u32 MouseBit(u8 button) {
     switch (button) {
@@ -83,10 +87,25 @@ extern "C" int bbgpu_mouse_sample(float* dx, float* dy, uint32_t* buttons, int* 
     return mouse_captured ? 1 : 0;
 }
 
+#ifdef _WIN32
+// Declared here: windows.h clashes with names used by this file's headers.
+extern "C" __declspec(dllimport) void* __stdcall GetForegroundWindow();
+extern "C" __declspec(dllimport) void* __stdcall GetAncestor(void* hwnd, unsigned int flags);
+#endif
+
+extern "C" int bbgpu_window_foreground(void) {
+    return window_foreground.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 namespace Frontend {
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
+    // Their events come whatever SDL thinks of the keyboard focus; whether the game is in front
+    // is decided from Windows instead (window_foreground). BB_PAD_BACKGROUND=0: as before.
+    if (const char* env = std::getenv("BB_PAD_BACKGROUND"); !(env && env[0] == '0')) {
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    }
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
@@ -175,6 +194,19 @@ bool WindowSDL::PollEvents() {
     if (!text_active) {
         BbOverlay::UpdateTextInput(window);
     }
+#ifdef _WIN32
+    {
+        // In front: the game window, a window it owns (an overlay in exclusive fullscreen), or
+        // SDL's keyboard focus on it.
+        void* hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(window),
+                                            SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+        void* foreground = GetForegroundWindow();
+        constexpr unsigned int GA_ROOTOWNER = 3;
+        window_foreground = !hwnd || foreground == hwnd ||
+                            (foreground && GetAncestor(foreground, GA_ROOTOWNER) == hwnd) ||
+                            SDL_GetKeyboardFocus() == window;
+    }
+#endif
     // Mouse look holds the cursor in the window (relative mode) while the game has the focus;
     // the settings menu, text entry and a held Left Alt give it back.
     {

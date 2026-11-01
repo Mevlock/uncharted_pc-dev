@@ -5589,6 +5589,14 @@ VAddr WatchedGpuWrite() {
 // Off by default (review 2026-11-01): InvalidateMemoryFromGPU(lo, hi - lo) only marks images that start at the
 // span's lowest address, so a cached image at another view's base address stayed stale (the per-view calls it
 // replaced each matched their own base). BB_SPAN_INVALIDATE=1: the span-wide call (experiment).
+static bool TypedNullImages() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_TYPED_NULL_IMAGES");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
 static bool SpanInvalidate() {
     static const bool on = [] {
         const char* env = std::getenv("BB_SPAN_INVALIDATE");
@@ -6296,13 +6304,33 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             LOG_WARNING(Render_Vulkan, "Unexpected metadata read by a shader (texture)");
         }
 
+        // A null descriptor for this slot, of the binding's own type (storage for a written image)
+        // and with the pipeline layout's descriptor count (NumBindings of the same T#: a
+        // DynamicIndex mip array). A sampled count-1 null was invalid Vulkan there and shifted
+        // every later binding of the stage (from BilalReloaded's port 0.8.0;
+        // BB_TYPED_NULL_IMAGES=0: as before).
+        const u32 layout_count =
+            image_desc.mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex
+                ? static_cast<u32>(tsharp.last_level - tsharp.base_level + 1)
+                : 1u;
+        const auto bind_null = [&] {
+            auto& null_desc = image_desc_storage.emplace_back();
+            const u32 count = TypedNullImages() ? layout_count : 1u;
+            if (TypedNullImages() && image_desc.is_written) {
+                null_desc.type = VideoCore::TextureCache::BindingType::Storage;
+            }
+            for (u32 i = 0; i < count; ++i) {
+                image_bindings.emplace_back(VideoCore::ImageId{}, &null_desc);
+                image_binding_entries.push_back(nullptr);
+                binding_proxy_ok.push_back(false);
+            }
+            image_descriptor_array_sizes.push_back(count);
+        };
+
         const auto data_fmt = tsharp.GetDataFmt();
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
-            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
-            image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
-            image_descriptor_array_sizes.push_back(1);
+            bind_null();
             continue;
         }
 
@@ -6313,10 +6341,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                         "data_format={}, num_format={}",
                         tsharp.Address(), tsharp.pitch, tsharp.width, static_cast<u32>(data_fmt),
                         static_cast<u32>(num_fmt));
-            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
-            image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
-            image_descriptor_array_sizes.push_back(1);
+            bind_null();
             continue;
         }
 
@@ -6334,10 +6359,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             prepared ? CachedImageDescEntry(tsharp, image_desc, prepared->image_hashes[image_index])
                      : CachedImageDescEntry(tsharp, image_desc);
         if (!desc_entry.plausible) {
-            image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
-            image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
-            image_descriptor_array_sizes.push_back(1);
+            bind_null();
             set_ok = false;
             continue;
         }

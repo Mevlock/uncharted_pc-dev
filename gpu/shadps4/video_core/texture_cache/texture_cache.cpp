@@ -336,17 +336,41 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size, bool before_write) 
 }
 
 void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size, bool whole_range) {
+    // BB_CHAIN_INVALIDATE=0: only the image at the written address, as before (shadPS4 #5599 follows images
+    // stored right after it inside the written range, e.g. the chroma planes after a luma plane).
+    static const bool chain = [] {
+        const char* env = std::getenv("BB_CHAIN_INVALIDATE");
+        return !(env && env[0] == '0');
+    }();
     std::scoped_lock lock{mutex};
+    boost::container::small_vector<std::pair<VAddr, Image*>, 8> after;
+    VAddr next_end = 0;
     ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
         // Only consider images that match base address, or with whole_range every image
         // overlapping the written range.
         // TODO: Maybe also consider subresources
-        if (whole_range ? !image.Overlaps(address, max_size) : image.info.guest_address != address) {
+        const VAddr base = image.info.guest_address;
+        if (whole_range ? !image.Overlaps(address, max_size) : base != address) {
+            if (chain && !whole_range && base > address && base < address + max_size) {
+                after.emplace_back(base, &image);
+            }
             return;
         }
         // Ensure image is reuploaded when accessed again.
         image.flags |= ImageFlagBits::GpuDirty;
+        next_end = std::max<VAddr>(next_end, base + image.info.guest_size);
     });
+    // Images are visited in page order, so the chain is followed afterwards.
+    for (VAddr next = next_end; next > address && next < address + max_size;) {
+        next_end = 0;
+        for (auto& [base, image] : after) {
+            if (base == next) {
+                image->flags |= ImageFlagBits::GpuDirty;
+                next_end = std::max<VAddr>(next_end, base + image->info.guest_size);
+            }
+        }
+        next = next_end;
+    }
 }
 
 void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {

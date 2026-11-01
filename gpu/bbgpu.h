@@ -51,6 +51,8 @@ void bbgpu_mouse_configure(int look);
  * it is; 0 before the first frame with a known camera. */
 int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds);
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
+/* The game window is in front (Windows; 1 without a window): the controller is read only then. */
+int bbgpu_window_foreground(void);
 /* The mouse movement over the last window_s seconds, in pixels per second, from the event times (paced cameras). */
 void bbgpu_mouse_rate(double window_s, float *rate_x, float *rate_y);
 /* In-game trophy notice (the overlay draws it for a few seconds, one at a time): grade 1 platinum,

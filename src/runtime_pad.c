@@ -86,8 +86,28 @@ static void touch_click(PadData *d, int right) {
 /* The keyboard and mouse were used last (the prompts' device 0): the controller doesn't rumble
  * (antikmewzik's controls fork). */
 static int keyboard_in_use;
+/* The pad is sampled when the game reads it, so a press and release between two reads was never
+ * seen (BilalReloaded's port #309: the Treasure Vault lever in Uncharted 1 asks to mash Triangle).
+ * Every button that went down since the last read counts as pressed in that read (SDL event watch
+ * on the window thread; read and cleared in sample_host). BB_PAD_LATCH=0: off. */
+static unsigned long long pad_taps; /* bit = SDL_GamepadButton, set on BUTTON_DOWN */
+static bool SDLCALL pad_tap_watch(void *userdata, SDL_Event *event) {
+    (void)userdata;
+    if (event->type==SDL_EVENT_GAMEPAD_BUTTON_DOWN && event->gbutton.button<64 &&
+        (!gamepad || event->gbutton.which==SDL_GetGamepadID(gamepad)))
+        __atomic_or_fetch(&pad_taps,1ull<<event->gbutton.button,__ATOMIC_RELAXED);
+    return true;
+}
+static int pad_latch_enabled(void) {
+    static int value=-1;
+    if (value<0) { const char *e=getenv("BB_PAD_LATCH"); value=!(e && e[0]=='0'); }
+    return value;
+}
 static SDL_Gamepad *current_gamepad(void) {
-    if (!sdl_ready) sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
+    if (!sdl_ready) {
+        sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
+        if (sdl_ready>0 && pad_latch_enabled()) SDL_AddEventWatch(pad_tap_watch,NULL);
+    }
     if (sdl_ready<0) return NULL;
     if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
     if (!gamepad) {
@@ -1278,10 +1298,15 @@ static void sample_host(PadData *d) {
         const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
     static int layout_logged;
     if (k && !layout_logged) { layout_logged=1; log_layout_keys(); }
+        /* SDL delivers gamepad events in the background too (window.cpp): the game takes them
+         * only while its window is in front. */
+        const unsigned long long taps=__atomic_exchange_n(&pad_taps,0ull,__ATOMIC_RELAXED);
+        if (g && !bbgpu_window_foreground()) g=NULL;
         if (g) {
             for (int a=0;a<16;++a) {
                 const int b=input.pad[a];
-                if (b>=0 && SDL_GetGamepadButton(g,(SDL_GamepadButton)b)) d->buttons|=actions[a].ps;
+                if (b>=0 && (SDL_GetGamepadButton(g,(SDL_GamepadButton)b) || (b<64 && (taps>>b & 1ull))))
+                    d->buttons|=actions[a].ps;
                 else if (b==PAD_TRIGGER_LEFT || b==PAD_TRIGGER_RIGHT) {
                     const uint8_t v=trigger(SDL_GetGamepadAxis(g,b==PAD_TRIGGER_LEFT ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER
                                                                                   : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
@@ -1290,7 +1315,8 @@ static void sample_host(PadData *d) {
                     if (actions[a].ps==BTN_R2 && v>d->r2) d->r2=v;
                 }
             }
-            if (SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_TOUCHPAD)) d->buttons|=BTN_TOUCHPAD; /* DualSense/DS4 click */
+            if (SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_TOUCHPAD) || (taps>>SDL_GAMEPAD_BUTTON_TOUCHPAD & 1ull))
+                d->buttons|=BTN_TOUCHPAD; /* DualSense/DS4 click */
             if ((d->buttons & BTN_L2) && !d->l2) d->l2=255;
             if ((d->buttons & BTN_R2) && !d->r2) d->r2=255;
             d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));

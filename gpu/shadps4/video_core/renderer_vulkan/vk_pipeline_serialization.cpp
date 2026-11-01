@@ -24,6 +24,7 @@
 #include "bbport_overlay.h"
 #include "bbport_toggles.h"
 #include "common/hash.h"
+#include "shader_recompiler/ir/passes/ir_passes.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "common/serdes.h"
 #include "common/thread.h"
@@ -212,6 +213,15 @@ void RegisterShaderMeta(const Shader::Info& info,
                                        fmt::format("{:#018x}", perm_hash), ar.TakeOff());
 }
 
+/// The shader cache name of a translated variant. Shaders whose translation depends on a switch
+/// without a cache version bit (BB_EFFECT_LOOP_CLAMP) get a suffix: binaries saved before it (or
+/// with it off) are not taken for it, and the rest of the cache is kept.
+static std::string BinaryName(u64 pgm_hash, size_t perm_idx) {
+    return Shader::Optimization::EffectLoopClamp(pgm_hash)
+               ? fmt::format("{:#018x}_{}_lc1", pgm_hash, perm_idx)
+               : fmt::format("{:#018x}_{}", pgm_hash, perm_idx);
+}
+
 void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx) {
     if (!Storage::DataBase::Instance().IsOpened()) {
         return;
@@ -219,7 +229,7 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
 
     t_saved_binary = {pgm_hash, perm_idx, BinaryChecksum(spv)};
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", pgm_hash, perm_idx),
+                                       BinaryName(pgm_hash, perm_idx),
                                        std::move(spv));
 }
 
@@ -2013,7 +2023,7 @@ void PipelineCache::WarmUpThread() {
         }
         std::vector<u32> spv{};
         db.Load(Storage::BlobType::ShaderBinary,
-                fmt::format("{:#018x}_{}", info.pgm_hash, stage.perm_idx), spv);
+                BinaryName(info.pgm_hash, stage.perm_idx), spv);
         if (spv.empty()) {
             // bbport (shader variant list): translated again from the game's files below.
             if (replay_variants && stage.inputs.present && checksum) {
@@ -2035,7 +2045,7 @@ void PipelineCache::WarmUpThread() {
             mismatched_binaries.fetch_add(1, std::memory_order_relaxed);
             db.Remove(Storage::BlobType::ShaderMeta, fmt::format("{:#018x}", stage_hashes[i]));
             db.Remove(Storage::BlobType::ShaderBinary,
-                      fmt::format("{:#018x}_{}", info.pgm_hash, stage.perm_idx));
+                      BinaryName(info.pgm_hash, stage.perm_idx));
             return;
         }
         stage.module = CompileSPV(spv, device);
