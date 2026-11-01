@@ -282,9 +282,10 @@ public:
     /// Registrations run on the GPU thread; a deletion (also from UnmapMemory on a guest thread)
     /// only marks the filter stale, and the rebuild happens here, before the next bit is set: a
     /// rebuild racing a registration lost that bit (review 2026-11-01). Until then the filter
-    /// keeps extra bits, which only costs a map lookup.
+    /// keeps extra bits, which only costs a map lookup. Called with meta_mutex held.
     void NoteMeta(VAddr address) {
-        if (meta_filter_stale.exchange(false, std::memory_order_acq_rel)) {
+        if (meta_filter_stale.load(std::memory_order_relaxed) &&
+            meta_filter_stale.exchange(false, std::memory_order_acq_rel)) {
             RebuildMetaFilter();
         }
         meta_filter.set(MetaFilterBit(address));
@@ -307,6 +308,7 @@ public:
         if (!MaybeMeta(address)) {
             return std::nullopt;
         }
+        std::scoped_lock lock{meta_mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             return it->second.type;
@@ -316,6 +318,7 @@ public:
 
     /// Returns true if a slice of the specified metadata surface has been cleared.
     bool IsMetaCleared(VAddr address, u32 slice) const {
+        std::scoped_lock lock{meta_mutex};
         const auto& it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             return it.value().clear_mask & (1u << slice);
@@ -328,6 +331,7 @@ public:
         if (!MaybeMeta(address) && !HtileLogOn()) {
             return false;
         }
+        std::scoped_lock lock{meta_mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             it.value().clear_mask = u32(-1);
@@ -374,6 +378,7 @@ public:
 
     /// Updates the state of a slice of the specified metadata surface.
     bool TouchMeta(VAddr address, u32 slice, bool is_clear) {
+        std::scoped_lock lock{meta_mutex};
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             if (is_clear) {
@@ -559,6 +564,10 @@ private:
         ImageId owner{};
     };
     tsl::robin_map<VAddr, MetaDataInfo> surface_metas;
+    /// bbport: guards surface_metas. Deletions run on guest threads (UnmapMemory -> FreeImage),
+    /// registrations and lookups on the GPU thread; a lookup or the filter rebuild racing an
+    /// erase read a map being moved under it. Dispatches mostly stop at the filter first.
+    mutable std::mutex meta_mutex;
     std::bitset<4096> meta_filter; ///< see MaybeMeta
     std::atomic<bool> meta_filter_stale{false}; ///< a deletion since the last rebuild (NoteMeta)
     /// bbport: most layers, and most bytes, a request for a depth array at an address asked for

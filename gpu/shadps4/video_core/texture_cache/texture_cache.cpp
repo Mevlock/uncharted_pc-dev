@@ -481,6 +481,7 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
             (!new_image.info.meta_info.htile_addr || new_image.info.meta_info.htile_addr == old_htile)) {
             new_image.info.meta_info.htile_addr = old_htile;
             old_image.info.meta_info.htile_addr = 0;
+            std::scoped_lock meta_lock{meta_mutex};
             if (const auto it = surface_metas.find(old_htile); it != surface_metas.end()) {
                 it.value().owner = new_image_id;
             }
@@ -1290,6 +1291,10 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     UpdateImage(image_id);
 
     // Register meta data for this color buffer
+    std::unique_lock meta_lock{meta_mutex, std::defer_lock};
+    if (desc.info.meta_info.cmask_addr || desc.info.meta_info.fmask_addr) {
+        meta_lock.lock();
+    }
     if (desc.info.meta_info.cmask_addr) {
         surface_metas.emplace(desc.info.meta_info.cmask_addr,
                               MetaDataInfo{.type = MetaType::CMask});
@@ -1316,6 +1321,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 
     // Register meta data for this depth buffer
     if (desc.info.meta_info.htile_addr) {
+        std::scoped_lock meta_lock{meta_mutex};
         const auto [meta, added] = surface_metas.emplace(
             desc.info.meta_info.htile_addr,
             MetaDataInfo{.type = MetaType::HTile, .clear_mask = image.info.meta_info.htile_clear_mask});
@@ -2050,6 +2056,10 @@ void TextureCache::DeleteImage(ImageId image_id) {
 
     // Remove any registered meta areas.
     const auto& meta_info = image.info.meta_info;
+    std::unique_lock meta_lock{meta_mutex, std::defer_lock};
+    if (meta_info.cmask_addr || meta_info.fmask_addr || meta_info.htile_addr) {
+        meta_lock.lock();
+    }
     if (meta_info.cmask_addr) {
         surface_metas.erase(meta_info.cmask_addr);
     }
@@ -2064,6 +2074,9 @@ void TextureCache::DeleteImage(ImageId image_id) {
     }
     if (meta_info.cmask_addr || meta_info.fmask_addr || meta_info.htile_addr) {
         MarkMetaFilterStale(); // rebuilt by the next NoteMeta, on the registering thread
+    }
+    if (meta_lock.owns_lock()) {
+        meta_lock.unlock();
     }
 
     {

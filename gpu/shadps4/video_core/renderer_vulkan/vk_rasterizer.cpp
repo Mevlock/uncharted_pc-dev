@@ -5768,8 +5768,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     g_wspan_parts[0].fetch_add(__rdtsc() - t_ob, std::memory_order_relaxed);
                 }
                 written_spans[num_written_spans++] = {lo, hi, buffer, offset};
-                // bbport: the views of a span make cached images stale once, as their union
-                // (the views overlap: no gap is covered). BB_SPAN_INVALIDATE=0: per view.
+                // bbport experiment (BB_SPAN_INVALIDATE=1, off by default): the views of a span
+                // make cached images stale once, as their union. Known gap: only images at the
+                // span's lowest address are marked; the default invalidates per view.
                 if (SpanInvalidate()) {
                     const u64 t_inv = StageBStats() ? __rdtsc() : 0;
                     const u64 t_iv = timed ? __rdtsc() : 0;
