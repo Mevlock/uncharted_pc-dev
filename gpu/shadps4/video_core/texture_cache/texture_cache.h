@@ -290,6 +290,13 @@ public:
         }
         meta_filter.set(MetaFilterBit(address));
     }
+    /// bbport: metadata clears so far. A draw that reuses the previous draw's render state
+    /// (Rasterizer::BeginRendering's memo) does not look at the clear masks: a clear made in
+    /// between without recording anything (a DMA fill) was skipped, and the draw went on with the
+    /// old contents (code review 2026-11-01). The memo holds only while this is unchanged.
+    [[nodiscard]] u64 MetaClears() const noexcept {
+        return meta_clears.load(std::memory_order_relaxed);
+    }
     void MarkMetaFilterStale() {
         meta_filter_stale.store(true, std::memory_order_release);
     }
@@ -341,6 +348,7 @@ public:
         auto it = surface_metas.find(address);
         if (it != surface_metas.end()) {
             it.value().clear_mask = u32(-1);
+            meta_clears.fetch_add(1, std::memory_order_relaxed);
             if (HtileLogOn()) {
                 static std::unordered_set<VAddr> seen_matched;
                 if (seen_matched.insert(address).second) {
@@ -578,7 +586,8 @@ private:
     /// erase read a map being moved under it. Dispatches mostly stop at the filter first.
     mutable std::mutex meta_mutex;
     std::bitset<4096> meta_filter; ///< see MaybeMeta
-    std::atomic<bool> meta_filter_stale{false}; ///< a deletion since the last rebuild (NoteMeta)
+    std::atomic<bool> meta_filter_stale{false};
+    std::atomic<u64> meta_clears{0}; ///< see MetaClears ///< a deletion since the last rebuild (NoteMeta)
     /// bbport: most layers, and most bytes, a request for a depth array at an address asked for
     /// (PadDepthLayers).
     struct DepthArraySeen {
