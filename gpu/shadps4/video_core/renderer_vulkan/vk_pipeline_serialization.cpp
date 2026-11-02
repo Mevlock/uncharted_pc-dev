@@ -1115,6 +1115,12 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
     std::FILE* lines = lines_path ? std::fopen(lines_path, "w") : nullptr;
     u32 count = 0;
     db.ForEachBlob(Storage::BlobType::ShaderMeta, [&](std::vector<u8>&& data) {
+        // Version 11 (releases before 0.3.6.27) had no checksum of the binary (a u64 after the permutation
+        // index); otherwise as 12.
+        if (data.size() > 36 && data[0] == 11) {
+            data.insert(data.begin() + 24, 8, u8{0});
+            data[0] = 12;
+        }
         // Version 12 stored Bindings without descriptor_set (its last member, after the 32-byte header).
         if (data.size() > 44 && data[0] == 12) {
             data.insert(data.begin() + 32 + 12, 4, u8{0});
