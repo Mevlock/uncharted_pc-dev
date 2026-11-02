@@ -1048,13 +1048,47 @@ static int region_cache_enabled(void) {
     if (value<0) { const char *v=getenv("BB_REGION_CACHE"); value=!(v && v[0]=='0'); }
     return value;
 }
+/* BB_REGION_CACHE_CHECK=1 (diagnosis, U2 train flicker 2026-11-02): every hit is looked up again under the lock and
+ * compared; a different region at the same table generation is a wrong answer, a changed generation a hit used while
+ * the table changed. */
+static int region_cache_check(void) {
+    static int value=-1;
+    if (value<0) { const char *v=getenv("BB_REGION_CACHE_CHECK"); value=v && v[0]=='1'; }
+    return value;
+}
+static void check_cached_region(const CachedRegion *c, uintptr_t address) {
+    static long hits, wrong, raced;
+    read_lock();
+    const uint64_t now=__atomic_load_n(&table_generation,__ATOMIC_ACQUIRE);
+    const size_t i=vma_index(address);
+    const int found=i<vma_count && vmas[i].start<=address;
+    const uintptr_t s=found ? vmas[i].start : 0, e=found ? vmas[i].end : 0;
+    const int kind=found ? vmas[i].kind : -1;
+    read_unlock();
+    const long n=__atomic_add_fetch(&hits,1,__ATOMIC_RELAXED);
+    if (now!=c->generation) {
+        const long r=__atomic_add_fetch(&raced,1,__ATOMIC_RELAXED);
+        if (r<=20 || !(r & (r-1)))
+            printf("Region cache check: hit used while the table changed (#%ld of %ld hits): %#" PRIxPTR " cached [%#" PRIxPTR ",%#" PRIxPTR ") kind %d gen %" PRIu64 ", now [%#" PRIxPTR ",%#" PRIxPTR ") kind %d gen %" PRIu64 "\n",
+                   r,n,address,c->start,c->end,c->kind,c->generation,s,e,kind,now);
+    } else if (!found || s!=c->start || e!=c->end || kind!=c->kind) {
+        const long w=__atomic_add_fetch(&wrong,1,__ATOMIC_RELAXED);
+        if (w<=50 || !(w & (w-1)))
+            printf("Region cache check: WRONG (#%ld of %ld hits): %#" PRIxPTR " cached [%#" PRIxPTR ",%#" PRIxPTR ") kind %d, table [%#" PRIxPTR ",%#" PRIxPTR ") kind %d, gen %" PRIu64 "\n",
+                   w,n,address,c->start,c->end,c->kind,s,e,kind,now);
+    }
+    if (!(n & ((1L<<24)-1))) printf("Region cache check: %ld hits, %ld wrong, %ld used while the table changed\n",n,wrong,raced);
+}
 static const CachedRegion *cached_region(uintptr_t address) {
     if (!region_cache_enabled()) return NULL;
     uint64_t generation=__atomic_load_n(&table_generation,__ATOMIC_ACQUIRE);
     if (generation & 1) return NULL;
     for (unsigned i=0;i<8;++i) {
         const CachedRegion *c=&region_cache[i];
-        if (c->generation==generation && c->end && c->start<=address && address<c->end) return c;
+        if (c->generation==generation && c->end && c->start<=address && address<c->end) {
+            if (region_cache_check()) check_cached_region(c,address);
+            return c;
+        }
     }
     return NULL;
 }
@@ -1065,8 +1099,10 @@ static void cache_region(size_t i) {
     region_cache[region_cache_next++ % 8]=(CachedRegion){generation,vmas[i].start,vmas[i].end,vmas[i].kind};
 }
 /* Mapped length from address, up to size, across adjacent mappings. */
+/* BB_TOGGLE_FILE second number: 128 / 256 / 512 = no region cache for runtime_memory_clamp / _region / _is_mapped
+ * alone (diagnosis, U2 train flicker 2026-11-02). */
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size) {
-    const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
+    const CachedRegion *c=(runtime_disabled_optimizations & 1) || (runtime_disabled_optimizations2 & 128) ? NULL : cached_region(address);
     if (c && c->kind!=KIND_RESERVED && size<=c->end-address) return size;
     read_lock();
     { size_t i=vma_index(address); if (i<vma_count && vmas[i].start<=address) cache_region(i); }
@@ -1080,7 +1116,7 @@ uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size) {
 }
 /* Region around address: [start,end) mapped or a gap; 0 past the last mapping. */
 int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, int *mapped) {
-    const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
+    const CachedRegion *c=(runtime_disabled_optimizations & 1) || (runtime_disabled_optimizations2 & 256) ? NULL : cached_region(address);
     if (c) { *start=c->start; *end=c->end; *mapped=c->kind!=KIND_RESERVED; return 1; }
     read_lock();
     size_t i=vma_index(address);
@@ -1109,7 +1145,7 @@ void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int 
 }
 /* Host view of a guest range, for the GPU backend: the range must be mapped. */
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size) {
-    const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
+    const CachedRegion *c=(runtime_disabled_optimizations & 1) || (runtime_disabled_optimizations2 & 512) ? NULL : cached_region(address);
     if (c && c->kind!=KIND_RESERVED && size<=c->end-address) return 1;
     read_lock();
     int result=covered(address,address+size,0);

@@ -428,6 +428,71 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
     });
 }
 
+// bbport diagnosis (U2 train flicker, 2026-11-02): BB_FLASH_LOG=<file>: per presented frame, the mean brightness of a
+// 16x9 grid of cells (every 8th row read back), appended as one record: u32 frame, then 144 u32 cell means read as
+// 8-bit channels and 144 as 10-bit channels (the frame's format is either). A one-frame white flash is a spike there.
+static void FlashSample(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
+                        vk::Image image, vk::ImageLayout layout, u32 w, u32 h) {
+    static std::FILE* out = [] {
+        const char* path = std::getenv("BB_FLASH_LOG");
+        return path && *path ? std::fopen(path, "wb") : nullptr;
+    }();
+    static u32 frame = 0;
+    if (!out || w < 16 || h < 72) {
+        return;
+    }
+    constexpr u32 Step = 8;
+    const u32 rows = h / Step;
+    const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                       .size = VkDeviceSize(w) * rows * 4,
+                                       .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+    const VmaAllocationCreateInfo alloc_ci{
+        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST};
+    VkBuffer buffer{};
+    VmaAllocation allocation{};
+    VmaAllocationInfo info{};
+    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer, &allocation,
+                        &info) != VK_SUCCESS) {
+        return;
+    }
+    std::vector<vk::BufferImageCopy> regions(rows);
+    for (u32 r = 0; r < rows; ++r) {
+        regions[r] = vk::BufferImageCopy{
+            .bufferOffset = VkDeviceSize(r) * w * 4,
+            .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .imageOffset = {0, s32(r * Step), 0},
+            .imageExtent = {w, 1, 1}};
+    }
+    cmdbuf.copyImageToBuffer(image, layout, buffer, regions);
+    scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation, info,
+                                      w, rows, index = frame++] {
+        vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
+        const auto* px = static_cast<const u32*>(info.pMappedData);
+        std::array<u64, 144> sum8{}, sum10{};
+        std::array<u32, 144> count{};
+        for (u32 r = 0; r < rows; ++r) {
+            const u32 cy = std::min<u32>(8, r * 9 / rows);
+            for (u32 x = 0; x < w; ++x) {
+                const u32 v = px[size_t(r) * w + x];
+                const u32 cell = cy * 16 + std::min<u32>(15, x * 16 / w);
+                sum8[cell] += (v & 0xff) + ((v >> 8) & 0xff) + ((v >> 16) & 0xff);
+                sum10[cell] += (v & 0x3ff) + ((v >> 10) & 0x3ff) + ((v >> 20) & 0x3ff);
+                ++count[cell];
+            }
+        }
+        std::array<u32, 1 + 288> record{};
+        record[0] = index;
+        for (u32 c = 0; c < 144; ++c) {
+            record[1 + c] = count[c] ? u32(sum8[c] / count[c]) : 0;
+            record[145 + c] = count[c] ? u32(sum10[c] / count[c]) : 0;
+        }
+        std::fwrite(record.data(), sizeof(u32), record.size(), out);
+        std::fflush(out);
+        vmaDestroyBuffer(allocator, buffer, allocation);
+    });
+}
+
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
     // bbport: BB_FRAME_DUMP_TRIGGER=<file>: when the file exists it is removed and this frame's
@@ -649,6 +714,16 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         DumpRaw(instance, draw_scheduler, cmdbuf, frame->image, vk::ImageLayout::eGeneral,
                 frame->width, frame->height, "output", frame_dump_index);
         ++frame_dump_index;
+    }
+    static const bool flash_log = std::getenv("BB_FLASH_LOG") != nullptr;
+    if (flash_log) {
+        const vk::MemoryBarrier2 done{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                      .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                                      .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                                      .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &done});
+        FlashSample(instance, draw_scheduler, cmdbuf, frame->image, vk::ImageLayout::eGeneral,
+                    frame->width, frame->height);
     }
 
     // Flush frame creation commands.

@@ -1780,6 +1780,70 @@ void Rasterizer::FlushDrawBatch() {
     }
 }
 
+// Diagnosis (U2 train flash, 2026-11-02): BB_NO_WRITE_NOTES=1: buffers a draw writes are not noted as
+// pending GPU writes (as with the constant ring off); BB_NOTE_WRITES_RING_OFF=1: with the ring off they
+// are noted all the same (NoteWrittenBuffers).
+static bool NoWriteNotes() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_NO_WRITE_NOTES");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+// bbport (U2 train flash, 2026-11-02): images a draw or dispatch writes (storage images) are pending
+// GPU writes too: stage A's reads of that memory (resource tables walked ahead, constants) wait for
+// them like for written buffers. The range is an over-estimate (pitch x height x depth x layers,
+// doubled for mips and tile padding): a larger range only waits more. BB_NOTE_WRITTEN_IMAGES=0: off.
+static bool NoteWrittenImagesOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_NOTE_WRITTEN_IMAGES");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+static u64 WrittenImageBytes(const AmdGpu::Image& tsharp) {
+    const u64 bpp = std::max<u32>(8, AmdGpu::NumBitsPerElement(tsharp.GetDataFmt())) / 8;
+    const u64 pitch = std::max<u64>(tsharp.Pitch(), u64(tsharp.width) + 1);
+    const u64 depth = tsharp.GetType() == AmdGpu::ImageType::Color3D ? u64(tsharp.depth) + 1 : 1;
+    return 2 * pitch * (u64(tsharp.height) + 1) * depth * std::max<u32>(1, tsharp.NumLayers()) * bpp;
+}
+
+static bool NoteWritesRingOff() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_NOTE_WRITES_RING_OFF");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+// Diagnosis (U2 train flash, 2026-11-02): BB_RING_IGNORE_PENDING=1: the constant ring copies a range
+// even when a write still queued for the recording thread overlaps it (copied now, not late).
+static bool RingIgnorePending() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_RING_IGNORE_PENDING");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+// BB_RING_SKIP_PAGE=<hex address>: the ring leaves ranges touching that 4 KiB page to the late copy;
+// BB_RING_SKIP_RANGE=<hex lo>-<hex hi>: the same for a whole range.
+static bool RingSkipsPage(VAddr address, u64 size) {
+    static const std::pair<VAddr, VAddr> range = [] {
+        if (const char* env = std::getenv("BB_RING_SKIP_RANGE")) {
+            char* end;
+            const VAddr lo = std::strtoull(env, &end, 16);
+            const VAddr hi = *end == '-' ? std::strtoull(end + 1, nullptr, 16) : lo;
+            return std::pair<VAddr, VAddr>{lo, hi};
+        }
+        if (const char* env = std::getenv("BB_RING_SKIP_PAGE")) {
+            const VAddr page = std::strtoull(env, nullptr, 16) & ~0xfffull;
+            return std::pair<VAddr, VAddr>{page, page + 0x1000};
+        }
+        return std::pair<VAddr, VAddr>{0, 0};
+    }();
+    return range.second && address < range.second && range.first < address + size;
+}
+
 void Rasterizer::QueueRingCandidates(const Shader::Info& stage, const PreparedDraw* prepared,
                                      u32 stage_index) {
     const PreparedStage* prepared_stage = nullptr;
@@ -1811,12 +1875,14 @@ void Rasterizer::QueueRingCandidates(const Shader::Info& stage, const PreparedDr
             continue;
         }
         if (desc.is_written) {
-            NotePendingGpuWrite(address, memory->ClampRangeSize(address, size));
+            if (!NoWriteNotes()) {
+                NotePendingGpuWrite(address, memory->ClampRangeSize(address, size));
+            }
             continue;
         }
         // Unclamped here (the collector clamps): a larger range only skips more.
-        if (size > VideoCore::BufferCache::STREAM_THRESHOLD ||
-            PendingWriteOverlaps(address, size)) {
+        if (size > VideoCore::BufferCache::STREAM_THRESHOLD || RingSkipsPage(address, size) ||
+            (!RingIgnorePending() && PendingWriteOverlaps(address, size))) {
             continue;
         }
         ring_collector->Add(stage_index, index, address, size);
@@ -1919,7 +1985,8 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         // The stream path of BufferCache::ObtainBuffer, taken here: small, read-only, not
         // written by the GPU (now or by work still queued for the recording thread).
         if (size == 0 || size > VideoCore::BufferCache::STREAM_THRESHOLD ||
-            buffer_cache.IsRegionGpuModified(address, size) || PendingWriteOverlaps(address, size)) {
+            buffer_cache.IsRegionGpuModified(address, size) || RingSkipsPage(address, size) ||
+            (!RingIgnorePending() && PendingWriteOverlaps(address, size))) {
             continue;
         }
         VideoCore::NoteAsyncAccess("constant ring copy", address, size, false, true);
@@ -2250,6 +2317,32 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
                     CollectRingBindings(*stage, used_prepared, ring);
                 }
             }
+            if (NoteWrittenImagesOn() && !NoWriteNotes()) {
+                for (const auto& image_desc : stage->images) {
+                    if (!image_desc.is_written) {
+                        continue;
+                    }
+                    const auto tsharp = image_desc.GetSharp(*stage);
+                    if (tsharp.Address() != 0 &&
+                        tsharp.GetDataFmt() != AmdGpu::DataFormat::FormatInvalid) {
+                        NotePendingGpuWrite(tsharp.Address(),
+                                            memory->ClampRangeSize(tsharp.Address(), WrittenImageBytes(tsharp)));
+                    }
+                }
+            }
+            if (!(constant_ring && !BbToggle::Disabled(BbToggle::ConstantRing)) && NoteWritesRingOff()) {
+                for (u32 index = 0; index < stage->buffers.size(); ++index) {
+                    const auto& desc = stage->buffers[index];
+                    if (desc.IsSpecial() || !desc.is_written) {
+                        continue;
+                    }
+                    const auto vsharp = desc.GetSharp(*stage);
+                    if (vsharp.base_address && vsharp.GetSize()) {
+                        NotePendingGpuWrite(vsharp.base_address,
+                                            memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()));
+                    }
+                }
+            }
             ++num_stages;
             size += sizeof(PacketStage) +
                     AlignPacket(u32(stage->user_data.size() + stage->flattened_ud_buf.size()) *
@@ -2367,8 +2460,8 @@ void Rasterizer::RetireSubmission() {
     }
 }
 
-bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 toggle) {
-    if (!UseDrawPipe() || BbToggle::Disabled(toggle)) {
+bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 toggle, bool drain) {
+    if (!UseDrawPipe() || BbToggle::Disabled(toggle) || drain) {
         DrainDrawPipe(DrawPipe::ReasonRasterizer);
         task(*this, static_cast<const u8*>(data));
         return false;
@@ -4805,7 +4898,7 @@ void Rasterizer::FlushInOrder() {
             SubmitInfo info{};
             self.scheduler.Flush(info);
         },
-        &none, 0);
+        &none, 0, BbToggle::PipelinedTasks, BbToggle::Disabled2(16384));
 }
 
 void Rasterizer::Finish() {

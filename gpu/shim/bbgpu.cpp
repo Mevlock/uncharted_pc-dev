@@ -114,7 +114,12 @@ void MemoryManager::InvalidateMemory(VAddr address, u64 size) {
 u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
     return runtime_memory_clamp(virtual_addr, size);
 }
+extern "C" bool BbEopTraceOn();
+extern "C" void BbEopTraceRead(u64 address, u64 size, const char* path);
 static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
+    if (BbEopTraceOn()) {
+        BbEopTraceRead(source, size, "guest copy");
+    }
     while (size) {
         uintptr_t start = 0, end = 0;
         int mapped = 0;

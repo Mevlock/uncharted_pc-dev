@@ -2818,6 +2818,9 @@ static void ObtainStatsPrint() {
     }
 }
 
+extern "C" bool BbEopTraceOn();
+extern "C" void BbEopTraceRead(u64 address, u64 size, const char* path);
+
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer,
                                                         u64 stream_limit) {
@@ -2827,6 +2830,10 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         NoteHotUse(device_addr, size);
     }
     NoteGpuUse(device_addr, size);
+    if (BbEopTraceOn() && !is_written) {
+        BbEopTraceRead(device_addr, size,
+                       IsRegionGpuModified(device_addr, size) ? "buffer bind (GPU data)" : "buffer bind");
+    }
     if (StableCheckEnabled() && !is_written && size >= 16 &&
         memory->IsValidGpuMapping(device_addr, size) && !IsRegionGpuModified(device_addr, size)) {
         std::scoped_lock lk{stable_mutex};

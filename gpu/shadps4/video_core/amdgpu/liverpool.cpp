@@ -13,6 +13,12 @@
 #include "bbport_trace.h"
 #include "bbport_threads.h"
 #include <cstdio>
+#include <algorithm>
+#include <immintrin.h>
+#include <mutex>
+#include <map>
+#include <unordered_map>
+#include <vector>
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -193,7 +199,7 @@ void Liverpool::ProcessCommands() {
                 (*run)();
                 delete run;
             },
-            &task, sizeof(task));
+            &task, sizeof(task), BbToggle::PipelinedTasks, BbToggle::Disabled2(8192));
     }
     {
         std::scoped_lock lk{submit_mutex};
@@ -430,9 +436,78 @@ bool PipelinedOpcode(PM4ItOpcode opcode) {
 } // namespace
 
 namespace {
+
+// bbport diagnosis (U2 train flash, 2026-11-02): BB_EOP_TRACE=1: pages with an end-of-pipe write handed to
+// the recording thread and not written yet; reads of guest memory for the GPU that touch such a page are
+// logged (BbEopTraceRead), with the path that read.
+namespace {
+std::mutex eop_trace_mutex;
+std::unordered_map<u64, int> eop_trace_pages;
+std::map<u64, int> eop_trace_exact; // pending end-of-pipe writes by address (8 bytes each)
+}
+extern "C" bool BbEopTraceOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_EOP_TRACE");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+extern "C" void BbEopTraceAdd(u64 address) {
+    std::scoped_lock lk{eop_trace_mutex};
+    ++eop_trace_pages[address >> 12];
+    ++eop_trace_exact[address];
+}
+extern "C" void BbEopTraceDone(u64 address) {
+    std::scoped_lock lk{eop_trace_mutex};
+    const auto it = eop_trace_pages.find(address >> 12);
+    if (it != eop_trace_pages.end() && --it->second <= 0) {
+        eop_trace_pages.erase(it);
+    }
+    const auto ex = eop_trace_exact.find(address);
+    if (ex != eop_trace_exact.end() && --ex->second <= 0) {
+        eop_trace_exact.erase(ex);
+    }
+}
+extern "C" void BbEopTraceRead(u64 address, u64 size, const char* path) {
+    static std::atomic<u64> hits{0}, reads{0};
+    const u64 n = reads.fetch_add(1, std::memory_order_relaxed) + 1;
+    int pending = 0;
+    u64 exact_hit = 0;
+    {
+        std::scoped_lock lk{eop_trace_mutex};
+        if (eop_trace_exact.empty()) {
+            return;
+        }
+        // Entries start up to 7 bytes before the range (8-byte writes).
+        for (auto it = eop_trace_exact.lower_bound(address >= 7 ? address - 7 : 0);
+             it != eop_trace_exact.end() && it->first < address + std::max<u64>(size, 1); ++it) {
+            if (it->first + 8 > address) {
+                pending += it->second;
+                exact_hit = it->first;
+            }
+        }
+    }
+    if (!pending) {
+        return;
+    }
+    const char* stage = AmdGpu::Liverpool::OnProcessorThread() ? "stage A"
+                        : Vulkan::DrawPipe::OnStageB()         ? "stage B"
+                                                               : "other thread";
+    const u64 h = hits.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (h <= 300 || !(h & (h - 1))) {
+        std::printf("EOP trace: %s on %s read %#llx+%#llx covering %d pending end-of-pipe write(s) at %#llx "
+                    "(%llu such reads of %llu)\n",
+                    path, stage, (unsigned long long)address, (unsigned long long)size, pending,
+                    (unsigned long long)exact_hit, (unsigned long long)h, (unsigned long long)n);
+    }
+}
+
 void SignalEop(const PM4CmdEventWriteEop& eop) {
     eop.SignalFence(
         [](void* address, u64 data, u32 num_bytes) {
+            if (BbEopTraceOn()) {
+                BbEopTraceDone(reinterpret_cast<u64>(address));
+            }
             auto* memory = Core::Memory::Instance();
             BbWriteLog::Note(reinterpret_cast<u64>(address), &data, num_bytes, BbWriteLog::Fence);
             if (!memory->TryWriteBacking(address, &data, num_bytes)) {
@@ -444,6 +519,42 @@ void SignalEop(const PM4CmdEventWriteEop& eop) {
 
 // bbport: end-of-pipe/-shader events run in order with the draws (Rasterizer::RunInOrder: on
 // the draw recording thread when the draw pipeline is in use).
+/// bbport diagnosis (2026-11-02): pipelined end-of-pipe events let stage A go on past them, and
+/// something after the event saw the state from before it: U2 chapter 1's train carriage flashed
+/// white for a frame now and then in the 25 s after a checkpoint (all of it with the constant ring
+/// off). The exact dependency is not known yet. BB_EOP_DRAIN=1 runs them after a drain (no flash,
+/// but about 10-15% slower in U3's market), the default stays pipelined until the real fix.
+static bool EopPipelined() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_EOP_DRAIN");
+        return !(env && env[0] == '1');
+    }();
+    return on;
+}
+
+/// bbport (U2 train flash, 2026-11-02): stage A goes on past at most one end-of-pipe event it handed
+/// to the recording thread (waits while more than BB_EOP_LAG of them have not run there yet).
+/// Further ahead, U2 chapter 1's train carriage flashed white for a frame now and then (the whole
+/// train with the constant ring off: 118-178 flash frames in 45 s, 0 at one EOP, 46-76 at two,
+/// 53-55 at four); what stage A overtakes there is not known yet. Draining at every EOP fixed it too
+/// but cost ~12% in U3's market (15,700 EOPs a second); one EOP of lead costs under 1%.
+/// Off by default (-1): one EOP of lead cost 4-8% in U3's market against batch 3 (the first A/B looked
+/// free because diagnosis counters slowed stage A on both sides). BB_EOP_LAG=1: the limit.
+std::atomic<int> g_eop_in_flight{0};
+static int EopLag() {
+    static const int lag = [] {
+        const char* env = std::getenv("BB_EOP_LAG");
+        return env ? std::atoi(env) : -1;
+    }();
+    return lag;
+}
+
+void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data);
+void RunEventWriteEopCounted(Vulkan::Rasterizer& rasterizer, const u8* data) {
+    RunEventWriteEop(rasterizer, data);
+    g_eop_in_flight.fetch_sub(1, std::memory_order_release);
+}
+
 void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto eop = *reinterpret_cast<const PM4CmdEventWriteEop*>(data);
     // Raycaster copies deferred before this packet land before its label shows (landing_gate.h).
@@ -1569,7 +1680,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::EventWriteEos: {
                 const auto* event_eos = reinterpret_cast<const PM4CmdEventWriteEos*>(header);
                 if (rasterizer &&
-                    rasterizer->RunInOrder(&RunEventWriteEos, event_eos, sizeof(*event_eos))) {
+                    rasterizer->RunInOrder(&RunEventWriteEos, event_eos, sizeof(*event_eos),
+                                           BbToggle::PipelinedTasks, BbToggle::Disabled2(1024))) {
                     NotePendingFences(*event_eos);
                 }
                 break;
@@ -1577,7 +1689,91 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             case PM4ItOpcode::EventWriteEop: {
                 const auto* event_eop = reinterpret_cast<const PM4CmdEventWriteEop*>(header);
                 if (rasterizer) {
-                    if (rasterizer->RunInOrder(&RunEventWriteEop, event_eop, sizeof(*event_eop))) {
+                    // Diagnosis (U2 train flash, 2026-11-02): BB_TOGGLE_FILE second number 32768
+                    // drains the EOPs that raise an interrupt, 65536 the others. BB_EOP_STATS=1:
+                    // counts by kind and the most written addresses; BB_EOP_DRAIN_ADDR=<hex>,...:
+                    // only the EOPs writing there drain.
+                    static const bool eop_stats = [] {
+                        const char* env = std::getenv("BB_EOP_STATS");
+                        return env && env[0] == '1';
+                    }();
+                    const bool irq = event_eop->int_sel.Value() != InterruptSelect::None;
+                    const VAddr label = reinterpret_cast<VAddr>(event_eop->Address<u32>());
+                    if (eop_stats) {
+                        static std::atomic<u64> eop_total{0}, eop_irq{0}, eop_data{0};
+                        eop_irq.fetch_add(irq ? 1 : 0, std::memory_order_relaxed);
+                        eop_data.fetch_add(event_eop->data_sel.Value() != DataSelect::None ? 1 : 0,
+                                           std::memory_order_relaxed);
+                        const u64 n = eop_total.fetch_add(1, std::memory_order_relaxed) + 1;
+                        if (n % 20000 == 0) {
+                            std::printf("EOP kinds: %llu events, %llu with an interrupt, %llu writing data\n",
+                                        (unsigned long long)n, (unsigned long long)eop_irq.load(),
+                                        (unsigned long long)eop_data.load());
+                        }
+                    }
+                    if (eop_stats) {
+                        static std::mutex label_mutex;
+                        static std::unordered_map<VAddr, u64> label_counts;
+                        static u64 label_events = 0;
+                        std::scoped_lock lk{label_mutex};
+                        ++label_counts[label];
+                        if (++label_events % 200000 == 0) {
+                            std::vector<std::pair<u64, VAddr>> top;
+                            for (const auto& [a, c] : label_counts) {
+                                top.emplace_back(c, a);
+                            }
+                            std::sort(top.rbegin(), top.rend());
+                            std::printf("EOP labels (%zu addresses):", label_counts.size());
+                            for (size_t i = 0; i < std::min<size_t>(16, top.size()); ++i) {
+                                std::printf(" %#llx=%llu", (unsigned long long)top[i].second,
+                                            (unsigned long long)top[i].first);
+                            }
+                            std::printf("\n");
+                        }
+                    }
+                    static const std::vector<VAddr> drain_addrs = [] {
+                        std::vector<VAddr> list;
+                        if (const char* env = std::getenv("BB_EOP_DRAIN_ADDR")) {
+                            for (const char* p = env; *p;) {
+                                char* end;
+                                const VAddr a = std::strtoull(p, &end, 16);
+                                if (end == p) break;
+                                list.push_back(a);
+                                p = *end == ',' ? end + 1 : end;
+                            }
+                        }
+                        return list;
+                    }();
+                    const bool drain_addr =
+                        !drain_addrs.empty() &&
+                        std::find(drain_addrs.begin(), drain_addrs.end(), label) != drain_addrs.end();
+                    const bool drain_kind = (irq && BbToggle::Disabled2(32768)) ||
+                                            (!irq && BbToggle::Disabled2(65536)) || drain_addr;
+                    g_eop_in_flight.fetch_add(1, std::memory_order_relaxed);
+                    const bool handed = rasterizer->RunInOrder(
+                        &RunEventWriteEopCounted, event_eop, sizeof(*event_eop),
+                        BbToggle::PipelinedTasks,
+                        !EopPipelined() || BbToggle::Disabled2(2048) || drain_kind);
+                    if (handed && EopLag() >= 0) {
+                        // Bounded: 50 ms at most (the recording thread may wait for something
+                        // stage A is still to decode); noted if it ever runs out.
+                        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+                        while (g_eop_in_flight.load(std::memory_order_acquire) > EopLag()) {
+                            if (std::chrono::steady_clock::now() >= until) {
+                                static std::atomic<u32> timeouts{0};
+                                const u32 t = timeouts.fetch_add(1, std::memory_order_relaxed) + 1;
+                                if (t == 1 || !(t & (t - 1))) {
+                                    std::printf("EOP lead: waited 50 ms for the recording thread (%u times)\n", t);
+                                }
+                                break;
+                            }
+                            _mm_pause();
+                        }
+                    }
+                    if (handed) {
+                        if (BbEopTraceOn() && event_eop->data_sel.Value() != DataSelect::None) {
+                            BbEopTraceAdd(label);
+                        }
                         NotePendingFences(*event_eop);
                     }
                 } else {
@@ -1787,6 +1983,25 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const auto* cond_exec = reinterpret_cast<const PM4CmdCondExec*>(header);
                 if (cond_exec->command.Value() != 0) {
                     LOG_WARNING(Render, "IT_COND_EXEC used a reserved command");
+                }
+                // bbport: the condition may be written by work still handed to the recording
+                // thread (an end-of-pipe event's data, a WriteData, a written binding): read it once
+                // that work has run, not the value from before it. Stage A ran ahead of those
+                // writes and U2 chapter 1's train flashed white for a frame (draws the game meant
+                // to skip, or the reverse), 2026-11-02. BB_COND_EXEC_SYNC=0: read at once, as before.
+                static const bool cond_sync = [] {
+                    const char* env = std::getenv("BB_COND_EXEC_SYNC");
+                    return !(env && env[0] == '0');
+                }();
+                if (cond_sync && rasterizer && !rasterizer->DrawPipeIdle() &&
+                    rasterizer->HasPendingGpuWrite(reinterpret_cast<VAddr>(cond_exec->Address()), 4)) {
+                    static std::atomic<u64> waits{0};
+                    const u64 n = waits.fetch_add(1, std::memory_order_relaxed) + 1;
+                    if (n == 1 || !(n & (n - 1))) {
+                        std::printf("COND_EXEC: waited for a pending write to the condition (%llu times)\n",
+                                    (unsigned long long)n);
+                    }
+                    rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                 }
                 const u32 condition = *cond_exec->Address();
                 const auto skip = condition == 0;
@@ -2175,7 +2390,8 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 if (!rasterizer->native_batch_deferrable) {
                     rasterizer->native_batch_deferrable = &RunReleaseMem; // native batch
                 }
-                if (rasterizer->RunInOrder(&RunReleaseMem, &task, sizeof(task))) {
+                if (rasterizer->RunInOrder(&RunReleaseMem, &task, sizeof(task), BbToggle::PipelinedTasks,
+                                           BbToggle::Disabled2(4096))) {
                     // Pending until the recording thread runs it: guest reads of the label
                     // wait for it, and WAIT_REG_MEM sees the value it will have.
                     const VAddr address = task.packet.Address<VAddr>();

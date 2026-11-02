@@ -122,8 +122,9 @@ public:
     /// thread while the draw pipeline is in use (PipelinedTasks), else here after a drain.
     using OrderedTask = void (*)(Rasterizer& rasterizer, const u8* data);
     /// Returns true when the task was handed to the recording thread (not run yet).
+    /// drain (diagnosis): run it after a drain anyway (BB_TOGGLE_FILE second number, per task kind).
     bool RunInOrder(OrderedTask task, const void* data, u32 size,
-                    u64 toggle = BbToggle::PipelinedTasks);
+                    u64 toggle = BbToggle::PipelinedTasks, bool drain = false);
     /// Stage A: a GPU write handed to the recording thread (fence, copy) may still change these
     /// bytes.
     bool HasPendingGpuWrite(VAddr address, u64 size) {
