@@ -1269,7 +1269,18 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
         return;
     }
     // Draws write the same buffers over and over: an entry for the range only moves on.
-    const u64 position = draw_pipe->Head();
+    // bbport (U2 chapter 1 train flash, 2026-11-02): Head() is where the packet being prepared
+    // starts, and Reached(Head()) holds as soon as the packet before it has run. A write noted by
+    // PostDraw before its packet is committed (a draw's or dispatch's written resources) counted
+    // as done while that packet had not run: a copy shader the recording thread runs on the CPU
+    // (ExecuteScalarCopyHLE) wrote a material constant (0 -> 1.0) after stage A had walked the
+    // resource tables holding it into a later draw, and the train's platform flashed white for a
+    // frame. One past the start: done once this packet has run. BB_PENDING_NOTE_FIX=0: as before.
+    static const bool note_fix = [] {
+        const char* env = std::getenv("BB_PENDING_NOTE_FIX");
+        return !(env && env[0] == '0');
+    }();
+    const u64 position = draw_pipe->Head() + (note_fix && notes_before_commit ? 1 : 0);
     const VAddr end = address + size;
     if (PendingFast()) {
         PrunePendingWrites();
@@ -2306,6 +2317,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     u32 num_stages = 0;
     u32 size = sizeof(DrawPacket) + AlignPacket(num_blocks * sizeof(u16)) +
                num_blocks * AmdGpu::RegDirty::BlockWords * sizeof(u32);
+    notes_before_commit = true;
     for (const auto* stage : stages) {
         if (stage) {
             auto& ring = rings[num_stages];
@@ -2445,6 +2457,7 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     dirty.Clear();
     draw_pipe->Commit(static_cast<u32>(out - start));
+    notes_before_commit = false;
     PrintPipeStats();
 }
 
@@ -2668,7 +2681,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         // The resource tables the GPU thread walked must read the same now: else a write
         // still queued here (WriteData, DMA) changed them after that thread read them.
         static u32 flat_reports = 0;
-        for (u32 i = 0; i < packet.num_stages && flat_reports < 32; ++i) {
+        for (u32 i = 0; i < packet.num_stages && flat_reports < 400; ++i) {
             const auto& snapshot = Shader::Info::ud_snapshots[i];
             const auto& srt = snapshot.info->srt_info;
             // Stages the pipeline selection did not refresh (no user data) keep their tables.
@@ -2685,9 +2698,20 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
                 continue;
             }
             runtime_fault_recover = &recover;
+            // Diagnosis (U2 train flash): the guest addresses the walk reads, printed with a change.
+            static thread_local Shader::SrtReadLog walk_log;
+            walk_log.count = 0;
+            Shader::SrtReadLog* previous_log = Shader::SwapSrtReadLog(&walk_log);
             srt.walker_func(snapshot.user_data, flat.data());
+            Shader::SwapSrtReadLog(previous_log);
             runtime_fault_recover = nullptr;
             if (std::memcmp(flat.data(), snapshot.flat, snapshot.flat_size * sizeof(u32)) != 0) {
+                std::printf("Draw pipe: table walk reads:");
+                for (u32 r = 0; r < std::min(walk_log.count, Shader::SrtReadLogCapacity); ++r) {
+                    std::printf(" %#llx+%llu", (unsigned long long)walk_log.reads[r].address,
+                                (unsigned long long)walk_log.reads[r].bytes);
+                }
+                std::printf("\n");
                 u32 first = 0, count = 0;
                 for (u32 w = 0; w < snapshot.flat_size; ++w) {
                     if (flat[w] != snapshot.flat[w]) {

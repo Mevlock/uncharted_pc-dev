@@ -1747,8 +1747,28 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     const bool drain_addr =
                         !drain_addrs.empty() &&
                         std::find(drain_addrs.begin(), drain_addrs.end(), label) != drain_addrs.end();
+                    // Diagnosis (U2 train flash): BB_EOP_DOWNLOAD_DRAIN=1: EOPs with image downloads
+                    // queued run after a drain (the downloads write guest memory stage A reads).
+                    static const bool download_drain = [] {
+                        const char* env = std::getenv("BB_EOP_DOWNLOAD_DRAIN");
+                        return env && env[0] == '1';
+                    }();
+                    bool queued_downloads = false;
+                    if (download_drain || eop_stats) {
+                        queued_downloads = rasterizer->GetTextureCache().HasQueuedDownloads();
+                        static std::atomic<u64> with_downloads{0}, all{0};
+                        const u64 n = all.fetch_add(1, std::memory_order_relaxed) + 1;
+                        const u64 d = with_downloads.fetch_add(queued_downloads ? 1 : 0,
+                                                               std::memory_order_relaxed) +
+                                      (queued_downloads ? 1 : 0);
+                        if (n % 20000 == 0) {
+                            std::printf("EOP downloads: %llu of %llu EOPs had image downloads queued\n",
+                                        (unsigned long long)d, (unsigned long long)n);
+                        }
+                    }
                     const bool drain_kind = (irq && BbToggle::Disabled2(32768)) ||
-                                            (!irq && BbToggle::Disabled2(65536)) || drain_addr;
+                                            (!irq && BbToggle::Disabled2(65536)) || drain_addr ||
+                                            (download_drain && queued_downloads);
                     g_eop_in_flight.fetch_add(1, std::memory_order_relaxed);
                     const bool handed = rasterizer->RunInOrder(
                         &RunEventWriteEopCounted, event_eop, sizeof(*event_eop),

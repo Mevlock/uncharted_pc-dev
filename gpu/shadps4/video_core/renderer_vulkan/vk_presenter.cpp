@@ -469,6 +469,35 @@ static void FlashSample(const Instance& instance, Scheduler& scheduler, vk::Comm
                                       w, rows, index = frame++] {
         vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);
         const auto* px = static_cast<const u32*>(info.pMappedData);
+        // BB_FLASH_GRID=64: a 64x36 grid of one-byte means (8-bit channels, 0-255), record = u32 frame
+        // + 2304 bytes; otherwise 16x9 as below.
+        static const bool fine = [] {
+            const char* env = std::getenv("BB_FLASH_GRID");
+            return env && std::atoi(env) == 64;
+        }();
+        if (fine) {
+            constexpr u32 GW = 64, GH = 36;
+            std::vector<u64> sum(GW * GH);
+            std::vector<u32> cnt(GW * GH);
+            for (u32 r = 0; r < rows; ++r) {
+                const u32 cy = std::min<u32>(GH - 1, r * GH / rows);
+                for (u32 x = 0; x < w; ++x) {
+                    const u32 v = px[size_t(r) * w + x];
+                    const u32 cell = cy * GW + std::min<u32>(GW - 1, x * GW / w);
+                    sum[cell] += (v & 0xff) + ((v >> 8) & 0xff) + ((v >> 16) & 0xff);
+                    ++cnt[cell];
+                }
+            }
+            std::vector<u8> bytes(GW * GH);
+            for (u32 c = 0; c < GW * GH; ++c) {
+                bytes[c] = cnt[c] ? u8(sum[c] / (3 * cnt[c])) : 0;
+            }
+            std::fwrite(&index, sizeof(u32), 1, out);
+            std::fwrite(bytes.data(), 1, bytes.size(), out);
+            std::fflush(out);
+            vmaDestroyBuffer(allocator, buffer, allocation);
+            return;
+        }
         std::array<u64, 144> sum8{}, sum10{};
         std::array<u32, 144> count{};
         for (u32 r = 0; r < rows; ++r) {

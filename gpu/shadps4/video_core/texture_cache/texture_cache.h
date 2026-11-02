@@ -126,6 +126,11 @@ public:
 
     /// Schedules a copy of pending images for download back to CPU memory.
     void ProcessDownloadImages();
+    /// bbport diagnosis: images queued for download at the next end-of-pipe event.
+    bool HasQueuedDownloads() {
+        std::unique_lock lk{download_images_mutex};
+        return !download_images.empty() || !small_download_images.empty();
+    }
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);

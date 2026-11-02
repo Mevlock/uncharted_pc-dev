@@ -74,7 +74,9 @@ std::string_view NameOf(DataFormat fmt) {
     case DataFormat::FormatBc7:
         return "FormatBc7";
     default:
-        UNREACHABLE();
+        // bbport: names are for log lines; a garbage V#'s format (U2 crowd skinning shader 8f067540,
+        // 2026-11-02) stopped the game here while a warning was being printed.
+        return "FormatUnknown";
     }
 }
 
@@ -107,7 +109,7 @@ std::string_view NameOf(NumberFormat fmt) {
     case NumberFormat::Ubscaled:
         return "Unscaled";
     default:
-        UNREACHABLE();
+        return "NumberUnknown"; // a garbage V#'s number format (see the data format names)
     }
 }
 

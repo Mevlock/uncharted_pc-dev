@@ -154,6 +154,9 @@ public:
     /// Stage A: guest memory the recording thread will write for work handed to it (storage
     /// buffers, DMA, WriteData, fences); constants overlapping it are bound there, not copied here.
     void NotePendingGpuWrite(VAddr address, u64 size);
+    /// bbport: set while PostDraw prepares a packet (its written resources are noted before the
+    /// packet is committed): such notes last until that packet has run, not the one before it.
+    bool notes_before_commit{false};
     /// bbport: U3's auto-exposure value, a 16-byte buffer its compute shaders write and its CPU
     /// code reads. The dispatch notes it and the next end-of-pipe event copies it to guest memory
     /// without waiting (see SmallReadBackMode; BB_READBACK_SMALL_BUFFERS=0: off).
