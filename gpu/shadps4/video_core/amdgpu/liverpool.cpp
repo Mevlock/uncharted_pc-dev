@@ -34,6 +34,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "bbport_write_log.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/amdgpu/fence_stats.h"
 #include "video_core/landing_gate.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -226,6 +227,34 @@ void Liverpool::ProcessCommands() {
     }
 }
 
+/// bbport (perf6, BB_GFX_YIELD_PACKETS=N): compute submits not yet finished decoding. The graphics
+/// command buffer only gave way to the compute queues at its waits, so a skinning submit waited
+/// for most of a frame's draws to be decoded first (BB_FENCE_STATS, U3 market: submit->decode
+/// 1.3 ms of a 1.7 ms fence). With N > 0 the graphics queue yields every N packets while compute
+/// work is waiting (as the PS4 runs its compute queues alongside graphics). 0: off.
+static std::atomic<int> g_asc_pending{0};
+static u32 GfxYieldPackets() {
+    static const u32 packets = [] {
+        const char* env = std::getenv("BB_GFX_YIELD_PACKETS");
+        return env ? u32(std::strtoul(env, nullptr, 10)) : 0u;
+    }();
+    return packets;
+}
+
+/// bbport (perf6, BB_ASC_DUMP=N): the opcode list of N compute submits, printed once the game has
+/// run 2 million compute packets (in play): "D" dispatch, "R" RELEASE_MEM, "W" WAIT_REG_MEM, "S<reg>"
+/// SET_SH_REG with its first register, "I" indirect buffer, else the opcode number.
+static u32 AscDumpCount() {
+    static const u32 n = [] {
+        const char* env = std::getenv("BB_ASC_DUMP");
+        return env ? u32(std::strtoul(env, nullptr, 10)) : 0u;
+    }();
+    return n;
+}
+static std::array<std::string, 64> g_asc_trace;
+static std::atomic<u64> g_asc_packets{0};
+static std::atomic<u32> g_asc_dumped{0};
+
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     BbThreads::MakeRenderThread();
@@ -286,8 +315,12 @@ void Liverpool::Process(std::stop_token stoken) {
                 std::this_thread::sleep_until(not_before);
             }
             BbTrace::Record(BbTrace::SubmissionBegin, curr_qid);
+            const u64 busy_start = FenceStats::Enabled() ? FenceStats::Now() : 0;
             task.resume();
             BbTrace::Record(BbTrace::SubmissionEnd, curr_qid | (task.done() ? 0x100u : 0u));
+            if (busy_start && curr_qid != GfxQueueId) { // BB_FENCE_STATS
+                FenceStats::NoteBusy(FenceStats::Now() - busy_start, task.done());
+            }
 
             if (task.done()) {
                 task.destroy();
@@ -330,6 +363,9 @@ void Liverpool::Process(std::stop_token stoken) {
                     queue.front_started = false;
 
                     --num_submits;
+                    if (curr_qid != GfxQueueId) {
+                        g_asc_pending.fetch_sub(1, std::memory_order_relaxed);
+                    }
                     std::scoped_lock lock2{submit_mutex};
                     if (curr_qid == GfxQueueId) {
                         ++gfx_done;
@@ -625,7 +661,14 @@ void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
 struct ReleaseMemTask {
     PM4CmdReleaseMem packet;
     u32 pipe_id;
+    u64 fence_submit = 0; // BB_FENCE_STATS: when its command buffer was submitted, and when stage A
+    u64 fence_decode = 0; // reached it (0: not timed)
+    u64 fence_start = 0;  // when stage A began that command buffer
 };
+
+/// BB_FENCE_STATS: the submit time of the command buffer each compute queue is processing.
+static std::array<u64, 64> g_fence_cur_submit{};
+static std::array<u64, 64> g_fence_cur_start{};
 
 void SignalReleaseMem(const PM4CmdReleaseMem& release, u32 pipe_id) {
     u64 value = 0;
@@ -652,6 +695,7 @@ void SignalReleaseMem(const PM4CmdReleaseMem& release, u32 pipe_id) {
     }
     if (bytes) {
         auto* address = release.Address<void*>();
+        FenceStats::NoteFenceWrite(reinterpret_cast<u64>(address), pipe_id); // BB_FENCE_STATS
         BbWriteLog::Note(reinterpret_cast<u64>(address), &value, bytes, BbWriteLog::Fence);
         if (!Core::Memory::Instance()->TryWriteBacking(address, &value, bytes)) {
             std::memcpy(address, &value, bytes);
@@ -664,20 +708,27 @@ void SignalReleaseMem(const PM4CmdReleaseMem& release, u32 pipe_id) {
 }
 
 void RunReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
-    const auto task = *reinterpret_cast<const ReleaseMemTask*>(data);
+    ReleaseMemTask task{*reinterpret_cast<const PM4CmdReleaseMem*>(data), 0};
+    std::memcpy(&task, data, sizeof(task)); // the packet stream need not align its 8-byte fields
     // Raycaster copies deferred before this packet land before its label shows (landing_gate.h).
     const u64 landing_seq = VideoCore::LandingGate::Pending();
     rasterizer.ProcessDownloadImages();
     rasterizer.GetBufferCache().CheckStableBindings();
     rasterizer.CheckConstants();
+    const u64 fence_run = task.fence_decode ? FenceStats::Now() : 0;
     if (Vulkan::DrawPipe::OnStageB() && !BbToggle::Disabled(BbToggle::RecorderFences)) {
-        rasterizer.SignalAfterHostCopies([task] { SignalReleaseMem(task.packet, task.pipe_id); },
-                                         landing_seq);
+        rasterizer.SignalAfterHostCopies(
+            [task, fence_run] {
+                SignalReleaseMem(task.packet, task.pipe_id);
+                FenceStats::Record(task.fence_submit, task.fence_decode, fence_run, task.fence_start);
+            },
+            landing_seq);
     } else {
         rasterizer.WaitHostCopies();
         rasterizer.WaitDeferredSignals();
         VideoCore::LandingGate::Wait(landing_seq);
         SignalReleaseMem(task.packet, task.pipe_id);
+        FenceStats::Record(task.fence_submit, task.fence_decode, fence_run, task.fence_start);
     }
 }
 
@@ -1243,7 +1294,15 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     }
 
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
+    const u32 yield_packets = GfxYieldPackets();
+    u32 packets_since_yield = 0;
     while (!dcb.empty()) {
+        // BB_GFX_YIELD_PACKETS: let waiting compute submits be decoded (a packet boundary).
+        if (yield_packets && ++packets_since_yield >= yield_packets &&
+            g_asc_pending.load(std::memory_order_relaxed) > 0) {
+            packets_since_yield = 0;
+            YIELD_GFX();
+        }
         ProcessCommands();
         g_decoding_queue.store(0, std::memory_order_relaxed);
 
@@ -2125,6 +2184,12 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 template <bool is_indirect>
 Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     FIBER_ENTER(acb_task_name[vqid]);
+    if constexpr (!is_indirect) {
+        if (FenceStats::Enabled() && vqid < g_fence_cur_submit.size()) {
+            g_fence_cur_submit[vqid] = FenceStats::TakeSubmit(vqid);
+            g_fence_cur_start[vqid] = FenceStats::Now();
+        }
+    }
     if (rasterizer) {
         rasterizer->GetBufferCache().ForgetStreamCopies(); // see ProcessGraphics
     }
@@ -2182,6 +2247,21 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        if (AscDumpCount() && vqid < g_asc_trace.size() &&
+            g_asc_packets.fetch_add(1, std::memory_order_relaxed) > 2'000'000 &&
+            g_asc_dumped.load(std::memory_order_relaxed) < AscDumpCount()) {
+            auto& t = g_asc_trace[vqid];
+            switch (opcode) {
+            case PM4ItOpcode::DispatchDirect: t += "D "; break;
+            case PM4ItOpcode::ReleaseMem: t += "R "; break;
+            case PM4ItOpcode::WaitRegMem: t += "W "; break;
+            case PM4ItOpcode::IndirectBuffer: t += "I "; break;
+            case PM4ItOpcode::SetShReg:
+                t += fmt::format("S{:x} ", reinterpret_cast<const PM4CmdSetData*>(header)->reg_offset.Value());
+                break;
+            default: t += fmt::format("{:x} ", u32(opcode)); break;
+            }
+        }
         if (IsConsumingOpcode(opcode)) {
             while (VideoCore::g_async_stalled.load(std::memory_order_relaxed)) {
                 ProcessCommands();
@@ -2223,6 +2303,25 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             wrm_passed = wait->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory &&
                          PendingFenceValue(wait->Address<VAddr>(), value) &&
                          wait->TestValue(value);
+        }
+        // bbport (perf6, BB_COMPUTE_WRM_MET=0: off): a WAIT_REG_MEM already met in guest
+        // memory passes without a drain when nothing the draw recording thread still has to write
+        // touches its address (no pending fence there, no pending GPU write over it): memory then
+        // holds what the queue would see in order. U3 market: these drains were 566-828/s, 6.6-9.4%
+        // of the GPU thread, and the waits were met at once (BB_FENCE_STATS). ABBA 2026-11-03,
+        // market route: usual settings +1.0% mean / +1.5% crowd, CPU-bound +3.4% / +2.2%, slow CPU
+        // (8 threads, 60%) +-0 / +9.6% crowd; drains 566-828/s -> under 110/s.
+        static const bool wrm_met = [] {
+            const char* env = std::getenv("BB_COMPUTE_WRM_MET");
+            return !(env && env[0] == '0');
+        }();
+        if (!wrm_passed && wrm_met && opcode == PM4ItOpcode::WaitRegMem && rasterizer) {
+            const auto* wait = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
+            u32 value;
+            wrm_passed = wait->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory &&
+                         !PendingFenceValue(wait->Address<VAddr>(), value) &&
+                         !rasterizer->HasPendingGpuWrite(wait->Address<VAddr>(), 8) &&
+                         wait->Test(regs.reg_array);
         }
         const bool no_drain = opcode == PM4ItOpcode::Nop || opcode == PM4ItOpcode::SetShReg ||
                               opcode == PM4ItOpcode::SetQueueReg ||
@@ -2434,6 +2533,14 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             if (wrm_passed) {
                 break; // met by a fence the draw recording thread writes first
             }
+            if (FenceStats::Enabled() && !wait_reg_mem->Test(regs.reg_array)) {
+                const u64 wait_start = FenceStats::Now(); // BB_FENCE_STATS: an unmet wait
+                while (!wait_reg_mem->Test(regs.reg_array)) {
+                    YIELD_ASC(vqid);
+                }
+                FenceStats::NoteWait(wait_reg_mem->Address<u64>(), FenceStats::Now() - wait_start);
+                break;
+            }
             while (!wait_reg_mem->Test(regs.reg_array)) {
                 YIELD_ASC(vqid);
             }
@@ -2441,8 +2548,13 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::ReleaseMem: {
             if (rasterizer && release_in_order) {
-                const ReleaseMemTask task{*reinterpret_cast<const PM4CmdReleaseMem*>(header),
-                                          queue.pipe_id};
+                ReleaseMemTask task{*reinterpret_cast<const PM4CmdReleaseMem*>(header),
+                                    queue.pipe_id};
+                if (FenceStats::Enabled()) {
+                    task.fence_decode = FenceStats::Now();
+                    task.fence_submit = vqid < g_fence_cur_submit.size() ? g_fence_cur_submit[vqid] : 0;
+                    task.fence_start = vqid < g_fence_cur_start.size() ? g_fence_cur_start[vqid] : 0;
+                }
                 if (!rasterizer->native_batch_deferrable) {
                     rasterizer->native_batch_deferrable = &RunReleaseMem; // native batch
                 }
@@ -2507,6 +2619,15 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
     }
 
+    if constexpr (!is_indirect) {
+        if (AscDumpCount() && vqid < g_asc_trace.size() && !g_asc_trace[vqid].empty()) {
+            if (g_asc_dumped.fetch_add(1, std::memory_order_relaxed) < AscDumpCount()) {
+                std::printf("ASC dump: queue %u: %s\n", vqid, g_asc_trace[vqid].c_str());
+                std::fflush(stdout);
+            }
+            g_asc_trace[vqid].clear();
+        }
+    }
     FIBER_EXIT;
 }
 
@@ -2617,6 +2738,8 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
         // bbport (BB_PREP_ASYNC_COMPUTE=1): the queue's new compute programs start building on idle cores now.
         rasterizer->GetComputePreparation().Submit(vqid, acb);
     }
+    FenceStats::NoteSubmit(vqid); // BB_FENCE_STATS
+    g_asc_pending.fetch_add(1, std::memory_order_relaxed); // BB_GFX_YIELD_PACKETS
     const auto& task = ProcessCompute(acb, vqid);
     {
         std::scoped_lock lock{queue.m_access};
