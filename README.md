@@ -7,11 +7,11 @@
 Uncharted 1, 2 and 3 from the PS4 collection, running natively on Windows 10 and 11. The original PS4 game
 code runs directly on your PC and the graphics are translated to Vulkan.
 
-**[⬇ Download 0.3.6.39](https://github.com/Mevlock/uncharted_pc-dev/releases/latest)** ·
+**[⬇ Download 0.3.6.40](https://github.com/Mevlock/uncharted_pc-dev/releases/latest)** ·
 [What's new](docs/releases/v0.3.6.30.md) · [How much faster](docs/PERFORMANCE.md) · [Known issues](#known-issues) · [How the shader preparation works](docs/SHADER_PREPARATION.md)
 
 > **No game files are included.** You need your own decrypted dump of the collection, version 1.02:
-> EU/UK (CUSA02343), US (CUSA02320) or EU/Russian (CUSA02344). The folder holds eboot.bin,
+> EU/UK (CUSA02343), US (CUSA02320), EU/Russian (CUSA02344) or Spanish (CUSA02826). The folder holds eboot.bin,
 > big2-ps4_Shipping.elf, big3-ps4_Shipping.elf, sce_sys, u1data, u2data and u3data.
 > Not affiliated with Sony Interactive Entertainment or Naughty Dog.
 
