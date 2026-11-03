@@ -217,8 +217,10 @@ void RegisterShaderMeta(const Shader::Info& info,
 /// without a cache version bit (BB_EFFECT_LOOP_CLAMP) get a suffix: binaries saved before it (or
 /// with it off) are not taken for it, and the rest of the cache is kept.
 static std::string BinaryName(u64 pgm_hash, size_t perm_idx) {
+    // _lc2: pixel shader 689d1af9 (its first clamp builds patched nothing; not to be taken).
     return Shader::Optimization::EffectLoopClamp(pgm_hash)
-               ? fmt::format("{:#018x}_{}_lc1", pgm_hash, perm_idx)
+               ? fmt::format("{:#018x}_{}_{}", pgm_hash, perm_idx,
+                             pgm_hash == 0x689d1af9 ? "lc2" : "lc1")
                : fmt::format("{:#018x}_{}", pgm_hash, perm_idx);
 }
 
