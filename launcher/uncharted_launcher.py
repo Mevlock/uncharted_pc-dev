@@ -422,15 +422,26 @@ def game_code(s, key):
 
 
 def unsupported_version(s, key):
-    """The game's version when the shader preparation cannot be used on this copy (no shader index for its title and
-    game code), else ''."""
+    """The game's version when the shader preparation cannot be used on this copy (an executable whose game code we do
+    not know), else ''. A known game code under a title id without a shipped index (another region's release, e.g.
+    the Spanish CUSA02826 with the 1.02 code) is prepared: the game scans its files once and keeps the index."""
     info = game_info(game_folder(s, key))
     if not info:
         return ''
     code = game_code(s, key)
-    if code is None or (info['id'], code) in SHADER_INDEXES:
+    if code is None or code or (info['id'], code) in SHADER_INDEXES:
         return ''
     return info.get('version', '?')
+
+
+def needs_index_scan(s, key):
+    """True when this copy's game code is known but no shader index ships for its title: the first preparation reads
+    the game files once."""
+    info = game_info(game_folder(s, key))
+    if not info:
+        return False
+    code = game_code(s, key)
+    return bool(code) and (info['id'], code) not in SHADER_INDEXES
 
 
 def shader_locations(lists, s, key):
@@ -2142,6 +2153,9 @@ class Launcher:
             if unsupported_version(s, start):
                 ready += '\n' + _('Shader preparation is off for this copy of the game (version {}): the port '
                                   'does not know where its shaders are yet.').format(info['version'])
+            elif needs_index_scan(s, start) and not shaders_prepared(s, start):
+                ready += '\n' + _('No shader index ships for this copy ({}): the first shader preparation reads the '
+                                  'game files once (a few minutes, longer on a hard drive).').format(info['id'])
         self.ready.configure(text=ready)
         self.update_prep_status()
         if not self.process:
@@ -2628,7 +2642,9 @@ def log_header(settings, start=None):
         lists = shader_list(start)
         locations = shader_locations(lists, settings, start) if lists else None
         game += f' (game code {code})' if code else ' (game code unknown)' if code == '' else ''
-        game += f'; shader locations {locations.name}' if locations else '; shader preparation off: no index for it'
+        game += (f'; shader locations {locations.name}' if locations
+                 else '; no shipped shader index: the game files are scanned once' if code
+                 else '; shader preparation off: no index for it')
     return (f'Port: {NAME} {build} in {PORT_DIR}, starting {start}\n'
             f'Folders: saves {saves}, shader cache {DATA_DIR / "user" / "cache"}\n{game}\n')
 
