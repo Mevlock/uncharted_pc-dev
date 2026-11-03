@@ -207,7 +207,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'player_name': '',
-                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'skip_friends_notice': True, 'anisotropy': '0',
+                'fullscreen': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0',
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off',
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
@@ -422,21 +422,31 @@ def game_code(s, key):
 
 
 def unsupported_version(s, key):
-    """The game's version when the shader preparation cannot be used on this copy (an executable whose game code we do
-    not know), else ''. A known game code under a title id without a shipped index (another region's release, e.g.
-    the Spanish CUSA02826 with the 1.02 code) is prepared: the game scans its files once and keeps the index."""
+    """The game's version when the shader preparation is not used on this copy (no shader index ships for its title
+    and game code), else ''. Advanced 'prep_unknown_versions' lets a known game code under such a title (another
+    region's release, e.g. the Spanish CUSA02826 with the 1.02 code) be prepared: the game scans its files once and
+    keeps the index. An executable whose game code we do not know stays off."""
     info = game_info(game_folder(s, key))
     if not info:
         return ''
     code = game_code(s, key)
-    if code is None or code or (info['id'], code) in SHADER_INDEXES:
+    if code is None or (info['id'], code) in SHADER_INDEXES or (code and s.get('prep_unknown_versions')):
         return ''
     return info.get('version', '?')
 
 
 def needs_index_scan(s, key):
-    """True when this copy's game code is known but no shader index ships for its title: the first preparation reads
-    the game files once."""
+    """True when this copy is prepared through the Advanced override: its game code is known but no shader index ships
+    for its title, so the first preparation reads the game files once."""
+    info = game_info(game_folder(s, key))
+    if not info or not s.get('prep_unknown_versions'):
+        return False
+    code = game_code(s, key)
+    return bool(code) and (info['id'], code) not in SHADER_INDEXES
+
+
+def known_code_without_index(s, key):
+    """True when the Advanced override would turn the shader preparation on for this copy."""
     info = game_info(game_folder(s, key))
     if not info:
         return False
@@ -2067,6 +2077,11 @@ class Launcher:
             _('In the background the game starts at once but stutters until it is done.'))
         self.row(f, _('Speed'), self.choice(self.target(f), 'preparation_speed', [
             ('all', 'All CPU cores (fastest)'), ('half', 'Half the cores (the PC stays responsive)')]))
+        self.check(f, 'prep_unknown_versions', _('Also prepare versions the port has no shader index for'),
+                   _("Other regions' releases of a known game version (for example the Spanish CUSA02826). The "
+                     'first start then reads all the game files once to find the shaders: a few minutes, longer '
+                     'on a hard drive.'))
+        self.var('prep_unknown_versions').trace_add('write', lambda *_a: self.update_prep_status())
         card = self.target(f)
         self.prep_status = self.tk.Label(card, text='', bg=CARD, fg=TEXT, font=self.font_ui, justify='left')
         self.prep_status.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
@@ -2153,6 +2168,8 @@ class Launcher:
             if unsupported_version(s, start):
                 ready += '\n' + _('Shader preparation is off for this copy of the game (version {}): the port '
                                   'does not know where its shaders are yet.').format(info['version'])
+                if known_code_without_index(s, start):
+                    ready += ' ' + _('Advanced > Shader preparation can turn it on for this version.')
             elif needs_index_scan(s, start) and not shaders_prepared(s, start):
                 ready += '\n' + _('No shader index ships for this copy ({}): the first shader preparation reads the '
                                   'game files once (a few minutes, longer on a hard drive).').format(info['id'])
@@ -2643,7 +2660,8 @@ def log_header(settings, start=None):
         locations = shader_locations(lists, settings, start) if lists else None
         game += f' (game code {code})' if code else ' (game code unknown)' if code == '' else ''
         game += (f'; shader locations {locations.name}' if locations
-                 else '; no shipped shader index: the game files are scanned once' if code
+                 else '; no shipped shader index: the game files are scanned once (Advanced override)'
+                 if needs_index_scan(settings, start)
                  else '; shader preparation off: no index for it')
     return (f'Port: {NAME} {build} in {PORT_DIR}, starting {start}\n'
             f'Folders: saves {saves}, shader cache {DATA_DIR / "user" / "cache"}\n{game}\n')
