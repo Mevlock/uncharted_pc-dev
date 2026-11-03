@@ -262,7 +262,12 @@ void Report(std::vector<Sampled>& threads, double seconds) {
         std::ranges::sort(by_path, std::greater{}, &std::pair<std::array<u64, 4>, u32>::second);
         std::printf("Sampler: '%s' by call path (function <- bb-probe.exe return addresses):\n",
                     t.name.c_str());
-        for (size_t i = 0; i < by_path.size() && i < 25; ++i) {
+        // BB_SAMPLE_PATHS=<n>: more call paths (default 25), e.g. to sum the callers of a lock.
+        static const size_t paths_listed = [] {
+            const char* env = std::getenv("BB_SAMPLE_PATHS");
+            return env ? size_t(std::strtoul(env, nullptr, 10)) : size_t{25};
+        }();
+        for (size_t i = 0; i < by_path.size() && i < paths_listed; ++i) {
             std::printf("Sampler:   %5.2f%% %s", 100.0 * by_path[i].second / t.samples,
                         Describe(by_path[i].first[0]).c_str());
             for (size_t f = 1; f < 4 && by_path[i].first[f]; ++f) {
