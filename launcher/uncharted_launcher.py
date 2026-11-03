@@ -40,7 +40,7 @@ CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.6.38'  # fork: upstream 0.3.6 + this fork's changes
+VERSION = '0.3.6.39'  # fork: upstream 0.3.6 + this fork's changes
 # Fork: updates come from this fork's own releases (the latest one; -pre tags are published as normal releases).
 RELEASES_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases/latest'
 RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
@@ -99,10 +99,24 @@ RENDER_RESOLUTIONS = [('1080', "1920 × 1080 (the game's own)"),
                       ('balanced', 'Balanced: upscaled from 58%'),
                       ('performance', 'Performance: upscaled from 50%'),
                       ('3840x2160', '3840 × 2160 (4K, experimental)'),
-                      ('3840x1600', '3840 × 1600 (21:9 4K, experimental)')]
+                      ('3840x1600', '3840 × 1600 (21:9 4K, experimental)'),
+                      ('4k-quality', '4K output, Quality: from 67% (experimental)'),
+                      ('4k-balanced', '4K output, Balanced: from 58% (experimental)'),
+                      ('4k-performance', '4K output, Performance: from 50% (experimental)'),
+                      ('ss-quality', 'Supersampled 2.25x: from native (experimental)'),
+                      ('ss-performance', 'Supersampled 2.25x, faster: from 75% (experimental)')]
 # The 4K choices draw at that size whatever the window (scaled to it when presented); only they
 # go above RENDER_PIXELS_MAX, which Native and the scaled modes keep.
 RENDER_4K = {'3840x2160', '3840x1600'}
+# The 4K output choices: the scaled modes with a 4K output instead of the window's size (3840 x 1600 on
+# screens wider than 2:1, else 3840 x 2160), which the presenter then scales to the window: the upscaler's
+# 4K picture supersampled to the screen, like NVIDIA's DLDSR. The render size stays that fraction of 4K.
+RENDER_4K_UPSCALED = {'4k-quality': 1.5, '4k-balanced': 1.7, '4k-performance': 2.0}
+# The supersampled choices (like NVIDIA's DLDSR 2.25x): rendered at the output size (or 75% of it), upscaled by the
+# anti-aliasing to 1.5 times it per axis and filtered back down by the presenter (post_process.frag, Lanczos).
+# The upscaled size stays within SUPERSAMPLED_PIXELS_MAX (a 3440 x 1440 screen's 1.5x); larger screens get less.
+SUPERSAMPLED = {'ss-quality': 1.0, 'ss-performance': 0.75}
+SUPERSAMPLED_PIXELS_MAX = 5160 * 2160
 RENDER_SCALES = {'native': 1.0, 'quality': 1.5, 'balanced': 1.7, 'performance': 2.0}
 RENDER_PIXELS_MAX = 3440 * 1440
 RENDER_PIXELS_MAX_BIG = 3840 * 2160  # the 4K choices
@@ -536,14 +550,24 @@ def render_sizes(s, start=None):
         choice = '1080' if small_card() else 'native'
         if choice == '1080':
             return None
-    limit = RENDER_PIXELS_MAX_BIG if choice in RENDER_4K else RENDER_PIXELS_MAX
+    limit = RENDER_PIXELS_MAX_BIG if choice in RENDER_4K or choice in RENDER_4K_UPSCALED else RENDER_PIXELS_MAX
     out_w, out_h = output_size(s)
     if choice in RENDER_4K:
         # Drawn at that size and output at it too: the presenter scales the frame to the window
         # (above the window's size, supersampling). Exactly the sizes tested (2160 is not a
         # multiple of 32, but its bloom chain was fine).
         return choice, choice
-    if choice in RENDER_SCALES:
+    if choice in RENDER_4K_UPSCALED:
+        out_w, out_h = (3840, 1600) if out_w / max(1, out_h) > 2.0 else (3840, 2160)
+        scale = RENDER_4K_UPSCALED[choice]
+        width, height = out_w / scale, out_h / scale
+    elif choice in SUPERSAMPLED:
+        screen_w, screen_h = out_w, out_h
+        factor = min(1.5, (SUPERSAMPLED_PIXELS_MAX / (screen_w * screen_h)) ** 0.5)
+        # The screen's shape kept exactly (1080p: 2880 x 1620; a rounder height letterboxed it by a few rows).
+        out_w, out_h = int(screen_w * factor) // 8 * 8, int(round(screen_h * factor / 2)) * 2
+        width, height = screen_w * SUPERSAMPLED[choice], screen_h * SUPERSAMPLED[choice]
+    elif choice in RENDER_SCALES:
         scale = RENDER_SCALES[choice]
         width, height = out_w / scale, out_h / scale
     else:
@@ -1607,7 +1631,7 @@ class Launcher:
         self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
                  _('The window\'s size in windowed mode. With Render resolution at 1920 × 1080, a larger '
                    'window, or fullscreen on a 1440p or 4K screen, gets the image upscaled to fit.'))
-        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', RENDER_RESOLUTIONS, 34),
+        self.row(f, _('Render resolution'), self.choice(f, 'render_resolution', RENDER_RESOLUTIONS, 58),
                  _('The size the game draws its picture at. Native draws at your window size (or your '
                    'screen in fullscreen) for the sharpest image. Quality, Balanced and Performance draw '
                    'a smaller picture and let DLSS or FSR rebuild it at full size, while the HUD stays '

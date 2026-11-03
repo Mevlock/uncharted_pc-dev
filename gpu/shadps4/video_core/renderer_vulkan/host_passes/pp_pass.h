@@ -18,6 +18,9 @@ public:
         float gamma = 1.0f;
         u32 hdr = 0;
         u32 srgb_input = 0;
+        /// bbport: a picture larger than the output is filtered (Lanczos 2) instead of point-sampled
+        /// (supersampled render resolutions). BB_DOWNSCALE_FILTER=0: one bilinear tap as before.
+        u32 downscale = 1;
     };
 
     void Create(vk::Device device, vk::Format surface_format);

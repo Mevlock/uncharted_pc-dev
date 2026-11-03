@@ -676,6 +676,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
+    static const u32 downscale_filter = [] {
+        const char* env = std::getenv("BB_DOWNSCALE_FILTER");
+        return env && env[0] == '0' ? 0u : 1u;
+    }();
+    pp_settings.downscale = downscale_filter;
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
 
     // bbport: frame generation: the frames between the previous frame and this one.
