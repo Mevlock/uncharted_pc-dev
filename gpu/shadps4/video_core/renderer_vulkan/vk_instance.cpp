@@ -818,6 +818,15 @@ bool Instance::CreateDevice() {
     static const Instance* vram_instance = nullptr;
     vram_instance = this;
     Vram::allows = [](u64 bytes) { return vram_instance->VramAllows(bytes); };
+    // bbport: the subgroup (lane) width the guest's 64-lane waves are split by, and whether compute shaders are held
+    // to it (FixedComputeSubgroupSize; Intel can pick 8, 16 or 32 per shader).
+    const u32 fixed = IsSubgroupSize64Supported() ? 64 : FixedComputeSubgroupSize();
+    std::printf("GPU: subgroups of %u lanes (driver range %u-%u, size control %s, compute %s); compute shaders run "
+                "with %s\n",
+                vk11_props.subgroupSize, vk13_props.minSubgroupSize, vk13_props.maxSubgroupSize,
+                vk13_features.subgroupSizeControl ? "yes" : "no",
+                (vk13_props.requiredSubgroupSizeStages & vk::ShaderStageFlagBits::eCompute) ? "yes" : "no",
+                fixed ? fmt::format("{} lanes (fixed)", fixed).c_str() : "the driver's choice");
     return true;
 }
 

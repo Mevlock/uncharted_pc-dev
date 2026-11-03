@@ -4752,6 +4752,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     MarkPass(pipeline, state);
     FullBarrierBeforeDraw(scheduler);
     scheduler.BeginRendering(state);
+    if (Scheduler::BreadcrumbsOn()) { // BB_GPU_BREADCRUMBS: the pass's shaders, listed with its number
+        for (const auto* stage : pipeline->GetStages()) {
+            if (stage) {
+                scheduler.NotePassShader(stage->pgm_hash);
+            }
+        }
+    }
     bool batched = false;
     if (batch_variant) {
         ++draw_batch.candidates;
@@ -5524,6 +5531,8 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         return env ? std::atoi(env) : 0;
     }();
     const void* checkpoint = NoteCheckpoint("dispatch", cs.pgm_hash, 0, groups_x, dim_y, dim_z, 0);
+    const u32 crumb = scheduler.NoteBreadcrumb(1, cs.pgm_hash); // BB_GPU_BREADCRUMBS
+    const Scheduler* crumb_scheduler = &scheduler;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         const vk::MemoryBarrier2 barrier = {
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -5546,6 +5555,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         if (full_barrier >= 1) {
             cmdbuf.pipelineBarrier2(dependency);
         }
+        crumb_scheduler->WriteBreadcrumb(cmdbuf, crumb, vk::PipelineStageFlagBits2::eComputeShader);
     });
     DebugState.IncDispatch();
 
@@ -5598,12 +5608,16 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
     const void* checkpoint =
         NoteCheckpoint("indirect dispatch", pipeline->GetStage(Shader::SwStage::Compute).pgm_hash,
                        0, size, 0, 0, address + offset);
+    const u32 crumb =
+        scheduler.NoteBreadcrumb(1, pipeline->GetStage(Shader::SwStage::Compute).pgm_hash); // BB_GPU_BREADCRUMBS
+    const Scheduler* crumb_scheduler = &scheduler;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         if (checkpoint) {
             cmdbuf.setCheckpointNV(checkpoint);
         }
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
         cmdbuf.dispatchIndirect(args, args_offset);
+        crumb_scheduler->WriteBreadcrumb(cmdbuf, crumb, vk::PipelineStageFlagBits2::eComputeShader);
     });
     DebugState.IncDispatch();
 

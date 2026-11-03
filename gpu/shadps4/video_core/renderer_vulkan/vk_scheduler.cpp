@@ -15,6 +15,8 @@
 #include <functional>
 
 #include "bbport_copy.h"
+#include <fmt/format.h>
+#include <string>
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/landing_gate.h"
 #include "bbport_toggles.h"
@@ -128,6 +130,7 @@ void Scheduler::ReportStall() {
                     static_cast<const void*>(scheduler), static_cast<void*>(timeline),
                     static_cast<unsigned long long>(value),
                     static_cast<unsigned long long>(scheduler->work_semaphore.CurrentTick()));
+        scheduler->ReportBreadcrumbs();
     }
     const u64 count = std::min<u64>(g_recent_count, g_recent.size());
     for (u64 i = g_recent_count - count; i < g_recent_count; ++i) {
@@ -169,6 +172,132 @@ Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     AllocateWorkerCommandBuffers();
     priority_pending_ops_thread =
         std::jthread(std::bind_front(&Scheduler::PriorityPendingOpsThread, this));
+    if (BreadcrumbsOn()) {
+        CreateBreadcrumbBuffer();
+    }
+}
+
+bool Scheduler::BreadcrumbsOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_GPU_BREADCRUMBS");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+void Scheduler::CreateBreadcrumbBuffer() {
+    const vk::Device device = instance.GetDevice();
+    auto [buffer_result, buffer] = device.createBuffer(vk::BufferCreateInfo{
+        .size = 64,
+        .usage = vk::BufferUsageFlagBits::eTransferDst,
+    });
+    if (buffer_result != vk::Result::eSuccess) {
+        return;
+    }
+    const auto requirements = device.getBufferMemoryRequirements(buffer);
+    const auto properties = instance.GetPhysicalDevice().getMemoryProperties();
+    const auto wanted = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+    u32 type = ~0u;
+    for (u32 i = 0; i < properties.memoryTypeCount; ++i) {
+        if ((requirements.memoryTypeBits & (1u << i)) &&
+            (properties.memoryTypes[i].propertyFlags & wanted) == wanted) {
+            type = i;
+            break;
+        }
+    }
+    if (type == ~0u) {
+        device.destroyBuffer(buffer);
+        return;
+    }
+    auto [memory_result, memory] = device.allocateMemory(vk::MemoryAllocateInfo{
+        .allocationSize = requirements.size,
+        .memoryTypeIndex = type,
+    });
+    if (memory_result != vk::Result::eSuccess || device.bindBufferMemory(buffer, memory, 0) != vk::Result::eSuccess) {
+        device.destroyBuffer(buffer);
+        return;
+    }
+    auto [map_result, mapped] = device.mapMemory(memory, 0, 64);
+    if (map_result != vk::Result::eSuccess) {
+        device.destroyBuffer(buffer);
+        device.freeMemory(memory);
+        return;
+    }
+    std::memset(mapped, 0, 64);
+    crumb_buffer = buffer;
+    crumb_memory = memory;
+    crumb_mapped = static_cast<volatile u32*>(mapped);
+    std::printf("GPU breadcrumbs: on for scheduler %p (BB_GPU_BREADCRUMBS; a barrier after every dispatch and render "
+                "pass, slower)\n",
+                static_cast<const void*>(this));
+}
+
+u32 Scheduler::NoteBreadcrumb(u32 kind, u64 hash) {
+    if (!crumb_buffer) {
+        return 0;
+    }
+    const u32 id = crumb_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    Crumb& crumb = crumbs[id % crumbs.size()];
+    if (kind == 2) {
+        crumb = pass_crumb;
+    } else {
+        crumb = Crumb{};
+        crumb.count = 1;
+        crumb.hashes[0] = hash;
+    }
+    crumb.kind = kind;
+    return id;
+}
+
+void Scheduler::NotePassShader(u64 hash) {
+    if (!crumb_buffer || !hash) {
+        return;
+    }
+    for (u32 i = 0; i < pass_crumb.count; ++i) {
+        if (pass_crumb.hashes[i] == hash) {
+            return;
+        }
+    }
+    if (pass_crumb.count < std::size(pass_crumb.hashes)) {
+        pass_crumb.hashes[pass_crumb.count++] = hash;
+    }
+}
+
+void Scheduler::WriteBreadcrumb(vk::CommandBuffer cmdbuf, u32 id, vk::PipelineStageFlags2 after) const {
+    if (!id || !crumb_buffer) {
+        return;
+    }
+    const vk::MemoryBarrier2 barrier{
+        .srcStageMask = after,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+    };
+    cmdbuf.pipelineBarrier2(vk::DependencyInfo{.memoryBarrierCount = 1, .pMemoryBarriers = &barrier});
+    cmdbuf.fillBuffer(crumb_buffer, 0, 4, id);
+}
+
+void Scheduler::ReportBreadcrumbs() const {
+    if (!crumb_mapped) {
+        return;
+    }
+    const u32 done = crumb_mapped[0];
+    const u32 recorded = crumb_count.load(std::memory_order_relaxed);
+    std::printf("GPU breadcrumbs: scheduler %p: the GPU finished #%u of %u recorded; the next are where it stopped:\n",
+                static_cast<const void*>(this), done, recorded);
+    for (u32 id = std::max(done, 1u); id <= recorded && id <= done + 6; ++id) {
+        if (recorded - id >= crumbs.size()) {
+            continue;
+        }
+        const Crumb& crumb = crumbs[id % crumbs.size()];
+        std::string list;
+        for (u32 i = 0; i < crumb.count; ++i) {
+            list += fmt::format(" {:08x}", static_cast<u32>(crumb.hashes[i]));
+        }
+        std::printf("GPU breadcrumbs:   #%u %s %s:%s\n", id, id == done ? "(finished)" : "(not finished)",
+                    crumb.kind == 1 ? "dispatch, compute shader" : "render pass, shaders", list.c_str());
+    }
+    std::fflush(stdout);
 }
 
 Scheduler::~Scheduler() {
@@ -267,7 +396,12 @@ void Scheduler::EndRendering() {
         ++g_pass_count;
         g_pass_draws = 0;
     }
-    Record([](vk::CommandBuffer cmdbuf) { cmdbuf.endRendering(); });
+    const u32 crumb = crumb_buffer ? NoteBreadcrumb(2, 0) : 0;
+    pass_crumb = {};
+    Record([crumb, this](vk::CommandBuffer cmdbuf) {
+        cmdbuf.endRendering();
+        WriteBreadcrumb(cmdbuf, crumb, vk::PipelineStageFlagBits2::eAllGraphics);
+    });
 }
 
 void Scheduler::TraceDirectRecording(void* caller) {

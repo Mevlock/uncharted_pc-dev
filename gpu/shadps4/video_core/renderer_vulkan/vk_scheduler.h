@@ -4,6 +4,7 @@
 #pragma once
 
 #include "bbport_causal.h"
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -973,6 +974,36 @@ public:
     /// bbport: the calling thread is a scheduler's Vulkan recording thread (deferred fences and
     /// their interrupts run there; nothing it calls may wait for that thread to go idle).
     static bool OnRecorderThread();
+
+    /// bbport diagnosis (BB_GPU_BREADCRUMBS=1, any vendor): every dispatch and every render pass gets a number when
+    /// it is recorded (with its shader hashes, kept here); once the GPU has finished it, a fill writes the number into
+    /// a host-visible buffer (behind a barrier: slow). The GPU stall and crash reports print the last one finished
+    /// and the ones after it: the work the GPU hung in. No VK_NV_device_diagnostic_checkpoints needed.
+    static bool BreadcrumbsOn();
+    /// Stage B: a dispatch (kind 1) about to be recorded; the number to write after it (0: off).
+    u32 NoteBreadcrumb(u32 kind, u64 hash);
+    /// Stage B: a shader of a draw in the open render pass (listed with the pass's number at EndRendering).
+    void NotePassShader(u64 hash);
+    /// Recording thread, in a recorded closure: writes `id` once the work before it (in `after` stages) is done.
+    void WriteBreadcrumb(vk::CommandBuffer cmdbuf, u32 id, vk::PipelineStageFlags2 after) const;
+    /// Prints the last finished number and the ones recorded after it (stall and crash reports).
+    void ReportBreadcrumbs() const;
+
+private:
+    struct Crumb {
+        u32 kind = 0; ///< 1 dispatch, 2 render pass
+        u32 count = 0;
+        u64 hashes[6]{};
+    };
+    std::array<Crumb, 4096> crumbs{};
+    std::atomic<u32> crumb_count{0};
+    Crumb pass_crumb{};
+    vk::Buffer crumb_buffer{};
+    vk::DeviceMemory crumb_memory{};
+    volatile u32* crumb_mapped = nullptr;
+    void CreateBreadcrumbBuffer();
+
+public:
 
 private:
 
