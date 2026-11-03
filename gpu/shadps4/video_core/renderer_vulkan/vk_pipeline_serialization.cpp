@@ -909,6 +909,21 @@ static std::optional<std::vector<u32>> ReadShaderCodeAt(std::FILE* f, u64 at, u6
 /// Every shader info block in the game's files.
 static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u64* files_scanned) {
     ShaderLocations locations;
+    // bbport: progress for the preparation page and the launcher's bar (phase 5, MiB read of MiB): the sizes first
+    // (a directory listing, no reading), then every chunk read.
+    u64 total_bytes = 0, read_bytes = 0;
+    {
+        std::error_code size_ec;
+        for (auto it = std::filesystem::recursive_directory_iterator(app0, size_ec);
+             !size_ec && it != std::filesystem::recursive_directory_iterator(); it.increment(size_ec)) {
+            if (it->is_regular_file(size_ec)) {
+                total_bytes += it->file_size(size_ec);
+            }
+        }
+    }
+    const u32 total_mib = u32(std::max<u64>(1, total_bytes >> 20));
+    BbOverlay::SetScanProgress(0, total_mib);
+    const auto t_scan = std::chrono::steady_clock::now();
     std::unordered_map<u64, std::vector<std::string>> tops; ///< the top folders a shader is noted under
     static constexpr size_t chunk = 64ull << 20;
     std::vector<char> buf(chunk + 64);
@@ -932,6 +947,8 @@ static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u6
         while (true) {
             const size_t got = std::fread(buf.data() + carry, 1, chunk, f);
             const size_t have = carry + got;
+            read_bytes += got;
+            BbOverlay::SetScanProgress(u32(std::min<u64>(read_bytes >> 20, total_mib)), total_mib);
             if (have < 28) {
                 break;
             }
@@ -975,6 +992,12 @@ static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u6
             locations.files.push_back(relative);
         }
     }
+    BbOverlay::SetScanProgress(0, 0); // the scan is over
+    std::printf("Shader locations: scanned %llu files, %.1f GB in %.0f s, %zu shaders found\n",
+                static_cast<unsigned long long>(*files_scanned), double(read_bytes) / (1ull << 30),
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_scan).count(),
+                locations.shaders.size());
+    std::fflush(stdout);
     return locations;
 }
 

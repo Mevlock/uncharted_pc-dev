@@ -957,6 +957,30 @@ void SetShaderPreparation(int phase, u32 done, u32 total) {
     prep_phase.store(phase, std::memory_order_release);
 }
 
+static std::atomic<u32> scan_done{0}, scan_total{0};
+static std::atomic<s64> scan_start_ms{0};
+
+void SetScanProgress(u32 done_mib, u32 total_mib) {
+    if (total_mib && !scan_total.load(std::memory_order_relaxed)) {
+        scan_start_ms.store(NowMs(), std::memory_order_relaxed);
+    }
+    scan_done.store(done_mib, std::memory_order_relaxed);
+    scan_total.store(total_mib, std::memory_order_release);
+}
+
+/// "  about 3 min left" for the scan: its average rate so far (reading is steady, unlike pipeline builds).
+static std::string ScanEta(u32 done, u32 total) {
+    const s64 elapsed = NowMs() - scan_start_ms.load(std::memory_order_relaxed);
+    if (done < 64 || total <= done || elapsed < 3000) {
+        return {};
+    }
+    const double left_s = double(total - done) * double(elapsed) / double(done) / 1000.0;
+    return left_s >= 90.0 ? fmt::format("  about {:.0f} min left", left_s / 60.0)
+                          : fmt::format("  about {:.0f} s left", std::max(1.0, left_s));
+}
+
+static const char* const ScanStep = "Step 1 of 2: finding the shaders in your game files (only this once)";
+
 void SetPreparationScreen(bool on) {
     prep_screen.store(on, std::memory_order_release);
     runtime_freeze_guest(on ? 1 : 0); // the game's threads wait for the page (runtime.h; BB_PREP_FREEZE=0: they run)
@@ -1052,6 +1076,12 @@ std::string PreparationEta(u32 done, u32 total) {
 // The full-screen page shown before the game starts (SetPreparationScreen): what is happening, that it happens once,
 // a progress bar with the step, the count and the countdown. Centred on a dark background.
 void FullScreenPreparation() {
+    // The launcher's bar follows the page: PREP lines 4 times a second while it is up (BB_PREPARE_ONLY prints its own).
+    static s64 last_prep_line = 0;
+    if (const s64 now = NowMs(); now - last_prep_line >= 250) {
+        last_prep_line = now;
+        PrintPreparationProgress();
+    }
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->Pos);
     ImGui::SetNextWindowSize(viewport->Size);
@@ -1092,17 +1122,21 @@ void FullScreenPreparation() {
                        : phase == 2 || between ? "Step 2 of 2: compiling them for your graphics card"
                        : finishing  ? "Finishing..."
                                     : "Starting...";
-    centered(step, 1.2f, white);
+    const u32 scan_of = scan_total.load(std::memory_order_acquire);
+    const u32 scan_at = std::min(scan_done.load(std::memory_order_relaxed), scan_of);
+    centered(scan_of ? ScanStep : step, 1.2f, white);
     ImGui::Dummy(ImVec2(0.0f, 10.0f * base_scale));
     const float bar_w = std::min(w * 0.55f, 900.0f * base_scale);
     ImGui::SetCursorPosX((w - bar_w) * 0.5f);
-    const float fraction = PreparationFraction(phase, done, total, finishing, between);
+    const float fraction = scan_of ? float(scan_at) / float(scan_of)  // the scan fills the bar on its own
+                                   : PreparationFraction(phase, done, total, finishing, between);
     ImGui::SetWindowFontScale(1.0f);
     ImGui::ProgressBar(fraction, ImVec2(bar_w, 22.0f * base_scale), "");
     ImGui::Dummy(ImVec2(0.0f, 8.0f * base_scale));
     // the countdown only in step 2: before it the remaining time cannot be told
     const std::string count =
-        !finishing && total
+        scan_of ? fmt::format("{:.1f} / {:.1f} GB{}", scan_at / 1024.0, scan_of / 1024.0, ScanEta(scan_at, scan_of))
+        : !finishing && total
             ? fmt::format("{} / {}{}", done, total, phase == 2 ? PreparationEta(done, total) : std::string{})
             : std::string{};
     centered(count.c_str(), 1.1f, grey);
@@ -1119,6 +1153,13 @@ void FullScreenPreparation() {
 // "PREP 37 1240 4496 2|  about 25 s left": the launcher's bar while preparing without a window (one thread, the
 // page's PreparationEta is not drawn then).
 void PrintPreparationProgress() {
+    if (const u32 total = scan_total.load(std::memory_order_acquire)) {
+        const u32 done = std::min(scan_done.load(std::memory_order_relaxed), total);
+        std::printf("PREP %d %u %u 5|%s\n", int(100.0f * float(done) / float(total)), done, total,
+                    ScanEta(done, total).c_str());
+        std::fflush(stdout);
+        return;
+    }
     const int phase = prep_phase.load(std::memory_order_acquire);
     const u32 done = prep_done.load(std::memory_order_relaxed);
     const u32 total = prep_total.load(std::memory_order_relaxed);
@@ -1142,7 +1183,8 @@ void ShaderPreparation() {
         return;
     }
     const int phase = prep_phase.load(std::memory_order_acquire);
-    if (phase == 0) {
+    const u32 scan_of = scan_total.load(std::memory_order_acquire);
+    if (phase == 0 && scan_of == 0) {
         return;
     }
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1160,7 +1202,11 @@ void ShaderPreparation() {
     const u32 done = prep_done.load(std::memory_order_relaxed);
     const u32 total = prep_total.load(std::memory_order_relaxed);
     const char* what = phase == 1 ? "shaders" : "pipelines";
-    if (total == 0) {
+    if (scan_of) {
+        const u32 scan_at = std::min(scan_done.load(std::memory_order_relaxed), scan_of);
+        ImGui::Text("Finding the shaders in your game files (only this once) %.1f / %.1f GB%s", scan_at / 1024.0,
+                    scan_of / 1024.0, ScanEta(scan_at, scan_of).c_str());
+    } else if (total == 0) {
         ImGui::Text("Preparing %s", what);
     } else {
         ImGui::Text("Preparing %s %u / %u%s", what, done, total, PreparationEta(done, total).c_str());
@@ -1172,6 +1218,7 @@ void ShaderPreparation() {
 bool Visible() {
     return initialized && (menu_open || text_entry_active || BbSettings::Get().show_fps ||
                            toast_busy || prep_phase.load(std::memory_order_relaxed) != 0 ||
+                           scan_total.load(std::memory_order_relaxed) != 0 ||
                            prep_screen.load(std::memory_order_relaxed));
 }
 

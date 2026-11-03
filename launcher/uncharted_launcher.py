@@ -40,7 +40,7 @@ CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.6.40'  # fork: upstream 0.3.6 + this fork's changes
+VERSION = '0.3.6.41'  # fork: upstream 0.3.6 + this fork's changes
 # Fork: updates come from this fork's own releases (the latest one; -pre tags are published as normal releases).
 RELEASES_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases/latest'
 RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
@@ -2079,8 +2079,8 @@ class Launcher:
             ('all', 'All CPU cores (fastest)'), ('half', 'Half the cores (the PC stays responsive)')]))
         self.check(f, 'prep_unknown_versions', _('Also prepare versions the port has no shader index for'),
                    _("Other regions' releases of a known game version (for example the Spanish CUSA02826). The "
-                     'first start then reads all the game files once to find the shaders: a few minutes, longer '
-                     'on a hard drive.'))
+                     'first start then reads all the game files (about 60 GB) once to find the shaders. This can '
+                     'take a very long time: leave it running, a progress bar shows how far it is.'))
         self.var('prep_unknown_versions').trace_add('write', lambda *_a: self.update_prep_status())
         card = self.target(f)
         self.prep_status = self.tk.Label(card, text='', bg=CARD, fg=TEXT, font=self.font_ui, justify='left')
@@ -2171,8 +2171,9 @@ class Launcher:
                 if known_code_without_index(s, start):
                     ready += ' ' + _('Advanced > Shader preparation can turn it on for this version.')
             elif needs_index_scan(s, start) and not shaders_prepared(s, start):
-                ready += '\n' + _('No shader index ships for this copy ({}): the first shader preparation reads the '
-                                  'game files once (a few minutes, longer on a hard drive).').format(info['id'])
+                ready += '\n' + _('No shader index ships for this copy ({}): the first shader preparation reads all '
+                                  'the game files once. This can take a very long time: leave it running, a '
+                                  'progress bar shows how far it is.').format(info['id'])
         self.ready.configure(text=ready)
         self.update_prep_status()
         if not self.process:
@@ -2305,7 +2306,8 @@ class Launcher:
         for raw in iter(process.stdout.readline, b''):
             text = raw.decode('utf-8', errors='replace')
             self.output.put(text)
-            if log:
+            # PREP lines (4 a second while shaders are prepared) feed the bar, not the log file.
+            if log and not text.startswith('PREP '):
                 log.write(text.replace('\r\n', '\n'))
         if log:
             log.close()
@@ -2368,9 +2370,12 @@ class Launcher:
         self.prep_bar['value'] = percent
         steps = {0: _('Starting…'), 1: _('Step 1 of 2: reading the shaders'),
                  2: _('Step 2 of 2: compiling them for your graphics card'), 3: _('Finishing…'),
-                 4: _('Saving the prepared shaders')}
+                 4: _('Saving the prepared shaders'),
+                 5: _('Step 1 of 2: finding the shaders in your game files (only this once)')}
         text = f'{steps.get(step, "")}   {percent} %'
-        if step in (1, 2, 4) and total:
+        if step == 5 and total:
+            text += f'   ({done / 1024:.1f} / {total / 1024:.1f} GB)'  # the scan counts MiB
+        elif step in (1, 2, 4) and total:
             text += f'   ({done} / {total})'
         if left.strip():
             text += f' · {left.strip()}'
@@ -2693,7 +2698,8 @@ def play_without_window(settings):
                                    stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
         for raw in iter(process.stdout.readline, b''):
             text = raw.decode('utf-8', errors='replace')
-            log.write(text)
+            if not text.startswith('PREP '):  # the bar's lines, 4 a second while preparing
+                log.write(text)
             try:
                 sys.stdout.write(text)
             except (OSError, ValueError):
