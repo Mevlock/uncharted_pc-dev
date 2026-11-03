@@ -182,6 +182,10 @@ public:
         scheduler.WaitDeferredSignals();
     }
     /// Runs `signal` after the guest memory copies issued so far, without waiting here.
+    void SignalRawAfterHostCopies(Scheduler::RawSignalFn fn, const void* bytes, u32 size,
+                                  u64 landing_seq) {
+        scheduler.SignalRawAfterHostCopies(fn, bytes, size, landing_seq);
+    }
     void SignalAfterHostCopies(std::function<void()> signal, u64 landing_seq = 0) {
         scheduler.SignalAfterHostCopies(std::move(signal), landing_seq);
     }

@@ -41,5 +41,8 @@ void WaitAsync();
 /// far has finished (at once when none is pending), on whichever thread finishes last.
 /// Callbacks run in the order they were registered.
 void AfterCopies(std::function<void()> callback);
+/// Flushes this thread's batch; true when AfterCopies() would run its callback at once (perf6:
+/// fences signal without building callbacks when nothing is in flight).
+bool IdleAfterFlush();
 
 } // namespace BbCopy

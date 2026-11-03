@@ -664,7 +664,11 @@ struct ReleaseMemTask {
     u64 fence_submit = 0; // BB_FENCE_STATS: when its command buffer was submitted, and when stage A
     u64 fence_decode = 0; // reached it (0: not timed)
     u64 fence_start = 0;  // when stage A began that command buffer
+    u64 fence_run = 0;    // when stage B ran it
 };
+
+/// BB_RAW_FENCE: the signal of a RELEASE_MEM task, from its bytes (Scheduler::SignalRawAfterHostCopies).
+static void SignalReleaseMemRaw(const u8* bytes);
 
 /// BB_FENCE_STATS: the submit time of the command buffer each compute queue is processing.
 static std::array<u64, 64> g_fence_cur_submit{};
@@ -707,6 +711,13 @@ void SignalReleaseMem(const PM4CmdReleaseMem& release, u32 pipe_id) {
     }
 }
 
+static void SignalReleaseMemRaw(const u8* bytes) {
+    ReleaseMemTask task{*reinterpret_cast<const PM4CmdReleaseMem*>(bytes), 0};
+    std::memcpy(&task, bytes, sizeof(task));
+    SignalReleaseMem(task.packet, task.pipe_id);
+    FenceStats::Record(task.fence_submit, task.fence_decode, task.fence_run, task.fence_start);
+}
+
 void RunReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     ReleaseMemTask task{*reinterpret_cast<const PM4CmdReleaseMem*>(data), 0};
     std::memcpy(&task, data, sizeof(task)); // the packet stream need not align its 8-byte fields
@@ -716,7 +727,12 @@ void RunReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     rasterizer.GetBufferCache().CheckStableBindings();
     rasterizer.CheckConstants();
     const u64 fence_run = task.fence_decode ? FenceStats::Now() : 0;
-    if (Vulkan::DrawPipe::OnStageB() && !BbToggle::Disabled(BbToggle::RecorderFences)) {
+    if (Vulkan::DrawPipe::OnStageB() && !BbToggle::Disabled(BbToggle::RecorderFences) &&
+        Vulkan::Scheduler::RawFencesOn()) {
+        task.fence_run = fence_run;
+        static_assert(sizeof(ReleaseMemTask) <= Vulkan::Scheduler::RawSignalBytes);
+        rasterizer.SignalRawAfterHostCopies(&SignalReleaseMemRaw, &task, sizeof(task), landing_seq);
+    } else if (Vulkan::DrawPipe::OnStageB() && !BbToggle::Disabled(BbToggle::RecorderFences)) {
         rasterizer.SignalAfterHostCopies(
             [task, fence_run] {
                 SignalReleaseMem(task.packet, task.pipe_id);

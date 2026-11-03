@@ -151,6 +151,7 @@ public:
     bool LandingGateActive() const;
     void WaitLanding(u64 seq);
     void RunAfterLanding(u64 seq, std::function<void()> fn);
+    bool LandingClear(u64 seq);
     /// Ends the landing thread: nothing more is deferred, every wait on it lets go, what is
     /// pending is dropped (~BufferCache; idempotent).
     void StopLanding();

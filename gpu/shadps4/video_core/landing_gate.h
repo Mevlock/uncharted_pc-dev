@@ -28,6 +28,8 @@ void Wait(u64 seq);
 /// Runs `fn` once every deferred copy up to `seq` has landed, in order with the other functions
 /// passed here, without blocking the caller (inline when nothing is waiting).
 void Run(u64 seq, std::function<void()> fn);
+/// True when Run(seq, fn) would run fn at once.
+bool Clear(u64 seq);
 
 /// True once the buffer cache is going down: the landing thread no longer lands anything, the
 /// labels run at once and the waits for a landing return. Loops that wait for a label to run on

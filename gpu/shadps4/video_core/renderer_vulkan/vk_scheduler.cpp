@@ -8,6 +8,7 @@
 #include <windows.h>
 #endif
 #include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -449,6 +450,63 @@ std::unique_ptr<RecordChunk> Scheduler::AcquireChunk() {
     auto chunk = std::move(free_chunks.back());
     free_chunks.pop_back();
     return chunk;
+}
+
+bool Scheduler::RawFencesOn() {
+    // Off by default (2026-11-03 market route ABBA): fence task 0.35 -> 0.27-0.30 us, CPU-bound +2.8% mean /
+    // +1.0% crowd, but slow CPU +3.5% mean / -4.4% crowd (both pairs): not proven, needs another slow round.
+    static const bool on = [] {
+        const char* env = std::getenv("BB_RAW_FENCE");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+void Scheduler::SignalRawAfterHostCopies(RawSignalFn fn, const void* bytes, u32 size,
+                                         u64 landing_seq) {
+    ASSERT(size <= RawSignalBytes);
+    struct Raw {
+        RawSignalFn fn;
+        std::array<u8, RawSignalBytes> bytes;
+    } raw{fn, {}};
+    std::memcpy(raw.bytes.data(), bytes, size);
+    if (!IsRecordingDeferred()) {
+        WaitHostCopies();
+        if (VideoCore::LandingGate::Active()) {
+            WaitDeferredSignals();
+        }
+        VideoCore::LandingGate::Wait(landing_seq);
+        raw.fn(raw.bytes.data());
+        return;
+    }
+    BbCopy::FlushBatch();
+    deferred_signals_issued.fetch_add(1, std::memory_order_relaxed);
+    Record([raw, done = deferred_signals_done.get(), keep = deferred_signals_done,
+            landing_seq](vk::CommandBuffer) {
+        // Nothing in flight ahead of it (the checks AfterCopies and the landing gate make
+        // themselves): signal now, no callbacks built.
+        if (BbCopy::IdleAfterFlush() && VideoCore::LandingGate::Clear(landing_seq)) {
+            raw.fn(raw.bytes.data());
+            done->fetch_add(1, std::memory_order_release);
+            return;
+        }
+        BbCopy::AfterCopies([raw, keep, landing_seq] {
+            VideoCore::LandingGate::Run(landing_seq, [raw, keep] {
+                raw.fn(raw.bytes.data());
+                keep->fetch_add(1, std::memory_order_release);
+            });
+        });
+    });
+    static const bool lazy = [] {
+        const char* env = std::getenv("BB_LAZY_FENCE_KICK");
+        return !(env && env[0] == '0');
+    }();
+    if (lazy && DrawPipe::OnStageB() && ++owed_fences < 16) {
+        kick_owed = true;
+        KickRecording(false);
+        return;
+    }
+    KickRecording(true);
 }
 
 void Scheduler::SignalAfterHostCopies(std::function<void()> signal, u64 landing_seq) {

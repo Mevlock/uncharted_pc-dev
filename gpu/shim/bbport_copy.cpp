@@ -61,6 +61,12 @@ public:
         cv.notify_one();
     }
 
+    /// True when a callback handed to AfterCopies() now would run at once (no allocation needed).
+    bool Idle() {
+        std::scoped_lock lk{mutex};
+        return !(epochs.size() > 1 || epochs.back().pending != 0 || draining);
+    }
+
     void AfterCopies(std::function<void()> callback) {
         {
             std::unique_lock lk{mutex};
@@ -280,6 +286,11 @@ void QueueCopy(const Item& item) {
 void AfterCopies(std::function<void()> callback) {
     FlushBatch();
     GetPool().AfterCopies(std::move(callback));
+}
+
+bool IdleAfterFlush() {
+    FlushBatch();
+    return GetPool().Idle();
 }
 
 void WaitAsync() {

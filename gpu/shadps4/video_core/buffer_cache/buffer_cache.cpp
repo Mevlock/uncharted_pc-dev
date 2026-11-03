@@ -1886,6 +1886,11 @@ void BufferCache::WaitLanding(u64 seq) {
     }
 }
 
+bool BufferCache::LandingClear(u64 seq) {
+    std::scoped_lock lk{landing_mutex};
+    return landing_stop || (seq <= landing_done_seq && gated_labels.empty() && !gate_running);
+}
+
 void BufferCache::RunAfterLanding(u64 seq, std::function<void()> fn) {
     {
         std::unique_lock lk{landing_mutex};
@@ -1923,6 +1928,10 @@ void Run(u64 seq, std::function<void()> fn) {
 }
 bool Stopped() {
     return land_stopping.load(std::memory_order_acquire);
+}
+bool Clear(u64 seq) {
+    auto* cache = land_instance.load(std::memory_order_acquire);
+    return !cache || cache->LandingClear(seq);
 }
 } // namespace LandingGate
 
