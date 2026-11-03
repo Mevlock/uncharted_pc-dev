@@ -81,6 +81,24 @@ struct PreparedVertexInputs {
     bool valid;
 };
 
+/// bbport: a descriptor a worker read through a table pointer in user data (Info::ReadUdRegDirect: vertex attribute
+/// V#s, sharps outside the flattened user data), with the bytes it saw (the first 32).
+struct PreparedDirectRead {
+    VAddr address;
+    u32 size;
+    u32 pad;
+    u8 bytes[32];
+};
+
+/// Set by the rasterizer: true while a queued GPU write (a copy shader the recording thread has not run yet among
+/// them) overlaps the range, on the GPU thread.
+inline bool (*g_prepared_read_pending)(VAddr address, u64 size) = nullptr;
+
+/// Draw-preparation workers: records a descriptor read while a draw is prepared (true: recorded).
+bool CaptureDirectRead(VAddr address, u64 size);
+/// BB_PREP_DIRECT_CHECK=1 (diagnosis): the reads are recorded and checked again (PipelineCache::TryPreparedPipeline).
+bool PrepDirectCheck();
+
 struct PreparedDraw {
     enum : u32 { Pending = 0, Ready = 1, Unavailable = 2 };
     std::atomic<u32> state{Pending};
@@ -89,6 +107,9 @@ struct PreparedDraw {
     u32 num_stages{};
     std::array<PreparedStage, MaxShaderStages> stages{};
     PreparedVertexInputs vertex{};
+    /// Checked again before the draw is used (the flattened user data is compared; these were not).
+    const PreparedDirectRead* direct_reads{};
+    u32 num_direct_reads{};
 };
 
 class DrawPreparation {

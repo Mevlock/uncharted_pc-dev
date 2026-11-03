@@ -477,6 +477,18 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
             queued_chunks.store(recorder_queue.size(), std::memory_order_release);
             recorder_busy = true;
         }
+        // Diagnosis (U2 train flicker, 2026-11-02): BB_REC_DELAY_NS=<n>: the recording thread spins n ns before
+        // each chunk.
+        static const u64 rec_delay = [] {
+            const char* env = std::getenv("BB_REC_DELAY_NS");
+            return env ? std::strtoull(env, nullptr, 10) : 0ull;
+        }();
+        if (rec_delay) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(rec_delay);
+            while (std::chrono::steady_clock::now() < until) {
+                __builtin_ia32_pause();
+            }
+        }
         // current_cmdbuf only changes after SyncRecording(), which waits for this thread.
         BbTrace::Record(BbTrace::ChunkBegin);
         chunk->Execute(current_cmdbuf);

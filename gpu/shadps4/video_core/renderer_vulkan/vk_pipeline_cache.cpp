@@ -917,6 +917,30 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
             return nullptr;
         }
     }
+    // bbport (U2 chapter 1 train flash, 2026-11-03): the descriptors the worker read through table pointers
+    // (vertex attribute V#s and other sharps outside the flattened user data) are what the GPU thread would read
+    // now: not while a queued write (a copy shader the recording thread runs) still covers them, nor once one
+    // changed them. The draw is then set up here, where such reads wait for the write (BB_UD_READ_SYNC).
+    // Diagnosis, BB_PREP_DIRECT_CHECK=1: never fired at the train, so off by default.
+    static const bool direct_check = PrepDirectCheck();
+    if (direct_check) {
+        for (u32 i = 0; i < prepared.num_direct_reads; ++i) {
+            const auto& read = prepared.direct_reads[i];
+            const bool pending = g_prepared_read_pending && g_prepared_read_pending(read.address, read.size);
+            if (pending || std::memcmp(reinterpret_cast<const void*>(read.address), read.bytes,
+                                       std::min<size_t>(read.size, sizeof(read.bytes))) != 0) {
+                static std::atomic<u64> rejected[2]{};
+                const u64 n = rejected[pending ? 0 : 1].fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 4 || !(n & (n - 1))) {
+                    std::printf("Prepared draw: descriptor at %#llx %s (%llu so far): set up again\n",
+                                static_cast<unsigned long long>(read.address),
+                                pending ? "has a queued write" : "changed since the worker read it",
+                                static_cast<unsigned long long>(n));
+                }
+                return nullptr;
+            }
+        }
+    }
     std::shared_lock lock{pipelines_mutex};
     const auto it = graphics_pipelines.find(prepared.key);
     return it != graphics_pipelines.end() ? it->second.get() : nullptr;

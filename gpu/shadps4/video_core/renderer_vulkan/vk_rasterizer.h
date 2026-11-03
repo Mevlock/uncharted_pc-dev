@@ -118,6 +118,12 @@ public:
     /// `line`/`function`: the caller, for the statistics of where stage A waits.
     void DrainDrawPipe(u32 reason = DrawPipe::ReasonRasterizer, u32 line = __builtin_LINE(),
                        const char* function = __builtin_FUNCTION());
+    /// Diagnosis (U2 train flicker, 2026-11-03): BB_HLE_WAIT_AT=<mask>: stage A waits until the recording thread
+    /// has run the last copy shader queued, at the places in the mask (1 draws/dispatches, 2 other graphics
+    /// packets, 4 compute queue packets, 8 constant engine packets).
+    void WaitHleCopies(u32 where);
+    static u32 HleWaitAt();
+    std::atomic<u64> hle_copy_end{0};
     /// Runs `task(rasterizer, copy of data)` in order with the draws: on the draw recording
     /// thread while the draw pipeline is in use (PipelinedTasks), else here after a drain.
     using OrderedTask = void (*)(Rasterizer& rasterizer, const u8* data);
@@ -157,6 +163,11 @@ public:
     /// bbport: set while PostDraw prepares a packet (its written resources are noted before the
     /// packet is committed): such notes last until that packet has run, not the one before it.
     bool notes_before_commit{false};
+    /// The notes made while the packet is prepared, recorded once it is committed (its position is known then: a
+    /// packet that does not fit at the end of the ring starts at the next lap, past Head() at the time of the note).
+    std::vector<std::pair<VAddr, u64>> notes_held;
+    /// Records notes_held at the position after the packet just committed.
+    void CommitHeldNotes();
     /// bbport: U3's auto-exposure value, a 16-byte buffer its compute shaders write and its CPU
     /// code reads. The dispatch notes it and the next end-of-pipe event copies it to guest memory
     /// without waiting (see SmallReadBackMode; BB_READBACK_SMALL_BUFFERS=0: off).

@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
+#include <immintrin.h>
 #include "core/memory.h"
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -262,6 +264,9 @@ static bool ExecuteCopyShaderHLE(const Shader::Info& info, const AmdGpu::Compute
 static constexpr u64 SCALAR_COPY_SHADER_HASH = 0x2d215c3b;    // one dword per workgroup
 static constexpr u64 SCALAR_COPY64_SHADER_HASH = 0x6a6422a9;  // 64 dwords per workgroup (U2)
 
+extern "C" void BbHleWriteCheck(unsigned long long address, unsigned long long size, unsigned hash);
+extern "C" void BbHleSrcCheck(unsigned long long src, unsigned long long dst);
+
 static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
                                  Rasterizer& rasterizer, u64 group_size) {
     if (info.buffers.size() != 2 || BbToggle::Disabled(BbToggle::MultiCopyShader)) {
@@ -305,6 +310,20 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
         buffer_cache.SyncImageToBuffer(src.base_address, static_cast<u32>(size));
     }
     auto* memory = Core::Memory::Instance();
+    // Diagnosis (U2 train flicker, 2026-11-03): BB_HLE_READ_WATCH=1 also checks that this destination was noted as a
+    // pending write when the command thread queued the copy (BbHleWriteCheck in vk_rasterizer.cpp).
+    BbHleWriteCheck(dst.base_address, size, u32(info.pgm_hash));
+    BbHleSrcCheck(src.base_address, dst.base_address);
+    // Diagnosis (U2 train flicker, 2026-11-02): BB_HLE_WAIT_COPIES=1: the guest-memory copies queued for the
+    // recording and copy threads (uploads of earlier draws, which read guest memory there) finish before this
+    // copy writes guest memory.
+    static const bool wait_copies = [] {
+        const char* env = std::getenv("BB_HLE_WAIT_COPIES");
+        return env && env[0] == '1';
+    }();
+    if (wait_copies) {
+        rasterizer.GetRuntime().GetScheduler().WaitHostCopies();
+    }
     const bool src_gpu = buffer_cache.IsRegionGpuModified(src.base_address, size);
     const bool dst_gpu = buffer_cache.IsRegionGpuModified(dst.base_address, size);
     if (src_gpu || dst_gpu) {
@@ -411,6 +430,26 @@ bool IsGuestMemoryShaderHLE(unsigned long long pgm_hash) {
 
 bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
                       const AmdGpu::ComputeProgram& cs_program, Rasterizer& rasterizer) {
+    // Diagnosis (U2 train flicker, 2026-11-02): BB_HLE_DELAY_NS=<n>: stage B spins n ns before each copy shader
+    // done on the host (BB_HLE_DELAY_WHICH=1 copy, 2 scalar, 4 scalar 64; default all).
+    static const u64 hle_delay = [] {
+        const char* env = std::getenv("BB_HLE_DELAY_NS");
+        return env ? std::strtoull(env, nullptr, 10) : 0ull;
+    }();
+    static const u32 hle_which = [] {
+        const char* env = std::getenv("BB_HLE_DELAY_WHICH");
+        return env ? u32(std::strtoul(env, nullptr, 0)) : 7u;
+    }();
+    const u32 which = info.pgm_hash == COPY_SHADER_HASH          ? 1u
+                      : info.pgm_hash == SCALAR_COPY_SHADER_HASH ? 2u
+                      : info.pgm_hash == SCALAR_COPY64_SHADER_HASH ? 4u
+                                                                   : 0u;
+    if (hle_delay && (hle_which & which)) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(hle_delay);
+        while (std::chrono::steady_clock::now() < until) {
+            _mm_pause();
+        }
+    }
     switch (info.pgm_hash) {
     case COPY_SHADER_HASH: {
         // BB_COPY_HLE=0 (diagnosis): the game's copy shader runs on the GPU instead.

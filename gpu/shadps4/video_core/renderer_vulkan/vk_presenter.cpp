@@ -465,6 +465,18 @@ static void FlashSample(const Instance& instance, Scheduler& scheduler, vk::Comm
             .imageExtent = {w, 1, 1}};
     }
     cmdbuf.copyImageToBuffer(image, layout, buffer, regions);
+    // BB_FLASH_TIMES=<file>: "frame microseconds" per sampled frame (steady clock when presented), to line flashes up
+    // with other logs (BB_LATE_WRITE_CHECK).
+    static std::FILE* times = [] {
+        const char* path = std::getenv("BB_FLASH_TIMES");
+        return path && *path ? std::fopen(path, "w") : nullptr;
+    }();
+    if (times) {
+        std::fprintf(times, "%u %lld\n", frame,
+                     static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now().time_since_epoch())
+                                                .count()));
+    }
     scheduler.DeferPriorityOperation([allocator = instance.GetAllocator(), buffer, allocation, info,
                                       w, rows, index = frame++] {
         vmaInvalidateAllocation(allocator, allocation, 0, VK_WHOLE_SIZE);

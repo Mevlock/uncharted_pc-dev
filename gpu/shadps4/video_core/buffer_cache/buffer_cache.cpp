@@ -2407,10 +2407,12 @@ void PrintFaultHistory(VAddr address, u64 size) {
 // pages marked CPU-modified without being written only cost an upload when bound.
 // Item: context = BufferCache, source = guest address, destination = host pointer, size,
 // extra = the Buffer whose mapping holds the destination (flushed after the copy).
+extern "C" void BbLateWriteNote(u64 address, u64 size); // diagnosis, vk_rasterizer.cpp (BB_LATE_WRITE_CHECK)
 void BufferCache::RunGuestCopy(const BbCopy::Item& item) {
     auto* cache = static_cast<BufferCache*>(item.context);
     auto* dst = reinterpret_cast<u8*>(item.destination);
     cache->memory->CopySparseMemory(item.source, dst, item.size);
+    BbLateWriteNote(item.source, item.size);
     auto* buffer = reinterpret_cast<Buffer*>(item.extra);
     buffer->Flush(dst - buffer->mapped_data.data(), item.size);
 }
@@ -2606,6 +2608,32 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
                             static_cast<unsigned long long>(copy.size),
                             static_cast<unsigned long long>(device_addr),
                             static_cast<unsigned long long>(size));
+            }
+        }
+        // Diagnosis (U2 train flicker, 2026-11-02): BB_DOWNLOAD_LOG=<file>: every read-back that changes guest bytes
+        // (CPU-modified or not: copies made through the backing view raise no fault), "time us, address, size,
+        // request address, first changed offset: guest > GPU".
+        static std::FILE* download_log = [] {
+            const char* path = std::getenv("BB_DOWNLOAD_LOG");
+            return path && *path ? std::fopen(path, "w") : nullptr;
+        }();
+        if (download_log) {
+            const u8* guest = dst_addr;
+            for (u64 b = 0; b + 4 <= copy.size; b += 4) {
+                if (std::memcmp(guest + b, data + b, 4) != 0) {
+                    u32 was, is;
+                    std::memcpy(&was, guest + b, 4);
+                    std::memcpy(&is, data + b, 4);
+                    std::fprintf(download_log, "%lld %llx %llu %llx +%llx:%08x>%08x\n",
+                                 static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                            std::chrono::steady_clock::now().time_since_epoch())
+                                                            .count()),
+                                 static_cast<unsigned long long>(reinterpret_cast<VAddr>(dst_addr)),
+                                 static_cast<unsigned long long>(copy.size),
+                                 static_cast<unsigned long long>(device_addr),
+                                 static_cast<unsigned long long>(b), was, is);
+                    break;
+                }
             }
         }
         WriteBackGpuData(dst_addr, data, copy.size);

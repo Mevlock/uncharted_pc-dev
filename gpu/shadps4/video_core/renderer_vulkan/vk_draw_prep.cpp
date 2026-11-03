@@ -144,6 +144,9 @@ struct FlatArena {
     }
 };
 
+/// The descriptor reads of the draw being prepared on this worker (null while none is).
+thread_local std::vector<PreparedDirectRead>* t_direct_reads = nullptr;
+
 /// Reads the stage's resource sharps from the worker's flattened user data, so the GPU thread
 /// only binds them (the sharp fetches and texture-description hashing were ~7% of it).
 void PrepareResources(const Shader::Info& info, PreparedStage& stage, FlatArena& arena) {
@@ -253,6 +256,25 @@ void PrepareVertexInputs(const Shader::Info& vs, const Shader::Gcn::FetchShaderD
 }
 
 } // namespace
+
+bool PrepDirectCheck() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_PREP_DIRECT_CHECK");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+bool CaptureDirectRead(VAddr address, u64 size) {
+    auto* reads = t_direct_reads;
+    if (!reads) {
+        return false;
+    }
+    PreparedDirectRead read{address, static_cast<u32>(size), 0, {}};
+    std::memcpy(read.bytes, reinterpret_cast<const void*>(address), std::min<u64>(size, sizeof(read.bytes)));
+    reads->push_back(read);
+    return true;
+}
 
 void DrawPreparation::ReturnChunks(std::vector<std::unique_ptr<u32[]>>& chunks) {
     if (chunks.empty() || !ChunkPoolEnabled()) {
@@ -622,6 +644,9 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 prep_worker.stages.clear();
                 prep_worker.failed = false;
                 sel.draw_indirect_params = {};
+                thread_local std::vector<PreparedDirectRead> direct_reads;
+                direct_reads.clear();
+                t_direct_reads = PrepDirectCheck() ? &direct_reads : nullptr;
                 if (pipeline_cache.PrepareGraphicsPipeline(sel)) {
                     draw.reg_checksum = checksum;
                     draw.key = sel.graphics_key;
@@ -644,8 +669,12 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     if (vs && sel.fetch_shader) {
                         PrepareVertexInputs(*vs, *sel.fetch_shader, *regs, draw.vertex, arena);
                     }
+                    t_direct_reads = nullptr;
+                    draw.direct_reads = arena.AppendArray(direct_reads.data(), direct_reads.size());
+                    draw.num_direct_reads = static_cast<u32>(direct_reads.size());
                     draw.state.store(PreparedDraw::Ready, std::memory_order_release);
                 } else {
+                    t_direct_reads = nullptr;
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);
                 }
             }

@@ -116,7 +116,9 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
 }
 extern "C" bool BbEopTraceOn();
 extern "C" void BbEopTraceRead(u64 address, u64 size, const char* path);
+extern "C" void BbHleReadCheck(u64 address, u64 size, const char* what); // diagnosis, vk_rasterizer.cpp
 static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
+    BbHleReadCheck(source, size, "a guest memory copy");
     if (BbEopTraceOn()) {
         BbEopTraceRead(source, size, "guest copy");
     }

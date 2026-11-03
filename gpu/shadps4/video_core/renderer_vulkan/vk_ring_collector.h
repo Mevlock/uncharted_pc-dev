@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstring>
 #include <thread>
+#include <vector>
 #include <x86intrin.h>
 
 #include "common/thread.h"
@@ -65,8 +66,19 @@ public:
     }
 
     /// Stage A: a candidate of the packet being built.
-    void Add(u32 stage, u32 index, VAddr address, u64 size) {
-        Push({address, size, stage, index, ItemKind::Candidate, 0});
+    void Add(u32 stage, u32 index, VAddr address, u64 size, u64 pipe_position = 0) {
+        Push({address, size, stage, index, ItemKind::Candidate, pipe_position});
+    }
+
+    /// Diagnosis (U2 train flicker, 2026-11-02): BB_COLLECT_AFTER_B=1: a candidate is copied only
+    /// once stage B has run every packet before its own (`reached`, with the position Add got).
+    using ReachedFn = bool (*)(void* context, u64 position);
+    using PeekFn = void (*)(void* context, VAddr address, u8* out, u64 size);
+    using GpuModFn = int (*)(void* context, VAddr address, u64 size);
+    void SetReached(ReachedFn fn, PeekFn peek = nullptr, GpuModFn gpu_mod = nullptr) {
+        reached_fn = fn;
+        peek_fn = peek;
+        gpu_mod_fn = gpu_mod;
     }
 
     /// Stage A: bytes (flat user data) to copy into the ring as the binding `index`.
@@ -218,6 +230,19 @@ private:
                 }
                 results[item.extra % results.size()] = {packet_first, ring_end, counts};
                 counts = {};
+                // bbport (U2 chapter 1 train flash, 2026-11-02): the ring is write-combined
+                // memory (video memory through the BAR). Its stores wait in the core's
+                // write-combining buffers until something drains them, and the release store
+                // below does not: stage B recorded, and the GPU read, constants whose first
+                // bytes still held the ring's previous contents. The fence drains them before
+                // the packet is published. BB_RING_SFENCE=0: as before.
+                static const bool sfence = [] {
+                    const char* env = std::getenv("BB_RING_SFENCE");
+                    return !(env && env[0] == '0');
+                }();
+                if (sfence) {
+                    _mm_sfence();
+                }
                 // The next packet's bindings start where they cannot wrap.
                 if (out % bindings.size() + MaxPerPacket > bindings.size()) {
                     out += bindings.size() - out % bindings.size();
@@ -231,6 +256,57 @@ private:
             const u8* source = item.kind == ItemKind::Bytes ? bytes.data() + item.address
                                                              : nullptr;
             const VAddr address = item.kind == ItemKind::Bytes ? 0 : item.address;
+            if (reached_fn && item.kind == ItemKind::Candidate && item.extra) {
+                // BB_COLLECT_DIFF=1: the candidate's bytes before and after the wait; a
+                // difference is a write stage B made while running an earlier packet.
+                static const bool diff = [] {
+                    const char* env = std::getenv("BB_COLLECT_DIFF");
+                    return env && env[0] == '1';
+                }();
+                if (diff && peek_fn && item.size <= 65536) {
+                    peek_before.resize(item.size);
+                    peek_fn(collect_context, item.address, peek_before.data(), item.size);
+                }
+                const int gpu_before =
+                    diff && gpu_mod_fn ? gpu_mod_fn(collect_context, item.address, item.size) : 0;
+                while (!reached_fn(collect_context, item.extra)) {
+                    _mm_pause();
+                }
+                if (diff && gpu_mod_fn) {
+                    const int gpu_after = gpu_mod_fn(collect_context, item.address, item.size);
+                    static u32 flips = 0;
+                    if (gpu_after != gpu_before && ++flips <= 4000) {
+                        std::printf("Collect diff: %#llx size %llu: GPU-written %d -> %d while "
+                                    "stage B ran the packets before the draw\n",
+                                    static_cast<unsigned long long>(item.address),
+                                    static_cast<unsigned long long>(item.size), gpu_before,
+                                    gpu_after);
+                    }
+                }
+                if (diff && peek_fn && item.size <= 65536) {
+                    peek_after.resize(item.size);
+                    peek_fn(collect_context, item.address, peek_after.data(), item.size);
+                    if (std::memcmp(peek_before.data(), peek_after.data(), item.size) != 0) {
+                        u32 first = 0, count = 0;
+                        for (u32 b = 0; b + 4 <= item.size; b += 4) {
+                            if (std::memcmp(peek_before.data() + b, peek_after.data() + b, 4)) {
+                                first = count++ ? first : b;
+                            }
+                        }
+                        u32 was = 0, is = 0;
+                        std::memcpy(&was, peek_before.data() + first, 4);
+                        std::memcpy(&is, peek_after.data() + first, 4);
+                        static u32 reports = 0;
+                        if (++reports <= 4000) {
+                            std::printf("Collect diff: %#llx size %llu: %u words written by stage B "
+                                        "before the draw (first at +%u: %08x -> %08x)\n",
+                                        static_cast<unsigned long long>(item.address),
+                                        static_cast<unsigned long long>(item.size), count, first,
+                                        was, is);
+                        }
+                    }
+                }
+            }
             u64 offset = 0;
             u64 size = item.size;
             if (item.stage < MaxStages &&
@@ -260,6 +336,10 @@ private:
     }
 
     CollectFn collect_fn = nullptr;
+    ReachedFn reached_fn = nullptr;
+    PeekFn peek_fn = nullptr;
+    GpuModFn gpu_mod_fn = nullptr;
+    std::vector<u8> peek_before, peek_after;
     void* collect_context = nullptr;
     std::array<Item, 65536> items{};
     std::array<u8, Bytes> bytes{};

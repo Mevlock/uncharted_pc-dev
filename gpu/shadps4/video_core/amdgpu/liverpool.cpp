@@ -895,6 +895,9 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
 
         const PM4ItOpcode opcode = header->type3.opcode;
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
+        if (rasterizer && Vulkan::Rasterizer::HleWaitAt()) {
+            rasterizer->WaitHleCopies(8);
+        }
         switch (opcode) {
         case PM4ItOpcode::Nop: {
             // const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
@@ -1277,6 +1280,36 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
             }
             ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
+            if (rasterizer && Vulkan::Rasterizer::HleWaitAt()) {
+                switch (opcode) {
+                case PM4ItOpcode::Nop:
+                case PM4ItOpcode::ContextControl:
+                case PM4ItOpcode::SetConfigReg:
+                case PM4ItOpcode::SetContextReg:
+                case PM4ItOpcode::SetShReg:
+                case PM4ItOpcode::SetUconfigReg:
+                case PM4ItOpcode::IndexType:
+                case PM4ItOpcode::NumInstances:
+                case PM4ItOpcode::IndexBase:
+                case PM4ItOpcode::IndexBufferSize:
+                    break;
+                case PM4ItOpcode::DrawIndex2:
+                case PM4ItOpcode::DrawIndexOffset2:
+                case PM4ItOpcode::DrawIndexAuto:
+                case PM4ItOpcode::DrawIndirect:
+                case PM4ItOpcode::DrawIndirectMulti:
+                case PM4ItOpcode::DrawIndexIndirect:
+                case PM4ItOpcode::DrawIndexIndirectMulti:
+                case PM4ItOpcode::DrawIndexIndirectCountMulti:
+                case PM4ItOpcode::DispatchDirect:
+                case PM4ItOpcode::DispatchIndirect:
+                    rasterizer->WaitHleCopies(1);
+                    break;
+                default:
+                    rasterizer->WaitHleCopies(2);
+                    break;
+                }
+            }
             // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
             if (rasterizer && !PipelinedOpcode(opcode) &&
                 !(opcode == PM4ItOpcode::DmaData &&
@@ -2156,6 +2189,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             }
         }
 
+        if (rasterizer && Vulkan::Rasterizer::HleWaitAt()) {
+            rasterizer->WaitHleCopies(4);
+        }
         // bbport: compute work that uses the caches or guest memory directly waits for the draw
         // recording thread. Register writes need not (the recording thread works from register
         // snapshots), nor dispatches (DispatchDirect hands them over like draws or drains

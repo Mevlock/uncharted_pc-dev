@@ -71,11 +71,32 @@ static pthread_rwlock_t lock=PTHREAD_RWLOCK_INITIALIZER;
 static __thread unsigned exclusive_depth;
 /* Odd while a writer holds the lock; readers' region caches are valid for one even value. */
 static uint64_t table_generation;
-static void write_lock(void) {
-    if (!exclusive_depth++) { pthread_rwlock_wrlock(&lock); __atomic_add_fetch(&table_generation,1,__ATOMIC_ACQ_REL); }
+/* BB_WLOCK_LOG=1 (diagnosis, U2 train flicker 2026-11-02): each outermost write lock is printed with the code that
+ * took it and how long it was held (first 4000). */
+static int wlock_log(void) {
+    static int value=-1;
+    if (value<0) { const char *v=getenv("BB_WLOCK_LOG"); value=v && v[0]=='1'; }
+    return value;
 }
-static void write_unlock(void) {
-    if (!--exclusive_depth) { __atomic_add_fetch(&table_generation,1,__ATOMIC_RELEASE); pthread_rwlock_unlock(&lock); }
+static __thread void *wlock_caller;
+static __thread uint64_t wlock_since;
+static uint64_t wlock_now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
+static __attribute__((noinline)) void write_lock(void) {
+    if (!exclusive_depth++) {
+        pthread_rwlock_wrlock(&lock); __atomic_add_fetch(&table_generation,1,__ATOMIC_ACQ_REL);
+        if (wlock_log()) { wlock_caller=__builtin_return_address(0); wlock_since=wlock_now_us(); }
+    }
+}
+static __attribute__((noinline)) void write_unlock(void) {
+    if (!--exclusive_depth) {
+        if (wlock_log()) {
+            static long printed;
+            const uint64_t held=wlock_now_us()-wlock_since;
+            if (__atomic_add_fetch(&printed,1,__ATOMIC_RELAXED)<=4000)
+                printf("Write lock: %p held %" PRIu64 " us (at %" PRIu64 " ms)\n",wlock_caller,held,wlock_since/1000u);
+        }
+        __atomic_add_fetch(&table_generation,1,__ATOMIC_RELEASE); pthread_rwlock_unlock(&lock);
+    }
 }
 static void read_lock(void) { if (!exclusive_depth) pthread_rwlock_rdlock(&lock); }
 static void read_unlock(void) { if (!exclusive_depth) pthread_rwlock_unlock(&lock); }
@@ -1117,7 +1138,15 @@ uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size) {
 /* Region around address: [start,end) mapped or a gap; 0 past the last mapping. */
 int runtime_memory_region(uintptr_t address, uintptr_t *start, uintptr_t *end, int *mapped) {
     const CachedRegion *c=(runtime_disabled_optimizations & 1) || (runtime_disabled_optimizations2 & 256) ? NULL : cached_region(address);
-    if (c) { *start=c->start; *end=c->end; *mapped=c->kind!=KIND_RESERVED; return 1; }
+    if (c) {
+        /* BB_REGION_FENCE (diagnosis, U2 train flicker 2026-11-02): 1 = a full fence on a hit, 2 = the read lock
+         * taken and dropped on a hit (the answer still from the cache). */
+        static int fence=-1;
+        if (fence<0) { const char *v=getenv("BB_REGION_FENCE"); fence=v ? atoi(v) : 0; }
+        if (fence==1) __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        else if (fence==2) { read_lock(); read_unlock(); }
+        *start=c->start; *end=c->end; *mapped=c->kind!=KIND_RESERVED; return 1;
+    }
     read_lock();
     size_t i=vma_index(address);
     int found=i<vma_count;

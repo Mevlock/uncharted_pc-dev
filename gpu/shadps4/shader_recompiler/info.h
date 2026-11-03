@@ -284,6 +284,9 @@ struct Info : InfoPersistent {
             if (VAddr(base) < 0x10000) {
                 return T{};
             }
+            if (g_ud_table_read) {
+                g_ud_table_read(VAddr(base + dword_offset), sizeof(T));
+            }
         }
         std::memcpy(&data, base + dword_offset, sizeof(T));
         return data;

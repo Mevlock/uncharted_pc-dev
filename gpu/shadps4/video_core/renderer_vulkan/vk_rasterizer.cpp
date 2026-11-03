@@ -39,7 +39,9 @@
 #include <vk_mem_alloc.h>
 
 // bbport: the render size BB_RENDER_RES patched in (runtime_ultrawide.c), 0 without it.
+#include <immintrin.h>
 extern "C" unsigned runtime_render_width, runtime_render_height;
+extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 
 namespace Vulkan {
 
@@ -713,6 +715,21 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         if (RingCollector::Enabled()) {
             ring_collector = std::make_unique<RingCollector>();
             ring_collector->Start(&RingCollectOne, this);
+            if (const char* env = std::getenv("BB_COLLECT_AFTER_B"); env && env[0] == '1') {
+                ring_collector->SetReached(
+                    [](void* context, u64 position) {
+                        return static_cast<Rasterizer*>(context)->DrawPipeReached(position);
+                    },
+                    [](void* context, VAddr address, u8* out, u64 size) {
+                        static_cast<Rasterizer*>(context)->memory->CopySparseMemory(address, out,
+                                                                                     size);
+                    },
+                    [](void* context, VAddr address, u64 size) {
+                        auto& self = *static_cast<Rasterizer*>(context);
+                        size = self.memory->ClampRangeSize(address, size);
+                        return size ? int(self.buffer_cache.IsRegionGpuModified(address, size)) : -1;
+                    });
+            }
         } else if (ConstantRing::CopierEnabled()) {
             constant_ring->StartCopier(
                 [](void* context, u64 source, u8* destination, u64 size) {
@@ -741,18 +758,63 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     busy_check = this;
     g_draw_pipe_busy = [] { return busy_check->OnStageA() && !busy_check->DrawPipeIdle(); };
     g_drain_draw_pipe = [] { busy_check->DrainDrawPipe(); };
+    // bbport (U2 chapter 1 train flash, 2026-11-03; from ffc0de23): copy shaders run on the CPU are pipelined to the
+    // recording thread, their destination a pending write until it has run them. The SRT walker waits for those
+    // (SyncSrtReads), but descriptors read through a table pointer elsewhere (Info::ReadUdRegDirect: the vertex
+    // attribute V#s the pipeline is selected by) did not: the GPU thread took the V#s of the draw before, and the
+    // train's platform was drawn with them for a frame. Such a read of a pending write waits for it (drain).
+    // BB_UD_READ_SYNC=0: as before.
+    static const bool ud_read_sync = [] {
+        const char* env = std::getenv("BB_UD_READ_SYNC");
+        return !(env && env[0] == '0');
+    }();
+    // The same reads on a draw-preparation worker are recorded with the prepared draw and checked again before it
+    // is used (PipelineCache::TryPreparedPipeline).
+    g_prepared_read_pending = [](VAddr address, u64 size) {
+        return busy_check->OnStageA() && !busy_check->DrawPipeIdle() && busy_check->PendingWriteOverlaps(address, size);
+    };
+    if (ud_read_sync) {
+        Shader::g_ud_table_read = [](u64 address, u64 size) {
+            if (CaptureDirectRead(address, size)) {
+                return;
+            }
+            if (busy_check->OnStageA() && !busy_check->DrawPipeIdle() &&
+                busy_check->PendingWriteOverlaps(address, size)) {
+                static std::atomic<u64> drains{0};
+                const u64 n = drains.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 4 || !(n & (n - 1))) {
+                    std::printf("Descriptor read: %#llx (%llu bytes) waits for a pending write (%llu so far)\n",
+                                static_cast<unsigned long long>(address), static_cast<unsigned long long>(size),
+                                static_cast<unsigned long long>(n));
+                }
+                busy_check->DrainDrawPipe();
+            }
+        };
+    }
     Shader::g_srt_read_check = [](const Shader::SrtReadLog& log) {
         return busy_check->SyncSrtReads(log);
     };
 }
 
+extern "C" void BbLateWriteNoteKind(u64 address, u64 size, u32 kind); // diagnosis, below
+extern "C" void BbHleReadCheck(u64 address, u64 size, const char* what); // diagnosis, below
+extern "C" std::FILE* HlePairLogFile();                                      // diagnosis, below
+
 bool Rasterizer::SyncSrtReads(const Shader::SrtReadLog& log) {
     // Only the GPU thread reads back: the walks ahead of it (prepared draws) are walked again
     // there before they are used.
     if (!OnStageA()) {
+        for (u32 i = 0; i < std::min(log.count, Shader::SrtReadLogCapacity); ++i) {
+            BbHleReadCheck(log.reads[i].address, log.reads[i].bytes, "a table walk off the command thread");
+        }
         return false;
     }
     const u32 count = std::min(log.count, Shader::SrtReadLogCapacity);
+    for (u32 i = 0; i < count; ++i) {
+        if (log.reads[i].address) {
+            BbLateWriteNoteKind(log.reads[i].address, log.reads[i].bytes, 2); // BB_LATE_WRITE_CHECK: table walks
+        }
+    }
     // Stale pointers in the tables log addresses outside guest memory: the range set check
     // below is safe for any address (the page tracker is not).
     // One lock for all the reads (each took and released the set's lock: ~4% of stage A).
@@ -766,6 +828,24 @@ bool Rasterizer::SyncSrtReads(const Shader::SrtReadLog& log) {
         // writes guest memory): the walk waits for it.
         pending = read.address && PendingWriteOverlaps(read.address, read.bytes);
     }
+    // bbport (U2 chapter 1 train flash, 2026-11-03): the log holds 64 reads and a full one stops counting (the walker
+    // code is in players' shader caches, so it stays as it is): reads past the 64th were never checked. A full log
+    // waits as well when any write is still pending. BB_SRT_FULL_LOG_SYNC=0: as before.
+    static const bool full_log_sync = [] {
+        const char* env = std::getenv("BB_SRT_FULL_LOG_SYNC");
+        return !(env && env[0] == '0');
+    }();
+    if (!pending && full_log_sync && log.count >= Shader::SrtReadLogCapacity &&
+        PendingWriteOverlaps(0x10'0000'0000ull, 0xEC'0000'0000ull)) {
+        pending = true;
+        static std::atomic<u64> full_waits{0};
+        const u64 n = full_waits.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 4 || !(n & (n - 1))) {
+            std::printf("Resource tables: a walk filled its read log (64 reads) while writes were pending: it waits "
+                        "(%llu so far)\n",
+                        static_cast<unsigned long long>(n));
+        }
+    }
     if (!written) {
         if (pending) {
             DrainDrawPipe();
@@ -776,6 +856,19 @@ bool Rasterizer::SyncSrtReads(const Shader::SrtReadLog& log) {
                 }
             }
             return true;
+        }
+        // Diagnosis (BB_HLE_PAIR_LOG): a walk used as it is: "R <stage A head> <address> <size> <us>".
+        if (auto* f = HlePairLogFile()) {
+            const long long us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count();
+            for (u32 i = 0; i < count; ++i) {
+                if (log.reads[i].address) {
+                    std::fprintf(f, "R %llu %llx %llu %lld\n", static_cast<unsigned long long>(draw_pipe->Head()),
+                                 static_cast<unsigned long long>(log.reads[i].address),
+                                 static_cast<unsigned long long>(log.reads[i].bytes), us);
+                }
+            }
         }
         return false;
     }
@@ -1275,12 +1368,19 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     // as done while that packet had not run: a copy shader the recording thread runs on the CPU
     // (ExecuteScalarCopyHLE) wrote a material constant (0 -> 1.0) after stage A had walked the
     // resource tables holding it into a later draw, and the train's platform flashed white for a
-    // frame. One past the start: done once this packet has run. BB_PENDING_NOTE_FIX=0: as before.
+    // frame. Such notes are held and recorded when the packet is committed, at the position after it: done once this
+    // packet has run. (One past Head() was not enough: a packet that does not fit at the end of the ring starts at the
+    // next lap, so the note still expired early; 62 of 1.8 million copies in 90 s at the train, all at a 16 MiB
+    // boundary, enough for a few flashes a minute.) BB_PENDING_NOTE_FIX=0: as before both.
     static const bool note_fix = [] {
         const char* env = std::getenv("BB_PENDING_NOTE_FIX");
         return !(env && env[0] == '0');
     }();
-    const u64 position = draw_pipe->Head() + (note_fix && notes_before_commit ? 1 : 0);
+    if (note_fix && notes_before_commit) {
+        notes_held.emplace_back(address, size);
+        return;
+    }
+    const u64 position = draw_pipe->Head();
     const VAddr end = address + size;
     if (PendingFast()) {
         PrunePendingWrites();
@@ -1360,6 +1460,12 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
 }
 
 bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
+    // Notes of the packet being prepared, not recorded yet (CommitHeldNotes).
+    for (const auto& [held, held_size] : notes_held) {
+        if (address < held + held_size && held < address + size) {
+            return true;
+        }
+    }
     if (PendingFast()) {
         if (pending_writes.empty() && pending_big_writes.empty()) {
             return false;
@@ -1855,6 +1961,234 @@ static bool RingSkipsPage(VAddr address, u64 size) {
     return range.second && address < range.second && range.first < address + size;
 }
 
+// Diagnosis (U2 train flicker, 2026-11-03; first bad commit ffc0de23): BB_HLE_READ_WATCH=1: the destinations of the
+// copy shaders run on the CPU are registered while queued for the recording thread (until it has run them); reads of
+// them from any other thread are printed with their call stack ("HLE read watch: ...", first 300).
+namespace HleReadWatch {
+struct Range {
+    VAddr lo, hi;
+    u64 position;
+    u32 shader;
+};
+static std::mutex mutex;
+static std::vector<Range> ranges;
+static std::atomic<u32> count{0};
+static DrawPipe* pipe = nullptr;
+static bool Enabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_HLE_READ_WATCH");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+// BB_HLE_PAIR_LOG=<file>: "N <packet> <shader> <address> <size>" per note, "W <packet> <shader> <address> <size>"
+// per copy write (packet = the draw pipe position the packet starts at), to pair them offline.
+static std::FILE* PairLog() {
+    static std::FILE* f = [] {
+        const char* path = std::getenv("BB_HLE_PAIR_LOG");
+        return path && *path ? std::fopen(path, "w") : nullptr;
+    }();
+    return f;
+}
+static void Add(DrawPipe* p, VAddr lo, u64 size, u64 position, u32 shader) {
+    std::scoped_lock lk{mutex};
+    if (auto* f = PairLog()) {
+        std::fprintf(f, "N %llu %08x %llx %llu\n", static_cast<unsigned long long>(position - 1), shader,
+                     static_cast<unsigned long long>(lo), static_cast<unsigned long long>(size));
+    }
+    pipe = p;
+    std::erase_if(ranges, [](const Range& r) { return pipe->Reached(r.position); });
+    ranges.push_back({lo, lo + size, position, shader});
+    count.store(u32(ranges.size()), std::memory_order_release);
+}
+} // namespace HleReadWatch
+
+// Diagnosis (U2 train flicker, 2026-11-03): BB_HLE_SRC_CHECK=1: a copy shader's source is hashed when the command
+// thread queues the copy and again when the recording thread runs it (through the backing view, at most 16 KiB);
+// sources that changed in between print "S <packet> <src> <bytes> <dst> <pending at queue time> <us queued> <us run>"
+// into BB_HLE_PAIR_LOG (the copy took newer data than the GPU would have).
+namespace HleSrcCheck {
+struct Entry {
+    VAddr src;
+    u64 bytes;
+    u64 hash;
+    bool pending;
+    long long us;
+};
+static std::mutex mutex;
+static std::map<u64, std::vector<Entry>> queued;
+static std::atomic<u64> checked{0}, changed{0}, missing{0};
+static bool Enabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_HLE_SRC_CHECK");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+static long long NowUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+static bool Hash(VAddr address, u64 bytes, u64& hash) {
+    static thread_local std::vector<u8> buffer;
+    buffer.resize(bytes);
+    if (!runtime_memory_read_backing(address, buffer.data(), bytes)) {
+        return false;
+    }
+    u64 h = 0xcbf29ce484222325ull;
+    for (u64 i = 0; i < bytes; ++i) {
+        h = (h ^ buffer[i]) * 0x100000001b3ull;
+    }
+    hash = h;
+    return true;
+}
+static void Queue(u64 position, VAddr src, u64 bytes, bool pending) {
+    bytes = std::min<u64>(bytes, 16384);
+    u64 hash = 0;
+    if (!Hash(src, bytes, hash)) {
+        return;
+    }
+    std::scoped_lock lk{mutex};
+    queued[position].push_back({src, bytes, hash, pending, NowUs()});
+}
+} // namespace HleSrcCheck
+
+extern "C" void BbHleSrcCheck(unsigned long long src, unsigned long long dst) {
+    if (!HleSrcCheck::Enabled() || !HleReadWatch::pipe) {
+        return;
+    }
+    const u64 position = HleReadWatch::pipe->Consumed();
+    HleSrcCheck::Entry entry{};
+    bool found = false;
+    {
+        std::scoped_lock lk{HleSrcCheck::mutex};
+        auto& q = HleSrcCheck::queued;
+        q.erase(q.begin(), q.lower_bound(position));
+        const auto it = q.find(position);
+        if (it != q.end()) {
+            for (auto e = it->second.begin(); e != it->second.end(); ++e) {
+                if (e->src == src) {
+                    entry = *e;
+                    it->second.erase(e);
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (!found) {
+        HleSrcCheck::missing.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    u64 hash = 0;
+    if (!HleSrcCheck::Hash(src, entry.bytes, hash)) {
+        return;
+    }
+    const u64 n = HleSrcCheck::checked.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (hash != entry.hash) {
+        const u64 c = HleSrcCheck::changed.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (auto* f = HleReadWatch::PairLog()) {
+            std::scoped_lock lk{HleReadWatch::mutex};
+            std::fprintf(f, "S %llu %llx %llu %llx %d %lld %lld\n", static_cast<unsigned long long>(position), src,
+                         static_cast<unsigned long long>(entry.bytes), dst, entry.pending ? 1 : 0, entry.us,
+                         HleSrcCheck::NowUs());
+        }
+        if (c <= 20 || (c & 1023) == 0) {
+            std::printf("HLE source check: source %#llx changed between queue and run (%llu of %llu, %llu unmatched)\n",
+                        src, static_cast<unsigned long long>(c), static_cast<unsigned long long>(n),
+                        static_cast<unsigned long long>(HleSrcCheck::missing.load()));
+        }
+    } else if ((n & 65535) == 0) {
+        std::printf("HLE source check: %llu checked, %llu changed, %llu unmatched\n", static_cast<unsigned long long>(n),
+                    static_cast<unsigned long long>(HleSrcCheck::changed.load()),
+                    static_cast<unsigned long long>(HleSrcCheck::missing.load()));
+    }
+}
+
+extern "C" void BbHleReadCheck(u64 address, u64 size, const char* what) {
+    if (!HleReadWatch::Enabled() || HleReadWatch::count.load(std::memory_order_acquire) == 0 || !address || !size ||
+        DrawPipe::OnStageB()) {
+        return;
+    }
+    u32 shader = 0;
+    VAddr lo = 0, hi = 0;
+    {
+        std::scoped_lock lk{HleReadWatch::mutex};
+        for (const auto& r : HleReadWatch::ranges) {
+            if (address < r.hi && r.lo < address + size && !HleReadWatch::pipe->Reached(r.position)) {
+                shader = r.shader;
+                lo = r.lo;
+                hi = r.hi;
+                break;
+            }
+        }
+    }
+    if (!shader) {
+        return;
+    }
+    static std::atomic<u32> printed{0};
+    if (printed.fetch_add(1, std::memory_order_relaxed) >= 300) {
+        return;
+    }
+    void* frames[10]{};
+    const u16 n = CaptureStackBackTrace(1, 10, frames, nullptr);
+    const auto base = reinterpret_cast<u64>(GetModuleHandleA(nullptr));
+    std::string stack;
+    for (u16 i = 0; i < n; ++i) {
+        stack += fmt::format(" {:x}", reinterpret_cast<u64>(frames[i]) - base);
+    }
+    std::printf("HLE read watch: %s reads %#llx+%llu (thread '%s') while copy shader %08x's write to %#llx-%#llx "
+                "is still queued; at%s\n",
+                what, static_cast<unsigned long long>(address), static_cast<unsigned long long>(size),
+                Common::GetCurrentThreadName().c_str(), shader, static_cast<unsigned long long>(lo),
+                static_cast<unsigned long long>(hi), stack.c_str());
+}
+
+extern "C" std::FILE* HlePairLogFile() {
+    return HleReadWatch::Enabled() ? HleReadWatch::PairLog() : nullptr;
+}
+
+/// Recording thread, at a copy shader's write: the range it writes should lie in one noted when the copy was queued.
+extern "C" void BbHleWriteCheck(unsigned long long address, unsigned long long size, unsigned hash) {
+    if (!HleReadWatch::Enabled()) {
+        return;
+    }
+    static std::atomic<u64> writes{0}, unnoted{0};
+    const u64 w = writes.fetch_add(1, std::memory_order_relaxed) + 1;
+    bool covered = false;
+    VAddr near_lo = 0, near_hi = 0;
+    {
+        std::scoped_lock lk{HleReadWatch::mutex};
+        if (auto* f = HleReadWatch::PairLog(); f && HleReadWatch::pipe) {
+            std::fprintf(f, "W %llu %08x %llx %llu %lld\n",
+                         static_cast<unsigned long long>(HleReadWatch::pipe->Consumed()), hash, address, size,
+                         static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                    std::chrono::steady_clock::now().time_since_epoch())
+                                                    .count()));
+        }
+        for (const auto& r : HleReadWatch::ranges) {
+            if (r.lo <= address && address + size <= r.hi) {
+                covered = true;
+                break;
+            }
+            if (r.shader == hash) {
+                near_lo = r.lo;
+                near_hi = r.hi;
+            }
+        }
+    }
+    if (!covered) {
+        const u64 u = unnoted.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (u <= 200 || !(u & (u - 1))) {
+            std::printf("HLE write check: copy shader %08x writes %#llx+%llu, NOT covered by a pending note (%llu of %llu "
+                        "writes; a note of this shader: %#llx-%#llx)\n",
+                        hash, address, size, static_cast<unsigned long long>(u), static_cast<unsigned long long>(w),
+                        static_cast<unsigned long long>(near_lo), static_cast<unsigned long long>(near_hi));
+        }
+    }
+}
+
 void Rasterizer::QueueRingCandidates(const Shader::Info& stage, const PreparedDraw* prepared,
                                      u32 stage_index) {
     const PreparedStage* prepared_stage = nullptr;
@@ -1889,15 +2223,233 @@ void Rasterizer::QueueRingCandidates(const Shader::Info& stage, const PreparedDr
             if (!NoWriteNotes()) {
                 NotePendingGpuWrite(address, memory->ClampRangeSize(address, size));
             }
+            if (HleReadWatch::Enabled() && IsGuestMemoryShaderHLE(stage.pgm_hash)) {
+                // The copy runs from the tables as they are when the recording thread gets there; the address
+                // registered is the one this thread sees (prepared or walked now).
+                HleReadWatch::Add(draw_pipe.get(), address, memory->ClampRangeSize(address, size),
+                                  draw_pipe->Head() + 1, u32(stage.pgm_hash));
+            }
             continue;
+        }
+        if (HleSrcCheck::Enabled() && IsGuestMemoryShaderHLE(stage.pgm_hash)) {
+            HleReadWatch::pipe = draw_pipe.get();
+            HleSrcCheck::Queue(draw_pipe->Head(), address, memory->ClampRangeSize(address, size),
+                               PendingWriteOverlaps(address, size));
         }
         // Unclamped here (the collector clamps): a larger range only skips more.
         if (size > VideoCore::BufferCache::STREAM_THRESHOLD || RingSkipsPage(address, size) ||
             (!RingIgnorePending() && PendingWriteOverlaps(address, size))) {
             continue;
         }
-        ring_collector->Add(stage_index, index, address, size);
+        // Diagnosis (U2 train flicker, 2026-11-02): BB_RING_EARLY_GPU=1 also skips GPU-modified ranges here, at
+        // stage A's time, as the path without the collector does (the collector checks again when it copies).
+        static const bool early_gpu = [] {
+            const char* env = std::getenv("BB_RING_EARLY_GPU");
+            return env && env[0] == '1';
+        }();
+        if (early_gpu && buffer_cache.IsRegionGpuModified(address, memory->ClampRangeSize(address, size))) {
+            continue;
+        }
+        ring_collector->Add(stage_index, index, address, size, draw_pipe->Head());
     }
+}
+
+// Diagnosis (U2 train flicker, 2026-11-02): BB_LATE_WRITE_CHECK=<microseconds>: every guest range the ring collector
+// copies is hashed there (address, size, time); a checker thread reads it again that long after the copy (through the
+// backing view: no faults) and prints the ranges that changed since ("Late write: ..."), with steady-clock times to
+// line them up with BB_FLASH_TIMES. BB_LATE_WRITE_RANGE=<hex lo>-<hex hi> limits the ranges checked.
+namespace LateWriteCheck {
+struct Entry {
+    u64 address;
+    u64 hash;
+    s64 t_us;
+    u32 size;
+    u32 kind; ///< 0 ring copy, 1 deferred guest copy (texture upload or stream copy)
+    u64 snapshot; ///< BB_LATE_WRITE_WATCH: index of its copy-time bytes
+};
+static std::mutex note_mutex;
+static const bool watch = std::getenv("BB_LATE_WRITE_WATCH") != nullptr;
+constexpr u64 SnapCount = 4096;
+static std::vector<u8> snapshots;
+static u64 snapshot_next = 0;
+static s64 NowUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+static const s64 delay_us = [] {
+    const char* env = std::getenv("BB_LATE_WRITE_CHECK");
+    return env ? std::strtoll(env, nullptr, 10) : 0ll;
+}();
+static const std::pair<u64, u64> range = [] {
+    if (const char* env = std::getenv("BB_LATE_WRITE_RANGE")) {
+        char* end;
+        const u64 lo = std::strtoull(env, &end, 16);
+        const u64 hi = *end == '-' ? std::strtoull(end + 1, nullptr, 16) : ~0ull;
+        return std::pair{lo, hi};
+    }
+    return std::pair{0ull, ~0ull};
+}();
+constexpr u64 Size = 1u << 22;
+static std::vector<Entry> entries;
+static std::atomic<u64> head{0};
+static bool Enabled() {
+    return delay_us > 0;
+}
+static void Checker() {
+    Common::SetCurrentThreadName("bb:LateWrite");
+    u64 tail = 0, changed = 0, checked = 0, skipped = 0;
+    std::vector<u8> bytes;
+    for (;;) {
+        const u64 h = head.load(std::memory_order_acquire);
+        if (h - tail > Size / 2) {
+            skipped += h - Size / 2 - tail;
+            tail = h - Size / 2;
+        }
+        if (tail == h) {
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            continue;
+        }
+        const Entry e = entries[tail % Size];
+        const s64 wait = e.t_us + delay_us - NowUs();
+        if (wait > 0) {
+            std::this_thread::sleep_for(std::chrono::microseconds(std::min<s64>(wait, 1000)));
+            continue;
+        }
+        ++tail;
+        bytes.resize(e.size);
+        if (!runtime_memory_read_backing(e.address, bytes.data(), e.size)) {
+            continue;
+        }
+        ++checked;
+        // BB_LATE_WRITE_LOG=<file>: every change, one line each ("copy time us, address, size"); else the first
+        // 50000 to stdout.
+        static std::FILE* out = [] {
+            const char* path = std::getenv("BB_LATE_WRITE_LOG");
+            return path && *path ? std::fopen(path, "w") : nullptr;
+        }();
+        if (XXH3_64bits(bytes.data(), e.size) != e.hash) {
+            ++changed;
+            // BB_LATE_WRITE_WATCH: ranges up to 4 KiB keep their copy-time bytes; the changed dwords are listed.
+            if (out && watch && e.size <= 4096) {
+                const u8* before = snapshots.data() + (e.snapshot % SnapCount) * 4096;
+                std::string diff;
+                u32 shown = 0;
+                for (u32 b = 0; b + 4 <= e.size; b += 4) {
+                    u32 was, is;
+                    std::memcpy(&was, before + b, 4);
+                    std::memcpy(&is, bytes.data() + b, 4);
+                    if (was != is && shown++ < 24) {
+                        diff += fmt::format(" +{:x}:{:08x}>{:08x}", b, was, is);
+                    }
+                }
+                std::fprintf(out, "%lld %llx %u %u%s\n", static_cast<long long>(e.t_us),
+                             static_cast<unsigned long long>(e.address), e.size, e.kind, diff.c_str());
+                goto next;
+            }
+            if (out) {
+                std::fprintf(out, "%lld %llx %u %u\n", static_cast<long long>(e.t_us),
+                             static_cast<unsigned long long>(e.address), e.size, e.kind);
+            } else if (changed <= 50000) {
+                std::printf("Late write: %#llx size %u changed within %lld us of its ring copy (copied at %lld us)\n",
+                            static_cast<unsigned long long>(e.address), e.size,
+                            static_cast<long long>(delay_us), static_cast<long long>(e.t_us));
+            }
+        }
+    next:
+        if (!(checked & ((1u << 22) - 1))) {
+            std::printf("Late write check: %llu checked, %llu changed, %llu skipped\n",
+                        static_cast<unsigned long long>(checked), static_cast<unsigned long long>(changed),
+                        static_cast<unsigned long long>(skipped));
+        }
+    }
+}
+// BB_LATE_WRITE_KINDS=<mask> (1 ring copies, 2 deferred guest copies; default both), BB_LATE_WRITE_MAX=<bytes>
+// (largest range checked, default 1 MiB), BB_LATE_WRITE_SKIP=<hex page> (a page left out).
+static const u32 kinds_mask = [] {
+    const char* env = std::getenv("BB_LATE_WRITE_KINDS");
+    return env ? u32(std::strtoul(env, nullptr, 0)) : 3u;
+}();
+static const u64 max_size = [] {
+    const char* env = std::getenv("BB_LATE_WRITE_MAX");
+    return env ? std::strtoull(env, nullptr, 0) : u64(1) << 20;
+}();
+static const u64 skip_page = [] {
+    const char* env = std::getenv("BB_LATE_WRITE_SKIP");
+    return env ? std::strtoull(env, nullptr, 16) & ~0xfffull : 0ull;
+}();
+// BB_LATE_WRITE_MIN=<bytes> (smallest range checked), BB_LATE_WRITE_SAMPLE=<n> (one copy in n is checked).
+static const u64 min_size = [] {
+    const char* env = std::getenv("BB_LATE_WRITE_MIN");
+    return env ? std::strtoull(env, nullptr, 0) : 0ull;
+}();
+static const u64 sample = [] {
+    const char* env = std::getenv("BB_LATE_WRITE_SAMPLE");
+    return env ? std::max<u64>(1, std::strtoull(env, nullptr, 0)) : 1ull;
+}();
+static std::atomic<u64> sample_counter{0};
+static void Note(VAddr address, u64 size, u32 kind = 0) {
+    if (address < range.first || address >= range.second || size > max_size || size < min_size ||
+        !(kinds_mask >> kind & 1) || (skip_page && address < skip_page + 0x1000 && skip_page < address + size)) {
+        return;
+    }
+    if (sample > 1 && sample_counter.fetch_add(1, std::memory_order_relaxed) % sample != 0) {
+        return;
+    }
+    std::scoped_lock lk{note_mutex};
+    static const bool started = [] {
+        entries.resize(Size);
+        if (watch) {
+            snapshots.resize(SnapCount * 4096);
+        }
+        std::thread(Checker).detach();
+        return true;
+    }();
+    (void)started;
+    const u64 h = head.load(std::memory_order_relaxed);
+    u64 snapshot = 0;
+    if (watch && size <= 4096) {
+        snapshot = snapshot_next++;
+        std::memcpy(snapshots.data() + (snapshot % SnapCount) * 4096, reinterpret_cast<const void*>(address), size);
+    }
+    entries[h % Size] = {address, XXH3_64bits(reinterpret_cast<const void*>(address), size), NowUs(),
+                         static_cast<u32>(size), kind, snapshot};
+    head.store(h + 1, std::memory_order_release);
+}
+} // namespace LateWriteCheck
+
+/// Deferred guest copies (BufferCache::RunGuestCopy) report to the same check.
+extern "C" void BbLateWriteNote(u64 address, u64 size) {
+    if (LateWriteCheck::Enabled()) {
+        LateWriteCheck::Note(address, size, 1);
+    }
+}
+/// Kind 2: stage A's resource table walks (SyncSrtReads, needs the SRT read check on).
+extern "C" void BbLateWriteNoteKind(u64 address, u64 size, u32 kind) {
+    if (LateWriteCheck::Enabled()) {
+        LateWriteCheck::Note(address, size, kind);
+    }
+}
+
+__attribute__((target("sse4.1"))) static void StreamLoad(__m128i* out, __m128i* from, u32 blocks) {
+    for (u32 k = 0; k < blocks; ++k) {
+        out[k] = _mm_stream_load_si128(from + k);
+    }
+}
+
+// BB_RING_CHECK (diagnosis): a host copy of the constant ring, at the same offsets.
+static u8* RingCheckShadow() {
+    static std::vector<u8> shadow = [] {
+        std::vector<u8> bytes;
+        // BB_RING_CHECK=2: the host copy (it slows the collector, which hid the train flicker);
+        // 1: the check reads the ring with streaming loads instead.
+        const char* env = std::getenv("BB_RING_CHECK");
+        if (env && env[0] == '2') {
+            bytes.resize(ConstantRing::Capacity);
+        }
+        return bytes;
+    }();
+    return shadow.empty() ? nullptr : shadow.data();
 }
 
 bool Rasterizer::RingCollectOne(void* context, VAddr address, u64& size, const u8* source,
@@ -1928,10 +2480,22 @@ bool Rasterizer::RingCollectOne(void* context, VAddr address, u64& size, const u
         return false;
     }
     u8* dst = self.constant_ring->Data(*offset);
-    if (source) {
+    if (u8* shadow = RingCheckShadow()) {
+        // BB_RING_CHECK: the bytes also go into a host copy of the ring (the ring itself is
+        // write-combined memory: the check's reads of it ran the game at 1 fps).
+        if (source) {
+            std::memcpy(shadow + *offset, source, size);
+        } else {
+            self.memory->CopySparseMemory(address, shadow + *offset, size);
+        }
+        std::memcpy(dst, shadow + *offset, size);
+    } else if (source) {
         std::memcpy(dst, source, size);
     } else {
         self.memory->CopySparseMemory(address, dst, size);
+        if (LateWriteCheck::Enabled()) {
+            LateWriteCheck::Note(address, size);
+        }
     }
     self.constant_ring->Flush(*offset, size);
     ring_offset = *offset;
@@ -2458,7 +3022,16 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     dirty.Clear();
     draw_pipe->Commit(static_cast<u32>(out - start));
     notes_before_commit = false;
+    CommitHeldNotes();
     PrintPipeStats();
+}
+
+void Rasterizer::CommitHeldNotes() {
+    // Head() is now the position after the packet just committed: Reached(Head()) once it has run.
+    for (const auto& [address, size] : notes_held) {
+        NotePendingGpuWrite(address, size);
+    }
+    notes_held.clear();
 }
 
 void Rasterizer::RetireSubmission() {
@@ -2578,6 +3151,22 @@ extern "C" char __ImageBase;
 
 void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     const u32 kind = std::min<u32>(u32(*reinterpret_cast<const PacketKind*>(data)), 5);
+    // Diagnosis (U2 train flicker, 2026-11-02): BB_STAGEB_DELAY_NS=<n>: stage B spins n ns before each packet.
+    static const u64 stage_b_delay = [] {
+        const char* env = std::getenv("BB_STAGEB_DELAY_NS");
+        return env ? std::strtoull(env, nullptr, 10) : 0ull;
+    }();
+    // BB_STAGEB_DELAY_KINDS=<mask of PacketKind bits> (default all): which packets wait.
+    static const u32 stage_b_kinds = [] {
+        const char* env = std::getenv("BB_STAGEB_DELAY_KINDS");
+        return env ? u32(std::strtoul(env, nullptr, 0)) : ~0u;
+    }();
+    if (stage_b_delay && (stage_b_kinds >> kind & 1)) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(stage_b_delay);
+        while (std::chrono::steady_clock::now() < until) {
+            _mm_pause();
+        }
+    }
     // BB_FRAME_TRACE: a task's argument also names its function (exe offset).
     BbTrace::Record(BbTrace::PacketBegin,
                     kind == u32(PacketKind::Task)
@@ -2760,6 +3349,36 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
     } else if (cs) {
         stage_cs = cs;
         const auto* pipeline = static_cast<const ComputePipeline*>(packet.pipeline);
+        // Diagnosis (U2 train flicker, 2026-11-02): BB_CS_DELAY_NS=<n> spins before dispatches of the compute
+        // shaders in BB_CS_DELAY_HASHES (hex, comma separated; a leading '!' means all but those).
+        static const u64 cs_delay = [] {
+            const char* env = std::getenv("BB_CS_DELAY_NS");
+            return env ? std::strtoull(env, nullptr, 10) : 0ull;
+        }();
+        if (cs_delay) {
+            static const std::pair<bool, std::vector<u32>> filter = [] {
+                std::vector<u32> list;
+                const char* env = std::getenv("BB_CS_DELAY_HASHES");
+                const bool invert = env && *env == '!';
+                for (const char* p = env ? env + invert : ""; *p;) {
+                    char* end;
+                    const u32 value = u32(std::strtoul(p, &end, 16));
+                    if (end == p) {
+                        break;
+                    }
+                    list.push_back(value);
+                    p = *end == ',' ? end + 1 : end;
+                }
+                return std::pair{invert, list};
+            }();
+            const u32 hash = u32(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash);
+            if ((std::ranges::find(filter.second, hash) != filter.second.end()) != filter.first) {
+                const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(cs_delay);
+                while (std::chrono::steady_clock::now() < until) {
+                    _mm_pause();
+                }
+            }
+        }
         // bbport diagnosis: BB_DISPATCH_STATS=1, how repetitive dispatches are (every 5 s).
         static const bool dispatch_stats = [] {
             const char* env = std::getenv("BB_DISPATCH_STATS");
@@ -4539,10 +5158,99 @@ void Rasterizer::DispatchDirect() {
         (pipelined_hle ||
          !IsGuestMemoryShaderHLE(pipeline->GetStage(Shader::SwStage::Compute).pgm_hash))) {
         PostDraw(pipeline, nullptr, false, 0, &CsRegs());
+        // Diagnosis (U2 train flicker, 2026-11-03): BB_HLE_A_WAIT=1: this thread waits until the recording thread
+        // has run a copy shader it queued (the order on the recording thread stays as it is).
+        static const bool a_wait = [] {
+            const char* env = std::getenv("BB_HLE_A_WAIT");
+            return env && env[0] == '1';
+        }();
+        // The copy shader stage A's lead is bounded by (CopyLeadDraws); BB_HLE_WAIT_HASH=<hex> (diagnosis): another
+        // one, 0: all of them.
+        static const u64 wait_hash = [] {
+            const char* env = std::getenv("BB_HLE_WAIT_HASH");
+            return env ? std::strtoull(env, nullptr, 16) : 0x2d215c3bull;
+        }();
+        const u64 copy_hash = pipeline->GetStage(Shader::SwStage::Compute).pgm_hash;
+        if ((a_wait || HleWaitAt()) && IsGuestMemoryShaderHLE(copy_hash) && (!wait_hash || copy_hash == wait_hash)) {
+            const u64 end = draw_pipe->Head();
+            hle_copy_end.store(end, std::memory_order_release);
+            while (a_wait && !draw_pipe->Reached(end)) {
+                _mm_pause();
+            }
+        }
         return;
     }
     DrainDrawPipe();
     DispatchRecord(pipeline);
+}
+
+/// bbport (U2 chapter 1 train flash, 2026-11-03): since the copy shaders run on the CPU went through the draw pipe
+/// (ffc0de23), the train's platform flashed white for single frames (3-8 times in 3 minutes at checkpoint #2) when
+/// stage A ran far past a one-dword copy (2d215c3b, material constants) the recording thread had not run yet. Which
+/// read sees the destination too early is not known: the table walks never did (0 of 24.7M logged), the constant
+/// ring and the worker's descriptors neither, and the copy's source never changed in between. Bounding the lead
+/// fixes it: stage A waits for the copy at the draw after CopyLeadDraws() others (8 and 16: no flash in 3 minutes,
+/// 32 and 64: 6-8; waiting at the first draw cost ~5% in U3's market, this is free there within noise).
+/// BB_COPY_LEAD=<draws> (default 8), 0: off.
+static u32 CopyLeadDraws() {
+    static const u32 draws = [] {
+        const char* env = std::getenv("BB_COPY_LEAD");
+        return env ? u32(std::strtoul(env, nullptr, 10)) : 8u;
+    }();
+    return draws;
+}
+
+u32 Rasterizer::HleWaitAt() {
+    static const u32 mask = [] {
+        const char* env = std::getenv("BB_HLE_WAIT_AT");
+        return env ? u32(std::strtoul(env, nullptr, 0)) : CopyLeadDraws() ? 1u : 0u;
+    }();
+    return mask;
+}
+
+void Rasterizer::WaitHleCopies(u32 where) {
+    if (!(HleWaitAt() & where) || DrawPipe::OnStageB()) {
+        return;
+    }
+    const u64 end = hle_copy_end.load(std::memory_order_acquire);
+    if (!end || draw_pipe->Reached(end)) {
+        return;
+    }
+    // The first N draws after a copy go on without waiting (BB_HLE_WAIT_SKIP=N overrides CopyLeadDraws, diagnosis).
+    static const u32 skip = [] {
+        const char* env = std::getenv("BB_HLE_WAIT_SKIP");
+        return env ? u32(std::strtoul(env, nullptr, 10)) : CopyLeadDraws();
+    }();
+    if (skip && where == 1) {
+        static thread_local u64 last_end = 0;
+        static thread_local u32 passed = 0;
+        if (end != last_end) {
+            last_end = end;
+            passed = 0;
+        }
+        if (passed < skip) {
+            ++passed;
+            return;
+        }
+    }
+    static std::atomic<u64> waits[16]{}, timeouts{0};
+    const u64 n = waits[where & 15].fetch_add(1, std::memory_order_relaxed) + 1;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
+    while (!draw_pipe->Reached(end)) {
+        _mm_pause();
+        if (std::chrono::steady_clock::now() > until) {
+            timeouts.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+    }
+    static const bool wait_log = std::getenv("BB_HLE_WAIT_AT") != nullptr;
+    if (wait_log && (n & 16383) == 1) {
+        std::printf("HLE wait at %u: %llu waits (1:%llu 2:%llu 4:%llu 8:%llu), %llu timeouts\n", where,
+                    static_cast<unsigned long long>(n), static_cast<unsigned long long>(waits[1].load()),
+                    static_cast<unsigned long long>(waits[2].load()), static_cast<unsigned long long>(waits[4].load()),
+                    static_cast<unsigned long long>(waits[8].load()),
+                    static_cast<unsigned long long>(timeouts.load()));
+    }
 }
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
@@ -5923,22 +6631,42 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             // Copied by the GPU command thread into the constant ring (read-only).
             static const bool ring_check = std::getenv("BB_RING_CHECK") != nullptr;
             if (ring_check && !desc.IsSpecial() && memory->IsValidGpuMapping(ring->address, 0)) {
-                const u8* copied = constant_ring->Data(ring->offset);
-                const u8* now = reinterpret_cast<const u8*>(ring->address);
-                if (std::memcmp(copied, now, ring->size) != 0) {
+                const u8* copied = nullptr;
+                if (u8* shadow = RingCheckShadow()) {
+                    copied = shadow + ring->offset;
+                } else {
+                    // Streaming loads: plain reads of the write-combined ring ran at 1 fps.
+                    static thread_local std::vector<__m128i> stream_bytes;
+                    const u32 blocks = (ring->size + 15) / 16;
+                    stream_bytes.resize(blocks);
+                    StreamLoad(stream_bytes.data(),
+                               reinterpret_cast<__m128i*>(constant_ring->Data(ring->offset)), blocks);
+                    copied = reinterpret_cast<const u8*>(stream_bytes.data());
+                }
+                // Read through the backing view: pages protected for GPU tracking would fault
+                // into a read-back for every binding (1 fps).
+                static thread_local std::vector<u8> now_bytes;
+                now_bytes.resize(ring->size);
+                const u8* now = now_bytes.data();
+                if (runtime_memory_read_backing(ring->address, now_bytes.data(), ring->size) &&
+                    std::memcmp(copied, now, ring->size) != 0) {
                     u32 first = 0, count = 0;
                     for (u32 b = 0; b < ring->size; b += 4) {
                         if (std::memcmp(copied + b, now + b, 4) != 0) {
                             first = count++ ? first : b;
                         }
                     }
+                    u32 was = 0, is = 0;
+                    std::memcpy(&was, copied + first, 4);
+                    std::memcpy(&is, now + first, 4);
                     static std::atomic<u32> reports{0};
-                    if (reports.fetch_add(1) < 400) {
+                    if (reports.fetch_add(1) < 4000) {
                         std::printf("Ring check: shader %08x buffer %u at %#llx size %u: %u words "
-                                    "changed since the copy (first at +%u)\n",
+                                    "changed since the copy (first at +%u: %08x -> %08x, %g -> %g)\n",
                                     u32(stage.pgm_hash), buffer_index,
                                     static_cast<unsigned long long>(ring->address), ring->size,
-                                    count, first);
+                                    count, first, was, is, std::bit_cast<float>(was),
+                                    std::bit_cast<float>(is));
                     }
                 }
             }

@@ -62,6 +62,9 @@ struct SrtReadLog {
 static_assert(offsetof(SrtReadLog, reads) == 8 && sizeof(SrtReadLog::Read) == 16);
 /// Called after a logged walk; true when it refreshed guest memory (the walk is repeated).
 inline bool (*g_srt_read_check)(const SrtReadLog&) = nullptr;
+/// bbport: called before a descriptor is read through a user data table pointer outside the SRT walker
+/// (Info::ReadUdRegDirect: vertex attribute V#s and other GetSharp reads), with the guest address and size.
+inline void (*g_ud_table_read)(u64 address, u64 size) = nullptr;
 
 inline SrtReadLog* SwapSrtReadLog(SrtReadLog* log) {
 #ifdef _WIN32
