@@ -316,8 +316,13 @@ def game_info(folder):
     try:
         from prepare import sfo
         values = sfo((folder / 'sce_sys/param.sfo').read_bytes())
+        # The newer of APP_VER and VERSION: a package with an update built in (the Spanish EP9000-CUSA02826
+        # A0100-V0102, EU/Russian CUSA02344 1.02 dumps) keeps APP_VER 01.00 and says 01.02 in VERSION.
+        versions = [v for v in (values.get('APP_VER'), values.get('VERSION')) if v]
         info.update(title=values.get('TITLE', info['title']).replace('™', '').strip(),
-                    id=values.get('TITLE_ID', info['id']), version=values.get('APP_VER', '?'))
+                    id=values.get('TITLE_ID', info['id']),
+                    version=max(versions, key=lambda v: tuple(int(p) for p in v.split('.') if p.isdigit()))
+                    if versions else '?')
     except (OSError, ValueError, ImportError):
         pass
     return info
