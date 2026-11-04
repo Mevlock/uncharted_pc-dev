@@ -376,6 +376,7 @@ SHADER_INDEXES = {
     ('CUSA02320', '1.00'): 'shader_locations_CUSA02320_100.txt',
     ('CUSA02320', '1.02'): 'shader_locations_CUSA02320.txt',
     ('CUSA02344', '1.02'): 'shader_locations_CUSA02344.txt',
+    ('CUSA02826', '1.02'): 'shader_locations_CUSA02826.txt',  # Spanish (EP9000), from the 1.02 package
 }
 _executable_hashes = {}
 
