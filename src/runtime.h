@@ -107,8 +107,10 @@ void __attribute__((ms_abi)) runtime_exit_menu_u1_eu_add(uint64_t rdi, uint64_t 
                                                          const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_exit_menu_u1_us_add(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                          const uint64_t *regs);
-void __attribute__((ms_abi)) runtime_exit_menu_u1_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
-                                                          const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_exit_menu_u1_eu_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                             const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_exit_menu_u1_us_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                             const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_exit_menu_u2_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
     const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_exit_menu_u3_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
