@@ -1,0 +1,513 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// The overlay's save slots for the campaign save (SAVEDATA0<game>0, the save Continue loads), kept beside the
+// saves in <title>.backups/u<game>/:
+//   slot1..slot5   copies the player makes (Save here) and puts back (Load)
+//   before-load    the campaign save as it was before the last Load
+//   story          the story save: the campaign save as reached by playing on. Each time the game closes its
+//                  campaign save, the new checkpoint is compared with the story save's: the next checkpoints of
+//                  the same chapter, or the start of the next chapter from the end of the last one, move the
+//                  story save along; anything else (Chapter Select back or ahead, a new game) leaves it where
+//                  it is, and only loading it again or "Make this my story save" lets it follow again.
+// Loading puts a copy back while the game is not running: the game restarts and the restore happens before its
+// first save mount (runtime_savedata.c). The profile save (SAVEDATA0<game>P: treasures, unlocks) is never touched.
+//
+// The checkpoint comes from the campaign save itself: its body is Blowfish-encrypted (32-bit words little-endian)
+// after a 12-byte header, and the decrypted data holds the task (checkpoint) id at 0x9a8.
+#include "bbport_saves.h"
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <system_error>
+
+#include <openssl/blowfish.h>
+
+extern "C" {
+int runtime_savedata_dir(char* out, size_t size);
+int runtime_savedata_mounted(void);
+void runtime_restart(void);
+}
+
+namespace fs = std::filesystem;
+
+namespace {
+
+struct TaskRow {
+    int game;
+    uint32_t task;
+    int number, chapter;
+    const char* chapter_title;
+    const char* name;
+};
+const TaskRow tasks[] = {
+#include "bbport_checkpoints.inc"
+};
+
+const unsigned char blowfish_key[20] = {0x28, 0x53, 0x48, 0x5b, 0x40, 0x32, 0x3e, 0x72, 0x36, 0x32,
+                                        0x25, 0x35, 0x2b, 0x51, 0x4b, 0x70, 0x79, 0x7c, 0x67, 0x36};
+constexpr size_t task_offset = 0x9a8;  // in the decrypted body
+constexpr size_t header_size = 0xc;
+// The story save follows into the next chapter only from its last checkpoints (Chapter Select from the middle of
+// a chapter to the next one is a skip).
+constexpr int chapter_end_checkpoints = 2;
+
+std::recursive_mutex lock;
+BbSaves::Slot slots[BbSaves::StorySlot + 1];
+BbSaves::Checkpoint current;
+fs::file_time_type current_time{};
+std::chrono::steady_clock::time_point current_checked{};
+
+// A path as UTF-8 text (C++20's u8string() is a std::u8string).
+std::string Utf8(const fs::path& path) {
+    const auto text = path.u8string();
+    return std::string(text.begin(), text.end());
+}
+fs::path SavesDir() {
+    char dir[700];
+    runtime_savedata_dir(dir, sizeof(dir));
+    return fs::u8path(dir);
+}
+std::string SlotName(int game) {
+    return "SAVEDATA0" + std::to_string(game) + "0";
+}
+fs::path GameBackups(int game) {
+    fs::path saves = SavesDir();
+    return saves.parent_path() / (Utf8(saves.filename()) + ".backups") / ("u" + std::to_string(game));
+}
+std::string SlotFolder(int index) {
+    return index == BbSaves::UndoSlot    ? std::string("before-load")
+           : index == BbSaves::StorySlot ? std::string("story")
+                                         : "slot" + std::to_string(index + 1);
+}
+fs::path SlotDir(int game, int index) {
+    return GameBackups(game) / SlotFolder(index);
+}
+fs::path PendingFile(int game) {
+    return GameBackups(game).parent_path() / "pending-load.txt";
+}
+fs::path StoryState(int game) {
+    return GameBackups(game) / "story-state.txt";
+}
+
+BbSaves::Checkpoint Lookup(int game, uint32_t task) {
+    BbSaves::Checkpoint c;
+    c.task = task;
+    int row = 0;
+    for (const TaskRow& t : tasks) {
+        if (t.game != game) {
+            continue;
+        }
+        if (t.task == task) {
+            c.known = true;
+            c.row = row;
+            c.number = t.number;
+            c.chapter = t.chapter;
+            c.chapter_title = t.chapter_title;
+            c.name = t.name;
+            break;
+        }
+        ++row;
+    }
+    return c;
+}
+
+// The checkpoint a campaign save is at: the one decrypted 8-byte block that holds the task id.
+BbSaves::Checkpoint ReadCheckpoint(int game, const fs::path& slot) {
+    std::ifstream f(slot / "USR-DATA", std::ios::binary);
+    unsigned char block[8];
+    if (!f.seekg(header_size + task_offset) || !f.read(reinterpret_cast<char*>(block), sizeof(block))) {
+        return {};
+    }
+    BF_KEY key;
+    BF_set_key(&key, sizeof(blowfish_key), blowfish_key);
+    // Blowfish works on big-endian words, the save stores little-endian ones: each word byte-swapped going in,
+    // and the decrypted little-endian word read back as big-endian.
+    unsigned char in[8], out[8];
+    for (int i = 0; i < 8; ++i) {
+        in[i] = block[(i & ~3) + 3 - (i & 3)];
+    }
+    BF_ecb_encrypt(in, out, &key, BF_DECRYPT);
+    const uint32_t task = uint32_t(out[0]) << 24 | uint32_t(out[1]) << 16 | uint32_t(out[2]) << 8 | out[3];
+    return Lookup(game, task);
+}
+
+// Playing on from `from` reaches `to`: a later checkpoint of the same chapter, or the next chapter when `from`
+// was among the last checkpoints of its chapter.
+bool PlaysOn(int game, const BbSaves::Checkpoint& from, const BbSaves::Checkpoint& to) {
+    if (!from.known || !to.known || to.row <= from.row) {
+        return false;
+    }
+    if (to.chapter == from.chapter) {
+        return true;
+    }
+    if (to.chapter != from.chapter + 1) {
+        return false;
+    }
+    int left = 0, row = 0;
+    for (const TaskRow& t : tasks) {
+        if (t.game != game) {
+            continue;
+        }
+        if (row++ > from.row && t.chapter == from.chapter && t.number) {
+            ++left;
+        }
+    }
+    return left <= chapter_end_checkpoints;
+}
+
+// The game's own progress text (param.bin's subtitle, 128 bytes at 128).
+std::string ReadProgress(const fs::path& meta) {
+    std::ifstream f(meta / "param.bin", std::ios::binary);
+    char text[129] = {};
+    if (!f.seekg(128) || !f.read(text, 128)) {
+        return {};
+    }
+    return text;
+}
+
+std::string Now() {
+    std::time_t t = std::time(nullptr);
+    char text[64];
+    std::strftime(text, sizeof(text), "%Y-%m-%d %H:%M", std::localtime(&t));
+    return text;
+}
+
+// `to` replaced by a copy of the two folders of a save (the save and its .sce_sys) found in `from`: copied next
+// to it first, so a failed copy leaves `to` as it was.
+bool CopySave(const fs::path& from, const fs::path& to, const std::string& name, std::string& error) {
+    std::error_code ec;
+    const fs::path temp = to.parent_path() / (Utf8(to.filename()) + ".new");
+    fs::remove_all(temp, ec);
+    fs::create_directories(temp, ec);
+    for (const std::string& dir : {name, name + ".sce_sys"}) {
+        fs::copy(from / dir, temp / dir, fs::copy_options::recursive, ec);
+        if (ec) {
+            error = ec.message();
+            fs::remove_all(temp, ec);
+            return false;
+        }
+    }
+    const fs::path old = to.parent_path() / (Utf8(to.filename()) + ".old");
+    fs::remove_all(old, ec);
+    if (fs::exists(to)) {
+        fs::rename(to, old, ec);
+        if (ec) {
+            error = ec.message();
+            fs::remove_all(temp, ec);
+            return false;
+        }
+    }
+    fs::rename(temp, to, ec);
+    if (ec) {
+        error = ec.message();
+        std::error_code ignore;
+        fs::rename(old, to, ignore);
+        return false;
+    }
+    fs::remove_all(old, ec);
+    return true;
+}
+
+// story-state.txt: "<task id of the story save> following|away"
+struct StoryStatus {
+    bool exists = false;
+    bool following = true;
+};
+StoryStatus ReadStory(int game) {
+    StoryStatus s;
+    std::ifstream f(StoryState(game));
+    std::string task, mode;
+    if (f >> task >> mode) {
+        s.exists = std::filesystem::exists(SlotDir(game, BbSaves::StorySlot) / SlotName(game) / "USR-DATA");
+        s.following = mode != "away";
+    }
+    return s;
+}
+void WriteStory(int game, uint32_t task, bool following) {
+    std::error_code ec;
+    fs::create_directories(GameBackups(game), ec);
+    char id[16];
+    std::snprintf(id, sizeof(id), "%08x", task);
+    std::ofstream(StoryState(game)) << id << " " << (following ? "following" : "away") << "\n";
+}
+
+// The campaign save copied into a slot folder, with the time.
+bool CopyCampaign(int game, int index, std::string& error) {
+    const fs::path to = SlotDir(game, index);
+    std::error_code ec;
+    fs::create_directories(to.parent_path(), ec);
+    if (!CopySave(SavesDir(), to, SlotName(game), error)) {
+        return false;
+    }
+    std::ofstream(to / "saved.txt") << Now() << "\n";
+    return true;
+}
+
+} // namespace
+
+namespace BbSaves {
+
+int Game() {
+    static const int game = [] {
+        const char* exe = std::getenv("BB_EXE");
+        if (!exe) {
+            return 0;
+        }
+        if (std::strstr(exe, "big3")) {
+            return 3;
+        }
+        if (std::strstr(exe, "big2")) {
+            return 2;
+        }
+        return std::strcmp(exe, "eboot.bin") == 0 ? 1 : 0;
+    }();
+    return game;
+}
+
+Checkpoint Current() {
+    std::lock_guard guard(lock);
+    const auto now = std::chrono::steady_clock::now();
+    if (Game() && now - current_checked > std::chrono::seconds(1)) {
+        current_checked = now;
+        std::error_code ec;
+        const fs::path file = SavesDir() / SlotName(Game()) / "USR-DATA";
+        const auto time = fs::last_write_time(file, ec);
+        if (!ec && time != current_time && !runtime_savedata_mounted()) {
+            current_time = time;
+            current = ReadCheckpoint(Game(), file.parent_path());
+        }
+    }
+    return current;
+}
+
+void Refresh() {
+    std::lock_guard guard(lock);
+    const int game = Game();
+    for (int i = 0; i <= StorySlot; ++i) {
+        Slot s;
+        const fs::path dir = SlotDir(game, i);
+        std::error_code ec;
+        if (game && fs::exists(dir / SlotName(game) / "USR-DATA", ec)) {
+            s.used = true;
+            s.progress = ReadProgress(dir / (SlotName(game) + ".sce_sys"));
+            s.checkpoint = ReadCheckpoint(game, dir / SlotName(game));
+            std::ifstream info(dir / "saved.txt");
+            std::getline(info, s.date);
+        }
+        slots[i] = s;
+    }
+}
+
+const Slot& GetSlot(int index) {
+    return slots[index];
+}
+
+bool AwayFromStory() {
+    std::lock_guard guard(lock);
+    const StoryStatus s = ReadStory(Game());
+    return s.exists && !s.following;
+}
+
+bool Store(int index, std::string& message) {
+    std::lock_guard guard(lock);
+    const int game = Game();
+    if (!game || index < 0 || index > StorySlot) {
+        message = "Save slots are only for Uncharted 1, 2 and 3.";
+        return false;
+    }
+    if (runtime_savedata_mounted()) {
+        message = "The game is saving: try again in a moment.";
+        return false;
+    }
+    std::error_code ec;
+    if (!fs::exists(SavesDir() / SlotName(game) / "USR-DATA", ec)) {
+        message = "There is no campaign save yet.";
+        return false;
+    }
+    std::string error;
+    if (!CopyCampaign(game, index, error)) {
+        message = "Could not copy the save: " + error;
+        return false;
+    }
+    std::printf("Save slots: campaign save copied to %s\n", Utf8(SlotDir(game, index)).c_str());
+    Refresh();
+    message = index < SlotCount ? "Saved in slot " + std::to_string(index + 1) + "." : std::string("Saved.");
+    return true;
+}
+
+bool MakeStory(std::string& message) {
+    std::lock_guard guard(lock);
+    if (!Store(StorySlot, message)) {
+        return false;
+    }
+    WriteStory(Game(), ReadCheckpoint(Game(), SavesDir() / SlotName(Game())).task, true);
+    message = "This is now your story save.";
+    return true;
+}
+
+bool Load(int index, std::string& message) {
+    std::lock_guard guard(lock);
+    const int game = Game();
+    if (!game || index < 0 || index > StorySlot || !GetSlot(index).used) {
+        message = "That slot is empty.";
+        return false;
+    }
+    if (runtime_savedata_mounted()) {
+        message = "The game is saving: try again in a moment.";
+        return false;
+    }
+    // Loading the before-load copy itself puts it back as it is (no new copy over it).
+    if (index != UndoSlot && !Store(UndoSlot, message)) {
+        return false;
+    }
+    std::ofstream pending(PendingFile(game));
+    pending << "u" << game << " " << SlotFolder(index) << "\n";
+    pending.close();
+    if (!pending) {
+        message = "Could not write the load request.";
+        return false;
+    }
+    std::printf("Save slots: %s requested, restarting\n", Utf8(SlotDir(game, index)).c_str());
+    std::fflush(stdout);
+    runtime_restart();
+    return true;
+}
+
+std::string Describe(const Checkpoint& c) {
+    if (!c.known) {
+        return c.task ? "an unknown checkpoint" : "no save yet";
+    }
+    std::string text = c.number ? "Checkpoint " + std::to_string(c.number) : std::string("Cutscene");
+    if (!c.name.empty()) {
+        text += " \xC2\xB7 " + c.name;
+    }
+    return text + " \xC2\xB7 Chapter " + std::to_string(c.chapter) + " " + c.chapter_title;
+}
+
+} // namespace BbSaves
+
+namespace {
+
+// A slot chosen with Load put back as the campaign save.
+void ApplyPending(int game) {
+    const fs::path pending = PendingFile(game);
+    std::ifstream f(pending);
+    std::string which_game, folder;
+    if (!(f >> which_game >> folder)) {
+        return;
+    }
+    f.close();
+    if (which_game != "u" + std::to_string(game)) {
+        return;  // a request for another game of the collection: it applies when that game starts
+    }
+    std::error_code ec;
+    fs::remove(pending, ec);
+    if (folder.find_first_of("/\\.") != std::string::npos) {
+        return;
+    }
+    const fs::path from = GameBackups(game) / folder;
+    const std::string name = SlotName(game);
+    const fs::path saves = SavesDir();
+    std::string error;
+    // Both folders copied beside the campaign save first, then swapped in.
+    bool ok = true;
+    for (const std::string& dir : {name, name + ".sce_sys"}) {
+        const fs::path temp = saves / (dir + ".bbload");
+        fs::remove_all(temp, ec);
+        fs::copy(from / dir, temp, fs::copy_options::recursive, ec);
+        if (ec) {
+            error = ec.message();
+            fs::remove_all(temp, ec);
+            ok = false;
+            break;
+        }
+    }
+    for (const std::string& dir : {name, name + ".sce_sys"}) {
+        if (!ok) {
+            break;
+        }
+        fs::remove_all(saves / dir, ec);
+        fs::rename(saves / (dir + ".bbload"), saves / dir, ec);
+        if (ec) {
+            error = ec.message();
+            ok = false;
+        }
+    }
+    if (ok && folder == "story") {
+        WriteStory(game, ReadCheckpoint(game, saves / name).task, true);
+    }
+    std::printf("Save slots: %s %s\n", Utf8(from).c_str(),
+                ok ? "restored as the campaign save" : ("NOT restored: " + error).c_str());
+}
+
+} // namespace
+
+// runtime_savedata.c, before the game's first save mount: a slot chosen with Load is put back now, and a player
+// without a story save gets one from the campaign save as it is, before this session writes anything (a first
+// save written from Chapter Select would otherwise start it in the wrong place).
+extern "C" void bbport_saves_apply_pending(void) {
+    const int game = BbSaves::Game();
+    if (!game) {
+        return;
+    }
+    std::lock_guard guard(lock);
+    ApplyPending(game);
+    std::error_code ec;
+    const fs::path campaign = SavesDir() / SlotName(game);
+    if (!ReadStory(game).exists && fs::exists(campaign / "USR-DATA", ec)) {
+        const BbSaves::Checkpoint now = ReadCheckpoint(game, campaign);
+        std::string error;
+        if (now.known && CopyCampaign(game, BbSaves::StorySlot, error)) {
+            WriteStory(game, now.task, true);
+            std::printf("Story save: started at %s\n", BbSaves::Describe(now).c_str());
+        }
+    }
+}
+
+// runtime_savedata.c, after the game closed a save: when it was the campaign save, the story save follows it if
+// the new checkpoint plays on from the story save's, and stops following otherwise.
+extern "C" void bbport_saves_closed(const char* host_dir) {
+    const int game = BbSaves::Game();
+    if (!game || !host_dir) {
+        return;
+    }
+    const fs::path dir = fs::u8path(host_dir);
+    if (Utf8(dir.filename()) != SlotName(game)) {
+        return;
+    }
+    std::lock_guard guard(lock);
+    const BbSaves::Checkpoint now = ReadCheckpoint(game, dir);
+    if (!now.known) {
+        return;
+    }
+    const StoryStatus story = ReadStory(game);
+    std::string error;
+    if (!story.exists) {
+        if (CopyCampaign(game, BbSaves::StorySlot, error)) {
+            WriteStory(game, now.task, true);
+            std::printf("Story save: started at %s\n", BbSaves::Describe(now).c_str());
+        }
+        return;
+    }
+    if (!story.following) {
+        return;
+    }
+    const BbSaves::Checkpoint was =
+        ReadCheckpoint(game, SlotDir(game, BbSaves::StorySlot) / SlotName(game));
+    if (now.task == was.task || PlaysOn(game, was, now)) {
+        if (CopyCampaign(game, BbSaves::StorySlot, error)) {
+            WriteStory(game, now.task, true);
+        } else {
+            std::printf("Story save: could not copy the campaign save (%s)\n", error.c_str());
+        }
+        return;
+    }
+    WriteStory(game, was.task, false);
+    std::printf("Story save: kept at %s (the campaign save moved to %s)\n", BbSaves::Describe(was).c_str(),
+                BbSaves::Describe(now).c_str());
+}

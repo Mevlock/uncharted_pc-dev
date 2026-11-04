@@ -26,6 +26,7 @@
 #endif
 #include <windows.h>
 #endif
+#include "bbport_saves.h"
 #include "bbport_settings.h"
 #include <miniz.h>
 #include "imgui.h"
@@ -326,6 +327,142 @@ void Hint(const char* text) {
     }
 }
 
+// Save slots page: the story save, five slots and the copy taken before the last Load (bbport_saves.cpp).
+// Saving over a used slot, loading and moving the story save each ask first, on the page itself.
+void SaveSlotsPage() {
+    enum class Action { None, Store, Load, MakeStory };
+    static Action pending = Action::None;
+    static int pending_slot = -1;
+    static std::string message;
+    static double refreshed = -10.0;
+    if (ImGui::GetTime() - refreshed > 2.0) {
+        BbSaves::Refresh();
+        refreshed = ImGui::GetTime();
+    }
+    const auto when = [](const BbSaves::Slot& slot) {
+        return slot.date.empty() ? std::string() : "  (" + slot.date + ")";
+    };
+
+    ImGui::TextWrapped("Now: %s", BbSaves::Describe(BbSaves::Current()).c_str());
+
+    ImGui::SeparatorText("Story save");
+    const BbSaves::Slot& story = BbSaves::GetSlot(BbSaves::StorySlot);
+    const bool away = BbSaves::AwayFromStory();
+    if (!story.used) {
+        ImGui::TextDisabled("Starts with the game's next save.");
+    } else {
+        ImGui::TextWrapped("%s%s", BbSaves::Describe(story.checkpoint).c_str(), when(story).c_str());
+        if (away) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+            ImGui::TextWrapped("Your save has moved away from your story (Chapter Select or a new game). "
+                               "The story save stays here until you load it, or make the current save your "
+                               "story save to keep the change.");
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::TextDisabled("Follows your playthrough as you play on.");
+        }
+        if (ImGui::Button("Load story save")) {
+            pending = Action::Load;
+            pending_slot = BbSaves::StorySlot;
+        }
+        ImGui::SameLine();
+    }
+    ImGui::BeginDisabled(story.used && !away);
+    if (ImGui::Button("Make this my story save")) {
+        pending = Action::MakeStory;
+    }
+    ImGui::EndDisabled();
+    Hint("Use this after skipping ahead on purpose: the story save then follows your playthrough from "
+         "where you are now.");
+
+    ImGui::SeparatorText("Slots");
+    for (int i = 0; i < BbSaves::SlotCount; ++i) {
+        const BbSaves::Slot& slot = BbSaves::GetSlot(i);
+        ImGui::PushID(i);
+        ImGui::AlignTextToFramePadding();
+        ImGui::Text("%d", i + 1);
+        ImGui::SameLine();
+        if (ImGui::Button("Save here")) {
+            pending = Action::Store;
+            pending_slot = i;
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!slot.used);
+        if (ImGui::Button("Load")) {
+            pending = Action::Load;
+            pending_slot = i;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (slot.used) {
+            ImGui::TextWrapped("%s%s", BbSaves::Describe(slot.checkpoint).c_str(), when(slot).c_str());
+        } else {
+            ImGui::TextDisabled("empty");
+        }
+        ImGui::PopID();
+    }
+    const BbSaves::Slot& undo = BbSaves::GetSlot(BbSaves::UndoSlot);
+    if (undo.used) {
+        ImGui::PushID("undo");
+        if (ImGui::Button("Load")) {
+            pending = Action::Load;
+            pending_slot = BbSaves::UndoSlot;
+        }
+        ImGui::SameLine();
+        ImGui::TextWrapped("Before the last load: %s%s", BbSaves::Describe(undo.checkpoint).c_str(),
+                           when(undo).c_str());
+        ImGui::PopID();
+    }
+
+    if (pending != Action::None) {
+        ImGui::Spacing();
+        const std::string name = pending_slot == BbSaves::StorySlot ? std::string("the story save")
+                                 : pending_slot == BbSaves::UndoSlot
+                                     ? std::string("the save from before the last load")
+                                     : "slot " + std::to_string(pending_slot + 1);
+        std::string question;
+        bool ask = true;
+        if (pending == Action::Store) {
+            question = "Replace what slot " + std::to_string(pending_slot + 1) + " holds with your current save?";
+            ask = BbSaves::GetSlot(pending_slot).used;
+        } else if (pending == Action::Load) {
+            question = "Load " + name + "? The game restarts and Continue starts there. Your current save is "
+                       "kept as \"Before the last load\".";
+        } else {
+            question = "Make your current save the story save?";
+        }
+        bool yes = !ask;
+        if (ask) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+            ImGui::TextWrapped("%s", question.c_str());
+            ImGui::PopStyleColor();
+            yes = ImGui::Button("Yes");
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                pending = Action::None;
+            }
+        }
+        if (yes) {
+            const Action action = pending;
+            pending = Action::None;
+            if (action == Action::Store) {
+                BbSaves::Store(pending_slot, message);
+            } else if (action == Action::Load) {
+                BbSaves::Load(pending_slot, message);  // restarts the game when it works
+            } else {
+                BbSaves::MakeStory(message);
+            }
+            refreshed = -10.0;
+        }
+    }
+    if (!message.empty()) {
+        ImGui::TextWrapped("%s", message.c_str());
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled("Copies of this game's campaign save (the one Continue loads). Treasures, unlocks "
+                       "and trophies are not changed.");
+}
+
 void Menu() {
     auto& s = BbSettings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -345,6 +482,9 @@ void Menu() {
     Hint("Changes here apply at once, for this session. The launcher's settings apply each time "
          "the game starts: set the same there to keep a change.");
 
+    ImGui::BeginTabBar("##pages");
+    const bool settings_page = ImGui::BeginTabItem("Settings");
+    if (settings_page) {
     ImGui::SeparatorText("Picture");
     ImGui::Text("Rendering %s", RenderSizeText());
     Hint("Set in the launcher (Display: Render resolution); it applies when the game starts. "
@@ -478,6 +618,14 @@ void Menu() {
             runtime_restart();
         }
     }
+    ImGui::EndTabItem();
+    }
+    // Save slots: Uncharted 1, 2 and 3 (the collection's menu has no campaign save).
+    if (BbSaves::Game() && ImGui::BeginTabItem("Save slots")) {
+        SaveSlotsPage();
+        ImGui::EndTabItem();
+    }
+    ImGui::EndTabBar();
 
     ImGui::Spacing();
     if (ImGui::Button("Close")) {

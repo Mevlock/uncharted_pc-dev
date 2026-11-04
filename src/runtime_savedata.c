@@ -159,9 +159,26 @@ static ABI int32_t save_terminate(void) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     initialized=0; return 0;
 }
+/* The overlay's save slots (gpu/shim/bbport_saves.cpp): the folder of this title's saves, whether the game has
+ * any save open right now, and a slot chosen in the overlay ("Load", which restarts the game) put back before
+ * the game opens its first save. */
+static int32_t last_user=1;
+void bbport_saves_apply_pending(void);
+void bbport_saves_closed(const char *host_dir);
+int runtime_savedata_dir(char *out, size_t size) { root(last_user,NULL,out,size); return 0; }
+int runtime_savedata_mounted(void) {
+    pthread_mutex_lock(&lock);
+    int n=0;
+    for (int i=0;i<SLOTS;++i) n+=slots[i].used;
+    pthread_mutex_unlock(&lock);
+    return n;
+}
 static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     if (user<0) return ERR_INVALID_USER;
+    static pthread_once_t pending_once=PTHREAD_ONCE_INIT;
+    last_user=user;
+    pthread_once(&pending_once,bbport_saves_apply_pending);
     if (!dir || !result || !valid_name(dir->data,sizeof(dir->data))) return ERR_PARAMETER;
     char base[600], host[640], meta[680];
     root(user,title,base,sizeof(base));
@@ -217,8 +234,11 @@ static ABI int32_t save_umount(const MountPoint *point) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     pthread_mutex_lock(&lock);
     int slot=slot_of(point);
-    if (slot>=0) { runtime_file_unmount(point->data); slots[slot].used=0; }
+    char host[700]="";
+    if (slot>=0) { runtime_file_unmount(point->data); slots[slot].used=0; snprintf(host,sizeof(host),"%s",slots[slot].host); }
     pthread_mutex_unlock(&lock);
+    /* A save closed: the overlay's story save follows the game's campaign saves (bbport_saves.cpp). */
+    if (slot>=0) bbport_saves_closed(host);
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
 static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const void *buffer, uint64_t size) {
