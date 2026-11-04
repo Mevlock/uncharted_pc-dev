@@ -432,15 +432,16 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
 }
 
 void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
-                                  vk::ImageView motion_view, u32 width, u32 height) {
+                                  vk::ImageView motion_view, u32 width, u32 height,
+                                  float jitter_scale) {
     const auto& camera = velocity_camera;
     const PushConstants push{
         .reproject = camera.to_previous_clip,
         .proj = camera.uv_to_view,
         .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], 0.0f, 0.0f},
         .size = {float(width), float(height)},
-        .jitter = jitter,
-        .previous_jitter = previous_jitter,
+        .jitter = {jitter[0] * jitter_scale, jitter[1] * jitter_scale},
+        .previous_jitter = {previous_jitter[0] * jitter_scale, previous_jitter[1] * jitter_scale},
         .mode = camera.valid && !camera.cut ? 2u : 3u,
     };
     const vk::DescriptorImageInfo depth_info{.imageView = depth_view,

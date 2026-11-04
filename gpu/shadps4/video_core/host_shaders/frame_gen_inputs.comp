@@ -10,7 +10,8 @@ layout(binding = 0) uniform texture2D depth_tex; // D32 depth aspect, render siz
 layout(binding = 1, r32f) uniform writeonly image2D depth_img;
 
 layout(push_constant) uniform Constants {
-    vec2 size; // render pixels
+    vec2 size;  // pixels written
+    vec2 scale; // render pixels per pixel written (1: the render size; more: a larger render)
 };
 
 void main() {
@@ -18,5 +19,7 @@ void main() {
     if (pixel.x >= int(size.x) || pixel.y >= int(size.y)) {
         return;
     }
-    imageStore(depth_img, pixel, vec4(texelFetch(depth_tex, pixel, 0).r, 0.0, 0.0, 0.0));
+    // A larger render: the render pixel at this pixel's centre.
+    const ivec2 source = ivec2((vec2(pixel) + 0.5) * scale);
+    imageStore(depth_img, pixel, vec4(texelFetch(depth_tex, source, 0).r, 0.0, 0.0, 0.0));
 }

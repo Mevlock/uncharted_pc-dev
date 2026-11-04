@@ -139,7 +139,7 @@ void FrameGenerator::CreatePipeline() {
         .bindingCount = u32(bindings.size()),
         .pBindings = bindings.data(),
     }));
-    const vk::PushConstantRange push{vk::ShaderStageFlagBits::eCompute, 0, 2 * sizeof(float)};
+    const vk::PushConstantRange push{vk::ShaderStageFlagBits::eCompute, 0, 4 * sizeof(float)};
     pipeline_layout = Check(device.createPipelineLayoutUnique({
         .setLayoutCount = 1,
         .pSetLayouts = &*desc_layout,
@@ -218,12 +218,31 @@ void FrameGenerator::EnsureInputs(u32 w, u32 h) {
 }
 
 vk::ImageView FrameGenerator::BeginCapture(vk::CommandBuffer cmdbuf, vk::ImageView depth, u32 w,
-                                           u32 h) {
+                                           u32 h, vk::Extent2D& capture) {
     if (!Wanted() || !depth || !w || !h) {
         return {};
     }
     CreatePipeline();
-    EnsureInputs(w, h);
+    // Larger than the frames shown, of the same shape (within 10%, as Generate checks): taken at
+    // the frame's size. Another shape stays as it is and Generate skips it.
+    u32 cw = w, ch = h;
+    if (frame_width && frame_height && (w > frame_width || h > frame_height)) {
+        const u64 frame_shape = u64(frame_width) * h, input_shape = u64(w) * frame_height;
+        const u64 diff = frame_shape > input_shape ? frame_shape - input_shape
+                                                   : input_shape - frame_shape;
+        if (diff * 10 <= frame_shape) {
+            cw = frame_width;
+            ch = frame_height;
+            static bool noted = false;
+            if (!noted) {
+                noted = true;
+                std::printf("Frame generation: render %ux%u taken at the frame's %ux%u\n", w, h,
+                            cw, ch);
+            }
+        }
+    }
+    capture = vk::Extent2D{cw, ch};
+    EnsureInputs(cw, ch);
     // Last frame's contents are not needed.
     std::array<vk::ImageMemoryBarrier2, 2> to_write{};
     for (u32 i = 0; i < 2; ++i) {
@@ -249,12 +268,28 @@ vk::ImageView FrameGenerator::BeginCapture(vk::CommandBuffer cmdbuf, vk::ImageVi
         {.dstBinding = 1, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eStorageImage,
          .pImageInfo = &depth_out},
     }};
-    const std::array<float, 2> size{float(w), float(h)};
+    // The size written and the render pixels per pixel written.
+    const std::array<float, 4> size{float(cw), float(ch), float(w) / float(cw),
+                                    float(h) / float(ch)};
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0, writes);
     cmdbuf.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(size),
                          size.data());
-    cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    cmdbuf.dispatch((cw + 7) / 8, (ch + 7) / 8, 1);
+    if (cw != w || ch != h) {
+        // The motion vectors are written next from this copy.
+        const vk::ImageMemoryBarrier2 depth_ready{
+            .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = vk::Image(depth_image),
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &depth_ready});
+    }
     return *motion_view;
 }
 
@@ -458,6 +493,8 @@ u32 FrameGenerator::Generate(vk::CommandBuffer cmdbuf, vk::Image color, vk::Imag
     // created for that frame and lost the device at its first evaluation (U3 title screen,
     // Balanced, 2x). The upscaled modes keep the shape within a few percent (the
     // render height rounds to 32), a 16:9 frame over a 21:9 scene is 34% off.
+    frame_width = width;
+    frame_height = height;
     const u64 frame_shape = u64(width) * input_height;
     const u64 input_shape = u64(input_width) * height;
     const bool other_shape = (frame_shape > input_shape ? frame_shape - input_shape

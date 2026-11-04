@@ -77,8 +77,10 @@ public:
     }
     /// Records the motion vector pass from the velocity pass's camera into `motion_view`
     /// (RG16F storage, General), pixels, previous minus current; zero without that camera.
+    /// `jitter_scale`: pixels written per render pixel (motion written below the render size).
     void RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
-                        vk::ImageView motion_view, u32 width, u32 height);
+                        vk::ImageView motion_view, u32 width, u32 height,
+                        float jitter_scale = 1.0f);
     [[nodiscard]] VideoCore::ImageId Depth() const noexcept {
         return depth_id;
     }
