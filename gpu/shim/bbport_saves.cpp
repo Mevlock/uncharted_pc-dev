@@ -404,11 +404,11 @@ bool Practising() {
     return runtime_checkpoint_practice() != 0;
 }
 
-bool Jump(const Checkpoint& target, std::string& message) {
+bool StartPractice(std::string& message) {
     std::lock_guard guard(lock);
     const int game = Game();
-    if (!game || !target.known || !JumpsAvailable()) {
-        message = "Checkpoint jumps work in Uncharted 3 for now.";
+    if (!game) {
+        message = "Practice mode is only for Uncharted 1, 2 and 3.";
         return false;
     }
     if (!Practising()) {
@@ -429,8 +429,51 @@ bool Jump(const Checkpoint& target, std::string& message) {
         runtime_checkpoint_set_practice(1);
         std::printf("Checkpoints: practice mode on (campaign saves go to %s)\n", Utf8(practice).c_str());
     }
+    return true;
+}
+
+bool Jump(const Checkpoint& target, std::string& message) {
+    std::lock_guard guard(lock);
+    if (!Game() || !target.known || !JumpsAvailable()) {
+        message = "Checkpoint jumps work in Uncharted 3 for now.";
+        return false;
+    }
+    if (!StartPractice(message)) {
+        return false;
+    }
     runtime_checkpoint_request(target.task);
     message = "Going to " + Describe(target) + "...";
+    return true;
+}
+
+bool KeepPractice(std::string& message) {
+    std::lock_guard guard(lock);
+    const int game = Game();
+    std::error_code ec;
+    if (!game || !Practising() ||
+        !fs::exists(GameBackups(game) / "practice" / SlotName(game) / "USR-DATA", ec)) {
+        message = "Nothing to keep yet: the game has not saved since the jump.";
+        return false;
+    }
+    if (runtime_savedata_mounted()) {
+        message = "The game is saving: try again in a moment.";
+        return false;
+    }
+    // The player's save as it was goes to "Before the last load" (undo), then the restart puts the practice save
+    // in its place and makes it the story save (bbport_saves_apply_pending).
+    if (!Store(UndoSlot, message)) {
+        return false;
+    }
+    std::ofstream pending(PendingFile(game));
+    pending << "u" << game << " practice\n";
+    pending.close();
+    if (!pending) {
+        message = "Could not write the request.";
+        return false;
+    }
+    std::printf("Checkpoints: keeping the practice save, restarting\n");
+    std::fflush(stdout);
+    runtime_restart();
     return true;
 }
 
@@ -501,11 +544,29 @@ void ApplyPending(int game) {
     if (ok && folder == "story") {
         WriteStory(game, ReadCheckpoint(game, saves / name).task, true);
     }
+    // Keep this progress: the practice save is the player's save now, and their story from here on.
+    if (ok && folder == "practice") {
+        std::string story_error;
+        if (CopyCampaign(game, BbSaves::StorySlot, story_error)) {
+            WriteStory(game, ReadCheckpoint(game, saves / name).task, true);
+        }
+        fs::remove_all(from, ec);
+    }
     std::printf("Save slots: %s %s\n", Utf8(from).c_str(),
                 ok ? "restored as the campaign save" : ("NOT restored: " + error).c_str());
 }
 
 } // namespace
+
+// runtime_checkpoint.c (BB_CHECKPOINT_TEST): practice mode on, with its copy, before a test jump.
+extern "C" int bbport_saves_start_practice(void) {
+    std::string message;
+    const bool ok = BbSaves::StartPractice(message);
+    if (!ok) {
+        std::printf("Checkpoints: %s\n", message.c_str());
+    }
+    return ok;
+}
 
 // runtime_savedata.c, before the game's first save mount: a slot chosen with Load is put back now, and a player
 // without a story save gets one from the campaign save as it is, before this session writes anything (a first

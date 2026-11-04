@@ -359,6 +359,28 @@ void CheckpointsPage() {
         ImGui::TextWrapped("Practice mode: the game saves to a practice copy until you restart it. Your own save "
                            "and story save are not touched.");
         ImGui::PopStyleColor();
+        static bool confirm_keep = false;
+        if (!confirm_keep) {
+            if (ImGui::Button("Keep this progress")) {
+                confirm_keep = true;
+            }
+            Hint("To carry on from here for real (for example past a place that does not work): the game "
+                 "restarts and Continue starts at the practice save, which becomes your save and your story "
+                 "save. Your save from before is kept in Save slots as \"Before the last load\".");
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+            ImGui::TextWrapped("Make the practice save your save? The game restarts and Continue starts there. "
+                               "Your save from before is kept as \"Before the last load\".");
+            ImGui::PopStyleColor();
+            if (ImGui::Button("Yes, keep it")) {
+                confirm_keep = false;
+                BbSaves::KeepPractice(message);  // restarts the game when it works
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) {
+                confirm_keep = false;
+            }
+        }
     } else {
         ImGui::TextDisabled("Jumping turns on practice mode: until the game restarts, it saves to a practice copy, "
                             "not to your own save.");

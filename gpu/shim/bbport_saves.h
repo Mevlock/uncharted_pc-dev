@@ -53,8 +53,13 @@ std::vector<Checkpoint> Checkpoints();
 bool JumpsAvailable();
 // Practice mode is on: the game saves to a practice copy until it restarts.
 bool Practising();
+// Practice mode on: the campaign save copied to the practice folder, where the game saves until it restarts.
+bool StartPractice(std::string& message);
 // Jumps the running game to a checkpoint at its next frame. The first jump turns practice mode on.
 bool Jump(const Checkpoint& target, std::string& message);
+// Ends practice mode keeping its progress: the game restarts with the practice save as the campaign save and the
+// story save (the player's save from before goes to "Before the last load").
+bool KeepPractice(std::string& message);
 // The outcome of the last jump once the game ran it: 1 done, -1 no such task, -2 not supported, 0 nothing new.
 int JumpResult();
 // "Checkpoint 57 · valve-room-entrance · Chapter 4 Run to Ground"

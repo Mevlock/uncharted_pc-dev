@@ -13,7 +13,9 @@
 #include "runtime.h"
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct {
     const char *name;
@@ -47,8 +49,34 @@ int runtime_checkpoint_available(void) { return atomic_load(&hooked); }
 typedef void *(__attribute__((sysv_abi)) *FindTaskById)(void *mgr, uint32_t id);
 typedef void (__attribute__((sysv_abi)) *PlayTask)(void *task, int mode, int *fade_frames, int flag);
 
+int bbport_saves_start_practice(void); /* gpu/shim/bbport_saves.cpp: the practice copy, then practice mode on */
+
+/* BB_CHECKPOINT_TEST=<task id hex>@<seconds> (tests): one jump that many seconds after the first frame
+ * this hook saw, as if picked in the overlay (practice mode too: the campaign save is not touched). */
+static void test_request(void) {
+    static int state;  /* 0 unread, 1 waiting, 2 done or off */
+    static uint32_t task;
+    static double due;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC,&now);
+    const double t=now.tv_sec+now.tv_nsec*1e-9;
+    if (state==0) {
+        const char *e=getenv("BB_CHECKPOINT_TEST");
+        unsigned seconds=60;
+        state=e && sscanf(e,"%x@%u",&task,&seconds)>=1 && task ? 1 : 2;
+        due=t+seconds;
+        if (state==1) printf("Checkpoints: test jump to task %08x in %u s (BB_CHECKPOINT_TEST)\n",task,seconds);
+    }
+    if (state==1 && t>=due) {
+        state=2;
+        if (bbport_saves_start_practice()) atomic_store(&requested,task);
+        else printf("Checkpoints: test jump not made (practice mode could not start)\n");
+    }
+}
+
 static void frame(const Build *b, uint64_t image) {
     atomic_store(&hooked,1);
+    test_request();
     const uint32_t task=atomic_exchange(&requested,0);
     if (!task) return;
     unsigned char *base=(unsigned char *)(uintptr_t)image;
