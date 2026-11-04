@@ -591,6 +591,19 @@ TRANSLATIONS = {
     'Preparing pipelines %u / %u%s': L('Preparando pipelines %u / %u%s', 'Preparando pipelines %u / %u%s',
                                        'Préparation des pipelines %u / %u%s', 'Pipelines werden vorbereitet %u / %u%s',
                                        'Preparazione delle pipeline %u / %u%s', 'パイプラインを準備中 %u / %u%s'),
+    'Your graphics driver is compiling the shaders again (after a driver update or when its cache was cleared). The '
+    'game continues when this is done.': L(
+        'El driver gráfico está compilando los shaders de nuevo (tras actualizarlo o borrar su caché). El juego '
+        'continúa al terminar.',
+        'O driver gráfico está compilando os shaders de novo (após uma atualização ou com o cache dele apagado). O '
+        'jogo continua quando terminar.',
+        'Le pilote graphique compile à nouveau les shaders (après une mise à jour ou un cache vidé). Le jeu reprend '
+        'une fois terminé.',
+        'Der Grafiktreiber kompiliert die Shader erneut (nach einem Treiberupdate oder geleertem Cache). Das Spiel geht '
+        'danach weiter.',
+        'Il driver grafico sta compilando di nuovo gli shader (dopo un aggiornamento o con la sua cache svuotata). Il '
+        'gioco riprende al termine.',
+        'グラフィックドライバーがシェーダーを再びコンパイルしています（ドライバーの更新後やキャッシュの削除後）。完了するとゲームが続きます。'),
     'This happens once, before your first launch. Later launches start straight away.': L(
         'Esto ocurre una vez, antes del primer inicio. Los siguientes inicios empiezan al momento.',
         'Isso acontece uma vez, antes da primeira inicialização. As próximas começam na hora.',

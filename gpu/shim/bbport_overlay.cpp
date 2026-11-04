@@ -1316,6 +1316,12 @@ static std::string ScanEta(u32 done, u32 total) {
 
 static const char* const ScanStep = N_("Step 1 of 2: finding the shaders in your game files (only this once)");
 
+static std::atomic<bool> prep_rebuild{false};
+
+void SetPreparationRebuild(bool on) {
+    prep_rebuild.store(on, std::memory_order_release);
+}
+
 void SetPreparationScreen(bool on) {
     prep_screen.store(on, std::memory_order_release);
     runtime_freeze_guest(on ? 1 : 0); // the game's threads wait for the page (runtime.h; BB_PREP_FREEZE=0: they run)
@@ -1449,7 +1455,11 @@ void FullScreenPreparation() {
     ImGui::SetCursorPosY(h * 0.36f);
     centered(T("Preparing shaders"), 2.4f, white);
     ImGui::Dummy(ImVec2(0.0f, 8.0f * base_scale));
-    centered(T("This happens once, before your first launch. Later launches start straight away."), 1.15f, grey);
+    centered(prep_rebuild.load(std::memory_order_acquire)
+                 ? T("Your graphics driver is compiling the shaders again (after a driver update or when its "
+                     "cache was cleared). The game continues when this is done.")
+                 : T("This happens once, before your first launch. Later launches start straight away."),
+             1.15f, grey);
     ImGui::Dummy(ImVec2(0.0f, 28.0f * base_scale));
 
     const char* step = phase == 3   ? T("Step 1 of 2: loading shaders")

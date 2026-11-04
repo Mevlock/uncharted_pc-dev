@@ -52,6 +52,9 @@ void SetScanProgress(u32 done_mib, u32 total_mib);
 /// Any thread: the full-screen preparation page instead of the corner box. While it is on, the presenter shows blank
 /// frames with the page and holds the game's flips (the game waits at its first frames until preparation is done).
 void SetPreparationScreen(bool on);
+/// The page shown on a later launch: the graphics driver compiles the shaders again (its own cache was reset, e.g.
+/// after a driver update), so the page says why instead of "this happens once".
+void SetPreparationRebuild(bool on);
 bool PreparationScreenActive();
 
 /// Preparation without a window (BB_PREPARE_ONLY, the launcher's Prepare shaders button): the warm-up thread marks

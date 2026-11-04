@@ -40,6 +40,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "bbport_focus_fix.h"
+extern "C" void runtime_freeze_guest(int on); // runtime.h: the game's threads wait (1) or go on (0)
 #include "bbport_nan_guard.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
@@ -2345,14 +2346,54 @@ void PipelineCache::WarmUpThread() {
     };
     // bbport: a large cache (a prepared list) shows the same "Preparing pipelines" progress as the list build.
     if (stored.size() >= 500) {
+        // A later launch (no page) builds these behind the game. With the graphics driver's own cache warm that takes
+        // about a second; with it cold (a driver update, the driver's cache cleared or full) it took 25-35 s for
+        // Uncharted 3, the game reached play first and built ~140 of them itself on its drawing thread (a slump of
+        // several seconds right after the start). So the game's threads wait while they are built (as for the page;
+        // BB_PREP_HOLD=0: they run), and when the rest would take more than 3 s the page shows, saying why.
+        static const bool hold_allowed = [] {
+            const char* env = std::getenv("BB_PREP_HOLD");
+            return !(env && env[0] == '0');
+        }();
+        const bool hold = !prep_screen && !prepare_only && hold_allowed;
+        if (hold) {
+            runtime_freeze_guest(1);
+        }
+        const auto hold_start = std::chrono::steady_clock::now();
+        std::atomic<bool> page_raised{false};
         BbOverlay::SetShaderPreparation(2, 0, u32(stored.size()));
         std::atomic<u32> stored_done{0};
         ParallelFor(stored.size(), threads, [&](size_t i) {
             build_stored(i);
-            BbOverlay::SetShaderPreparation(2, stored_done.fetch_add(1, std::memory_order_relaxed) + 1,
-                                            u32(stored.size()));
+            const u32 done = stored_done.fetch_add(1, std::memory_order_relaxed) + 1;
+            BbOverlay::SetShaderPreparation(2, done, u32(stored.size()));
+            if (hold && !page_raised.load(std::memory_order_relaxed) && done % 64 == 0) {
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                                            hold_start)
+                                      .count();
+                const double left_ms = ms / done * double(stored.size() - done);
+                if (ms > 1000.0 && left_ms > 3000.0 && !page_raised.exchange(true)) {
+                    std::printf("Preparation: the graphics driver compiles the shaders again (%u of %zu pipelines in "
+                                "%.0f ms, about %.0f s left): the page shows\n",
+                                done, stored.size(), ms, left_ms / 1000.0);
+                    BbOverlay::SetPreparationRebuild(true);
+                    BbOverlay::SetPreparationScreen(true);
+                }
+            }
         });
         BbOverlay::SetShaderPreparation(0, 0, 0);
+        if (hold) {
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hold_start)
+                                  .count();
+            std::printf("Preparation: the game waited %.0f ms for %zu stored pipelines%s\n", ms, stored.size(),
+                        page_raised.load() ? " (page shown)" : "");
+            if (page_raised.load()) {
+                BbOverlay::SetPreparationScreen(false);
+                BbOverlay::SetPreparationRebuild(false);
+            } else {
+                runtime_freeze_guest(0);
+            }
+        }
     } else {
         ParallelFor(stored.size(), threads, build_stored);
     }
