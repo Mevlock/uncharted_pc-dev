@@ -1,0 +1,202 @@
+/* "Quit" in the games' main menus: one more item, last, that closes the game (like any PC game). Its label is the
+ * games' own "Quit" text (text id 0xa0be106d, in every language the games ship), so it follows the game's language.
+ *
+ * Uncharted 1 (EU 1.00 and 1.02 code) builds its menu pages in code, each page with its own item list
+ * (page+0xa0, count at page+0x98): the hook at the start of AddToPage notes the main menu's last item, Load Game
+ * (id 0x18, label text 0x7c894f27), and at the next AddToPage call (the game goes on building its other pages)
+ * appends a Quit item (AddItem with id 0x7e00, which no menu uses) to that page. The menu's item handler
+ * (a switch on the item id) is hooked at its start: id 0x7e00 ends the game through runtime_quit, after a save
+ * that is being written has finished. */
+#include "runtime.h"
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <stdlib.h>
+
+#define QUIT_ID 0x7e00u
+#define QUIT_TEXT 0xa0be106du
+#define LOAD_GAME_ID 0x18u
+#define LOAD_GAME_TEXT 0x7c894f27u
+
+typedef struct {
+    const char *name;
+    uint64_t add_item, alloc;
+} U1Build;
+static const U1Build u1_builds[]={
+    {"Uncharted 1 EU",0x129ed0,0x35dbb0},
+    {"Uncharted 1 1.02",0x12a020,0x4542b0},
+};
+
+typedef void *(__attribute__((sysv_abi)) *Alloc)(uint64_t size);
+typedef void (__attribute__((sysv_abi)) *AddItem)(void *item, void *owner, uint32_t id, void *label, uint32_t flags);
+typedef void (__attribute__((sysv_abi)) *AddToPage)(void *page, void *item);
+
+/* BB_EXIT_TEXT=<hex text id> (tests): another label text for the Quit item. */
+static uint32_t quit_text(void) {
+    static uint32_t text;
+    if (!text) {
+        const char *e=getenv("BB_EXIT_TEXT");
+        unsigned v=0;
+        text=e && sscanf(e,"%x",&v)==1 && v ? v : QUIT_TEXT;
+        if (text!=QUIT_TEXT) printf("Exit menu: label text %08x (BB_EXIT_TEXT)\n",text);
+    }
+    return text;
+}
+
+static unsigned char *pending_page, *pending_owner, *pending_text_source;
+static int adding, added;
+
+static void u1_add_to_page(const U1Build *b, uint64_t image, unsigned char *page, unsigned char *item,
+                           uint64_t add_to_page) {
+    if (adding) return;  /* our own AddToPage call below */
+    if (pending_page && !added && page!=pending_page) {
+        /* The main menu is complete (the game moved on to another page): Quit goes last. */
+        unsigned char *quit=((Alloc)(uintptr_t)(image+b->alloc))(0x108);
+        unsigned char *label=((Alloc)(uintptr_t)(image+b->alloc))(0x18);
+        if (quit && label) {
+            memset(label,0,0x18);
+            memcpy(label,&pending_text_source,sizeof(pending_text_source));
+            const uint64_t text=quit_text();
+            memcpy(label+8,&text,sizeof(text));
+            ((AddItem)(uintptr_t)(image+b->add_item))(quit,pending_owner,QUIT_ID,label,0);
+            adding=1;
+            ((AddToPage)(uintptr_t)(image+add_to_page))(pending_page,quit);
+            adding=0;
+            added=1;
+            int32_t count;
+            memcpy(&count,pending_page+0x98,4);
+            printf("Exit menu: %s: Quit added to the main menu (%d items)\n",b->name,count);
+        }
+        pending_page=NULL;
+    }
+    if (!item || added || pending_page) return;
+    uint32_t id, text;
+    unsigned char *label;
+    memcpy(&id,item+0xa8,4);
+    memcpy(&label,item+8,sizeof(label));
+    if (id!=LOAD_GAME_ID || !label) return;
+    memcpy(&text,label+8,4);
+    if (text!=LOAD_GAME_TEXT) return;
+    pending_page=page;
+    memcpy(&pending_owner,item+0xa0,sizeof(pending_owner));
+    memcpy(&pending_text_source,label,sizeof(pending_text_source));
+}
+
+/* Ends the game from its menu: a save being written finishes first (at most 5 s). */
+static void quit_from_menu(const char *game) {
+    printf("Exit menu: %s: Quit picked, closing the game\n",game);
+    fflush(stdout);
+    for (int i=0;i<100 && runtime_savedata_mounted();++i) {
+        struct timespec pause={0,50*1000*1000};
+        nanosleep(&pause,NULL);
+    }
+    runtime_quit(0);
+}
+
+void __attribute__((ms_abi)) runtime_exit_menu_u1_eu_add(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                         const uint64_t *regs) {
+    (void)r14; (void)regs;
+    u1_add_to_page(&u1_builds[0],image,(unsigned char *)(uintptr_t)rdi,(unsigned char *)(uintptr_t)rsi,0x132d70);
+}
+void __attribute__((ms_abi)) runtime_exit_menu_u1_us_add(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                         const uint64_t *regs) {
+    (void)r14; (void)regs;
+    u1_add_to_page(&u1_builds[1],image,(unsigned char *)(uintptr_t)rdi,(unsigned char *)(uintptr_t)rsi,0x132f00);
+}
+void __attribute__((ms_abi)) runtime_exit_menu_u1_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                          const uint64_t *regs) {
+    (void)rdi; (void)image; (void)r14; (void)regs;
+    if ((uint32_t)rsi==QUIT_ID) quit_from_menu("Uncharted 1");
+}
+
+/* Uncharted 2 and 3 load their menus from data (dc1/ps4/menu.bin): pages {.., u32 sid at +8, item header at +0x38
+ * (U2) / +0x48 (U3)}, item header {u32 count; Item *items}, items {name, u32 id at +8, type at +0x10, label name at
+ * +0x20, u32 label sid at +0x28, target page sid at +0x50 (0: the item goes to the menu handler)}. Right after the
+ * game looks up the "menu" data (the hook is on the store of its pointer, rax), the main menu page (PAGE_PROFILE,
+ * sid 0x82d5c00b) gets a new item list: its items and, last, a copy of LOADGAME (0xf7a5b490) as BUTTON_QUIT_GAME
+ * (id 0x3a1a91cf, no target page) labelled with the games' "Quit" (0xa0be106d). The game then builds the item
+ * itself like its own. The menu handler (host, id, ...) is hooked at its start: that id closes the game. */
+#include <stdlib.h>
+
+#define DC_QUIT_ID 0x3a1a91cfu
+#define DC_PROFILE_PAGE 0x82d5c00bu
+#define DC_LOADGAME_ID 0xf7a5b490u
+
+typedef struct {
+    const char *name;
+    size_t page_stride, page_items, item_stride;
+} DcLayout;
+static const DcLayout dc_u2={"Uncharted 2",0x70,0x38,0x70}, dc_u3={"Uncharted 3",0x80,0x48,0x68};
+static const char dc_quit_name[]="BUTTON_QUIT_GAME", dc_quit_label[]="BP_MENU_SPEEDRUN_QUIT";
+
+static void dc_add_quit(const DcLayout *l, unsigned char *menu) {
+    if (!menu) return;
+    uint32_t pages;
+    unsigned char *page_array;
+    memcpy(&pages,menu,4);
+    memcpy(&page_array,menu+8,sizeof(page_array));
+    if (!page_array || pages>4096) return;
+    for (uint32_t p=0;p<pages;++p) {
+        unsigned char *page=page_array+(size_t)p*l->page_stride, *header;
+        uint32_t sid;
+        memcpy(&sid,page+8,4);
+        if (sid!=DC_PROFILE_PAGE) continue;
+        memcpy(&header,page+l->page_items,sizeof(header));
+        if (!header) return;
+        uint32_t count;
+        unsigned char *items;
+        memcpy(&count,header,4);
+        memcpy(&items,header+8,sizeof(items));
+        if (!items || count==0 || count>256) return;
+        const unsigned char *load_game=NULL;
+        for (uint32_t i=0;i<count;++i) {
+            uint32_t id;
+            memcpy(&id,items+(size_t)i*l->item_stride+8,4);
+            if (id==DC_QUIT_ID) return;  /* already there (the data looked up again) */
+            if (id==DC_LOADGAME_ID) load_game=items+(size_t)i*l->item_stride;
+        }
+        if (!load_game) { printf("Exit menu: %s: no Load Game item on the main menu; no Quit\n",l->name); return; }
+        /* Kept for the life of the process: the game keeps pointers to its item records. */
+        unsigned char *copy=calloc((size_t)count+1,l->item_stride), *new_header=calloc(1,16);
+        if (!copy || !new_header) { free(copy); free(new_header); return; }
+        memcpy(copy,items,(size_t)count*l->item_stride);
+        unsigned char *quit=copy+(size_t)count*l->item_stride;
+        memcpy(quit,load_game,l->item_stride);
+        const char *name=dc_quit_name, *label=dc_quit_label;
+        const uint32_t id=DC_QUIT_ID, label_sid=quit_text(), no_target=0;
+        memcpy(quit,&name,sizeof(name));
+        memcpy(quit+8,&id,4);
+        memcpy(quit+0x20,&label,sizeof(label));
+        memcpy(quit+0x28,&label_sid,4);
+        memcpy(quit+0x50,&no_target,4);
+        const uint32_t new_count=count+1;
+        memcpy(new_header,&new_count,4);
+        memcpy(new_header+8,&copy,sizeof(copy));
+        memcpy(page+l->page_items,&new_header,sizeof(new_header));
+        printf("Exit menu: %s: Quit added to the main menu (%u items)\n",l->name,new_count);
+        return;
+    }
+}
+
+/* regs: rbx r11 r10 r9 r8 rdx rcx rax rflags: the menu data's pointer is in rax (regs[7]). */
+void __attribute__((ms_abi)) runtime_exit_menu_u2_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                       const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)image; (void)r14;
+    dc_add_quit(&dc_u2,(unsigned char *)(uintptr_t)regs[7]);
+}
+void __attribute__((ms_abi)) runtime_exit_menu_u3_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                       const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)image; (void)r14;
+    dc_add_quit(&dc_u3,(unsigned char *)(uintptr_t)regs[7]);
+}
+void __attribute__((ms_abi)) runtime_exit_menu_u2_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                          const uint64_t *regs) {
+    (void)rdi; (void)image; (void)r14; (void)regs;
+    if ((uint32_t)rsi==DC_QUIT_ID) quit_from_menu("Uncharted 2");
+}
+void __attribute__((ms_abi)) runtime_exit_menu_u3_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                          const uint64_t *regs) {
+    (void)rdi; (void)image; (void)r14; (void)regs;
+    if ((uint32_t)rsi==DC_QUIT_ID) quit_from_menu("Uncharted 3");
+}

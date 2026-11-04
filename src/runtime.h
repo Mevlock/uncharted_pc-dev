@@ -101,6 +101,22 @@ uintptr_t runtime_savedata_resolve(const char *name);
 void runtime_trophy_configure(const char *dir);
 uintptr_t runtime_trophy_resolve(const char *name);
 void runtime_savedata_report(void);
+int runtime_savedata_mounted(void);
+/* "Quit" in the games' main menus (runtime_exit_menu.c). */
+void __attribute__((ms_abi)) runtime_exit_menu_u1_eu_add(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                         const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_exit_menu_u1_us_add(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                         const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_exit_menu_u1_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                          const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_exit_menu_u2_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+    const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_exit_menu_u3_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+    const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_exit_menu_u2_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+    const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_exit_menu_u3_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+    const uint64_t *regs);
 /* Checkpoint jumps (runtime_checkpoint.c): the overlay asks for a task, the frame hook runs the game's own jump;
  * practice mode sends the campaign save to a practice copy until the game restarts. */
 void runtime_checkpoint_request(uint32_t task);
