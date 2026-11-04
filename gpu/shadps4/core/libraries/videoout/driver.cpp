@@ -974,7 +974,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
             if (!request) {
                 if (timer.GetTotalWait().count() < 0) { // Dont draw too fast
-                    if (!main_port.is_open) {
+                    // bbport: the page over a later launch's wait (the game held after it opened its video port,
+                    // vk_pipeline_serialization.cpp): no flips come, so blank frames carry the page (opaque).
+                    if (!main_port.is_open || BbOverlay::PreparationScreenActive()) {
                         DrawBlankFrame();
                     } else if (ImGui::Core::MustKeepDrawing()) {
                         DrawLastFrame();
