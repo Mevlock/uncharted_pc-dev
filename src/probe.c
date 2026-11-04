@@ -330,6 +330,49 @@ static DWORD WINAPI stack_dump_after(void *unused) {
     runtime_dump_thread_stacks("BB_STACK_DUMP_AFTER");
     return 0;
 }
+/* An address in committed executable memory (a return address candidate). */
+static int executable_address(uintptr_t address) {
+    MEMORY_BASIC_INFORMATION m;
+    if (address<0x10000 || !VirtualQuery((const void *)address,&m,sizeof(m)) || m.State!=MEM_COMMIT) return 0;
+    return (m.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))!=0;
+}
+/* user/crash.dmp (threads, modules, stacks and the memory they point at, no full memory: the
+ * guest maps gigabytes; about 2-5 MB): a player's crash can be read with a debugger. dbghelp is
+ * loaded at start (not in a crashed process); a helper thread writes the dump and gets 15 s, so
+ * a lock held by the faulting code (heap, loader) costs the dump, never a hung process.
+ * BB_NO_CRASH_DUMP=1: none. (Upstream 0.3.12, Jhojan Jimenez.) */
+typedef BOOL (WINAPI *MiniDumpWriteDumpFn)(HANDLE,DWORD,HANDLE,int,const void *,const void *,const void *);
+static MiniDumpWriteDumpFn crash_dump_write;
+static char crash_dump_path[MAX_PATH];
+/* MINIDUMP_EXCEPTION_INFORMATION is 4-byte packed (dbghelp.h, pshpack4): with natural alignment
+ * the pointer sits 4 bytes off and MiniDumpWriteDump fails. */
+#pragma pack(push,4)
+static struct { DWORD thread; EXCEPTION_POINTERS *pointers; BOOL client; } crash_exception;
+#pragma pack(pop)
+static void crash_dump_configure(const char *user) {
+    if (getenv("BB_NO_CRASH_DUMP")) return;
+    snprintf(crash_dump_path,sizeof(crash_dump_path),"%s\\crash.dmp",user);
+    HMODULE dbghelp=LoadLibraryA("dbghelp.dll");
+    if (dbghelp) crash_dump_write=(MiniDumpWriteDumpFn)(void *)GetProcAddress(dbghelp,"MiniDumpWriteDump");
+}
+static DWORD WINAPI crash_dump_thread(void *unused) {
+    (void)unused;
+    HANDLE file=CreateFileA(crash_dump_path,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);
+    if (file==INVALID_HANDLE_VALUE) return 1;
+    /* MiniDumpWithIndirectlyReferencedMemory | WithUnloadedModules | WithProcessThreadData | WithThreadInfo */
+    const BOOL ok=crash_dump_write(GetCurrentProcess(),GetCurrentProcessId(),file,0x40|0x20|0x100|0x1000,&crash_exception,NULL,NULL);
+    CloseHandle(file);
+    return ok ? 0 : 2;
+}
+static void write_crash_dump(EXCEPTION_POINTERS *info) {
+    if (!crash_dump_write) return;
+    crash_exception.thread=GetCurrentThreadId(); crash_exception.pointers=info; crash_exception.client=FALSE;
+    HANDLE helper=CreateThread(NULL,0,crash_dump_thread,NULL,0,NULL);
+    DWORD code=3;
+    if (helper && WaitForSingleObject(helper,15000)==WAIT_OBJECT_0) GetExitCodeThread(helper,&code);
+    if (code==0) fprintf(stderr,"Crash dump: %s\n",crash_dump_path);
+    else fprintf(stderr,"Crash dump: not written (%s)\n",code==1 ? "cannot create the file" : code==2 ? "dbghelp failed" : "timed out");
+}
 static int fatal_reported;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
@@ -387,15 +430,28 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
             for (int i=0;i<48;++i) fprintf(stderr,"%s%02x",i%8?"":" ",entry[i]);
         fprintf(stderr,"\n");
     }
-    /* The stack words at rsp that point into code: a jump to a bad address leaves its caller's
-     * return address there, which the rbp chain below skips. */
-    for (int i=0;i<16;++i) {
-        uint64_t word=0;
-        SIZE_T got=0;
-        if (!ReadProcessMemory(GetCurrentProcess(),(void *)(uintptr_t)(c->Rsp+8*i),&word,8,&got) || got!=8) break;
-        if (image && word-(uint64_t)(uintptr_t)image<0x4000000) {
+    /* The stack words at rsp that point into code, guest or host (drivers, the port): a jump to a
+     * bad address leaves its caller's return address there, which the rbp chain below skips, and
+     * host code without frame pointers has no chain. Return address candidates, not a verified
+     * call chain; bounded by the thread's stack (fibers set the TEB's to their own). Host part
+     * from upstream 0.3.12 (Jhojan Jimenez). */
+    {
+        uintptr_t top, limit; /* NT_TIB StackBase, StackLimit */
+        __asm__ volatile("mov %%gs:8,%0\n mov %%gs:16,%1" : "=r"(top), "=r"(limit));
+        const uintptr_t sp=(uintptr_t)c->Rsp&~(uintptr_t)7;
+        if (sp<limit || sp>=top || top-sp>32768) top=sp+32768;
+        uint64_t last=0;
+        int shown=0;
+        for (uintptr_t at=sp; at<top && shown<24; at+=8) {
+            uint64_t word=0;
+            SIZE_T got=0;
+            if (!ReadProcessMemory(GetCurrentProcess(),(void *)at,&word,8,&got) || got!=8) break;
+            if (word==last) continue;
+            const int guest=image && word-(uint64_t)(uintptr_t)image<0x4000000;
+            if (!guest && !executable_address((uintptr_t)word)) continue;
             describe_address(where,sizeof(where),(uintptr_t)word);
-            fprintf(stderr,"  [rsp+%#x] %s\n",8*i,where);
+            fprintf(stderr,"  [rsp+%#llx] %s\n",(unsigned long long)(at-(uintptr_t)c->Rsp),where);
+            last=word; ++shown;
         }
     }
     /* rbp chain (guest and host code keep frame pointers). */
@@ -408,6 +464,8 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         fprintf(stderr,"  #%d %s\n",depth,where);
         rbp=frame[0];
     }
+    fflush(NULL);
+    write_crash_dump(info);
     fflush(NULL);
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
@@ -1909,6 +1967,9 @@ int main(int argc, char **argv) {
     }
     if (app0) {
         runtime_file_configure(app0, user_dir ? user_dir : "user");
+#ifdef _WIN32
+        crash_dump_configure(user_dir ? user_dir : "user");
+#endif
         _putenv_s("BB_APP0_DIR", app0); /* the GPU side reads shader code from the game files (variant replay) */
         char sfo[4096], id[16]="";
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);

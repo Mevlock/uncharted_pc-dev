@@ -168,6 +168,28 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                       DEFAULT_CRITICAL_GC_MEMORY));
     trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
+    // bbport (mato215, upstream 0.3.12, from the Bloodborne port): below 8 GB the pressure mark
+    // above is 40% of the budget (2.5 GB of the 6.3 GB an 8 GB laptop card reports), under what
+    // the game holds outside textures: such cards were past it all session and evicted textures
+    // they still used, uploading them again. 60% of the budget (BB_GC_PRESSURE_PERCENT, 10-75),
+    // kept under the critical mark. Cards whose live budget is under 5.5 GB use the live marks of
+    // GarbageCollectImages instead (tight_budget).
+    if (device_local_memory < TARGET_GC_THRESHOLD) {
+        static const s64 percent = [] {
+            const char* env = std::getenv("BB_GC_PRESSURE_PERCENT");
+            return std::clamp<s64>(env ? std::strtoll(env, nullptr, 10) : 60, 10, 75);
+        }();
+        const u64 mark = static_cast<u64>(device_local_memory / 100 * percent);
+        pressure_gc_memory = std::min(std::max(pressure_gc_memory, mark), critical_gc_memory);
+    }
+    // bbport: the marks in the log, so a player's log tells where eviction starts on that card.
+    std::printf("Texture cache: VRAM budget %lld MiB; marks: collect %llu, pressure %llu, critical "
+                "%llu MiB%s\n",
+                static_cast<long long>(device_local_memory >> 20),
+                static_cast<unsigned long long>(trigger_gc_memory >> 20),
+                static_cast<unsigned long long>(pressure_gc_memory >> 20),
+                static_cast<unsigned long long>(critical_gc_memory >> 20),
+                tight_budget ? " (live marks)" : "");
 }
 
 TextureCache::~TextureCache() = default;

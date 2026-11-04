@@ -193,8 +193,10 @@ def main():
     env.setdefault('BB_UPSCALE_BEFORE_CS', 'aec539f0')
     env.setdefault('BB_HUDLESS_PS', '484cdbf5')
     # Full-screen passes that rebuild positions from the jittered scene depth get the upscaler's
-    # jitter too: U1's sun shadow pass (kj2223's fork; without it its shadows flickered).
-    env.setdefault('BB_JITTER_PS', 'f614041e')
+    # jitter too: U1's sun shadow pass (kj2223's fork; without it its shadows flickered), U1's
+    # boat details and U3's London bar surfaces drawn against secondary scene depth (Alex,
+    # upstream 0.3.12; they flickered too).
+    env.setdefault('BB_JITTER_PS', 'f614041e,b2a42acf,1a08df2d')
     if not env.get('BB_FSR411_DIR') and not (PORT / 'fsr4_411').is_dir() and (data / 'fsr4_411').is_dir():
         env['BB_FSR411_DIR'] = str(data / 'fsr4_411')
 
