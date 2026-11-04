@@ -117,21 +117,29 @@ void __attribute__((ms_abi)) runtime_exit_menu_u1_handler(uint64_t rdi, uint64_t
  * sid 0x82d5c00b) gets a new item list: its items and, last, a copy of LOADGAME (0xf7a5b490) as BUTTON_QUIT_GAME
  * (id 0x3a1a91cf, no target page) labelled with the games' "Quit" (0xa0be106d). The game then builds the item
  * itself like its own. The menu handler (host, id, ...) is hooked at its start: that id closes the game. */
-#include <stdlib.h>
-
 #define DC_QUIT_ID 0x3a1a91cfu
+#define DC_PAUSE_QUIT_ID 0x3a1a91d0u
 #define DC_PROFILE_PAGE 0x82d5c00bu
+#define DC_PAUSE_PAGE 0xf05cd578u
 #define DC_LOADGAME_ID 0xf7a5b490u
+#define DC_GAMEROOT_QUIT_ID 0xfdcd24dfu
+#define DC_YESNO_PAGE 0x960d2b9du
+#define DC_YES_TEXT 0x260a263u
+#define DC_NO_TEXT 0x75bc82du
+#define DC_NO_ID 0xfc5ba05du
 
+/* The Yes/No dialog the pause menu's Quit to Main Menu opens: the host's dialog record (host+dialog) holds the title
+ * text at +8 and, from `buttons` on, {u32 count (1); Yes text, Yes id, No text, No id; zeros}. */
 typedef struct {
     const char *name;
-    size_t page_stride, page_items, item_stride;
+    size_t page_stride, page_items, item_stride, dialog, buttons, zeros;
 } DcLayout;
-static const DcLayout dc_u2={"Uncharted 2",0x70,0x38,0x70}, dc_u3={"Uncharted 3",0x80,0x48,0x68};
-static const char dc_quit_name[]="BUTTON_QUIT_GAME", dc_quit_label[]="BP_MENU_SPEEDRUN_QUIT";
+static const DcLayout dc_u2={"Uncharted 2",0x70,0x38,0x70,0x17c8,0x40,2}, dc_u3={"Uncharted 3",0x80,0x48,0x68,0x1430,0x10,3};
 
-static void dc_add_quit(const DcLayout *l, unsigned char *menu) {
-    if (!menu) return;
+/* Appends a copy of the page's item `template_id` as a new item (name, id, label "Quit", target page). */
+static void dc_add_item(const DcLayout *l, unsigned char *menu, uint32_t page_sid, uint32_t template_id,
+                        const char *name, uint32_t id, uint32_t target, const char *where) {
+    static const char label[]="BP_MENU_SPEEDRUN_QUIT";
     uint32_t pages;
     unsigned char *page_array;
     memcpy(&pages,menu,4);
@@ -141,7 +149,7 @@ static void dc_add_quit(const DcLayout *l, unsigned char *menu) {
         unsigned char *page=page_array+(size_t)p*l->page_stride, *header;
         uint32_t sid;
         memcpy(&sid,page+8,4);
-        if (sid!=DC_PROFILE_PAGE) continue;
+        if (sid!=page_sid) continue;
         memcpy(&header,page+l->page_items,sizeof(header));
         if (!header) return;
         uint32_t count;
@@ -149,34 +157,58 @@ static void dc_add_quit(const DcLayout *l, unsigned char *menu) {
         memcpy(&count,header,4);
         memcpy(&items,header+8,sizeof(items));
         if (!items || count==0 || count>256) return;
-        const unsigned char *load_game=NULL;
+        const unsigned char *template=NULL;
         for (uint32_t i=0;i<count;++i) {
-            uint32_t id;
-            memcpy(&id,items+(size_t)i*l->item_stride+8,4);
-            if (id==DC_QUIT_ID) return;  /* already there (the data looked up again) */
-            if (id==DC_LOADGAME_ID) load_game=items+(size_t)i*l->item_stride;
+            uint32_t item_id;
+            memcpy(&item_id,items+(size_t)i*l->item_stride+8,4);
+            if (item_id==id) return;  /* already there (the data looked up again) */
+            if (item_id==template_id) template=items+(size_t)i*l->item_stride;
         }
-        if (!load_game) { printf("Exit menu: %s: no Load Game item on the main menu; no Quit\n",l->name); return; }
+        if (!template) { printf("Exit menu: %s: no item to copy on the %s; no Quit\n",l->name,where); return; }
         /* Kept for the life of the process: the game keeps pointers to its item records. */
         unsigned char *copy=calloc((size_t)count+1,l->item_stride), *new_header=calloc(1,16);
         if (!copy || !new_header) { free(copy); free(new_header); return; }
         memcpy(copy,items,(size_t)count*l->item_stride);
         unsigned char *quit=copy+(size_t)count*l->item_stride;
-        memcpy(quit,load_game,l->item_stride);
-        const char *name=dc_quit_name, *label=dc_quit_label;
-        const uint32_t id=DC_QUIT_ID, label_sid=quit_text(), no_target=0;
+        memcpy(quit,template,l->item_stride);
+        const char *label_name=label;
+        const uint32_t label_sid=quit_text();
         memcpy(quit,&name,sizeof(name));
         memcpy(quit+8,&id,4);
-        memcpy(quit+0x20,&label,sizeof(label));
+        memcpy(quit+0x20,&label_name,sizeof(label_name));
         memcpy(quit+0x28,&label_sid,4);
-        memcpy(quit+0x50,&no_target,4);
+        memcpy(quit+0x50,&target,4);
         const uint32_t new_count=count+1;
         memcpy(new_header,&new_count,4);
         memcpy(new_header+8,&copy,sizeof(copy));
         memcpy(page+l->page_items,&new_header,sizeof(new_header));
-        printf("Exit menu: %s: Quit added to the main menu (%u items)\n",l->name,new_count);
+        printf("Exit menu: %s: Quit added to the %s (%u items)\n",l->name,where,new_count);
         return;
     }
+}
+
+static void dc_add_quit(const DcLayout *l, unsigned char *menu) {
+    if (!menu) return;
+    /* Main menu: closes the game at once (nothing to lose there). */
+    dc_add_item(l,menu,DC_PROFILE_PAGE,DC_LOADGAME_ID,"BUTTON_QUIT_GAME",DC_QUIT_ID,0,"main menu");
+    /* Pause menu: opens the game's Yes/No page, set up by the handler hook below. */
+    dc_add_item(l,menu,DC_PAUSE_PAGE,DC_GAMEROOT_QUIT_ID,"BUTTON_QUIT_DESKTOP",DC_PAUSE_QUIT_ID,DC_YESNO_PAGE,
+                "pause menu");
+}
+
+/* The pause menu's Quit was picked: the handler goes on to open the Yes/No page (the item's target page); its
+ * record gets the title "Quit", the game's Yes and No, and Yes sends the main menu's Quit id. */
+static void dc_handler(const DcLayout *l, unsigned char *host, uint32_t id) {
+    if (id==DC_QUIT_ID) quit_from_menu(l->name);
+    if (id!=DC_PAUSE_QUIT_ID || !host) return;
+    unsigned char *dialog;
+    memcpy(&dialog,host+l->dialog,sizeof(dialog));
+    if (!dialog) return;
+    const uint32_t title=quit_text(), fields[5]={1,DC_YES_TEXT,DC_QUIT_ID,DC_NO_TEXT,DC_NO_ID}, zero=0;
+    memcpy(dialog+8,&title,4);
+    memcpy(dialog+l->buttons,fields,sizeof(fields));
+    for (size_t z=0;z<l->zeros;++z) memcpy(dialog+l->buttons+sizeof(fields)+4*z,&zero,4);
+    printf("Exit menu: %s: Quit picked on the pause menu, asking Yes/No\n",l->name);
 }
 
 /* regs: rbx r11 r10 r9 r8 rdx rcx rax rflags: the menu data's pointer is in rax (regs[7]). */
@@ -192,11 +224,11 @@ void __attribute__((ms_abi)) runtime_exit_menu_u3_data(uint64_t rdi, uint64_t rs
 }
 void __attribute__((ms_abi)) runtime_exit_menu_u2_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                           const uint64_t *regs) {
-    (void)rdi; (void)image; (void)r14; (void)regs;
-    if ((uint32_t)rsi==DC_QUIT_ID) quit_from_menu("Uncharted 2");
+    (void)image; (void)r14; (void)regs;
+    dc_handler(&dc_u2,(unsigned char *)(uintptr_t)rdi,(uint32_t)rsi);
 }
 void __attribute__((ms_abi)) runtime_exit_menu_u3_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                           const uint64_t *regs) {
-    (void)rdi; (void)image; (void)r14; (void)regs;
-    if ((uint32_t)rsi==DC_QUIT_ID) quit_from_menu("Uncharted 3");
+    (void)image; (void)r14; (void)regs;
+    dc_handler(&dc_u3,(unsigned char *)(uintptr_t)rdi,(uint32_t)rsi);
 }
