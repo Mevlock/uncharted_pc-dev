@@ -111,6 +111,14 @@ void __attribute__((ms_abi)) runtime_checkpoint_frame_eu(uint64_t rdi, uint64_t 
                                                         const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_checkpoint_frame_us(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                         const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_checkpoint_frame_u1_eu(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                           const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_checkpoint_frame_u1_us(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                           const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_eu(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                           const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_us(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                           const uint64_t *regs);
 int runtime_savedata_pick(int32_t user, const char *title, const char (*names)[32], uint32_t count,
                           int which, const char *focus, char out[32], void *param_out);
 void runtime_thread_attach_host(const char *name);

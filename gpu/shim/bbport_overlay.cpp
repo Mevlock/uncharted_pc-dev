@@ -351,7 +351,7 @@ void CheckpointsPage() {
     ImGui::TextWrapped("Now: %s", BbSaves::Describe(now).c_str());
     if (!BbSaves::JumpsAvailable()) {
         ImGui::Spacing();
-        ImGui::TextDisabled("Checkpoint jumps work in Uncharted 3 for now (Uncharted 1 and 2 later).");
+        ImGui::TextDisabled("Checkpoint jumps are not available for this release of the game.");
         return;
     }
     if (BbSaves::Practising()) {

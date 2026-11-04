@@ -435,7 +435,7 @@ bool StartPractice(std::string& message) {
 bool Jump(const Checkpoint& target, std::string& message) {
     std::lock_guard guard(lock);
     if (!Game() || !target.known || !JumpsAvailable()) {
-        message = "Checkpoint jumps work in Uncharted 3 for now.";
+        message = "Checkpoint jumps are not available for this release of the game.";
         return false;
     }
     if (!StartPractice(message)) {
