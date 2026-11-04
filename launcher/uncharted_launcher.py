@@ -795,6 +795,8 @@ def game_environment(s, start=None):
     env['BB_FRAME_GEN'] = str(s.get('frame_generation') or 'off')
     env['BB_FRAME_GEN_MULTIPLIER'] = str(s.get('frame_gen_multiplier') or '2')
     env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
+    # The in-game menu (Insert) speaks the launcher's language.
+    env['BB_UI_LANGUAGE'] = uncharted_i18n.language_code(str(s.get('ui_language') or ''))
     env['BB_CHEATS'] = ','.join([f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
                                  if s.get(f'{game}_infinite_{cheat}')] +
                                 [f'{game}:devmode' for game, _t, _s, _e in GAMES if s.get(f'{game}_devmode')])
@@ -2096,8 +2098,8 @@ class Launcher:
         grades = '   '.join(f"{_(trophies.GRADE_NAMES[g])} {progress['earned'][g]}/{progress['total'][g]}"
                             for g in 'PGSB' if progress['total'][g])
         self.trophy_summary.configure(
-            text=f"{info['title']}\n{progress['count']} of {len(info['trophies'])} earned · {progress['percent']}%"
-                 f'   ·   {grades}')
+            text=info['title'] + '\n' + _('{} of {} earned · {}%').format(
+                progress['count'], len(info['trophies']), progress['percent']) + f'   ·   {grades}')
         shown = 0
         size = self.px(52)
         for number, grade, hidden, name, detail in info['trophies']:

@@ -62,7 +62,8 @@ bool Jump(const Checkpoint& target, std::string& message);
 bool KeepPractice(std::string& message);
 // The outcome of the last jump once the game ran it: 1 done, -1 no such task, -2 not supported, 0 nothing new.
 int JumpResult();
-// "Checkpoint 57 · valve-room-entrance · Chapter 4 Run to Ground"
-std::string Describe(const Checkpoint& c);
+// "Checkpoint 57 · valve-room-entrance · Chapter 4 Run to Ground", in the menu's language (the task name and the
+// chapter title stay as the game names them); `translated` false: English, for the log.
+std::string Describe(const Checkpoint& c, bool translated = true);
 
 } // namespace BbSaves

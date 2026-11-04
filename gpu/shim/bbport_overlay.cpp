@@ -13,6 +13,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <fmt/format.h>
 
@@ -26,6 +27,7 @@
 #endif
 #include <windows.h>
 #endif
+#include "bbport_i18n.h"
 #include "bbport_saves.h"
 #include "bbport_settings.h"
 #include <miniz.h>
@@ -63,11 +65,54 @@ asm(".section .rodata\n"
 extern "C" const unsigned char bb_font_ttf[];
 extern "C" const unsigned char bb_font_ttf_end[];
 
+// Noto Sans JP, cut down to the menu's Japanese text (third_party/fonts, SIL OFL 1.1; tools/make_overlay_font_ja.py):
+// merged into the font when the menu speaks Japanese.
+#ifdef _WIN32
+asm(".section .rdata,\"dr\"\n"
+    ".balign 16\n"
+    ".global bb_font_ja_ttf\n"
+    "bb_font_ja_ttf:\n"
+    ".incbin \"" BB_FONT_JA_PATH "\"\n"
+    ".global bb_font_ja_ttf_end\n"
+    "bb_font_ja_ttf_end:\n"
+    ".text\n");
+#else
+asm(".section .rodata\n"
+    ".balign 16\n"
+    ".hidden bb_font_ja_ttf\n"
+    ".global bb_font_ja_ttf\n"
+    "bb_font_ja_ttf:\n"
+    ".incbin \"" BB_FONT_JA_PATH "\"\n"
+    ".hidden bb_font_ja_ttf_end\n"
+    ".global bb_font_ja_ttf_end\n"
+    "bb_font_ja_ttf_end:\n"
+    ".previous\n");
+#endif
+extern "C" const unsigned char bb_font_ja_ttf[];
+extern "C" const unsigned char bb_font_ja_ttf_end[];
+
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
 
 namespace BbOverlay {
 
 namespace {
+
+using BbI18n::T;
+
+// A translated label that keeps the English text as its ImGui ID ("Laden###Load"): two texts that translate alike
+// stay two widgets.
+const char* TI(const char* english) {
+    const char* text = T(english);
+    if (text == english) {
+        return english;
+    }
+    static std::unordered_map<const char*, std::string> labels;  // the overlay's thread (imgui_mutex)
+    auto [it, added] = labels.try_emplace(english);
+    if (added) {
+        it->second = std::string(text) + "###" + english;
+    }
+    return it->second.c_str();
+}
 
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
@@ -186,17 +231,18 @@ const char* RenderSizeText() {
         const char* render = std::getenv("BB_RENDER_RES");
         const char* output = std::getenv("BB_OUTPUT_RES");
         if (!render || !render[0]) {
-            return std::string("1920x1080 (the game's own)");
+            return std::string("1920x1080 ") + T("(the game's own)");
         }
         if (!output || !output[0] || std::strcmp(render, output) == 0) {
-            return std::string(render) + " (native)";
+            return std::string(render) + " " + T("(native)");
         }
         std::string text = std::string(render) + " -> " + output;
         // The launcher's scales (RENDER_SCALES): output width over render width.
         const float render_w = float(std::atoi(render)), output_w = float(std::atoi(output));
         if (render_w > 0.0f) {
             const float scale = output_w / render_w;
-            text += scale < 1.6f ? " (Quality)" : scale < 1.85f ? " (Balanced)" : " (Performance)";
+            text += std::string(" ") +
+                    (scale < 1.6f ? T("(Quality)") : scale < 1.85f ? T("(Balanced)") : T("(Performance)"));
         }
         return text;
     }();
@@ -316,6 +362,13 @@ void Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
     Store(value, v, changed);
 }
 
+// A grey note that wraps at the window's edge (TextDisabled does not wrap: translated notes ran off the window).
+void TextGrey(const char* text) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+    ImGui::TextWrapped("%s", text);
+    ImGui::PopStyleColor();
+}
+
 void Hint(const char* text) {
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
@@ -342,48 +395,48 @@ void CheckpointsPage() {
         chapter = now.known ? now.chapter : (list.empty() ? 1 : list.front().chapter);
     }
     switch (BbSaves::JumpResult()) {
-    case 1: message = "Done."; break;
-    case -1: message = "This checkpoint is not in this release of the game."; break;
-    case -2: message = "Checkpoint jumps do not work with this release of the game."; break;
+    case 1: message = T("Done."); break;
+    case -1: message = T("This checkpoint is not in this release of the game."); break;
+    case -2: message = T("Checkpoint jumps do not work with this release of the game."); break;
     default: break;
     }
 
-    ImGui::TextWrapped("Now: %s", BbSaves::Describe(now).c_str());
+    ImGui::TextWrapped(T("Now: %s"), BbSaves::Describe(now).c_str());
     if (!BbSaves::JumpsAvailable()) {
         ImGui::Spacing();
-        ImGui::TextDisabled("Checkpoint jumps are not available for this release of the game.");
+        TextGrey(T("Checkpoint jumps are not available for this release of the game."));
         return;
     }
     if (BbSaves::Practising()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
-        ImGui::TextWrapped("Practice mode: the game saves to a practice copy until you restart it. Your own save "
-                           "and story save are not touched.");
+        ImGui::TextWrapped("%s", T("Practice mode: the game saves to a practice copy until you restart it. Your "
+                                   "own save and story save are not touched."));
         ImGui::PopStyleColor();
         static bool confirm_keep = false;
         if (!confirm_keep) {
-            if (ImGui::Button("Keep this progress")) {
+            if (ImGui::Button(TI("Keep this progress"))) {
                 confirm_keep = true;
             }
-            Hint("To carry on from here for real (for example past a place that does not work): the game "
-                 "restarts and Continue starts at the practice save, which becomes your save and your story "
-                 "save. Your save from before is kept in Save slots as \"Before the last load\".");
+            Hint(T("To carry on from here for real (for example past a place that does not work): the game "
+                   "restarts and Continue starts at the practice save, which becomes your save and your story "
+                   "save. Your save from before is kept in Save slots as \"Before the last load\"."));
         } else {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
-            ImGui::TextWrapped("Make the practice save your save? The game restarts and Continue starts there. "
-                               "Your save from before is kept as \"Before the last load\".");
+            ImGui::TextWrapped("%s", T("Make the practice save your save? The game restarts and Continue starts "
+                                       "there. Your save from before is kept as \"Before the last load\"."));
             ImGui::PopStyleColor();
-            if (ImGui::Button("Yes, keep it")) {
+            if (ImGui::Button(TI("Yes, keep it"))) {
                 confirm_keep = false;
                 BbSaves::KeepPractice(message);  // restarts the game when it works
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel")) {
+            if (ImGui::Button(TI("Cancel"))) {
                 confirm_keep = false;
             }
         }
     } else {
-        ImGui::TextDisabled("Jumping turns on practice mode: until the game restarts, it saves to a practice copy, "
-                            "not to your own save.");
+        TextGrey(T("Jumping turns on practice mode: until the game restarts, it saves to a "
+                                    "practice copy, not to your own save."));
     }
 
     // Chapters, from the list (game order).
@@ -394,7 +447,7 @@ void CheckpointsPage() {
             break;
         }
     }
-    if (ImGui::BeginCombo("Chapter", chapter_label.c_str())) {
+    if (ImGui::BeginCombo(TI("Chapter"), chapter_label.c_str())) {
         int last = -1;
         for (const auto& c : list) {
             if (c.chapter == last) {
@@ -409,14 +462,17 @@ void CheckpointsPage() {
         }
         ImGui::EndCombo();
     }
-    if (ImGui::BeginChild("##checkpoints", ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing() * 10.0f),
+    // The list takes the room left in the window (the Go there line and the window's Close button below it).
+    const float list_h = std::max(ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing() * 3.0f,
+                                  ImGui::GetTextLineHeightWithSpacing() * 8.0f);
+    if (ImGui::BeginChild("##checkpoints", ImVec2(0.0f, list_h),
                           ImGuiChildFlags_Borders)) {
         for (int i = 0; i < static_cast<int>(list.size()); ++i) {
             const auto& c = list[i];
             if (c.chapter != chapter) {
                 continue;
             }
-            const std::string label = std::to_string(c.number) + "  " + c.name + (c.task == now.task ? "  (now)" : "");
+            const std::string label = std::to_string(c.number) + "  " + c.name + (c.task == now.task ? std::string("  ") + T("(now)") : std::string());
             if (ImGui::Selectable(label.c_str(), i == picked)) {
                 picked = i;
             }
@@ -424,7 +480,7 @@ void CheckpointsPage() {
     }
     ImGui::EndChild();
     ImGui::BeginDisabled(picked < 0);
-    if (ImGui::Button("Go there") && picked >= 0) {
+    if (ImGui::Button(TI("Go there")) && picked >= 0) {
         BbSaves::Jump(list[picked], message);
     }
     ImGui::EndDisabled();
@@ -450,52 +506,52 @@ void SaveSlotsPage() {
         return slot.date.empty() ? std::string() : "  (" + slot.date + ")";
     };
 
-    ImGui::TextWrapped("Now: %s", BbSaves::Describe(BbSaves::Current()).c_str());
+    ImGui::TextWrapped(T("Now: %s"), BbSaves::Describe(BbSaves::Current()).c_str());
 
-    ImGui::SeparatorText("Story save");
+    ImGui::SeparatorText(T("Story save"));
     const BbSaves::Slot& story = BbSaves::GetSlot(BbSaves::StorySlot);
     const bool away = BbSaves::AwayFromStory();
     if (!story.used) {
-        ImGui::TextDisabled("Starts with the game's next save.");
+        TextGrey(T("Starts with the game's next save."));
     } else {
         ImGui::TextWrapped("%s%s", BbSaves::Describe(story.checkpoint).c_str(), when(story).c_str());
         if (away) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
-            ImGui::TextWrapped("Your save has moved away from your story (Chapter Select or a new game). "
-                               "The story save stays here until you load it, or make the current save your "
-                               "story save to keep the change.");
+            ImGui::TextWrapped("%s", T("Your save has moved away from your story (Chapter Select or a new game). "
+                                       "The story save stays here until you load it, or make the current save "
+                                       "your story save to keep the change."));
             ImGui::PopStyleColor();
         } else {
-            ImGui::TextDisabled("Follows your playthrough as you play on.");
+            TextGrey(T("Follows your playthrough as you play on."));
         }
-        if (ImGui::Button("Load story save")) {
+        if (ImGui::Button(TI("Load story save"))) {
             pending = Action::Load;
             pending_slot = BbSaves::StorySlot;
         }
         ImGui::SameLine();
     }
     ImGui::BeginDisabled(story.used && !away);
-    if (ImGui::Button("Make this my story save")) {
+    if (ImGui::Button(TI("Make this my story save"))) {
         pending = Action::MakeStory;
     }
     ImGui::EndDisabled();
-    Hint("Use this after skipping ahead on purpose: the story save then follows your playthrough from "
-         "where you are now.");
+    Hint(T("Use this after skipping ahead on purpose: the story save then follows your playthrough from "
+           "where you are now."));
 
-    ImGui::SeparatorText("Slots");
+    ImGui::SeparatorText(T("Slots"));
     for (int i = 0; i < BbSaves::SlotCount; ++i) {
         const BbSaves::Slot& slot = BbSaves::GetSlot(i);
         ImGui::PushID(i);
         ImGui::AlignTextToFramePadding();
         ImGui::Text("%d", i + 1);
         ImGui::SameLine();
-        if (ImGui::Button("Save here")) {
+        if (ImGui::Button(TI("Save here"))) {
             pending = Action::Store;
             pending_slot = i;
         }
         ImGui::SameLine();
         ImGui::BeginDisabled(!slot.used);
-        if (ImGui::Button("Load")) {
+        if (ImGui::Button(TI("Load"))) {
             pending = Action::Load;
             pending_slot = i;
         }
@@ -504,48 +560,54 @@ void SaveSlotsPage() {
         if (slot.used) {
             ImGui::TextWrapped("%s%s", BbSaves::Describe(slot.checkpoint).c_str(), when(slot).c_str());
         } else {
-            ImGui::TextDisabled("empty");
+            ImGui::TextDisabled("%s", T("empty"));
         }
         ImGui::PopID();
     }
     const BbSaves::Slot& undo = BbSaves::GetSlot(BbSaves::UndoSlot);
     if (undo.used) {
         ImGui::PushID("undo");
-        if (ImGui::Button("Load")) {
+        if (ImGui::Button(TI("Load"))) {
             pending = Action::Load;
             pending_slot = BbSaves::UndoSlot;
         }
         ImGui::SameLine();
-        ImGui::TextWrapped("Before the last load: %s%s", BbSaves::Describe(undo.checkpoint).c_str(),
+        ImGui::TextWrapped(T("Before the last load: %s%s"), BbSaves::Describe(undo.checkpoint).c_str(),
                            when(undo).c_str());
         ImGui::PopID();
     }
 
     if (pending != Action::None) {
         ImGui::Spacing();
-        const std::string name = pending_slot == BbSaves::StorySlot ? std::string("the story save")
-                                 : pending_slot == BbSaves::UndoSlot
-                                     ? std::string("the save from before the last load")
-                                     : "slot " + std::to_string(pending_slot + 1);
         std::string question;
         bool ask = true;
         if (pending == Action::Store) {
-            question = "Replace what slot " + std::to_string(pending_slot + 1) + " holds with your current save?";
+            question = fmt::format(fmt::runtime(T("Replace what slot {} holds with your current save?")),
+                                   pending_slot + 1);
             ask = BbSaves::GetSlot(pending_slot).used;
         } else if (pending == Action::Load) {
-            question = "Load " + name + "? The game restarts and Continue starts there. Your current save is "
-                       "kept as \"Before the last load\".";
+            question = pending_slot == BbSaves::StorySlot
+                           ? std::string(T("Load the story save? The game restarts and Continue starts there. "
+                                           "Your current save is kept as \"Before the last load\"."))
+                       : pending_slot == BbSaves::UndoSlot
+                           ? std::string(T("Load the save from before the last load? The game restarts and "
+                                           "Continue starts there. Your current save is kept as \"Before the "
+                                           "last load\"."))
+                           : fmt::format(fmt::runtime(T("Load slot {}? The game restarts and Continue starts "
+                                                        "there. Your current save is kept as \"Before the last "
+                                                        "load\".")),
+                                         pending_slot + 1);
         } else {
-            question = "Make your current save the story save?";
+            question = T("Make your current save the story save?");
         }
         bool yes = !ask;
         if (ask) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
             ImGui::TextWrapped("%s", question.c_str());
             ImGui::PopStyleColor();
-            yes = ImGui::Button("Yes");
+            yes = ImGui::Button(TI("Yes"));
             ImGui::SameLine();
-            if (ImGui::Button("Cancel")) {
+            if (ImGui::Button(TI("Cancel"))) {
                 pending = Action::None;
             }
         }
@@ -566,8 +628,8 @@ void SaveSlotsPage() {
         ImGui::TextWrapped("%s", message.c_str());
     }
     ImGui::Spacing();
-    ImGui::TextDisabled("Copies of this game's campaign save (the one Continue loads). Treasures, unlocks "
-                       "and trophies are not changed.");
+    TextGrey(T("Copies of this game's campaign save (the one Continue loads). Treasures, "
+                                "unlocks and trophies are not changed."));
 }
 
 void Menu() {
@@ -576,85 +638,90 @@ void Menu() {
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + 40.0f * base_scale,
                                    viewport->WorkPos.y + 40.0f * base_scale),
                             ImGuiCond_Appearing);
-    ImGui::SetNextWindowSize(ImVec2(620.0f * base_scale, 0.0f), ImGuiCond_Appearing);
+    // The window follows the screen: about 42% of its width (700 to 1000 at 1080p scale) and three quarters of its
+    // height, the same for every tab (the Checkpoints and Save slots pages need the room); it can still be resized.
+    const float menu_w = std::clamp(viewport->WorkSize.x * 0.42f, 700.0f * base_scale, 1000.0f * base_scale);
+    const float menu_h = std::max(viewport->WorkSize.y * 0.75f - 40.0f * base_scale, 420.0f * base_scale);
+    ImGui::SetNextWindowSize(ImVec2(std::min(menu_w, viewport->WorkSize.x - 80.0f * base_scale), menu_h),
+                             ImGuiCond_Appearing);
     bool keep_open = true;
-    if (!ImGui::Begin("Uncharted — settings  (Insert / L3+R3)###Uncharted — settings  (Insert / L3+R3)", &keep_open,
+    if (!ImGui::Begin(TI("Uncharted — settings  (Insert / L3+R3)"), &keep_open,
                       ImGuiWindowFlags_NoCollapse)) {
         ImGui::End();
         return;
     }
     UpdateGameStats();
-    ImGui::Text("%.0f FPS  (%.1f ms)   1%% low %.0f", game_fps,
+    ImGui::Text(T("%.0f FPS  (%.1f ms)   1%% low %.0f"), game_fps,
                 game_fps > 0.0f ? 1000.0f / game_fps : 0.0f, game_low_fps);
-    Hint("Changes here apply at once, for this session. The launcher's settings apply each time "
-         "the game starts: set the same there to keep a change.");
+    Hint(T("Changes here apply at once, for this session. The launcher's settings apply each time "
+           "the game starts: set the same there to keep a change."));
 
     ImGui::BeginTabBar("##pages");
-    const bool settings_page = ImGui::BeginTabItem("Settings");
+    const bool settings_page = ImGui::BeginTabItem(TI("Settings"));
     if (settings_page) {
-    ImGui::SeparatorText("Picture");
-    ImGui::Text("Rendering %s", RenderSizeText());
-    Hint("Set in the launcher (Display: Render resolution); it applies when the game starts. "
-         "Quality, Balanced and Performance render smaller and let the anti-aliasing (DLSS or "
-         "FSR) rebuild the full size: Uncharted 3 only.");
-    static const char* upscalers[] = {"Off (the game's own)", "FSR 3.1", "FSR 4 (INT8)",
+    ImGui::SeparatorText(T("Picture"));
+    ImGui::Text(T("Rendering %s"), RenderSizeText());
+    Hint(T("Set in the launcher (Display: Render resolution); it applies when the game starts. "
+           "Quality, Balanced and Performance render smaller and let the anti-aliasing (DLSS or "
+           "FSR) rebuild the full size: Uncharted 3 only."));
+    static const char* upscalers[] = {N_("Off (the game's own)"), "FSR 3.1", "FSR 4 (INT8)",
                                      "FSR 4.1.1 (INT8)", "TAA", "DLSS (NVIDIA RTX)", "XeSS (Intel)"};
     int upscaler = s.upscaler;
-    if (ImGui::BeginCombo("Anti-aliasing", upscalers[upscaler])) {
+    if (ImGui::BeginCombo(TI("Anti-aliasing"), T(upscalers[upscaler]))) {
         for (int i = 0; i < BbSettings::UpscalerCount; ++i) {
             const bool supported = i == BbSettings::UpscalerFsr4 ? s.fsr4_supported.load()
                 : i == BbSettings::UpscalerFsr411 ? s.fsr411_supported.load()
                 : i == BbSettings::UpscalerDlss   ? s.dlss_supported.load()
                 : i == BbSettings::UpscalerXess   ? s.xess_supported.load() : true;
             ImGui::BeginDisabled(!supported);
-            if (ImGui::Selectable(upscalers[i], i == upscaler)) {
+            if (ImGui::Selectable(T(upscalers[i]), i == upscaler)) {
                 Store(s.upscaler, i, true);
             }
             ImGui::EndDisabled();
             if (!supported) {
                 ImGui::SameLine();
-                ImGui::TextDisabled("— not supported by this graphics card");
+                ImGui::TextDisabled("%s", T("— not supported by this graphics card"));
             }
         }
         ImGui::EndCombo();
     }
     if (const char* problem = s.dlss_problem.load(); problem && upscaler == BbSettings::UpscalerDlss) {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "DLSS: %s", problem);
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "DLSS: %s", T(problem));
     }
     if (const char* problem = s.xess_problem.load(); problem && upscaler == BbSettings::UpscalerXess) {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "XeSS: %s", problem);
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "XeSS: %s", T(problem));
     }
     if (const char* problem = s.fsr4_problem.load()) {
         ImGui::PushTextWrapPos();
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "FSR 4 unavailable: %s", problem);
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), T("FSR 4 unavailable: %s"), T(problem));
         if (!BbSettings::IsFsr4(s.upscaler))
-            ImGui::TextUnformatted("The mode selected above is active. FSR 4 can be selected again.");
+            ImGui::TextUnformatted(T("The mode selected above is active. FSR 4 can be selected again."));
         ImGui::PopTextWrapPos();
     }
-    Hint("Smooths edges and keeps the picture stable from frame to frame; with an upscaled render "
-         "resolution it also rebuilds the full size. DLSS needs a GeForce RTX card.");
+    Hint(T("Smooths edges and keeps the picture stable from frame to frame; with an upscaled render "
+           "resolution it also rebuilds the full size. DLSS needs a GeForce RTX card."));
     const bool upscaler_on = s.upscaler != BbSettings::UpscalerOff;
     ImGui::BeginDisabled(!upscaler_on || !s.sharpen);
-    Slider("Sharpness", s.sharpness, 0.0f, 2.0f);
+    Slider(TI("Sharpness"), s.sharpness, 0.0f, 2.0f);
     ImGui::EndDisabled();
-    Hint("Sharpens the anti-aliased picture (AMD RCAS, also with DLSS). 0 is off; the launcher's "
-         "Low, Medium and High are 0.2, 0.4 and 0.7. Ctrl+click to type a value.");
+    Hint(T("Sharpens the anti-aliased picture (AMD RCAS, also with DLSS). 0 is off; the launcher's "
+           "Low, Medium and High are 0.2, 0.4 and 0.7. Ctrl+click to type a value."));
 
-    ImGui::SeparatorText("Frame generation");
-    static const char* frame_gens[] = {"Off", "FSR 3 (any graphics card)",
+    ImGui::SeparatorText(T("Frame generation"));
+    static const char* frame_gens[] = {N_("Off"), N_("FSR 3 (any graphics card)"),
                                        "DLSS (NVIDIA RTX 40/50)"};
     const int frame_gen = s.frame_gen;
-    if (ImGui::BeginCombo("Frame generation", frame_gens[frame_gen])) {
+    if (ImGui::BeginCombo(TI("Frame generation"), T(frame_gens[frame_gen]))) {
         for (int i = 0; i < BbSettings::FrameGenCount; ++i) {
             const bool supported = i != BbSettings::FrameGenDlss || s.dlssg_max_multiplier > 1;
             ImGui::BeginDisabled(!supported);
-            if (ImGui::Selectable(frame_gens[i], i == frame_gen)) {
+            if (ImGui::Selectable(T(frame_gens[i]), i == frame_gen)) {
                 Store(s.frame_gen, i, true);
             }
             ImGui::EndDisabled();
             if (!supported) {
                 ImGui::SameLine();
-                ImGui::TextDisabled("— not supported by this graphics card");
+                ImGui::TextDisabled("%s", T("— not supported by this graphics card"));
             }
         }
         ImGui::EndCombo();
@@ -662,65 +729,65 @@ void Menu() {
     const int max_multiplier = s.frame_gen == BbSettings::FrameGenDlss ? s.dlssg_max_multiplier.load() : 2;
     ImGui::BeginDisabled(s.frame_gen == BbSettings::FrameGenOff || max_multiplier <= 2);
     int multiplier = std::min(s.frame_gen_multiplier.load(), max_multiplier);
-    if (ImGui::SliderInt("Multiplier", &multiplier, 2, std::max(max_multiplier, 2), "%dx")) {
+    if (ImGui::SliderInt(TI("Multiplier"), &multiplier, 2, std::max(max_multiplier, 2), "%dx")) {
         Store(s.frame_gen_multiplier, multiplier, true);
     }
     ImGui::EndDisabled();
     if (const char* problem = s.frame_gen_problem.load()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s", problem);
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "%s", T(problem));
     }
-    Hint("Generated frames between the game's own: 60 FPS on screen becomes 120. Adds a little "
-         "input latency; menus and cutscene videos are not generated. The launcher's Frame rate "
-         "limit counts generated frames.");
+    Hint(T("Generated frames between the game's own: 60 FPS on screen becomes 120. Adds a little "
+           "input latency; menus and cutscene videos are not generated. The launcher's Frame rate "
+           "limit counts generated frames."));
 
-    ImGui::SeparatorText("Other");
-    Checkbox("FPS counter in the corner", s.show_fps);
+    ImGui::SeparatorText(T("Other"));
+    Checkbox(TI("FPS counter in the corner"), s.show_fps);
     ImGui::BeginDisabled(!s.show_fps);
-    Checkbox("Frame time graph", s.show_fps_graph);
+    Checkbox(TI("Frame time graph"), s.show_fps_graph);
     ImGui::EndDisabled();
-    Hint("Top line, the game's own frames: FPS and frame time, 1%L the average of the slowest "
-         "1% (stutter), MAX the slowest frame (last 5 seconds). Below: the anti-aliasing, the "
-         "render size (Q, B, P: Quality, Balanced, Performance) and with frame generation FG, "
-         "the frames on screen. The graph: the game's frame times, a spike is a hitch.");
+    Hint(T("Top line, the game's own frames: FPS and frame time, 1%L the average of the slowest "
+           "1% (stutter), MAX the slowest frame (last 5 seconds). Below: the anti-aliasing, the "
+           "render size (Q, B, P: Quality, Balanced, Performance) and with frame generation FG, "
+           "the frames on screen. The graph: the game's frame times, a spike is a hitch."));
 
     // Diagnosis and tuning, kept out of the way: the defaults are right for the three games.
-    if (ImGui::CollapsingHeader("Developer options")) {
-        Checkbox("Sub-pixel jitter", s.jitter);
-        Hint("Each frame the scene shifts by a fraction of a pixel and the anti-aliasing gathers "
-             "detail from several frames. Off: smoothing from the history only.");
-        Checkbox("Sharpening pass", s.sharpen);
+    if (ImGui::CollapsingHeader(TI("Developer options"))) {
+        Checkbox(TI("Sub-pixel jitter"), s.jitter);
+        Hint(T("Each frame the scene shifts by a fraction of a pixel and the anti-aliasing gathers "
+               "detail from several frames. Off: smoothing from the history only."));
+        Checkbox(TI("Sharpening pass"), s.sharpen);
         if (BbSettings::IsFsr4(s.upscaler)) {
-            Checkbox("FSR 4: auto exposure", s.fsr4_auto_exposure);
-            Checkbox("FSR 4: inverted jitter sign", s.fsr4_invert_jitter);
+            Checkbox(TI("FSR 4: auto exposure"), s.fsr4_auto_exposure);
+            Checkbox(TI("FSR 4: inverted jitter sign"), s.fsr4_invert_jitter);
         }
         const bool taa = s.upscaler == BbSettings::UpscalerTaa;
         ImGui::BeginDisabled(taa || !upscaler_on);
-        Checkbox("Reactive mask", s.reactive);
-        Hint("Marks transparent effects (particles, haze) so the upscaler relies less on past "
-             "frames: fewer trails behind effects, more shimmer under them.");
+        Checkbox(TI("Reactive mask"), s.reactive);
+        Hint(T("Marks transparent effects (particles, haze) so the upscaler relies less on past "
+               "frames: fewer trails behind effects, more shimmer under them."));
         ImGui::BeginDisabled(!s.reactive);
-        Slider("Mask scale", s.reactive_scale, 0.0f, 4.0f);
-        Slider("Mask threshold", s.reactive_threshold, 0.0f, 1.0f);
-        Slider("Mask maximum", s.reactive_max, 0.0f, 1.0f);
+        Slider(TI("Mask scale"), s.reactive_scale, 0.0f, 4.0f);
+        Slider(TI("Mask threshold"), s.reactive_threshold, 0.0f, 1.0f);
+        Slider(TI("Mask maximum"), s.reactive_max, 0.0f, 1.0f);
         bool show_mask = s.debug_view == BbSettings::DebugReactive;
-        if (ImGui::Checkbox("Show the mask", &show_mask)) {
+        if (ImGui::Checkbox(TI("Show the mask"), &show_mask)) {
             s.debug_view = show_mask ? BbSettings::DebugReactive : BbSettings::DebugNone;
         }
         ImGui::EndDisabled();
         ImGui::EndDisabled();
-        Checkbox("Character motion vectors", s.object_motion);
-        Hint("Exact vectors for animated objects (applies after restarting the game).");
+        Checkbox(TI("Character motion vectors"), s.object_motion);
+        Hint(T("Exact vectors for animated objects (applies after restarting the game)."));
         bool show_motion = s.debug_view == BbSettings::DebugMotion;
-        if (ImGui::Checkbox("Show the motion vectors", &show_motion)) {
+        if (ImGui::Checkbox(TI("Show the motion vectors"), &show_motion)) {
             s.debug_view = show_motion ? BbSettings::DebugMotion : BbSettings::DebugNone;
         }
-        Hint("Red/green: horizontal/vertical motion (8 pixels = full brightness); blue: an exact "
-             "object vector.");
+        Hint(T("Red/green: horizontal/vertical motion (8 pixels = full brightness); blue: an exact "
+               "object vector."));
     }
     if (s.object_motion != s.startup_object_motion) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
-                           "Changes apply after restarting the game");
-        if (ImGui::Button("Apply and restart the game")) {
+                           "%s", T("Changes apply after restarting the game"));
+        if (ImGui::Button(TI("Apply and restart the game"))) {
             BbSettings::Save();
             runtime_restart();
         }
@@ -728,18 +795,18 @@ void Menu() {
     ImGui::EndTabItem();
     }
     // Save slots: Uncharted 1, 2 and 3 (the collection's menu has no campaign save).
-    if (BbSaves::Game() && ImGui::BeginTabItem("Checkpoints")) {
+    if (BbSaves::Game() && ImGui::BeginTabItem(TI("Checkpoints"))) {
         CheckpointsPage();
         ImGui::EndTabItem();
     }
-    if (BbSaves::Game() && ImGui::BeginTabItem("Save slots")) {
+    if (BbSaves::Game() && ImGui::BeginTabItem(TI("Save slots"))) {
         SaveSlotsPage();
         ImGui::EndTabItem();
     }
     ImGui::EndTabBar();
 
     ImGui::Spacing();
-    if (ImGui::Button("Close")) {
+    if (ImGui::Button(TI("Close"))) {
         keep_open = false;
     }
     ImGui::End();
@@ -767,8 +834,8 @@ void TextEntryBox() {
     ImGui::Text("%s_", text_entry_text.c_str());
     ImGui::SetWindowFontScale(1.0f);
     ImGui::Separator();
-    ImGui::TextDisabled("Keyboard: type, Backspace to erase, Enter = OK, Esc = cancel");
-    ImGui::TextDisabled("Controller: Cross (A) = OK, Circle (B) = cancel");
+    TextGrey(T("Keyboard: type, Backspace to erase, Enter = OK, Esc = cancel"));
+    TextGrey(T("Controller: Cross (A) = OK, Circle (B) = cancel"));
     ImGui::End();
 }
 
@@ -986,8 +1053,8 @@ void TrophyToast() {
     const float alpha = std::min(1.0f, (ToastSeconds - t) / 0.5f);
     static const ImVec4 colors[] = {ImVec4(0.62f, 0.82f, 0.96f, 1.0f), ImVec4(0.96f, 0.78f, 0.28f, 1.0f),
                                     ImVec4(0.80f, 0.83f, 0.88f, 1.0f), ImVec4(0.82f, 0.52f, 0.24f, 1.0f)};
-    static const char* const names[] = {"Platinum trophy earned", "Gold trophy earned",
-                                        "Silver trophy earned", "Bronze trophy earned"};
+    static const char* const names[] = {N_("Platinum trophy earned"), N_("Gold trophy earned"),
+                                        N_("Silver trophy earned"), N_("Bronze trophy earned")};
     const int grade = std::clamp(toast_now.grade, 1, 4) - 1;
 
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1012,7 +1079,7 @@ void TrophyToast() {
         ImGui::SameLine(0.0f, 12.0f * s);
     }
     ImGui::BeginGroup();
-    ImGui::TextColored(colors[grade], "%s", names[grade]);
+    ImGui::TextColored(colors[grade], "%s", T(names[grade]));
     ImGui::SetWindowFontScale(1.2f);
     ImGui::TextUnformatted(toast_now.name.c_str());
     ImGui::SetWindowFontScale(1.0f);
@@ -1053,6 +1120,15 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     font_config.FontDataOwnedByAtlas = false;
     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
                                    int(bb_font_ttf_end - bb_font_ttf), 18.0f, &font_config);
+    // Japanese: the kana and kanji DejaVu lacks come from the Noto Sans JP subset (ImGui 1.92 renders glyphs as they
+    // are first drawn, so the atlas holds only what the menu shows).
+    if (std::strcmp(BbI18n::Language(), "ja") == 0) {
+        ImFontConfig ja_config;
+        ja_config.FontDataOwnedByAtlas = false;
+        ja_config.MergeMode = true;
+        io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ja_ttf),
+                                       int(bb_font_ja_ttf_end - bb_font_ja_ttf), 18.0f, &ja_config);
+    }
 
     const vk::Instance vk_instance = instance.GetInstance();
     ImGui_ImplVulkan_LoadFunctions(
@@ -1234,11 +1310,11 @@ static std::string ScanEta(u32 done, u32 total) {
         return {};
     }
     const double left_s = double(total - done) * double(elapsed) / double(done) / 1000.0;
-    return left_s >= 90.0 ? fmt::format("  about {:.0f} min left", left_s / 60.0)
-                          : fmt::format("  about {:.0f} s left", std::max(1.0, left_s));
+    return "  " + (left_s >= 90.0 ? fmt::format(fmt::runtime(T("about {:.0f} min left")), left_s / 60.0)
+                                  : fmt::format(fmt::runtime(T("about {:.0f} s left")), std::max(1.0, left_s)));
 }
 
-static const char* const ScanStep = "Step 1 of 2: finding the shaders in your game files (only this once)";
+static const char* const ScanStep = N_("Step 1 of 2: finding the shaders in your game files (only this once)");
 
 void SetPreparationScreen(bool on) {
     prep_screen.store(on, std::memory_order_release);
@@ -1323,13 +1399,13 @@ std::string PreparationEta(u32 done, u32 total) {
     }
     const s64 left_s = s64(shown_s + 0.5);
     if (left_s < 5) {
-        return "  a few seconds left";
+        return std::string("  ") + T("a few seconds left");
     }
     if (left_s >= 60) {
         const s64 rounded = (left_s + 4) / 5 * 5;
-        return fmt::format("  about {} min {} s left", rounded / 60, rounded % 60);
+        return "  " + fmt::format(fmt::runtime(T("about {} min {} s left")), rounded / 60, rounded % 60);
     }
-    return fmt::format("  about {} s left", left_s);
+    return "  " + fmt::format(fmt::runtime(T("about {} s left")), left_s);
 }
 
 // The full-screen page shown before the game starts (SetPreparationScreen): what is happening, that it happens once,
@@ -1371,19 +1447,19 @@ void FullScreenPreparation() {
     const bool between = phase == 0 && had_step && !seen_step2;  // step 1 done, step 2 not started yet
 
     ImGui::SetCursorPosY(h * 0.36f);
-    centered("Preparing shaders", 2.4f, white);
+    centered(T("Preparing shaders"), 2.4f, white);
     ImGui::Dummy(ImVec2(0.0f, 8.0f * base_scale));
-    centered("This happens once, before your first launch. Later launches start straight away.", 1.15f, grey);
+    centered(T("This happens once, before your first launch. Later launches start straight away."), 1.15f, grey);
     ImGui::Dummy(ImVec2(0.0f, 28.0f * base_scale));
 
-    const char* step = phase == 3   ? "Step 1 of 2: loading shaders"
-                       : phase == 1 ? "Step 1 of 2: building shaders from your game files"
-                       : phase == 2 || between ? "Step 2 of 2: compiling them for your graphics card"
-                       : finishing  ? "Finishing..."
-                                    : "Starting...";
+    const char* step = phase == 3   ? T("Step 1 of 2: loading shaders")
+                       : phase == 1 ? T("Step 1 of 2: building shaders from your game files")
+                       : phase == 2 || between ? T("Step 2 of 2: compiling them for your graphics card")
+                       : finishing  ? T("Finishing...")
+                                    : T("Starting...");
     const u32 scan_of = scan_total.load(std::memory_order_acquire);
     const u32 scan_at = std::min(scan_done.load(std::memory_order_relaxed), scan_of);
-    centered(scan_of ? ScanStep : step, 1.2f, white);
+    centered(scan_of ? T(ScanStep) : step, 1.2f, white);
     ImGui::Dummy(ImVec2(0.0f, 10.0f * base_scale));
     const float bar_w = std::min(w * 0.55f, 900.0f * base_scale);
     ImGui::SetCursorPosX((w - bar_w) * 0.5f);
@@ -1402,9 +1478,9 @@ void FullScreenPreparation() {
     // Where it is switched off (the launcher's Advanced page). For now also the way out if a large shader cache
     // causes trouble (temporary, while shader preparation is being polished).
     ImGui::SetCursorPosY(h * 0.86f);
-    centered("If a large shader cache causes problems: in the launcher, clear the shader cache and turn off",
+    centered(T("If a large shader cache causes problems: in the launcher, clear the shader cache and turn off"),
              1.0f, grey);
-    centered("Advanced > Shader preparation.", 1.0f, grey);
+    centered(T("Advanced > Shader preparation."), 1.0f, grey);
     ImGui::End();
     ImGui::PopStyleColor(3);
 }
@@ -1460,15 +1536,15 @@ void ShaderPreparation() {
     ImGui::SetWindowFontScale(1.25f);
     const u32 done = prep_done.load(std::memory_order_relaxed);
     const u32 total = prep_total.load(std::memory_order_relaxed);
-    const char* what = phase == 1 ? "shaders" : "pipelines";
     if (scan_of) {
         const u32 scan_at = std::min(scan_done.load(std::memory_order_relaxed), scan_of);
-        ImGui::Text("Finding the shaders in your game files (only this once) %.1f / %.1f GB%s", scan_at / 1024.0,
+        ImGui::Text(T("Finding the shaders in your game files (only this once) %.1f / %.1f GB%s"), scan_at / 1024.0,
                     scan_of / 1024.0, ScanEta(scan_at, scan_of).c_str());
     } else if (total == 0) {
-        ImGui::Text("Preparing %s", what);
+        ImGui::TextUnformatted(phase == 1 ? T("Preparing shaders") : T("Preparing pipelines"));
     } else {
-        ImGui::Text("Preparing %s %u / %u%s", what, done, total, PreparationEta(done, total).c_str());
+        ImGui::Text(phase == 1 ? T("Preparing shaders %u / %u%s") : T("Preparing pipelines %u / %u%s"), done, total,
+                    PreparationEta(done, total).c_str());
     }
     ImGui::End();
     ImGui::PopStyleVar();

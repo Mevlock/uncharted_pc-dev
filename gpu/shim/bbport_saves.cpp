@@ -26,7 +26,10 @@
 #include <system_error>
 #include <vector>
 
+#include <fmt/format.h>
 #include <openssl/blowfish.h>
+
+#include "bbport_i18n.h"
 
 extern "C" {
 int runtime_savedata_dir(char* out, size_t size);
@@ -40,6 +43,7 @@ int runtime_checkpoint_available(void);
 }
 
 namespace fs = std::filesystem;
+using BbI18n::T;
 
 namespace {
 
@@ -325,26 +329,26 @@ bool Store(int index, std::string& message) {
     std::lock_guard guard(lock);
     const int game = Game();
     if (!game || index < 0 || index > StorySlot) {
-        message = "Save slots are only for Uncharted 1, 2 and 3.";
+        message = T("Save slots are only for Uncharted 1, 2 and 3.");
         return false;
     }
     if (runtime_savedata_mounted()) {
-        message = "The game is saving: try again in a moment.";
+        message = T("The game is saving: try again in a moment.");
         return false;
     }
     std::error_code ec;
     if (!fs::exists(SavesDir() / SlotName(game) / "USR-DATA", ec)) {
-        message = "There is no campaign save yet.";
+        message = T("There is no campaign save yet.");
         return false;
     }
     std::string error;
     if (!CopyCampaign(game, index, error)) {
-        message = "Could not copy the save: " + error;
+        message = fmt::format(fmt::runtime(T("Could not copy the save: {}")), error);
         return false;
     }
     std::printf("Save slots: campaign save copied to %s\n", Utf8(SlotDir(game, index)).c_str());
     Refresh();
-    message = index < SlotCount ? "Saved in slot " + std::to_string(index + 1) + "." : std::string("Saved.");
+    message = index < SlotCount ? fmt::format(fmt::runtime(T("Saved in slot {}.")), index + 1) : std::string(T("Saved."));
     return true;
 }
 
@@ -354,7 +358,7 @@ bool MakeStory(std::string& message) {
         return false;
     }
     WriteStory(Game(), ReadCheckpoint(Game(), SavesDir() / SlotName(Game())).task, true);
-    message = "This is now your story save.";
+    message = T("This is now your story save.");
     return true;
 }
 
@@ -362,11 +366,11 @@ bool Load(int index, std::string& message) {
     std::lock_guard guard(lock);
     const int game = Game();
     if (!game || index < 0 || index > StorySlot || !GetSlot(index).used) {
-        message = "That slot is empty.";
+        message = T("That slot is empty.");
         return false;
     }
     if (runtime_savedata_mounted()) {
-        message = "The game is saving: try again in a moment.";
+        message = T("The game is saving: try again in a moment.");
         return false;
     }
     // Loading the before-load copy itself puts it back as it is (no new copy over it).
@@ -377,7 +381,7 @@ bool Load(int index, std::string& message) {
     pending << "u" << game << " " << SlotFolder(index) << "\n";
     pending.close();
     if (!pending) {
-        message = "Could not write the load request.";
+        message = T("Could not write the load request.");
         return false;
     }
     std::printf("Save slots: %s requested, restarting\n", Utf8(SlotDir(game, index)).c_str());
@@ -408,12 +412,12 @@ bool StartPractice(std::string& message) {
     std::lock_guard guard(lock);
     const int game = Game();
     if (!game) {
-        message = "Practice mode is only for Uncharted 1, 2 and 3.";
+        message = T("Practice mode is only for Uncharted 1, 2 and 3.");
         return false;
     }
     if (!Practising()) {
         if (runtime_savedata_mounted()) {
-            message = "The game is saving: try again in a moment.";
+            message = T("The game is saving: try again in a moment.");
             return false;
         }
         // The practice copy starts as the campaign save; from now until the game restarts the game saves there.
@@ -422,7 +426,7 @@ bool StartPractice(std::string& message) {
         std::string error;
         if (fs::exists(SavesDir() / SlotName(game) / "USR-DATA", ec) &&
             !CopySave(SavesDir(), practice, SlotName(game), error)) {
-            message = "Could not start practice mode: " + error;
+            message = fmt::format(fmt::runtime(T("Could not start practice mode: {}")), error);
             return false;
         }
         fs::create_directories(practice, ec);
@@ -435,14 +439,14 @@ bool StartPractice(std::string& message) {
 bool Jump(const Checkpoint& target, std::string& message) {
     std::lock_guard guard(lock);
     if (!Game() || !target.known || !JumpsAvailable()) {
-        message = "Checkpoint jumps are not available for this release of the game.";
+        message = T("Checkpoint jumps are not available for this release of the game.");
         return false;
     }
     if (!StartPractice(message)) {
         return false;
     }
     runtime_checkpoint_request(target.task);
-    message = "Going to " + Describe(target) + "...";
+    message = fmt::format(fmt::runtime(T("Going to {}...")), Describe(target));
     return true;
 }
 
@@ -452,11 +456,11 @@ bool KeepPractice(std::string& message) {
     std::error_code ec;
     if (!game || !Practising() ||
         !fs::exists(GameBackups(game) / "practice" / SlotName(game) / "USR-DATA", ec)) {
-        message = "Nothing to keep yet: the game has not saved since the jump.";
+        message = T("Nothing to keep yet: the game has not saved since the jump.");
         return false;
     }
     if (runtime_savedata_mounted()) {
-        message = "The game is saving: try again in a moment.";
+        message = T("The game is saving: try again in a moment.");
         return false;
     }
     // The player's save as it was goes to "Before the last load" (undo), then the restart puts the practice save
@@ -468,7 +472,7 @@ bool KeepPractice(std::string& message) {
     pending << "u" << game << " practice\n";
     pending.close();
     if (!pending) {
-        message = "Could not write the request.";
+        message = T("Could not write the request.");
         return false;
     }
     std::printf("Checkpoints: keeping the practice save, restarting\n");
@@ -481,15 +485,17 @@ int JumpResult() {
     return runtime_checkpoint_result();
 }
 
-std::string Describe(const Checkpoint& c) {
+std::string Describe(const Checkpoint& c, bool translated) {
+    const auto tr = [translated](const char* english) { return translated ? T(english) : english; };
     if (!c.known) {
-        return c.task ? "an unknown checkpoint" : "no save yet";
+        return c.task ? tr("an unknown checkpoint") : tr("no save yet");
     }
-    std::string text = c.number ? "Checkpoint " + std::to_string(c.number) : std::string("Cutscene");
+    std::string text =
+        c.number ? fmt::format(fmt::runtime(tr("Checkpoint {}")), c.number) : std::string(tr("Cutscene"));
     if (!c.name.empty()) {
         text += " \xC2\xB7 " + c.name;
     }
-    return text + " \xC2\xB7 Chapter " + std::to_string(c.chapter) + " " + c.chapter_title;
+    return text + " \xC2\xB7 " + fmt::format(fmt::runtime(tr("Chapter {}")), c.chapter) + " " + c.chapter_title;
 }
 
 } // namespace BbSaves
@@ -643,7 +649,7 @@ extern "C" void bbport_saves_apply_pending(void) {
         std::string error;
         if (now.known && CopyCampaign(game, BbSaves::StorySlot, error)) {
             WriteStory(game, now.task, true);
-            std::printf("Story save: started at %s\n", BbSaves::Describe(now).c_str());
+            std::printf("Story save: started at %s\n", BbSaves::Describe(now, false).c_str());
         }
     }
 }
@@ -670,7 +676,7 @@ extern "C" void bbport_saves_closed(const char* host_dir) {
     if (!story.exists) {
         if (CopyCampaign(game, BbSaves::StorySlot, error)) {
             WriteStory(game, now.task, true);
-            std::printf("Story save: started at %s\n", BbSaves::Describe(now).c_str());
+            std::printf("Story save: started at %s\n", BbSaves::Describe(now, false).c_str());
         }
         return;
     }
@@ -688,6 +694,6 @@ extern "C" void bbport_saves_closed(const char* host_dir) {
         return;
     }
     WriteStory(game, was.task, false);
-    std::printf("Story save: kept at %s (the campaign save moved to %s)\n", BbSaves::Describe(was).c_str(),
-                BbSaves::Describe(now).c_str());
+    std::printf("Story save: kept at %s (the campaign save moved to %s)\n", BbSaves::Describe(was, false).c_str(),
+                BbSaves::Describe(now, false).c_str());
 }
