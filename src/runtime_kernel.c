@@ -61,6 +61,55 @@ static struct {
     TimeBase mono, real, tsc;
 } clocks={0,1.0,0,{0,0},{0,0},{0,0}};
 static int64_t ts_ns(const struct timespec *t) { return (int64_t)t->tv_sec*1000000000+t->tv_nsec; }
+/* The game's clocks stand still while its threads are frozen (runtime_freeze_guest: the preparation page, and the
+ * hold on a later launch, which freezes a game that already runs). Without this it resumed with a step of up to
+ * ~35 s in its frame time and movie clocks. Monotonic time, process time, the TSC and the GPU clock all read
+ * "host reading minus the time spent paused", which is constant while paused and continuous afterwards. Wall-clock
+ * time (gettimeofday, realtime, RTC) is left alone, and host code reads the host clocks, so it keeps real time.
+ * A seqlock with the host clock read inside it: a reader racing a pause or resume retries rather than mixing the
+ * old state with a newer reading, so no reader ever sees time go backwards. */
+static struct {
+    uint32_t seq;                  /* odd while a change is written; 0: never paused */
+    int active;
+    int64_t mono_start, tsc_start; /* host readings where the current pause began */
+    int64_t mono_total, tsc_total; /* the length of the finished pauses */
+} clock_pause={0,0,0,0,0,0};
+static pthread_mutex_t pause_lock=PTHREAD_MUTEX_INITIALIZER;
+static int64_t host_mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return ts_ns(&t); }
+/* which 0: monotonic ns, 1: TSC ticks. host_out (optional): the host reading it came from. */
+static int64_t unpaused(int which,int64_t *host_out) {
+    for (;;) {
+        const uint32_t s1=__atomic_load_n(&clock_pause.seq,__ATOMIC_ACQUIRE);
+        if (s1&1) { _mm_pause(); continue; }
+        const int64_t now=which ? (int64_t)__rdtsc() : host_mono_ns();
+        if (host_out) *host_out=now;
+        const int active=__atomic_load_n(&clock_pause.active,__ATOMIC_RELAXED);
+        const int64_t start=__atomic_load_n(which ? &clock_pause.tsc_start : &clock_pause.mono_start,__ATOMIC_RELAXED);
+        const int64_t total=__atomic_load_n(which ? &clock_pause.tsc_total : &clock_pause.mono_total,__ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&clock_pause.seq,__ATOMIC_RELAXED)!=s1) continue;
+        return (active ? start : now)-total;
+    }
+}
+void runtime_guest_clock_pause(int on) {
+    pthread_mutex_lock(&pause_lock);
+    if (!on==!clock_pause.active) { pthread_mutex_unlock(&pause_lock); return; } /* nested freeze calls (hold + page) */
+    __atomic_add_fetch(&clock_pause.seq,1,__ATOMIC_SEQ_CST);
+    const int64_t mono=host_mono_ns(), tsc=(int64_t)__rdtsc();
+    if (on) {
+        /* A hair ahead of now: a reader whose host reading lands just after ours but which still passes with the
+         * old state (store-buffer latency) gets less than the frozen value, never more. */
+        __atomic_store_n(&clock_pause.mono_start,mono+2000,__ATOMIC_RELAXED);
+        __atomic_store_n(&clock_pause.tsc_start,tsc+20000,__ATOMIC_RELAXED);
+    } else {
+        __atomic_store_n(&clock_pause.mono_total,clock_pause.mono_total+(mono-clock_pause.mono_start),__ATOMIC_RELAXED);
+        __atomic_store_n(&clock_pause.tsc_total,clock_pause.tsc_total+(tsc-clock_pause.tsc_start),__ATOMIC_RELAXED);
+        printf("Runtime: the game's clocks stood still for %.0f ms\n",(double)(mono-clock_pause.mono_start)/1e6);
+    }
+    __atomic_store_n(&clock_pause.active,on ? 1 : 0,__ATOMIC_RELAXED);
+    __atomic_add_fetch(&clock_pause.seq,1,__ATOMIC_RELEASE);
+    pthread_mutex_unlock(&pause_lock);
+}
 static int64_t map_clock(int which,int64_t host) {
     for (;;) {
         uint32_t s1=__atomic_load_n(&clocks.seq,__ATOMIC_ACQUIRE);
@@ -74,8 +123,9 @@ static int64_t map_clock(int which,int64_t host) {
     }
 }
 static void set_time_scale(double scale) {
-    struct timespec a,b; clock_gettime(CLOCK_MONOTONIC,&a); clock_gettime(CLOCK_REALTIME,&b);
-    const int64_t mono=ts_ns(&a), real=ts_ns(&b), tsc=(int64_t)__rdtsc();
+    struct timespec b; clock_gettime(CLOCK_REALTIME,&b);
+    /* monotonic and TSC bases in the paused domain (minus the frozen time), as map_clock gets them */
+    const int64_t mono=unpaused(0,NULL), real=ts_ns(&b), tsc=unpaused(1,NULL);
     const TimeBase m={mono,map_clock(0,mono)}, r={real,map_clock(1,real)}, t={tsc,map_clock(2,tsc)};
     __atomic_add_fetch(&clocks.seq,1,__ATOMIC_ACQ_REL);
     clocks.mono=m; clocks.real=r; clocks.tsc=t; clocks.scale=scale; clocks.changed=1;
@@ -139,6 +189,12 @@ static void scale_clock(struct timespec *t,int which) {
     const int64_t ns=map_clock(which,ts_ns(t));
     t->tv_sec=ns/1000000000; t->tv_nsec=ns%1000000000;
 }
+/* The game's monotonic clock: stopped while it is frozen (pause above), then scaled (BB_TIME_SCALE). */
+static void guest_mono(struct timespec *t) {
+    const int64_t ns=unpaused(0,NULL);
+    t->tv_sec=ns/1000000000; t->tv_nsec=ns%1000000000;
+    scale_clock(t,0);
+}
 static int host_clock(uint32_t id,clockid_t *out) {
     switch (id) {
     case 0: case 9: case 10: *out=CLOCK_REALTIME; return 1;            /* REALTIME(_PRECISE/_FAST) */
@@ -154,9 +210,11 @@ static int clock_read(uint32_t id,GuestTimespec *ts) {
     clockid_t host;
     if (!ts || !host_clock(id,&host)) return EINVAL;
     struct timespec t;
-    if (clock_gettime(host,&t)) return errno;
-    if (host==CLOCK_MONOTONIC) scale_clock(&t,0);
-    else if (host==CLOCK_REALTIME || host==CLOCK_REALTIME_COARSE) scale_clock(&t,1);
+    if (host==CLOCK_MONOTONIC) guest_mono(&t);
+    else {
+        if (clock_gettime(host,&t)) return errno;
+        if (host==CLOCK_REALTIME || host==CLOCK_REALTIME_COARSE) scale_clock(&t,1);
+    }
     if (id==13) t.tv_nsec=0;
     ts->sec=t.tv_sec; ts->nsec=t.tv_nsec; return 0;
 }
@@ -174,16 +232,16 @@ static ABI int32_t posix_clock_getres(uint32_t id,GuestTimespec *ts) {
     return 0;
 }
 static ABI uint64_t process_time(void) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); scale_clock(&t,0);
+    struct timespec t; guest_mono(&t);
     return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000+(uint64_t)((t.tv_nsec-process_start.tv_nsec)/1000);
 }
 static ABI uint64_t process_time_counter(void) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); scale_clock(&t,0);
+    struct timespec t; guest_mono(&t);
     return (uint64_t)(t.tv_sec-process_start.tv_sec)*1000000000+(uint64_t)(t.tv_nsec-process_start.tv_nsec);
 }
 static ABI uint64_t process_time_frequency(void) { return 1000000000; }
 static ABI uint64_t read_tsc(void) {
-    const uint64_t now=__rdtsc();
+    const uint64_t now=(uint64_t)unpaused(1,NULL); /* stopped while the game is frozen */
     return time_scale_setup() ? (uint64_t)map_clock(2,(int64_t)now) : now;
 }
 static uint64_t tsc_hz;
@@ -207,13 +265,25 @@ uint64_t runtime_guest_tsc(void) { return read_tsc(); }
 /* The guest's monotonic clock in microseconds (pad timestamps) and its wall clock (gettimeofday),
  * scaled like the kernel clocks under BB_TIME_SCALE. */
 uint64_t runtime_guest_monotonic_us(void) {
-    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); scale_clock(&t,0);
+    struct timespec t; guest_mono(&t);
     return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u;
 }
 void runtime_guest_realtime(struct timespec *t) { scale_clock(t,1); }
 /* The GPU's 64-bit clock (EOP timestamps, pm4_cmds.h GetGpuClock64): host nanoseconds from any
  * epoch, slowed from the first scaled reading on. */
 uint64_t runtime_guest_gpu_clock(uint64_t host_ns) {
+    if (__atomic_load_n(&clock_pause.seq,__ATOMIC_ACQUIRE)) {
+        /* Stopped while the game is frozen, like the monotonic clock: the paused time so far is subtracted (any
+         * epoch works, only the length counts). host_ns was read a moment before the pause state, so the result
+         * is kept from stepping back. */
+        int64_t host;
+        const int64_t adjusted=unpaused(0,&host);
+        host_ns-=(uint64_t)(host-adjusted);
+        static uint64_t last;
+        uint64_t prev=__atomic_load_n(&last,__ATOMIC_RELAXED);
+        while (host_ns>prev && !__atomic_compare_exchange_n(&last,&prev,host_ns,1,__ATOMIC_RELAXED,__ATOMIC_RELAXED)) {}
+        if (host_ns<prev) host_ns=prev;
+    }
     if (!time_scale_setup()) return host_ns;
     static uint64_t base;
     uint64_t expected=0;

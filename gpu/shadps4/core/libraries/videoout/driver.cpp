@@ -45,6 +45,7 @@ extern std::atomic<u32> g_bb_translations, g_bb_cs_pipelines, g_bb_gfx_pipelines
 } // namespace Vulkan
 
 extern "C" double runtime_time_scale_now(void);
+extern "C" volatile int runtime_freeze_flag; // runtime_thread.c: the game's threads are held (preparation page/hold)
 
 namespace Vulkan {
 extern std::atomic<u64> g_flips;
@@ -141,7 +142,10 @@ VideoOutDriver::VideoOutDriver(u32 width, u32 height) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
                 const u64 flips = Vulkan::g_flips.load(std::memory_order_relaxed);
                 const auto now = std::chrono::steady_clock::now();
-                if (flips != last || flips == 0) {
+                // The preparation page or hold stops the game's flips on purpose (20-35 s with a cold driver
+                // cache): not a freeze, and it must not spend the one dump. The count restarts when it ends.
+                const bool held = runtime_freeze_flag != 0 || BbOverlay::PreparationScreenActive();
+                if (held || flips != last || flips == 0) {
                     last = flips;
                     since = now;
                     continue;
@@ -960,14 +964,20 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
         }
         const bool flip_slot = movie || !frame_limit || now >= next_flip;
+        // bbport: while the game's threads are frozen (preparation page/hold) its clocks stand still
+        // (runtime_kernel.c) and so do its vblanks: no count step and no events, so it resumes without a jump. A
+        // host tick count paces the frames here meanwhile (the frozen vblank count would stall them).
+        static u64 frozen_ticks = 0;
+        const bool guest_frozen = runtime_freeze_flag != 0;
+        const u64 tick = guest_frozen ? frozen_ticks++ : vblank_status.count;
         // bbport: the full-screen preparation page is drawn opaque over whatever is presented; before the game opens
         // its video port, blank frames carry it at half the vblank rate (holding the game's flips instead upset its
         // frame rotation: the title flickered afterwards).
         if (BbOverlay::PreparationScreenActive() && !main_port.is_open) {
-            if (vblank_status.count % 2 == 0) {
+            if (tick % 2 == 0) {
                 DrawBlankFrame();
             }
-        } else if (flip_slot && vblank_status.count % (main_port.flip_rate + 1) == 0) {
+        } else if (flip_slot && tick % (main_port.flip_rate + 1) == 0) {
             const auto request = receive_request();
             if (request && frame_limit) {
                 next_flip = std::max(next_flip + frame_period, now - frame_period);
@@ -988,7 +998,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
         }
 
-        {
+        if (!guest_frozen) {
             // Needs lock here as can be concurrently read by `sceVideoOutGetVblankStatus`
             std::scoped_lock lock{main_port.vo_mutex};
 

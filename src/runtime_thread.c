@@ -71,12 +71,17 @@ void runtime_freeze_wait(void) {
     while (runtime_freeze_flag) pthread_cond_wait(&freeze_cv,&freeze_lock);
     pthread_mutex_unlock(&freeze_lock);
 }
+void runtime_guest_clock_pause(int on); /* runtime_kernel.c */
 void runtime_freeze_guest(int on) {
     static int enabled=-1;
     if (enabled<0) { const char *e=getenv("BB_PREP_FREEZE"); enabled=!(e && e[0]=='0'); }
     if (!enabled) return;
     pthread_mutex_lock(&freeze_lock);
+    /* The game's clocks stop with its threads, so it resumes as if no time passed (the hold freezes a running game).
+     * They start again before the threads are released, so a woken thread never reads a stopped clock. */
+    if (!on) runtime_guest_clock_pause(0);
     runtime_freeze_flag=on;
+    if (on) runtime_guest_clock_pause(1);
     if (!on) pthread_cond_broadcast(&freeze_cv);
     pthread_mutex_unlock(&freeze_lock);
     printf("Runtime: game threads %s (shader preparation page)\n",on ? "frozen" : "resumed");

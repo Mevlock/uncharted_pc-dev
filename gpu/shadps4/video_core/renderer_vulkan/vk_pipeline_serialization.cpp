@@ -2344,6 +2344,9 @@ void PipelineCache::WarmUpThread() {
         }
         ReleaseClaim(claim_id);
     };
+    // The hold below lasts until the listed variants are built too (step 5b), so no shader work is left behind the game.
+    bool held = false, held_page = false;
+    std::chrono::steady_clock::time_point held_since{};
     // bbport: a large cache (a prepared list) shows the same "Preparing pipelines" progress as the list build.
     if (stored.size() >= 500) {
         // A later launch (no page) builds these behind the game. With the graphics driver's own cache warm that takes
@@ -2355,7 +2358,22 @@ void PipelineCache::WarmUpThread() {
             const char* env = std::getenv("BB_PREP_HOLD");
             return !(env && env[0] == '0');
         }();
-        const bool hold = !prep_screen && !prepare_only && hold_allowed;
+        // BB_PREP_FREEZE=0 makes runtime_freeze_guest a no-op: there is no hold then (the game runs, so no page over
+        // it either), and the log says so instead of "the game waited".
+        static const bool freeze_enabled = [] {
+            const char* env = std::getenv("BB_PREP_FREEZE");
+            return !(env && env[0] == '0');
+        }();
+        // BB_PREP_SCREEN=0 forces every preparation page off, this one too (the hold itself stays).
+        static const bool page_allowed = [] {
+            const char* env = std::getenv("BB_PREP_SCREEN");
+            return !(env && env[0] == '0');
+        }();
+        const bool hold = !prep_screen && !prepare_only && hold_allowed && freeze_enabled;
+        if (!prep_screen && !prepare_only && hold_allowed && !freeze_enabled) {
+            std::printf("Preparation: BB_PREP_FREEZE=0, the game runs while %zu stored pipelines are built\n",
+                        stored.size());
+        }
         if (hold) {
             runtime_freeze_guest(1);
         }
@@ -2367,7 +2385,7 @@ void PipelineCache::WarmUpThread() {
             build_stored(i);
             const u32 done = stored_done.fetch_add(1, std::memory_order_relaxed) + 1;
             BbOverlay::SetShaderPreparation(2, done, u32(stored.size()));
-            if (hold && !page_raised.load(std::memory_order_relaxed) && done % 64 == 0) {
+            if (hold && page_allowed && !page_raised.load(std::memory_order_relaxed) && done % 64 == 0) {
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                                             hold_start)
                                       .count();
@@ -2382,18 +2400,9 @@ void PipelineCache::WarmUpThread() {
             }
         });
         BbOverlay::SetShaderPreparation(0, 0, 0);
-        if (hold) {
-            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - hold_start)
-                                  .count();
-            std::printf("Preparation: the game waited %.0f ms for %zu stored pipelines%s\n", ms, stored.size(),
-                        page_raised.load() ? " (page shown)" : "");
-            if (page_raised.load()) {
-                BbOverlay::SetPreparationScreen(false);
-                BbOverlay::SetPreparationRebuild(false);
-            } else {
-                runtime_freeze_guest(0);
-            }
-        }
+        held = hold;
+        held_page = page_raised.load();
+        held_since = hold_start;
     } else {
         ParallelFor(stored.size(), threads, build_stored);
     }
@@ -2553,6 +2562,19 @@ void PipelineCache::WarmUpThread() {
                     "the game first, %u failed, %u without code) in %.0f ms; then %u pipelines in %.0f ms\n",
                     listed.size(), t_read - t_ship, built.load(), taken.load(), failed.load(), no_code.load(),
                     t_built - t_read, num_pipelines.load() - before, elapsed_ms() - t_built);
+    }
+    // The hold ends: the stored pipelines and the listed variants are ready before the game goes on.
+    if (held) {
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - held_since)
+                              .count();
+        std::printf("Preparation: the game waited %.0f ms for %zu stored pipelines and the listed variants%s\n", ms,
+                    stored.size(), held_page ? " (page shown)" : "");
+        if (held_page) {
+            BbOverlay::SetPreparationScreen(false);
+            BbOverlay::SetPreparationRebuild(false);
+        } else {
+            runtime_freeze_guest(0);
+        }
     }
 
     // 6. bbport (shader variant list, BB_VARIANT_REPLAY=1): variants with translation inputs but no binary are

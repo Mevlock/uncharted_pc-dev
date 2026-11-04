@@ -1529,7 +1529,17 @@ void ShaderPreparation() {
     }
     const int phase = prep_phase.load(std::memory_order_acquire);
     const u32 scan_of = scan_total.load(std::memory_order_acquire);
+    // A start with a warm cache prepares for a second or so while the game waits: no box for that. It shows when the
+    // work lasts longer (the one-time file scan shows at once).
+    static s64 busy_since_ms = 0;
     if (phase == 0 && scan_of == 0) {
+        busy_since_ms = 0;
+        return;
+    }
+    if (busy_since_ms == 0) {
+        busy_since_ms = NowMs();
+    }
+    if (scan_of == 0 && NowMs() - busy_since_ms < 1500) {
         return;
     }
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
