@@ -577,6 +577,32 @@ extern "C" void bbport_saves_apply_pending(void) {
         return;
     }
     std::lock_guard guard(lock);
+    // Once per release folder, before anything here can change a save: every save of this release (the three
+    // games' campaign and profile saves) copied to <saves>.backups/before-save-slots, so a player always has the
+    // saves as they were before the save slots, story saves and checkpoint jumps first ran.
+    {
+        std::error_code ec;
+        const fs::path saves = SavesDir();
+        const fs::path first = saves.parent_path() / (Utf8(saves.filename()) + ".backups") / "before-save-slots";
+        if (!fs::exists(first, ec) && fs::is_directory(saves, ec)) {
+            const fs::path temp = first.parent_path() / "before-save-slots.new";
+            fs::remove_all(temp, ec);
+            fs::create_directories(temp, ec);
+            bool ok = !ec;
+            for (const auto& entry : fs::directory_iterator(saves, ec)) {
+                if (ok && entry.is_directory() && Utf8(entry.path().filename()).rfind("SAVEDATA", 0) == 0) {
+                    fs::copy(entry.path(), temp / entry.path().filename(), fs::copy_options::recursive, ec);
+                    ok = !ec;
+                }
+            }
+            if (ok) {
+                fs::rename(temp, first, ec);
+                ok = !ec;
+            }
+            std::printf("Save slots: %s\n", ok ? ("every save backed up once to " + Utf8(first)).c_str()
+                                                : ("the one-time save backup failed: " + ec.message()).c_str());
+        }
+    }
     ApplyPending(game);
     std::error_code ec;
     const fs::path campaign = SavesDir() / SlotName(game);
