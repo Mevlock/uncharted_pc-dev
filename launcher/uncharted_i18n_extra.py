@@ -196,8 +196,8 @@ EXTRA_TRANSLATIONS = {
         'Speed': 'Geschwindigkeit',
         'Also prepare versions the port has no shader index for':
         'Auch Versionen vorbereiten, für die der Port keinen Shader-Index hat',
-        "Other regions' releases of a known game version (for example the Spanish CUSA02826). The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
-        'Ausgaben anderer Regionen einer bekannten Spielversion (zum Beispiel die spanische CUSA02826). Der erste Start liest dann einmal alle Spieldateien (etwa 60 GB), um die Shader zu finden. Das kann sehr lange dauern: Lass es laufen, ein Fortschrittsbalken zeigt den Stand.',
+        "Other regions' releases of a known game version. The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
+        'Ausgaben anderer Regionen einer bekannten Spielversion. Der erste Start liest dann einmal alle Spieldateien (etwa 60 GB), um die Shader zu finden. Das kann sehr lange dauern: Lass es laufen, ein Fortschrittsbalken zeigt den Stand.',
         'Prepare shaders now': 'Shader jetzt vorbereiten',
         'Prepare again': 'Erneut vorbereiten',
         "This is an unofficial fork (version {}): it does not update itself. Official releases are on SuperMedo's page; installing one replaces this build.":
@@ -451,8 +451,8 @@ EXTRA_TRANSLATIONS = {
         'Speed': 'Velocità',
         'Also prepare versions the port has no shader index for':
         'Prepara anche le versioni per cui il port non ha un indice degli shader',
-        "Other regions' releases of a known game version (for example the Spanish CUSA02826). The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
-        'Edizioni di altre regioni di una versione nota del gioco (ad esempio la spagnola CUSA02826). Il primo avvio legge allora una volta tutti i file del gioco (circa 60 GB) per trovare gli shader. Può richiedere moltissimo tempo: lascialo andare, una barra di avanzamento mostra a che punto è.',
+        "Other regions' releases of a known game version. The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
+        'Edizioni di altre regioni di una versione nota del gioco. Il primo avvio legge allora una volta tutti i file del gioco (circa 60 GB) per trovare gli shader. Può richiedere moltissimo tempo: lascialo andare, una barra di avanzamento mostra a che punto è.',
         'Prepare shaders now': 'Prepara gli shader ora',
         'Prepare again': 'Prepara di nuovo',
         "This is an unofficial fork (version {}): it does not update itself. Official releases are on SuperMedo's page; installing one replaces this build.":
@@ -704,8 +704,8 @@ EXTRA_TRANSLATIONS = {
         'バックグラウンドではゲームはすぐに始まりますが、完了するまでカクつきます。',
         'Speed': '速度',
         'Also prepare versions the port has no shader index for': 'シェーダーインデックスのないバージョンも準備する',
-        "Other regions' releases of a known game version (for example the Spanish CUSA02826). The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
-        '既知のゲームバージョンの他地域版(例: スペイン版 CUSA02826)。初回起動時にシェーダーを探すため、すべてのゲームファイル(約 60 GB)を一度読み込みます。非常に時間がかかることがあります。そのまま実行しておいてください。進捗バーで進み具合を確認できます。',
+        "Other regions' releases of a known game version. The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
+        '既知のゲームバージョンの他地域版。初回起動時にシェーダーを探すため、すべてのゲームファイル(約 60 GB)を一度読み込みます。非常に時間がかかることがあります。そのまま実行しておいてください。進捗バーで進み具合を確認できます。',
         'Prepare shaders now': '今すぐシェーダーを準備',
         'Prepare again': 'もう一度準備',
         "This is an unofficial fork (version {}): it does not update itself. Official releases are on SuperMedo's page; installing one replaces this build.":
@@ -859,8 +859,8 @@ EXTRA_TRANSLATIONS = {
         'Speed': 'Velocidad',
         'Also prepare versions the port has no shader index for':
         'Preparar también versiones para las que el port no tiene índice de shaders',
-        "Other regions' releases of a known game version (for example the Spanish CUSA02826). The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
-        'Ediciones de otras regiones de una versión conocida del juego (por ejemplo, la española CUSA02826). El primer inicio lee entonces todos los archivos del juego (unos 60 GB) una vez para encontrar los shaders. Puede tardar mucho: déjalo en marcha; una barra de progreso muestra cuánto falta.',
+        "Other regions' releases of a known game version. The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
+        'Ediciones de otras regiones de una versión conocida del juego. El primer inicio lee entonces todos los archivos del juego (unos 60 GB) una vez para encontrar los shaders. Puede tardar mucho: déjalo en marcha; una barra de progreso muestra cuánto falta.',
         'Prepare shaders now': 'Preparar shaders ahora',
         'Prepare again': 'Preparar de nuevo',
         "This is an unofficial fork (version {}): it does not update itself. Official releases are on SuperMedo's page; installing one replaces this build.":
@@ -1016,8 +1016,8 @@ EXTRA_TRANSLATIONS = {
         'Speed': 'Velocidade',
         'Also prepare versions the port has no shader index for':
         'Preparar também versões para as quais o port não tem índice de shaders',
-        "Other regions' releases of a known game version (for example the Spanish CUSA02826). The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
-        'Edições de outras regiões de uma versão conhecida do jogo (por exemplo, a espanhola CUSA02826). A primeira inicialização então lê todos os arquivos do jogo (cerca de 60 GB) uma vez para encontrar os shaders. Isso pode demorar muito: deixe rodando; uma barra de progresso mostra quanto falta.',
+        "Other regions' releases of a known game version. The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
+        'Edições de outras regiões de uma versão conhecida do jogo. A primeira inicialização então lê todos os arquivos do jogo (cerca de 60 GB) uma vez para encontrar os shaders. Isso pode demorar muito: deixe rodando; uma barra de progresso mostra quanto falta.',
         'Prepare shaders now': 'Preparar shaders agora',
         'Prepare again': 'Preparar novamente',
         "This is an unofficial fork (version {}): it does not update itself. Official releases are on SuperMedo's page; installing one replaces this build.":
@@ -1174,8 +1174,8 @@ EXTRA_TRANSLATIONS = {
         'Speed': 'Vitesse',
         'Also prepare versions the port has no shader index for':
         'Préparer aussi les versions sans index de shaders dans le portage',
-        "Other regions' releases of a known game version (for example the Spanish CUSA02826). The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
-        'Éditions d’autres régions d’une version connue du jeu (par exemple l’espagnole CUSA02826). Le premier démarrage lit alors une fois tous les fichiers du jeu (environ 60 Go) pour trouver les shaders. Cela peut être très long : laissez tourner, une barre de progression indique l’avancement.',
+        "Other regions' releases of a known game version. The first start then reads all the game files (about 60 GB) once to find the shaders. This can take a very long time: leave it running, a progress bar shows how far it is.":
+        'Éditions d’autres régions d’une version connue du jeu. Le premier démarrage lit alors une fois tous les fichiers du jeu (environ 60 Go) pour trouver les shaders. Cela peut être très long : laissez tourner, une barre de progression indique l’avancement.',
         'Prepare shaders now': 'Préparer les shaders maintenant',
         'Prepare again': 'Préparer à nouveau',
         "This is an unofficial fork (version {}): it does not update itself. Official releases are on SuperMedo's page; installing one replaces this build.":

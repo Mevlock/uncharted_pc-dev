@@ -430,7 +430,7 @@ def game_code(s, key):
 def unsupported_version(s, key):
     """The game's version when the shader preparation is not used on this copy (no shader index ships for its title
     and game code), else ''. Advanced 'prep_unknown_versions' lets a known game code under such a title (another
-    region's release, e.g. the Spanish CUSA02826 with the 1.02 code) be prepared: the game scans its files once and
+    region's release with the 1.02 code that has no shipped index) be prepared: the game scans its files once and
     keeps the index. An executable whose game code we do not know stays off."""
     info = game_info(game_folder(s, key))
     if not info:
@@ -2157,7 +2157,7 @@ class Launcher:
         self.row(f, _('Speed'), self.choice(self.target(f), 'preparation_speed', [
             ('all', 'All CPU cores (fastest)'), ('half', 'Half the cores (the PC stays responsive)')]))
         self.check(f, 'prep_unknown_versions', _('Also prepare versions the port has no shader index for'),
-                   _("Other regions' releases of a known game version (for example the Spanish CUSA02826). The "
+                   _("Other regions' releases of a known game version. The "
                      'first start then reads all the game files (about 60 GB) once to find the shaders. This can '
                      'take a very long time: leave it running, a progress bar shows how far it is.'))
         self.var('prep_unknown_versions').trace_add('write', lambda *_a: self.update_prep_status())
