@@ -1631,6 +1631,16 @@ bool BufferCache::WaitLandingTick(u64 tick) {
     return false;
 }
 
+// BB_LANDING_UNMAP_WAIT=0: an unmap does not wait for a landing that is writing into its range (code review A2),
+// and landings do not mark themselves (one lock and wake-up each); for A/B.
+static bool LandingUnmapWait() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_LANDING_UNMAP_WAIT");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
 void BufferCache::ForgetUnmapped(VAddr device_addr, u64 size) {
     {
         std::unique_lock lk{landing_mutex};
@@ -1653,7 +1663,9 @@ void BufferCache::ForgetUnmapped(VAddr device_addr, u64 size) {
             }
             return false;
         };
-        landing_done_cv.wait(lk, [&] { return !merging_here(); });
+        if (LandingUnmapWait()) {
+            landing_done_cv.wait(lk, [&] { return !merging_here(); });
+        }
     }
     // After the wait: a landing that merged meanwhile reported its ranges, dropped here.
     DrainSharedLandings();
@@ -1744,7 +1756,9 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
                 gone.emplace_back(range.lo, range.hi);
             }
         }
-        landing_merging = &landing;
+        if (LandingUnmapWait()) {
+            landing_merging = &landing;
+        }
     }
     // Calls `land(target, offset into the copy, size)` for the pieces of copy i still mapped.
     const auto for_each_mapped = [&gone, &landing](size_t i, auto&& land) {
@@ -1814,11 +1828,13 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
             });
         }
     }
-    {
-        std::scoped_lock lk{landing_mutex};
-        landing_merging = nullptr;
+    if (LandingUnmapWait()) {
+        {
+            std::scoped_lock lk{landing_mutex};
+            landing_merging = nullptr;
+        }
+        landing_done_cv.notify_all();
     }
-    landing_done_cv.notify_all();
     side.Release(slot);
     return true;
 }

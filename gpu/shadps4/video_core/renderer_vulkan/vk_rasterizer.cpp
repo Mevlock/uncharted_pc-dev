@@ -5231,7 +5231,30 @@ void Rasterizer::WaitHleCopies(u32 where) {
         return env ? u32(std::strtoul(env, nullptr, 10)) : CopyLeadDraws();
     }();
     u64 end = 0;
-    if (skip && where == 1) {
+    // BB_COPY_LEAD_OLDEST=1: the bound counts from the oldest copy not run yet (code review A3: a copy every few
+    // draws restarts the count, so the lead is not bounded). It made stage A wait about as early as waiting at the
+    // first draw, ~5% lower dips in U3's market (0.3.6.44 A/B), so the default stays the count from the latest copy,
+    // which kept the U2 train free of flashes in play.
+    static const bool oldest = [] {
+        const char* env = std::getenv("BB_COPY_LEAD_OLDEST");
+        return env && env[0] == '1';
+    }();
+    if (skip && where == 1 && !oldest) {
+        end = hle_copy_end.load(std::memory_order_acquire);
+        if (!end || draw_pipe->Reached(end)) {
+            return;
+        }
+        static thread_local u64 last_end = 0;
+        static thread_local u32 passed = 0;
+        if (end != last_end) {
+            last_end = end;
+            passed = 0;
+        }
+        if (passed < skip) {
+            ++passed;
+            return;
+        }
+    } else if (skip && where == 1) {
         // Counted from the oldest copy not run yet, not the latest: a copy every few draws must not restart it.
         ++hle_draws;
         while (hle_copy_count && draw_pipe->Reached(hle_copies[hle_copy_first].end)) {
