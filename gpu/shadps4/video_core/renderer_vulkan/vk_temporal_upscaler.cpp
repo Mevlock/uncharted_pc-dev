@@ -1472,9 +1472,17 @@ void TemporalUpscaler::CaptureFrameGen() {
     const auto cmdbuf = scheduler.CommandBuffer();
     const u32 w = depth.info.size.width, h = depth.info.size.height;
     // The same motion vectors the upscaler computes: camera motion, previous minus current.
-    if (const vk::ImageView motion = frame_generator->BeginCapture(cmdbuf, depth_view, w, h)) {
-        camera_motion.RecordVelocity(cmdbuf, depth_view, motion, w, h);
-        frame_generator->EndCapture(cmdbuf, Active() ? jitter : std::array<float, 2>{},
+    vk::Extent2D capture{};
+    if (const vk::ImageView motion =
+            frame_generator->BeginCapture(cmdbuf, depth_view, w, h, capture)) {
+        // A larger render taken at the frame's size: motion vectors in its pixels.
+        const bool scaled = capture.width != w || capture.height != h;
+        const float s = scaled ? float(capture.width) / float(w) : 1.0f;
+        camera_motion.RecordVelocity(cmdbuf, scaled ? frame_generator->CaptureDepth() : depth_view,
+                                     motion, capture.width, capture.height, s);
+        frame_generator->EndCapture(cmdbuf,
+                                    Active() ? std::array<float, 2>{jitter[0] * s, jitter[1] * s}
+                                             : std::array<float, 2>{},
                                     camera_motion.Ready());
     }
 }

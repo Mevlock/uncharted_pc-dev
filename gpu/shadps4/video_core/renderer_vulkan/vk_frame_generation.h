@@ -47,7 +47,15 @@ public:
     /// At the upscaler's trigger, render size `w` x `h`: records the copy of the scene depth
     /// (depth aspect view, sampled in General layout) and returns the motion vector image to
     /// write next (RG16F storage, General: pixels, previous minus current), or null when off.
-    vk::ImageView BeginCapture(vk::CommandBuffer cmdbuf, vk::ImageView depth, u32 w, u32 h);
+    /// A render larger than the frames shown (a 4K render or supersampling on a smaller screen)
+    /// is taken at the frame's size: frame generation takes inputs no larger than its frame.
+    /// `capture` gets the size taken; when it is not `w` x `h`, write the motion vectors at that
+    /// size from CaptureDepth() (the copied depth, R32F, sampled in General layout).
+    vk::ImageView BeginCapture(vk::CommandBuffer cmdbuf, vk::ImageView depth, u32 w, u32 h,
+                               vk::Extent2D& capture);
+    [[nodiscard]] vk::ImageView CaptureDepth() const {
+        return *depth_view;
+    }
     /// After the motion vectors are written. `motion_valid` false: they are zero this frame.
     void EndCapture(vk::CommandBuffer cmdbuf, std::array<float, 2> jitter, bool motion_valid);
 
@@ -96,6 +104,7 @@ private:
     VideoCore::UniqueImage motion_image; ///< RG16F pixels, previous - current
     vk::UniqueImageView depth_view, motion_view;
     u32 input_width = 0, input_height = 0;
+    u32 frame_width = 0, frame_height = 0; ///< the last frame generated for (display size)
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pipeline_layout;
     vk::UniquePipeline pipeline;
