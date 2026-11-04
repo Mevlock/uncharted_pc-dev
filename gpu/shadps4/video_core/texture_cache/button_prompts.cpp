@@ -1058,8 +1058,10 @@ Force Forced() {
         if (!std::strcmp(env, "xbox")) {
             return Force::Xbox;
         }
+        // Nintendo pictures are withheld until they are tested further (a player's start ended right after they
+        // were drawn, 0.3.6.43): "nintendo" shows the Xbox ones.
         if (!std::strcmp(env, "nintendo")) {
-            return Force::Nintendo;
+            return Force::Xbox;
         }
         return !std::strcmp(env, "0") || !std::strcmp(env, "off") || !std::strcmp(env, "playstation")
                    ? Force::Off
@@ -1096,8 +1098,7 @@ Style Shown() {
     const int device = device_used.load(std::memory_order_relaxed);
     return device == 0   ? Style::Keyboard
            : device == 1 ? Style::Original
-           : device == 3 ? Style::Nintendo
-                         : Style::Xbox;
+                         : Style::Xbox; // a Nintendo controller (3) too, for now
 }
 
 u32 Switches() {
@@ -1224,7 +1225,7 @@ void Prebuild() {
         Common::SetCurrentThreadName("bb:ButtonPrompts");
         BbThreads::MakeBelowNormal();
         const Force force = Forced();
-        for (const Style style : {Style::Keyboard, Style::Xbox, Style::Nintendo}) {
+        for (const Style style : {Style::Keyboard, Style::Xbox}) { // Nintendo withheld for now (Forced())
             if ((force == Force::Keyboard && style != Style::Keyboard) ||
                 (force == Force::Xbox && style != Style::Xbox) ||
                 (force == Force::Nintendo && style != Style::Nintendo)) {

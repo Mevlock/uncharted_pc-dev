@@ -1410,9 +1410,10 @@ static int prompts_pad_device(SDL_Gamepad *g) {
     const SDL_GamepadType type=SDL_GetGamepadType(g);
     if (type==SDL_GAMEPAD_TYPE_PS3 || type==SDL_GAMEPAD_TYPE_PS4 || type==SDL_GAMEPAD_TYPE_PS5) return 1;
     if (type==SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO || type==SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
-        type==SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT || type==SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR) return 3;
+        type==SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT || type==SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR)
+        return 2; /* Nintendo pictures withheld for now (button_prompts.cpp): Xbox ones */
     const SDL_GamepadButtonLabel south=SDL_GetGamepadButtonLabel(g,SDL_GAMEPAD_BUTTON_SOUTH);
-    return south==SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 1 : south==SDL_GAMEPAD_BUTTON_LABEL_B ? 3 : 2;
+    return south==SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 1 : 2;
 }
 
 static void injected_mouse(float *dx, float *dy);
