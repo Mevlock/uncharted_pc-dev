@@ -1324,12 +1324,15 @@ const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
 }
 
 /* The button pictures for this controller: 1 PlayStation (DualShock, DualSense: the game's own),
- * 2 Xbox (everything else; the buttons are named by position, so a Switch pad is shown as the
- * Xbox layout). */
+ * 3 Nintendo (Switch Pro, Joy-Cons, pads labelled B at the bottom: B A Y X by position), 2 Xbox
+ * (everything else). */
 static int prompts_pad_device(SDL_Gamepad *g) {
     const SDL_GamepadType type=SDL_GetGamepadType(g);
     if (type==SDL_GAMEPAD_TYPE_PS3 || type==SDL_GAMEPAD_TYPE_PS4 || type==SDL_GAMEPAD_TYPE_PS5) return 1;
-    return SDL_GetGamepadButtonLabel(g,SDL_GAMEPAD_BUTTON_SOUTH)==SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 1 : 2;
+    if (type==SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO || type==SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT ||
+        type==SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT || type==SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR) return 3;
+    const SDL_GamepadButtonLabel south=SDL_GetGamepadButtonLabel(g,SDL_GAMEPAD_BUTTON_SOUTH);
+    return south==SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 1 : south==SDL_GAMEPAD_BUTTON_LABEL_B ? 3 : 2;
 }
 
 static void injected_mouse(float *dx, float *dy);

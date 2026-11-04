@@ -84,6 +84,17 @@ flat [Input Prompts](https://kenney.nl/assets/input-prompts) (CC0, licence in
 build needs no Python; `--kenney <unzipped pack>` packs Kenney's pictures instead). Adding one is a
 name in that script, a drawing in `xbox_prompts_domed.py` and an entry in `XGlyph`.
 
+## Nintendo buttons
+
+A Switch Pro controller, Joy-Cons, or any controller whose bottom button is labelled B gets Nintendo
+pictures: the same domed buttons in the same places as the Xbox set, labelled as a Switch controller
+labels them. The face buttons are matched by position, so the bottom button (✕) is B, the right one
+(○) A, the left one (□) Y and the top one (△) X; L1 R1 L2 R2 are L R ZL ZR, OPTIONS is + and the
+touchpad −. The face letters are light grey, like Nintendo's own buttons. Launcher: Controls,
+*Show in the game*, *Nintendo buttons*; `BB_BUTTON_PROMPTS=nintendo` forces them.
+`tools/make_xbox_prompts.py --nintendo` draws them into `texture_cache/button_prompts_nintendo.inc`
+(the same cells as the Xbox atlas).
+
 ## Keyboard layouts
 
 The launcher saves the character printed on the key the player pressed. `runtime_pad.c` used to

@@ -131,7 +131,7 @@ def bumper(label):
 
 def trigger(label):
     canvas = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    left = label == "LT"
+    left = label in ("LT", "ZL")
 
     def draw_shape(d):
         # A trigger: rounded rectangle with the outer top corner pulled round.
@@ -196,8 +196,48 @@ def dpad(lit):
     return canvas
 
 
-def draw(name):
-    if name.startswith("button_color_"):
+def nintendo_face(letter):
+    """A Nintendo face button: the same dark dome, a light grey letter (Nintendo's buttons are not coloured)."""
+    canvas = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    r = 196
+    dome = _circle(r)
+    _glow(canvas, dome, (200, 200, 200), radius=22, strength=90)
+    _dark_body(canvas, dome, S // 2 - r, S // 2 + r)
+    _text(canvas, letter, 250, TEXT, (S // 2, S // 2 + 8), stroke=12)
+    return canvas
+
+
+def nintendo_small_round(symbol):
+    """+ (start) or - (select) on a small dark dome."""
+    canvas = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    r = 170
+    dome = _circle(r)
+    _glow(canvas, dome, (200, 200, 200), radius=20, strength=70)
+    _dark_body(canvas, dome, S // 2 - r, S // 2 + r)
+    draw = ImageDraw.Draw(canvas)
+    c, arm, half = S // 2, 92, 22
+    draw.rounded_rectangle([c - arm, c - half, c + arm, c + half], radius=10, fill=TEXT + (255,))
+    if symbol == "plus":
+        draw.rounded_rectangle([c - half, c - arm, c + half, c + arm], radius=10, fill=TEXT + (255,))
+    return canvas
+
+
+# Nintendo: the same places as the Xbox pictures, named the way a Switch controller labels them. The face
+# buttons are matched by position (the bottom button is B, the right one A, the left one Y, the top one X).
+NINTENDO_FACES = {"a": "B", "b": "A", "x": "Y", "y": "X"}
+NINTENDO_SHOULDERS = {"lb": "L", "rb": "R", "lt": "ZL", "rt": "ZR"}
+
+
+def draw(name, style="xbox"):
+    if style == "nintendo" and name.startswith("button_color_"):
+        image = nintendo_face(NINTENDO_FACES[name[-1]])
+    elif style == "nintendo" and name in ("button_menu", "button_view"):
+        image = nintendo_small_round("plus" if name == "button_menu" else "minus")
+    elif style == "nintendo" and name in ("lb", "rb"):
+        image = bumper(NINTENDO_SHOULDERS[name])
+    elif style == "nintendo" and name in ("lt", "rt"):
+        image = trigger(NINTENDO_SHOULDERS[name])
+    elif name.startswith("button_color_"):
         image = face(name[-1])
     elif name in ("button_menu", "button_view"):
         image = small_round(name.split("_")[1])

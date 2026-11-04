@@ -422,6 +422,10 @@ Canvas Downsample(const Canvas& level);
 // ---- Xbox pictures: Kenney's Input Prompts (CC0), packed by tools/make_xbox_prompts.py ------
 
 #include "video_core/texture_cache/button_prompts_xbox.inc"
+// The Nintendo pictures: the same cells (xbox_glyphs), drawn as a Switch controller labels them.
+#include "video_core/texture_cache/button_prompts_nintendo.inc"
+static_assert(nintendo_atlas_width == xbox_atlas_width && nintendo_atlas_height == xbox_atlas_height,
+              "the Nintendo atlas has the Xbox atlas cells");
 
 // The order of xbox_glyphs in the .inc.
 enum XGlyph : u8 {
@@ -439,14 +443,16 @@ struct XboxAtlas {
     } glyph[XGlyphs];
 };
 
-const XboxAtlas* Atlas() {
-    static const std::unique_ptr<XboxAtlas> atlas = []() -> std::unique_ptr<XboxAtlas> {
+/// The picture set being drawn on this thread: Build and BuildPicture set it from their style.
+thread_local bool drawing_nintendo = false;
+
+std::unique_ptr<XboxAtlas> Unpack(const u8* z, u32 z_size, u32 width, u32 height, const char* what) {
+    {
         size_t size = 0;
-        void* raw = tinfl_decompress_mem_to_heap(xbox_atlas_z, xbox_atlas_size, &size,
-                                                 TINFL_FLAG_PARSE_ZLIB_HEADER);
-        if (!raw || size != size_t(xbox_atlas_width) * xbox_atlas_height * 4) {
+        void* raw = tinfl_decompress_mem_to_heap(z, z_size, &size, TINFL_FLAG_PARSE_ZLIB_HEADER);
+        if (!raw || size != size_t(width) * height * 4) {
             mz_free(raw);
-            std::printf("Button prompts: the Xbox pictures could not be unpacked\n");
+            std::printf("Button prompts: the %s pictures could not be unpacked\n", what);
             return nullptr;
         }
         auto out = std::make_unique<XboxAtlas>();
@@ -457,7 +463,7 @@ const XboxAtlas* Atlas() {
             g = {xbox_glyphs[i].x, xbox_glyphs[i].y, 1 << 30, 1 << 30, 0, 0};
             for (u32 y = 0; y < xbox_glyph_size; ++y) {
                 for (u32 x = 0; x < xbox_glyph_size; ++x) {
-                    if (out->rgba[(size_t(g.y + y) * xbox_atlas_width + g.x + x) * 4 + 3] > 8) {
+                    if (out->rgba[(size_t(g.y + y) * width + g.x + x) * 4 + 3] > 8) {
                         g.left = std::min(g.left, int(x));
                         g.top = std::min(g.top, int(y));
                         g.right = std::max(g.right, int(x) + 1);
@@ -467,8 +473,15 @@ const XboxAtlas* Atlas() {
             }
         }
         return out;
-    }();
-    return atlas.get();
+    }
+}
+
+const XboxAtlas* Atlas() {
+    static const std::unique_ptr<XboxAtlas> xbox =
+        Unpack(xbox_atlas_z, xbox_atlas_size, xbox_atlas_width, xbox_atlas_height, "Xbox");
+    static const std::unique_ptr<XboxAtlas> nintendo = Unpack(
+        nintendo_atlas_z, nintendo_atlas_size, nintendo_atlas_width, nintendo_atlas_height, "Nintendo");
+    return drawing_nintendo ? nintendo.get() : xbox.get();
 }
 
 /// A box filter over a plane, horizontally then vertically.
@@ -821,7 +834,9 @@ std::vector<Patch> BuildPicture(const Picture& picture, u32 levels, Style style)
             up.Blend(x, y, glow, 1.0f);
         }
     }
-    const int xbox = style == Style::Xbox && picture.shape != HudDPad ? XboxGlyph(picture.icon) : -1;
+    drawing_nintendo = style == Style::Nintendo;
+    const bool pad = style == Style::Xbox || style == Style::Nintendo;
+    const int xbox = pad && picture.shape != HudDPad ? XboxGlyph(picture.icon) : -1;
     switch (picture.shape) {
     case RoundButton:
         DrawRoundButton(up, font, bindings.keys[picture.icon], xbox);
@@ -966,8 +981,9 @@ std::vector<Patch> Build(const Sheet& sheet, u32 levels, Style style) {
     const Bindings bindings = LoadBindings();
     const Font font;
     Canvas canvas{sheet.width, sheet.height};
+    drawing_nintendo = style == Style::Nintendo;
     for (const Slot& s : sheet.slots) {
-        if (style == Style::Xbox) {
+        if (style == Style::Xbox || style == Style::Nintendo) {
             DrawXbox(canvas, s);
         } else if (s.icon >= DPad) {
             DrawArrows(canvas, font, s, bindings);
@@ -1023,13 +1039,13 @@ std::vector<Patch> Build(const Sheet& sheet, u32 levels, Style style) {
 } // namespace
 
 namespace {
-std::atomic<int> device_used{0}; ///< 0 keyboard and mouse, 1 PlayStation pad, 2 Xbox or other pad
+std::atomic<int> device_used{0}; ///< 0 keyboard and mouse, 1 PlayStation pad, 2 Xbox or other pad, 3 Nintendo pad
 std::atomic<u32> switches{0};
 
-enum class Force : u8 { Auto, Off, Keyboard, Xbox };
+enum class Force : u8 { Auto, Off, Keyboard, Xbox, Nintendo };
 
 /// BB_BUTTON_PROMPTS: unset or auto follows the device used last; 0 (or off, playstation) keeps the
-/// game's own pictures; keyboard or xbox shows that style always.
+/// game's own pictures; keyboard, xbox or nintendo shows that style always.
 Force Forced() {
     static const Force forced = [] {
         const char* env = std::getenv("BB_BUTTON_PROMPTS");
@@ -1042,6 +1058,9 @@ Force Forced() {
         if (!std::strcmp(env, "xbox")) {
             return Force::Xbox;
         }
+        if (!std::strcmp(env, "nintendo")) {
+            return Force::Nintendo;
+        }
         return !std::strcmp(env, "0") || !std::strcmp(env, "off") || !std::strcmp(env, "playstation")
                    ? Force::Off
                    : Force::Auto;
@@ -1051,11 +1070,12 @@ Force Forced() {
 } // namespace
 
 void SetDevice(int device) {
-    device = std::clamp(device, 0, 2);
+    device = std::clamp(device, 0, 3);
     if (device_used.exchange(device) != device) {
         switches.fetch_add(1, std::memory_order_release);
         static constexpr const char* names[] = {"keyboard keys", "PlayStation controller used, PlayStation buttons",
-                                                "Xbox controller used, Xbox buttons"};
+                                                "Xbox controller used, Xbox buttons",
+                                                "Nintendo controller used, Nintendo buttons"};
         std::printf("Button prompts: %s\n", names[device]);
     }
 }
@@ -1068,11 +1088,16 @@ Style Shown() {
         return Style::Keyboard;
     case Force::Xbox:
         return Style::Xbox;
+    case Force::Nintendo:
+        return Style::Nintendo;
     case Force::Auto:
         break;
     }
     const int device = device_used.load(std::memory_order_relaxed);
-    return device == 0 ? Style::Keyboard : device == 1 ? Style::Original : Style::Xbox;
+    return device == 0   ? Style::Keyboard
+           : device == 1 ? Style::Original
+           : device == 3 ? Style::Nintendo
+                         : Style::Xbox;
 }
 
 u32 Switches() {
@@ -1087,7 +1112,10 @@ u32 Switches() {
             char word[16]{};
             if (FILE* f = std::fopen(path, "r")) {
                 if (std::fscanf(f, "%15s", word) == 1) {
-                    SetDevice(!std::strcmp(word, "ps") ? 1 : !std::strcmp(word, "xbox") ? 2 : 0);
+                    SetDevice(!std::strcmp(word, "ps")         ? 1
+                              : !std::strcmp(word, "xbox")     ? 2
+                              : !std::strcmp(word, "nintendo") ? 3
+                                                               : 0);
                 }
                 std::fclose(f);
             }
@@ -1160,16 +1188,19 @@ static const std::vector<Patch>* FindIn(Style style, u64 hash, u32 width, u32 he
         }
         return nullptr;
     }
-    // The weapon d-pad keeps the game's picture with an Xbox controller: nothing on it is
-    // PlayStation's, and the game cuts it into four arms that no Xbox d-pad picture fits.
-    if (style == Style::Original || (style == Style::Xbox && picture && picture->shape == HudDPad)) {
+    // The weapon d-pad keeps the game's picture with an Xbox or Nintendo controller: nothing on it is
+    // PlayStation's, and the game cuts it into four arms that no d-pad picture fits.
+    if (style == Style::Original ||
+        ((style == Style::Xbox || style == Style::Nintendo) && picture && picture->shape == HudDPad)) {
         return &original; // a known picture, shown as the game drew it
     }
     const auto key = std::make_tuple(hash, levels, style);
     if (const auto it = built.find(key); it != built.end()) {
         return &it->second;
     }
-    const char* look = style == Style::Xbox ? "Xbox buttons" : "keyboard and mouse keys";
+    const char* look = style == Style::Xbox       ? "Xbox buttons"
+                       : style == Style::Nintendo ? "Nintendo buttons"
+                                                  : "keyboard and mouse keys";
     if (sheet) {
         auto& patches = built[key] = Build(*sheet, levels, style);
         std::printf("Button prompts: %s button pictures drawn as %s (%zu pictures, %u mip levels)\n",
@@ -1193,9 +1224,10 @@ void Prebuild() {
         Common::SetCurrentThreadName("bb:ButtonPrompts");
         BbThreads::MakeBelowNormal();
         const Force force = Forced();
-        for (const Style style : {Style::Keyboard, Style::Xbox}) {
+        for (const Style style : {Style::Keyboard, Style::Xbox, Style::Nintendo}) {
             if ((force == Force::Keyboard && style != Style::Keyboard) ||
-                (force == Force::Xbox && style != Style::Xbox)) {
+                (force == Force::Xbox && style != Style::Xbox) ||
+                (force == Force::Nintendo && style != Style::Nintendo)) {
                 continue;
             }
             for (const Sheet& sheet : sheets) {
