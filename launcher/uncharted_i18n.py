@@ -1,7 +1,8 @@
 """Small launcher translation table with English fallback."""
+import ctypes
 import locale
 
-from bbport_lang import table as shared_translations
+from bbport_lang import WINDOWS_LANGUAGES, table as shared_translations
 from uncharted_i18n_extra import EXTRA_TRANSLATIONS
 
 
@@ -20,9 +21,21 @@ LANGUAGES = [
 def language_code(value=''):
     if value in {code for code, _name in LANGUAGES if code}:
         return value
-    current = locale.getlocale()[0] or 'en'
-    code = current.split('_', 1)[0].lower()
+    code = windows_language()
+    if code is None:
+        current = locale.getlocale()[0] or 'en'
+        code = current.split('_', 1)[0].lower()
     return code if code in TRANSLATIONS else 'en'
+
+
+def windows_language():
+    """The Windows display language as a launcher code, None off Windows. locale.getlocale() gives
+    Windows names there ('Spanish_Spain'), so Automatic always picked English (review 2026-11-04)."""
+    try:
+        primary = ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3ff
+    except (AttributeError, OSError):
+        return None
+    return WINDOWS_LANGUAGES.get(primary, 'en')
 
 
 TRANSLATIONS = {

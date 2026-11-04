@@ -2,6 +2,7 @@ import ast
 import re
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from paths import ROOT
@@ -24,12 +25,23 @@ class LauncherTranslationTests(unittest.TestCase):
         self.assertEqual(uncharted_i18n.translate('es', 'Untranslated text'), 'Untranslated text')
         self.assertEqual(uncharted_i18n.translate('en', 'Play'), 'Play')
 
-    def test_automatic_language_uses_windows_locale(self):
-        for language in ('es', 'pt', 'fr', 'de', 'it', 'ja'):
-            with self.subTest(language=language), patch.object(
-                    uncharted_i18n.locale, 'getlocale', return_value=(f'{language}_XX', 'UTF-8')):
+    def test_automatic_language_uses_windows_ui_language(self):
+        # LANGIDs as GetUserDefaultUILanguage() returns them; locale.getlocale() on Windows gives
+        # names such as 'Spanish_Spain', which must not decide the language.
+        langids = {0x0c0a: 'es', 0x0416: 'pt', 0x0816: 'pt', 0x040c: 'fr', 0x0407: 'de', 0x0410: 'it',
+                   0x0411: 'ja', 0x0809: 'en', 0x0412: 'en', 0x0419: 'en'}
+        for langid, language in langids.items():
+            windows = SimpleNamespace(windll=SimpleNamespace(kernel32=SimpleNamespace(
+                GetUserDefaultUILanguage=lambda langid=langid: langid)))
+            with self.subTest(langid=hex(langid)), patch.object(uncharted_i18n, 'ctypes', windows),                     patch.object(uncharted_i18n.locale, 'getlocale', return_value=('Spanish_Spain', '1252')):
                 self.assertEqual(uncharted_i18n.language_code(''), language)
-        with patch.object(uncharted_i18n.locale, 'getlocale', return_value=('ko_KR', 'UTF-8')):
+
+    def test_automatic_language_uses_locale_off_windows(self):
+        no_windll = SimpleNamespace()
+        for language in ('es', 'pt', 'fr', 'de', 'it', 'ja'):
+            with self.subTest(language=language), patch.object(uncharted_i18n, 'ctypes', no_windll),                     patch.object(uncharted_i18n.locale, 'getlocale', return_value=(f'{language}_XX', 'UTF-8')):
+                self.assertEqual(uncharted_i18n.language_code(''), language)
+        with patch.object(uncharted_i18n, 'ctypes', no_windll),                 patch.object(uncharted_i18n.locale, 'getlocale', return_value=('ko_KR', 'UTF-8')):
             self.assertEqual(uncharted_i18n.language_code(''), 'en')
 
     def test_launcher_offers_selected_languages(self):

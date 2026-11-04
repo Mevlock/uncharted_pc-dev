@@ -877,6 +877,10 @@ class Launcher:
             pass
         self.info, self.available = None, {}
         self.update_box = None
+        self.update_offer = self.update_text = None  # shown again after a language change
+        self.updating = False
+        self.reader = None
+        self.closed = False
         root.title(f'{NAME} — The Nathan Drake Collection for Windows · by {AUTHOR}')
         root.configure(bg=BG)
         self.dpi = root.winfo_fpixels('1i') / 96.0
@@ -2281,17 +2285,30 @@ class Launcher:
         """Save and rebuild every label as soon as the interface language changes."""
         global UI_LANGUAGE
         page = self.current_page or 'advanced'
-        self.collect()
+        self.save_settings()  # a locked settings file must not keep the old language on screen
         UI_LANGUAGE = uncharted_i18n.language_code(self.app['ui_language'])
         for child in self.root.winfo_children():
             child.destroy()
+        # The rebuild drops the widgets these point at: a kept update_box hid the offer and made
+        # "Check for updates" do nothing until a restart; the new hide box needs its trace again.
         self.vars = {}
+        self.update_box = self.notes_window = None
+        self.notes_hide_traced = False
         self.build()
         self.show(page)
         self.refresh()
+        if self.update_offer:
+            self.offer_update(*self.update_offer)
         if self.process:
             self.play_button.configure(state='disabled')
             self.stop_button.configure(state='normal')
+            if self.preparing:
+                self.prep_bar.pack(side='left', padx=(self.px(28), 0))
+                self.prep_status.configure(text=_('Preparing shaders…'), fg=GOLD)
+            self.status.configure(text=_('The game is running.') if self.entered
+                                  else _('Preparing shaders…') if self.preparing
+                                  else _('Preparing the game; it opens in its own window…'), fg=GOLD)
+        self.detect_controller()
 
     def collect(self):
         for key, v in self.vars.items():
@@ -2445,7 +2462,8 @@ class Launcher:
         self.job = GameJob(self.process)
         self.entered, self.last_problem, self.stopping = False, '', False
         if not closing:
-            threading.Thread(target=self.read_output, args=(self.process,), daemon=True).start()
+            self.reader = threading.Thread(target=self.read_output, args=(self.process,), daemon=True)
+            self.reader.start()
         self.play_button.configure(state='disabled')
         self.stop_button.configure(state='normal')
         self.controller_refresh_button.configure(state='disabled')
@@ -2473,7 +2491,8 @@ class Launcher:
             pass
         for raw in iter(process.stdout.readline, b''):
             text = raw.decode('utf-8', errors='replace')
-            self.output.put(text)
+            if not self.closed:  # nobody shows it once the window is closed (close())
+                self.output.put(text)
             # PREP lines (4 a second while shaders are prepared) feed the bar, not the log file.
             if log and not text.startswith('PREP '):
                 log.write(text.replace('\r\n', '\n'))
@@ -2482,8 +2501,20 @@ class Launcher:
         self.output.put((process.wait(),))
 
     def drain_output(self):
+        # One failing call (a widget a language change destroyed: TclError) must not stop this
+        # pump, or the game's output and exit are never handled again.
+        try:
+            self.drain_once()
+        except Exception as failure:  # noqa: BLE001
+            print(f'launcher: {failure!r}', file=sys.stderr)
+        self.root.after(100, self.drain_output)
+
+    def drain_once(self):
         while not self.ui_calls.empty():
-            self.ui_calls.get_nowait()()
+            try:
+                self.ui_calls.get_nowait()()
+            except Exception as failure:  # noqa: BLE001
+                print(f'launcher: {failure!r}', file=sys.stderr)
         try:
             for _i in range(500):
                 item = self.output.get_nowait()
@@ -2527,7 +2558,6 @@ class Launcher:
                     self.append(item)
         except queue.Empty:
             pass
-        self.root.after(100, self.drain_output)
 
     def show_preparation(self, line):
         """A 'PREP <percent> <done> <total> <step>|<time left>' line from the game into the bar and status."""
@@ -2670,7 +2700,7 @@ class Launcher:
         label.pack(side='left', padx=(self.px(10), 0))
         label.bind('<Button-1>', lambda _e: hide.set(not hide.get()))
         if not getattr(self, 'notes_hide_traced', False):
-            hide.trace_add('write', lambda *_a: self.collect())
+            hide.trace_add('write', lambda *_a: self.save_settings())
             self.notes_hide_traced = True
         win.focus_set()
 
@@ -2704,10 +2734,13 @@ class Launcher:
         self.ui_calls.put(show)
 
     def offer_update(self, version, url, page, body=''):
-        if self.update_box:
+        if self.update_box and self.update_box.winfo_exists():
             return
+        self.update_offer = (version, url, page, body)
         tk = self.tk
         text = _('Version {} is available.').format(version)
+        if self.updating and self.update_text:
+            text = self.update_text  # a download running through a language change
         box = tk.Frame(self.side, bg=CARD, highlightthickness=1, highlightbackground=GOLD_DIM)
         self.update_label = tk.Label(box, text=text, bg=CARD, fg=GOLD, font=self.font_ui_md,
                                      wraplength=self.px(190), justify='left')
@@ -2717,6 +2750,8 @@ class Launcher:
         self.update_button = self.pill(buttons, _('Update'), lambda: self.install_update(version, url, page),
                                        kind='primary', padding=(14, 6))
         self.update_button.pack(side='left')
+        if self.updating:
+            self.update_button.configure(state='disabled')
         self.pill(buttons, _("What's new"),
                   lambda: self.show_notes([(version, body)]) if body else webbrowser.open(page),
                   padding=(12, 6)).pack(
@@ -2724,7 +2759,7 @@ class Launcher:
         box.pack(fill='x', padx=18, pady=(0, 14), before=self.side_note)
         self.update_box = box
         if not self.process:
-            self.status.configure(text=text, fg=GOLD)
+            self.status.configure(text=_('Version {} is available.').format(version), fg=GOLD)
 
     def install_update(self, version, url, page):
         if self.process:
@@ -2738,9 +2773,11 @@ class Launcher:
                 'are kept.').format(version)):
             return
         self.update_button.configure(state='disabled')
+        self.updating = True
 
         def progress(percent):
-            self.update_label.configure(text=_('Downloading version {}… {}%').format(version, percent))
+            self.update_text = _('Downloading version {}… {}%').format(version, percent)
+            self.update_label.configure(text=self.update_text)
 
         def work():
             try:
@@ -2769,6 +2806,7 @@ class Launcher:
                 self.ui_calls.put(self.close)
             except (OSError, zipfile.BadZipFile) as failure:
                 def failed(error=failure):
+                    self.updating, self.update_text = False, None
                     self.update_button.configure(state='normal')
                     self.update_label.configure(text=_('Version {} is available.').format(version))
                     self.messagebox.showerror(NAME, _('Update failed: {}').format(error))
@@ -2848,12 +2886,28 @@ class Launcher:
         self.messagebox.showinfo(NAME, _('The collection is in your Steam library. It starts with the settings '
                                          'saved in this launcher.'))
 
+    def save_settings(self):
+        try:
+            self.collect()
+        except OSError:  # a locked settings file: the window keeps working
+            pass
+
     def close(self):
         try:
             self.collect()
         except Exception:  # never keep the window open over a settings problem
             pass
+        # Closed by hand while the game runs: main() keeps this process reading the game's pipe
+        # (read_output, last_run.log) until the game exits. Without a reader the scripts' next
+        # print failed and a game switch or in-game restart never started (the close_on_play case,
+        # reviews 2026-11-01 / 2026-11-04).
+        self.closed = True
         self.root.destroy()
+
+    def wait_for_game(self):
+        """After the window closed: the reader thread to its end (the game and its successors exited)."""
+        if self.reader and self.reader.is_alive():
+            self.reader.join()
 
 
 class GameJob:
@@ -3028,8 +3082,9 @@ def main():
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
     root = tk.Tk()
-    Launcher(root, tk, ttk, filedialog, messagebox)
+    launcher = Launcher(root, tk, ttk, filedialog, messagebox)
     root.mainloop()
+    launcher.wait_for_game()
 
 
 if __name__ == '__main__':
