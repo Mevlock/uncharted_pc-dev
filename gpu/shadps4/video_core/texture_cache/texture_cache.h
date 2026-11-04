@@ -582,6 +582,18 @@ private:
     u32 button_prompt_switches = 0;
     std::mutex samplers_mutex;
     std::mutex download_images_mutex;
+    /// bbport: small-target read-backs queued to land after the GPU (DownloadImageMemory without
+    /// sync). UnmapMemory cancels those in its range, and a landing writes under the mutex, so a
+    /// VA mapped again never gets the old target's bytes (code review A4).
+    struct SmallReadback {
+        VAddr addr;
+        u64 size;
+        u64 id;
+        bool cancelled;
+    };
+    std::mutex small_readback_mutex;
+    std::vector<SmallReadback> small_readbacks;
+    u64 small_readback_id = 0;
     struct MetaDataInfo {
         MetaType type;
         s32 clear_mask = -1;
