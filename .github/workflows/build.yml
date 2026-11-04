@@ -84,6 +84,7 @@ jobs:
         shell: msys2 {0}
         env:
           BB_PGO: use
+          BB_PGO_MAX_UNMATCHED: 10  # a mostly unprofiled build stops here instead of being released
         run: |
           ccache -z
           bash build.sh
