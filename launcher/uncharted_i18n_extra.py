@@ -3,6 +3,10 @@
 
 EXTRA_TRANSLATIONS = {
     'de': {
+        'Version {}': 'Version {}',
+        "what's new": 'Neuerungen',
+        'Close': 'Schließen',
+        "Don't show this after updates": 'Nach Updates nicht mehr anzeigen',
         'AMD RCAS after FSR 1 (only while the image is enlarged).':
         'AMD RCAS nach FSR 1 (nur wenn das Bild vergrößert wird).',
         'Anti-aliasing': 'Kantenglättung',
@@ -257,6 +261,10 @@ EXTRA_TRANSLATIONS = {
         'Connected · Vibration supported': 'Verbunden · Vibration unterstützt',
     },
     'it': {
+        'Version {}': 'Versione {}',
+        "what's new": 'novità',
+        'Close': 'Chiudi',
+        "Don't show this after updates": 'Non mostrare dopo gli aggiornamenti',
         'AMD RCAS after FSR 1 (only while the image is enlarged).':
         "AMD RCAS dopo FSR 1 (solo quando l'immagine viene ingrandita).",
         'Anti-aliasing': 'Antialiasing',
@@ -511,6 +519,10 @@ EXTRA_TRANSLATIONS = {
         'Connected · Vibration supported': 'Connesso · Vibrazione supportata',
     },
     'ja': {
+        'Version {}': 'バージョン {}',
+        "what's new": '新機能',
+        'Close': '閉じる',
+        "Don't show this after updates": 'アップデート後に表示しない',
         'AMD RCAS after FSR 1 (only while the image is enlarged).':
         'FSR 1 適用後の AMD RCAS（画像を拡大する場合のみ）。',
         'Anti-aliasing': 'アンチエイリアス',
@@ -759,6 +771,10 @@ EXTRA_TRANSLATIONS = {
         'Connected · Vibration supported': '接続済み · 振動対応',
     },
     'es': {
+        'Version {}': 'Versión {}',
+        "what's new": 'novedades',
+        'Close': 'Cerrar',
+        "Don't show this after updates": 'No mostrar esto después de actualizar',
         'Your graphics card has {} GB of video memory: above 1920 × 1080 the game may not fit in it and can run at half speed or stutter. 1920 × 1080, Automatic or Performance is recommended; FSR needs about 350 MB less video memory than DLSS.':
         'Tu tarjeta gráfica tiene {} GB de memoria de vídeo: por encima de 1920 × 1080 puede que el juego no quepa en ella y funcione a la mitad de velocidad o con tirones. Se recomienda 1920 × 1080, Automático o Rendimiento; FSR necesita unos 350 MB menos de memoria de vídeo que DLSS.',
         'Collection banner': 'Banner de la colección',
@@ -916,6 +932,10 @@ EXTRA_TRANSLATIONS = {
         'Connected · Vibration supported': 'Conectado · Vibración compatible',
     },
     'pt': {
+        'Version {}': 'Versão {}',
+        "what's new": 'novidades',
+        'Close': 'Fechar',
+        "Don't show this after updates": 'Não mostrar isto após atualizações',
         'Your graphics card has {} GB of video memory: above 1920 × 1080 the game may not fit in it and can run at half speed or stutter. 1920 × 1080, Automatic or Performance is recommended; FSR needs about 350 MB less video memory than DLSS.':
         'Sua placa de vídeo tem {} GB de memória de vídeo: acima de 1920 × 1080 o jogo pode não caber nela e rodar na metade da velocidade ou com travadas. Recomenda-se 1920 × 1080, Automático ou Desempenho; o FSR precisa de cerca de 350 MB a menos de memória de vídeo que o DLSS.',
         'Collection banner': 'Banner da coleção',
@@ -1074,6 +1094,10 @@ EXTRA_TRANSLATIONS = {
         'Connected · Vibration supported': 'Conectado · Vibração suportada',
     },
     'fr': {
+        'Version {}': 'Version {}',
+        "what's new": 'nouveautés',
+        'Close': 'Fermer',
+        "Don't show this after updates": 'Ne plus afficher après les mises à jour',
         'Your graphics card has {} GB of video memory: above 1920 × 1080 the game may not fit in it and can run at half speed or stutter. 1920 × 1080, Automatic or Performance is recommended; FSR needs about 350 MB less video memory than DLSS.':
         'Votre carte graphique a {} Go de mémoire vidéo : au-delà de 1920 × 1080, le jeu risque de ne pas y tenir et peut tourner à mi-vitesse ou saccader. 1920 × 1080, Automatique ou Performance est recommandé ; FSR nécessite environ 350 Mo de mémoire vidéo de moins que DLSS.',
         'Collection banner': 'Bannière de la collection',

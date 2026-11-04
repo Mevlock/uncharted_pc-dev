@@ -63,6 +63,9 @@ cp -r shaders "$dest/"
 # The commit this build is made from: the launcher writes it at the top of last_run.log.
 git rev-parse --short HEAD > "$dest/commit.txt" 2>/dev/null || rm -f "$dest/commit.txt"
 cp packaging/windows/README-Uncharted.txt "$dest/README.txt"
+# The newest release notes (the launcher's What's new window): the five newest docs/releases/v*.md.
+mkdir -p "$dest/notes"
+ls docs/releases/v*.md | grep -vi draft | sort -V | tail -5 | while read -r note; do cp "$note" "$dest/notes/"; done
 mkdir -p "$dest/licenses"
 cp packaging/windows/licenses/*.txt "$dest/licenses/" 2>/dev/null || true
 # FSR 4 (the v07 INT8 model) when its assets are in fsr4_shaders/ (tools/fetch_fsr4_assets.sh).

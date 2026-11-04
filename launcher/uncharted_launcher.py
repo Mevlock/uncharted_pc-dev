@@ -215,7 +215,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'frame_gen_multiplier': '2', 'extra_env': '', 'close_on_play': False,
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
-                'pad_invert_y': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True,
+                'pad_invert_y': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
                 **{f'{game}_devmode': False for game, _t, _s, _e in GAMES}}
@@ -888,6 +888,9 @@ class Launcher:
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
         root.after(150, self.detect_controller)
+        # This version's release notes, once (the first start after an update).
+        if self.app.get('notes_seen') != VERSION and not self.app.get('notes_hide_after_update'):
+            root.after(900, self.show_new_notes)
         threading.Thread(target=self.find_vram, daemon=True).start()
         if UPDATES and self.app.get('check_updates', True):
             threading.Thread(target=self.check_update, daemon=True).start()
@@ -1210,8 +1213,12 @@ class Launcher:
             anchor='w', padx=18, pady=(1, 0))
         tk.Label(side, text=_('by {}').format(AUTHOR), bg=BG, fg=TEXT, font=self.font_ui_md,
                  anchor='w', wraplength=brand_wrap, justify='left').pack(anchor='w', padx=18, pady=(10, 0))
-        tk.Label(side, text=_('version {}').format(VERSION), bg=BG, fg='#6e604c', font=self.font_ui_sm,
-                 anchor='w').pack(anchor='w', padx=18, pady=(1, 0))
+        version_label = tk.Label(side, text=_('version {}').format(VERSION) + '  \u00b7  ' + _("what's new"),
+                                 bg=BG, fg='#6e604c', font=self.font_ui_sm, anchor='w', cursor='hand2')
+        version_label.pack(anchor='w', padx=18, pady=(1, 0))
+        version_label.bind('<Button-1>', lambda _e: self.show_notes())
+        version_label.bind('<Enter>', lambda _e: version_label.configure(fg=GOLD))
+        version_label.bind('<Leave>', lambda _e: version_label.configure(fg='#6e604c'))
         tk.Frame(side, bg=LINE, height=1).pack(fill='x', padx=18, pady=(16, 14))
         self.nav, self.nav_pills, self.nav_icons, self.nav_marks, self.current_page = {}, {}, {}, {}, None
         for name, title in (('play', _('Play')), ('game', _('Game')), ('cheats', _('Cheats')), ('display', _('Display')),
@@ -2198,6 +2205,7 @@ class Launcher:
                       lambda: threading.Thread(target=self.check_update, args=(True,), daemon=True).start()
                       ).pack(side='left')
             self.pill(holder, _('Releases page'), lambda: webbrowser.open(RELEASES_PAGE)).pack(side='left', padx=(8, 0))
+            self.pill(holder, _("What's new"), self.show_notes).pack(side='left', padx=(8, 0))
         else:
             self.tk.Label(holder, text=_('This is an unofficial fork (version {}): it does not update '
                                          "itself. Official releases are on SuperMedo's page; "
@@ -2574,11 +2582,112 @@ class Launcher:
             path.mkdir(parents=True, exist_ok=True)
         os.startfile(str(path))
 
+    # ---- release notes -------------------------------------------------------------------------
+    def show_notes(self, notes=None, title=None):
+        """Release notes in a window of their own: the notes' Markdown drawn simply (headings, bold, bullets,
+        code); notes = [(version, text)], by default the ones this copy carries."""
+        notes = release_notes() if notes is None else notes
+        if not notes:
+            webbrowser.open(RELEASES_PAGE)
+            return
+        tk = self.tk
+        if getattr(self, 'notes_window', None) and self.notes_window.winfo_exists():
+            self.notes_window.destroy()
+        win = tk.Toplevel(self.root)
+        self.notes_window = win
+        win.title(title or _("What's new"))
+        win.configure(bg=BG)
+        win.geometry(f'{self.px(760)}x{self.px(680)}')
+        win.transient(self.root)
+        body = tk.Frame(win, bg=BG)
+        body.pack(fill='both', expand=True, padx=self.px(16), pady=(self.px(16), self.px(10)))
+        bar = tk.Scrollbar(body)
+        bar.pack(side='right', fill='y')
+        view = tk.Text(body, wrap='word', bg=CARD, fg=TEXT, relief='flat', highlightthickness=0, cursor='arrow',
+                       padx=self.px(18), pady=self.px(14), font=self.font_ui, spacing1=self.px(2),
+                       spacing3=self.px(2), yscrollcommand=bar.set)
+        view.pack(side='left', fill='both', expand=True)
+        bar.configure(command=view.yview)
+        indent, step = self.px(10), self.px(18)
+        view.tag_configure('version', foreground=GOLD, font=self.font_brand_lg, spacing1=self.px(6),
+                           spacing3=self.px(8))
+        view.tag_configure('heading', foreground=GOLD, font=self.font_brand_md, spacing1=self.px(12),
+                           spacing3=self.px(4))
+        view.tag_configure('bold', font=(self.font_ui[0], self.font_ui[1], 'bold'))
+        view.tag_configure('code', font=('Consolas', self.font_ui[1]), foreground=MUTED)
+        view.tag_configure('bullet', lmargin1=indent, lmargin2=indent + step)
+        view.tag_configure('bullet2', lmargin1=indent + step, lmargin2=indent + 2 * step)
+        view.tag_configure('note', foreground=MUTED, font=self.font_ui_sm)
+
+        def inline(line, tags):
+            line = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', line)  # a link: its text
+            for part in re.split(r'(\*\*[^*]+\*\*|`[^`]+`)', line):
+                if len(part) > 4 and part.startswith('**') and part.endswith('**'):
+                    view.insert('end', part[2:-2], tags + ('bold',))
+                elif len(part) > 2 and part.startswith('`') and part.endswith('`'):
+                    view.insert('end', part[1:-1], tags + ('code',))
+                elif part:
+                    view.insert('end', part, tags)
+
+        for i, (version, markdown) in enumerate(notes):
+            view.insert('end', _('Version {}').format(version) + '\n', ('version',))
+            lines = markdown.splitlines()
+            for n, raw in enumerate(lines):
+                line = raw.rstrip()
+                if not line.strip():
+                    view.insert('end', '\n')
+                    continue
+                if line.lstrip().startswith('#'):
+                    view.insert('end', line.lstrip().lstrip('#').strip() + '\n', ('heading',))
+                    continue
+                bullet = re.match(r'^(\s*)[-*] (.*)$', line)
+                if bullet:
+                    level = 'bullet2' if len(bullet.group(1)) >= 2 else 'bullet'
+                    view.insert('end', '\u2022  ' if level == 'bullet' else '\u2013  ', (level,))
+                    inline(bullet.group(2).replace('\u21b3 ', ''), (level,))
+                    view.insert('end', '\n', (level,))
+                    continue
+                # A paragraph under a bullet (indented) keeps the bullet's margin; the first lines (fork note,
+                # installing) are smaller.
+                tags = ('bullet2',) if raw.startswith('  ') else (('note',) if n < 4 else ())
+                inline(line.strip(), tags)
+                view.insert('end', '\n', tags)
+            if i + 1 < len(notes):
+                view.insert('end', '\n')
+        view.configure(state='disabled')
+        buttons = tk.Frame(win, bg=BG)
+        buttons.pack(fill='x', padx=self.px(16), pady=(0, self.px(14)))
+        self.pill(buttons, _('Close'), win.destroy, kind='primary').pack(side='right')
+        self.pill(buttons, _('Releases page'), lambda: webbrowser.open(RELEASES_PAGE)).pack(side='right',
+                                                                                          padx=(0, 8))
+        # Don't show this after updates: the window then only opens from the version line or Advanced.
+        hide = self.var('notes_hide_after_update')
+        self.toggle(buttons, hide, background=BG).pack(side='left')
+        label = tk.Label(buttons, text=_("Don't show this after updates"), bg=BG, fg=MUTED, font=self.font_ui,
+                         cursor='hand2')
+        label.pack(side='left', padx=(self.px(10), 0))
+        label.bind('<Button-1>', lambda _e: hide.set(not hide.get()))
+        if not getattr(self, 'notes_hide_traced', False):
+            hide.trace_add('write', lambda *_a: self.collect())
+            self.notes_hide_traced = True
+        win.focus_set()
+
+    def show_new_notes(self):
+        """Once per version (the first start after an update or install): this version's notes."""
+        self.app['notes_seen'] = VERSION
+        try:
+            self.collect()
+        except OSError:
+            pass
+        current = [n for n in release_notes(1) if version_tuple(n[0]) == version_tuple(VERSION)]
+        if current:
+            self.show_notes(current)
+
     # ---- updates -------------------------------------------------------------------------------
     def check_update(self, manual=False):
         """Helper thread: asks GitHub for the newest release and offers it when it is newer."""
         try:
-            version, url, page = latest_release()
+            version, url, page, body = latest_release()
         except (OSError, ValueError, KeyError) as failure:
             if manual:
                 self.ui_calls.put(lambda error=failure: self.messagebox.showerror(
@@ -2587,12 +2696,12 @@ class Launcher:
 
         def show():
             if version_tuple(version) > version_tuple(VERSION):
-                self.offer_update(version, url, page)
+                self.offer_update(version, url, page, body)
             elif manual:
                 self.messagebox.showinfo(NAME, _('You have the latest version ({}).').format(VERSION))
         self.ui_calls.put(show)
 
-    def offer_update(self, version, url, page):
+    def offer_update(self, version, url, page, body=''):
         if self.update_box:
             return
         tk = self.tk
@@ -2606,7 +2715,9 @@ class Launcher:
         self.update_button = self.pill(buttons, _('Update'), lambda: self.install_update(version, url, page),
                                        kind='primary', padding=(14, 6))
         self.update_button.pack(side='left')
-        self.pill(buttons, _("What's new"), lambda: webbrowser.open(page), padding=(12, 6)).pack(
+        self.pill(buttons, _("What's new"),
+                  lambda: self.show_notes([(version, body)]) if body else webbrowser.open(page),
+                  padding=(12, 6)).pack(
             side='left', padx=(6, 0))
         box.pack(fill='x', padx=18, pady=(0, 14), before=self.side_note)
         self.update_box = box
@@ -2768,8 +2879,32 @@ def version_tuple(text):
     return tuple(int(number) for number in re.findall(r'\d+', text or ''))
 
 
+def notes_dir():
+    """The release notes this copy carries: notes/ in the package, docs/releases in a source tree."""
+    for folder in (PORT_DIR / 'notes', PORT_DIR / 'docs' / 'releases'):
+        if folder.is_dir():
+            return folder
+    return None
+
+
+def release_notes(limit=5):
+    """[(version, Markdown text)] of the newest release notes this copy carries, newest first."""
+    folder = notes_dir()
+    if not folder:
+        return []
+    found = sorted(((version_tuple(path.stem), path) for path in folder.glob('v*.md')
+                    if 'DRAFT' not in path.name.upper()), reverse=True)
+    notes = []
+    for version, path in found[:limit]:
+        try:
+            notes.append(('.'.join(str(n) for n in version), path.read_text(encoding='utf-8')))
+        except OSError:
+            pass
+    return notes
+
+
 def latest_release():
-    """(version, zip URL, page URL) of the newest GitHub release."""
+    """(version, zip URL, page URL, release notes) of the newest GitHub release."""
     request = urllib.request.Request(RELEASES_API, headers={'Accept': 'application/vnd.github+json',
                                                             'User-Agent': 'uncharted-launcher'})
     with urllib.request.urlopen(request, timeout=15) as response:
@@ -2777,7 +2912,7 @@ def latest_release():
     version = '.'.join(re.findall(r'\d+', release['tag_name']))
     url = next((asset['browser_download_url'] for asset in release.get('assets', [])
                 if asset.get('name', '').lower().endswith('.zip')), None)
-    return version, url, release.get('html_url') or RELEASES_PAGE
+    return version, url, release.get('html_url') or RELEASES_PAGE, release.get('body') or ''
 
 
 def install_update(target, wait_pid):
