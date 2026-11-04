@@ -253,28 +253,11 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
         Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
                                                   download.mapped, download_size);
     } else {
-        u64 id;
-        {
-            std::scoped_lock lk{small_readback_mutex};
-            id = ++small_readback_id;
-            small_readbacks.push_back({image.info.guest_address, download_size, id, false});
-        }
         scheduler.DeferPriorityOperation(
-            [this, device_addr = image.info.guest_address, download, download_size, id] {
+            [this, device_addr = image.info.guest_address, download, download_size] {
                 download.Invalidate();
-                {
-                    // Skipped when UnmapMemory took the range meanwhile; written under the lock so
-                    // an unmap cannot slip in between the check and the write.
-                    std::scoped_lock lk{small_readback_mutex};
-                    const auto it = std::ranges::find(small_readbacks, id, &SmallReadback::id);
-                    if (it != small_readbacks.end()) {
-                        if (!it->cancelled) {
-                            Core::Memory::Instance()->TryWriteBacking(
-                                std::bit_cast<u8*>(device_addr), download.mapped, download_size);
-                        }
-                        small_readbacks.erase(it);
-                    }
-                }
+                Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(device_addr),
+                                                          download.mapped, download_size);
                 runtime.GetStagingPool().FreeDeferred(download);
             });
     }
@@ -425,13 +408,6 @@ void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
     for (auto it = depth_array_layers.begin(); it != depth_array_layers.end();) {
         it = it->first >= cpu_addr && it->first < cpu_addr + size ? depth_array_layers.erase(it)
                                                                   : std::next(it);
-    }
-    // Small-target read-backs still waiting for the GPU no longer land here (A4).
-    std::scoped_lock rb_lk{small_readback_mutex};
-    for (auto& readback : small_readbacks) {
-        if (readback.addr < cpu_addr + size && cpu_addr < readback.addr + readback.size) {
-            readback.cancelled = true;
-        }
     }
 }
 
