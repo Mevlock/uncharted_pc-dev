@@ -124,6 +124,15 @@ public:
     void WaitHleCopies(u32 where);
     static u32 HleWaitAt();
     std::atomic<u64> hle_copy_end{0};
+    /// The copies stage A has not seen run yet, oldest first, with the draw count at each (stage A only): the
+    /// lead bound counts from the oldest, so copies coming every few draws cannot restart it (code review A3).
+    struct HleCopy {
+        u64 end, draw;
+    };
+    static constexpr u32 HleCopySlots = 32;
+    HleCopy hle_copies[HleCopySlots]{};
+    u32 hle_copy_first = 0, hle_copy_count = 0;
+    u64 hle_draws = 0;
     /// Runs `task(rasterizer, copy of data)` in order with the draws: on the draw recording
     /// thread while the draw pipeline is in use (PipelinedTasks), else here after a drain.
     using OrderedTask = void (*)(Rasterizer& rasterizer, const u8* data);
