@@ -372,7 +372,7 @@ TRANSLATIONS = {
 }
 
 for _code, _translations in EXTRA_TRANSLATIONS.items():
-    TRANSLATIONS[_code] = {**shared_translations(_code), **_translations}
+    TRANSLATIONS[_code] = {**shared_translations(_code), **TRANSLATIONS.get(_code, {}), **_translations}
 
 
 def translate(language, text):
