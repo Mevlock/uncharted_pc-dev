@@ -68,6 +68,7 @@
 {"Mask threshold", {"Umbral de la máscara", "Limiar da máscara", "Seuil du masque", "Maskenschwelle", "Soglia della maschera", "マスクのしきい値"}},
 {"Multiplier", {"Multiplicador", "Multiplicador", "Multiplicateur", "Multiplikator", "Moltiplicatore", "倍率"}},
 {"Nothing to keep yet: the game has not saved since the jump.", {"Aún no hay nada que conservar: el juego no ha guardado desde el salto.", "Ainda não há nada para manter: o jogo não salvou desde o salto.", "Rien à garder pour l’instant : le jeu n’a pas sauvegardé depuis le saut.", "Noch nichts zu behalten: Das Spiel hat seit dem Sprung nicht gespeichert.", "Ancora niente da mantenere: il gioco non ha salvato dopo il salto.", "まだ残すものがありません。ジャンプ後にゲームがセーブしていません。"}},
+{"Nothing to save yet: the game has not saved since the jump.", {"Aún no hay nada que guardar: el juego no ha guardado desde el salto.", "Ainda não há nada para salvar: o jogo não salvou desde o salto.", "Rien à sauvegarder pour l’instant : le jeu n’a pas sauvegardé depuis le saut.", "Noch nichts zu speichern: Das Spiel hat seit dem Sprung nicht gespeichert.", "Ancora niente da salvare: il gioco non ha salvato dopo il salto.", "まだセーブするものがありません。ジャンプ後にゲームがセーブしていません。"}},
 {"Now: %s", {"Ahora: %s", "Agora: %s", "Actuellement : %s", "Jetzt: %s", "Ora: %s", "現在: %s"}},
 {"Off", {"Desactivado", "Desligado", "Désactivé", "Aus", "Disattivo", "オフ"}},
 {"Off (the game's own)", {"Desactivado (el del juego)", "Desligado (o do jogo)", "Désactivé (celui du jeu)", "Aus (das des Spiels)", "Disattivo (quello del gioco)", "オフ(ゲーム本来)"}},

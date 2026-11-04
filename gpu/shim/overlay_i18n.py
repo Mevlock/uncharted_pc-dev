@@ -537,6 +537,13 @@ TRANSLATIONS = {
         'Impossibile avviare la modalità pratica: {}', '練習モードを開始できませんでした: {}'),
     'Going to {}...': L('Yendo a {}...', 'Indo para {}...', 'Direction {}...', 'Springe zu {}...', 'Vado a {}...',
                         '{} へ移動中...'),
+    'Nothing to save yet: the game has not saved since the jump.': L(
+        'Aún no hay nada que guardar: el juego no ha guardado desde el salto.',
+        'Ainda não há nada para salvar: o jogo não salvou desde o salto.',
+        'Rien à sauvegarder pour l’instant : le jeu n’a pas sauvegardé depuis le saut.',
+        'Noch nichts zu speichern: Das Spiel hat seit dem Sprung nicht gespeichert.',
+        'Ancora niente da salvare: il gioco non ha salvato dopo il salto.',
+        'まだセーブするものがありません。ジャンプ後にゲームがセーブしていません。'),
     'Nothing to keep yet: the game has not saved since the jump.': L(
         'Aún no hay nada que conservar: el juego no ha guardado desde el salto.',
         'Ainda não há nada para manter: o jogo não salvou desde o salto.',

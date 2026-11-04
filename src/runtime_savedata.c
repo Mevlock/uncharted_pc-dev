@@ -173,6 +173,21 @@ int runtime_savedata_mounted(void) {
     pthread_mutex_unlock(&lock);
     return n;
 }
+/* Practice mode (checkpoint jumps, runtime_checkpoint.c): the campaign save of the running game (SAVEDATA0<game>0)
+ * is the practice copy the overlay made before the first jump, for mounting and for deleting alike (a game deleting
+ * its campaign save, on New Game say, must not delete the player's own). */
+static void practice_redirect(const char *base, const char *name, char *host, size_t host_size, char *meta,
+                              size_t meta_size) {
+    if (!runtime_checkpoint_practice()) return;
+    const char *exe=getenv("BB_EXE");
+    const int game=!exe ? 0 : strstr(exe,"big3") ? 3 : strstr(exe,"big2") ? 2 : !strcmp(exe,"eboot.bin") ? 1 : 0;
+    char campaign[16];
+    snprintf(campaign,sizeof(campaign),"SAVEDATA0%d0",game);
+    if (game && !strcmp(name,campaign)) {
+        snprintf(host,host_size,"%s.backups/u%d/practice/%s",base,game,name);
+        snprintf(meta,meta_size,"%s.backups/u%d/practice/%s.sce_sys",base,game,name);
+    }
+}
 static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     if (user<0) return ERR_INVALID_USER;
@@ -184,18 +199,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     root(user,title,base,sizeof(base));
     snprintf(host,sizeof(host),"%s/%s",base,dir->data);
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,dir->data);
-    /* Practice mode (checkpoint jumps, runtime_checkpoint.c): the campaign save of the running game
-     * (SAVEDATA0<game>0) mounts from the practice copy the overlay made before the first jump. */
-    if (runtime_checkpoint_practice()) {
-        const char *exe=getenv("BB_EXE");
-        const int game=!exe ? 0 : strstr(exe,"big3") ? 3 : strstr(exe,"big2") ? 2 : !strcmp(exe,"eboot.bin") ? 1 : 0;
-        char campaign[16];
-        snprintf(campaign,sizeof(campaign),"SAVEDATA0%d0",game);
-        if (game && !strcmp(dir->data,campaign)) {
-            snprintf(host,sizeof(host),"%s.backups/u%d/practice/%s",base,game,dir->data);
-            snprintf(meta,sizeof(meta),"%s.backups/u%d/practice/%s.sce_sys",base,game,dir->data);
-        }
-    }
+    practice_redirect(base,dir->data,host,sizeof(host),meta,sizeof(meta));
     struct stat st;
     int exists=!stat(host,&st) && S_ISDIR(st.st_mode);
     if ((mode & MODE_CREATE) && exists) return ERR_EXISTS;
@@ -295,6 +299,7 @@ static ABI int32_t save_delete(const Delete *d) {
     root(d->user,d->title ? d->title->data : NULL,base,sizeof(base));
     snprintf(host,sizeof(host),"%s/%s",base,d->dir->data);
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,d->dir->data);
+    practice_redirect(base,d->dir->data,host,sizeof(host),meta,sizeof(meta));
     struct stat st;
     if (stat(host,&st)) return ERR_NOT_FOUND;
     remove_tree(host);

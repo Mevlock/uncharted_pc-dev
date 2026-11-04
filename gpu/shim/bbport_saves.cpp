@@ -246,12 +246,12 @@ void WriteStory(int game, uint32_t task, bool following) {
     std::ofstream(StoryState(game)) << id << " " << (following ? "following" : "away") << "\n";
 }
 
-// The campaign save copied into a slot folder, with the time.
-bool CopyCampaign(int game, int index, std::string& error) {
+// The campaign save (or, from `from`, another folder holding one) copied into a slot folder, with the time.
+bool CopyCampaign(int game, int index, std::string& error, const fs::path& from = {}) {
     const fs::path to = SlotDir(game, index);
     std::error_code ec;
     fs::create_directories(to.parent_path(), ec);
-    if (!CopySave(SavesDir(), to, SlotName(game), error)) {
+    if (!CopySave(from.empty() ? SavesDir() : from, to, SlotName(game), error)) {
         return false;
     }
     std::ofstream(to / "saved.txt") << Now() << "\n";
@@ -336,17 +336,23 @@ bool Store(int index, std::string& message) {
         message = T("The game is saving: try again in a moment.");
         return false;
     }
+    // In practice mode the save the page shows as "Now" is the practice copy: a slot or the story save takes that.
+    // The undo copy (before a Load or Keep this progress) is always the player's own campaign save.
+    const bool practice = index != UndoSlot && runtime_checkpoint_practice();
+    const fs::path source = practice ? GameBackups(game) / "practice" : SavesDir();
     std::error_code ec;
-    if (!fs::exists(SavesDir() / SlotName(game) / "USR-DATA", ec)) {
-        message = T("There is no campaign save yet.");
+    if (!fs::exists(source / SlotName(game) / "USR-DATA", ec)) {
+        message = practice ? T("Nothing to save yet: the game has not saved since the jump.")
+                           : T("There is no campaign save yet.");
         return false;
     }
     std::string error;
-    if (!CopyCampaign(game, index, error)) {
+    if (!CopyCampaign(game, index, error, source)) {
         message = fmt::format(fmt::runtime(T("Could not copy the save: {}")), error);
         return false;
     }
-    std::printf("Save slots: campaign save copied to %s\n", Utf8(SlotDir(game, index)).c_str());
+    std::printf("Save slots: %s copied to %s\n", practice ? "practice save" : "campaign save",
+                Utf8(SlotDir(game, index)).c_str());
     Refresh();
     message = index < SlotCount ? fmt::format(fmt::runtime(T("Saved in slot {}.")), index + 1) : std::string(T("Saved."));
     return true;
@@ -357,7 +363,7 @@ bool MakeStory(std::string& message) {
     if (!Store(StorySlot, message)) {
         return false;
     }
-    WriteStory(Game(), ReadCheckpoint(Game(), SavesDir() / SlotName(Game())).task, true);
+    WriteStory(Game(), ReadCheckpoint(Game(), SlotDir(Game(), StorySlot) / SlotName(Game())).task, true);
     message = T("This is now your story save.");
     return true;
 }
@@ -424,10 +430,13 @@ bool StartPractice(std::string& message) {
         std::error_code ec;
         const fs::path practice = GameBackups(game) / "practice";
         std::string error;
-        if (fs::exists(SavesDir() / SlotName(game) / "USR-DATA", ec) &&
-            !CopySave(SavesDir(), practice, SlotName(game), error)) {
-            message = fmt::format(fmt::runtime(T("Could not start practice mode: {}")), error);
-            return false;
+        if (fs::exists(SavesDir() / SlotName(game) / "USR-DATA", ec)) {
+            if (!CopySave(SavesDir(), practice, SlotName(game), error)) {
+                message = fmt::format(fmt::runtime(T("Could not start practice mode: {}")), error);
+                return false;
+            }
+        } else {
+            fs::remove_all(practice, ec);  // no campaign save: an old session's practice copy must not come back
         }
         fs::create_directories(practice, ec);
         runtime_checkpoint_set_practice(1);
@@ -516,6 +525,12 @@ void ApplyPending(int game) {
     }
     std::error_code ec;
     fs::remove(pending, ec);
+    if (fs::exists(pending, ec)) {
+        // Could not be removed (antivirus, a synced or read-only folder): applied now it would be applied again at
+        // every start, each time throwing away that session's progress.
+        std::printf("Save slots: %s could not be removed: the load is not applied\n", Utf8(pending).c_str());
+        return;
+    }
     if (folder.find_first_of("/\\.") != std::string::npos) {
         return;
     }
@@ -573,9 +588,42 @@ void ApplyPending(int game) {
             }
         }
     }
+    // Loading "Before the last load" swaps: the save it replaced becomes the new before-load copy (undo and redo,
+    // as the confirmation says), instead of being thrown away. A step that fails leaves .bbold in place.
+    bool keep_old = false;
+    if (ok && folder == SlotFolder(BbSaves::UndoSlot)) {
+        bool swapped = true;
+        for (const std::string& dir : dirs) {
+            if (!fs::exists(temp_of(dir, ".bbold"), ignore)) {
+                continue;
+            }
+            fs::remove_all(from / (dir + ".bbswap"), ignore);
+            std::error_code e1, e2;
+            if (fs::exists(from / dir, ignore)) {
+                fs::rename(from / dir, from / (dir + ".bbswap"), e1);
+            }
+            if (!e1) {
+                fs::rename(temp_of(dir, ".bbold"), from / dir, e2);
+            }
+            if (e1 || e2) {
+                swapped = false;
+                if (!e1 && fs::exists(from / (dir + ".bbswap"), ignore)) {
+                    fs::rename(from / (dir + ".bbswap"), from / dir, ignore);
+                }
+                continue;
+            }
+            fs::remove_all(from / (dir + ".bbswap"), ignore);
+        }
+        if (swapped) {
+            std::ofstream(from / "saved.txt") << Now() << "\n";
+        } else {
+            keep_old = true;
+            std::printf("Save slots: the replaced save could not become before-load; kept beside the save (.bbold)\n");
+        }
+    }
     for (const std::string& dir : dirs) {
         fs::remove_all(temp_of(dir, ".bbload"), ignore);
-        if (ok) {
+        if (ok && !keep_old) {
             fs::remove_all(temp_of(dir, ".bbold"), ignore);
         }
     }
@@ -585,7 +633,13 @@ void ApplyPending(int game) {
     // Keep this progress: the practice save is the player's save now, and their story from here on.
     if (ok && folder == "practice") {
         std::string story_error;
-        if (CopyCampaign(game, BbSaves::StorySlot, story_error)) {
+        // The story save it replaces (the player's playthrough, maybe away after Chapter Select) is kept.
+        const fs::path story = SlotDir(game, BbSaves::StorySlot);
+        if (fs::exists(story / name / "USR-DATA", ignore) &&
+            !CopySave(story, GameBackups(game) / "story-before-keep", name, story_error)) {
+            std::printf("Save slots: the story save could not be kept (%s): it stays as it was\n",
+                        story_error.c_str());
+        } else if (CopyCampaign(game, BbSaves::StorySlot, story_error)) {
             WriteStory(game, ReadCheckpoint(game, saves / name).task, true);
         }
         fs::remove_all(from, ec);

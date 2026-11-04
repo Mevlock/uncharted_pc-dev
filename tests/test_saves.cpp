@@ -306,6 +306,92 @@ int main(int argc, char** argv) {
                     fixtures / "u3_16" / "SAVEDATA030"),
           "16 made on the next start");
 
+    // ---- code review 2026-11-04 (P1) -------------------------------------------------------------------------
+    saves_dir = u8(saves);
+    fs::remove_all(backups / "u3" / "practice");
+
+    // 17. "Before the last load" swaps: the save it replaces becomes the new before-load copy (nothing is lost).
+    play_to(20, false);
+    BbSaves::Store(1, message);                  // slot 2 = 20
+    play_to(26, false);
+    BbSaves::Refresh();
+    check(BbSaves::Load(1, message), "17 load slot 2 requested");
+    next_start();
+    check(save_is(saves, 20) && save_is(slot("before-load"), 26), "17 slot 2 loaded, 26 kept as before-load");
+    play_to(27, false);                           // an hour of play after the load
+    BbSaves::Refresh();
+    check(BbSaves::Load(BbSaves::UndoSlot, message), "17 load before-load requested");
+    next_start();
+    check(save_is(saves, 26), "17 before-load (26) is the campaign save again");
+    check(save_is(slot("before-load"), 27), "17 the progress it replaced (27) is the new before-load (swap)");
+    BbSaves::Refresh();
+    check(BbSaves::Load(BbSaves::UndoSlot, message), "17 load before-load again (redo)");
+    next_start();
+    check(save_is(saves, 27) && save_is(slot("before-load"), 26), "17 redo: 27 back, 26 before-load");
+    check(!fs::exists(saves / "SAVEDATA030.bbold") && !fs::exists(slot("before-load") / "SAVEDATA030.bbswap"),
+          "17 no temporary folders left");
+    check(profile_untouched(), "17 profile untouched");
+
+    // 18. Practice mode: "Save here" and "Make this my story save" take the practice save (what "Now" shows).
+    play_to(20, false);
+    check(BbSaves::StartPractice(message) && practice == 1, "18 practice starts");
+    check(BbSaves::Store(2, message) && save_is(slot("slot3"), 20),
+          "18 right after starting, the practice copy is the campaign save (20)");
+    for (const char* d : {"SAVEDATA030", "SAVEDATA030.sce_sys"}) {
+        fs::remove_all(slot("practice") / d);
+        fs::copy(fixtures / "u3_45" / d, slot("practice") / d, fs::copy_options::recursive);
+    }
+    check(BbSaves::Store(2, message) && save_is(slot("slot3"), 45), "18 slot 3 = the practice save (45)");
+    check(save_is(saves, 20), "18 the campaign save untouched");
+
+    // 19. Keep this progress keeps the story save it replaces.
+    play_to(22, false);
+    BbSaves::Store(BbSaves::StorySlot, message);   // practice still on: story = practice save 45
+    practice = 0;
+    BbSaves::Store(BbSaves::StorySlot, message);   // story = the campaign save 22
+    check(save_is(slot("story"), 22), "19 story save = 22");
+    check(BbSaves::StartPractice(message), "19 practice again");
+    for (const char* d : {"SAVEDATA030", "SAVEDATA030.sce_sys"}) {
+        fs::remove_all(slot("practice") / d);
+        fs::copy(fixtures / "u3_45" / d, slot("practice") / d, fs::copy_options::recursive);
+    }
+    check(BbSaves::KeepPractice(message), "19 keep this progress");
+    practice = 0;
+    next_start();
+    check(save_is(saves, 45) && save_is(slot("story"), 45), "19 campaign and story = 45");
+    check(save_is(backups / "u3" / "story-before-keep", 22), "19 the old story save (22) kept");
+    check(profile_untouched(), "19 profile untouched");
+
+    // 20. A load request that cannot be removed is not applied (it would be applied at every start).
+    play_to(12, false);
+    BbSaves::Store(3, message);                    // slot 4 = 12
+    play_to(16, false);
+    BbSaves::Refresh();
+    check(BbSaves::Load(3, message), "20 load slot 4 requested");
+    fs::permissions(backups / "pending-load.txt", fs::perms::owner_read, fs::perm_options::replace);
+    next_start();
+    const bool stuck = fs::exists(backups / "pending-load.txt");
+    check(!stuck || save_is(saves, 16), "20 a request that stays is not applied");
+    fs::permissions(backups / "pending-load.txt", fs::perms::owner_all, fs::perm_options::replace);
+    if (stuck) {
+        next_start();
+        check(save_is(saves, 12), "20 applied once it can be removed");
+    }
+
+    // 21. Practice with no campaign save: an old practice copy is cleared, not reused.
+    fs::create_directories(slot("practice") / "SAVEDATA030");
+    std::ofstream(slot("practice") / "SAVEDATA030" / "USR-DATA") << "old practice";
+    for (const char* d : {"SAVEDATA030", "SAVEDATA030.sce_sys"}) {
+        fs::rename(saves / d, root / (std::string(d) + ".aside"));
+    }
+    check(BbSaves::StartPractice(message), "21 practice starts without a campaign save");
+    check(!fs::exists(slot("practice") / "SAVEDATA030" / "USR-DATA"), "21 the old practice copy is cleared");
+    practice = 0;
+    for (const char* d : {"SAVEDATA030", "SAVEDATA030.sce_sys"}) {
+        fs::rename(root / (std::string(d) + ".aside"), saves / d);
+    }
+    check(profile_untouched(), "21 profile untouched");
+
     std::printf("%d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }
