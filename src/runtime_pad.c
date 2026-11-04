@@ -104,14 +104,44 @@ static int pad_latch_enabled(void) {
     if (value<0) { const char *e=getenv("BB_PAD_LATCH"); value=!(e && e[0]=='0'); }
     return value;
 }
+/* A controller switched off during play stuttered the game: every pad read (on the game's thread) looked for one
+ * and tried to open it, and a Bluetooth pad that is going away can still be listed for a while, with each open or
+ * rumble to it blocking for milliseconds. Now a pad is looked for when SDL reports one added, or at most once a
+ * second; a removed one is closed at once; rumble and the light bar back off for 2 s after a slow write. Calls
+ * slower than 2 ms are logged ("Runtime: pad ... took"). */
+static volatile int pad_added=1, pad_removed;
+static uint64_t next_pad_scan_us, pad_writes_after_us;
+static bool SDLCALL pad_device_watch(void *userdata, SDL_Event *event) {
+    (void)userdata;
+    if (event->type==SDL_EVENT_GAMEPAD_ADDED) __atomic_store_n(&pad_added,1,__ATOMIC_RELEASE);
+    else if (event->type==SDL_EVENT_GAMEPAD_REMOVED) __atomic_store_n(&pad_removed,1,__ATOMIC_RELEASE);
+    return true;
+}
+static void pad_slow(const char *what, uint64_t start) {
+    const uint64_t took=now_us()-start;
+    if (took>2000) {
+        static unsigned noted;
+        if (noted++<20) printf("Runtime: pad %s took %.1f ms\n",what,took/1000.0);
+        if (took>8000 && (what[0]=='r' || what[0]=='l')) pad_writes_after_us=now_us()+2000000; /* rumble, light */
+    }
+}
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) {
         sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
         if (sdl_ready>0 && pad_latch_enabled()) SDL_AddEventWatch(pad_tap_watch,NULL);
+        if (sdl_ready>0) SDL_AddEventWatch(pad_device_watch,NULL);
     }
     if (sdl_ready<0) return NULL;
-    if (gamepad && !SDL_GamepadConnected(gamepad)) { SDL_CloseGamepad(gamepad); gamepad=NULL; }
+    if (gamepad && (__atomic_exchange_n(&pad_removed,0,__ATOMIC_ACQ_REL) || !SDL_GamepadConnected(gamepad))) {
+        printf("Runtime: gamepad disconnected\n");
+        SDL_CloseGamepad(gamepad);
+        gamepad=NULL;
+        next_pad_scan_us=now_us()+1000000;
+    }
     if (!gamepad) {
+        const uint64_t now=now_us();
+        if (!__atomic_exchange_n(&pad_added,0,__ATOMIC_ACQ_REL) && now<next_pad_scan_us) return NULL;
+        next_pad_scan_us=now+1000000;
         int count=0;
         SDL_JoystickID *ids=SDL_GetGamepads(&count);
         if (ids && count>0) {
@@ -119,8 +149,16 @@ static SDL_Gamepad *current_gamepad(void) {
             if (gamepad) { ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad)); }
         }
         SDL_free(ids);
+        pad_slow("open",now);
     }
     return gamepad;
+}
+/* Rumble and the light bar: skipped for 2 s after a write that blocked (a pad going away). */
+static void pad_rumble(SDL_Gamepad *g, uint16_t low, uint16_t high, uint32_t ms) {
+    if (!g || now_us()<pad_writes_after_us) return;
+    const uint64_t start=now_us();
+    SDL_RumbleGamepad(g,low,high,ms);
+    pad_slow("rumble",start);
 }
 /* Degrees of camera turn per mouse pixel at sensitivity 1 (0.08 felt "very slow", issue #18; the
  * launcher's slider and box go from 0.1 to 10 times this). */
@@ -1457,7 +1495,7 @@ static void sample_host(PadData *d) {
             prompts_device=device;
             bbgpu_prompts_controller(device);
             keyboard_in_use=device==0;
-            if (keyboard_in_use && g) SDL_RumbleGamepad(g,0,0,0); /* the pad put down stops shaking */
+            if (keyboard_in_use && g) pad_rumble(g,0,0,0); /* the pad put down stops shaking */
         }
     }
         /* Keyboard and mouse, together with the controller. */
@@ -1806,7 +1844,7 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
         const unsigned strength=(unsigned)input.pad_vibration_strength;
         const uint16_t low=(uint16_t)((param[0]*257u*strength+50u)/100u);
         const uint16_t high=(uint16_t)((param[1]*257u*strength+50u)/100u);
-        SDL_RumbleGamepad(g,low,high,1000);
+        pad_rumble(g,low,high,1000);
     }
     pthread_mutex_unlock(&lock);
     return 0;
@@ -1815,7 +1853,11 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
 static void set_led(uint8_t r, uint8_t g, uint8_t b) {
     pthread_mutex_lock(&lock);
     SDL_Gamepad *pad=current_gamepad();
-    if (pad) SDL_SetGamepadLED(pad,r,g,b);
+    if (pad && now_us()>=pad_writes_after_us) {
+        const uint64_t start=now_us();
+        SDL_SetGamepadLED(pad,r,g,b);
+        pad_slow("light bar",start);
+    }
     pthread_mutex_unlock(&lock);
 }
 static ABI int32_t pad_light_bar(int32_t handle, const uint8_t *rgb) {
