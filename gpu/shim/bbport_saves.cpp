@@ -517,28 +517,60 @@ void ApplyPending(int game) {
     const std::string name = SlotName(game);
     const fs::path saves = SavesDir();
     std::string error;
-    // Both folders copied beside the campaign save first, then swapped in.
+    // Both folders copied beside the campaign save first (.bbload). Then the swap: the player's folders moved aside
+    // (.bbold), the copies renamed into place, and only then the old folders removed. A failure at any step puts
+    // the player's folders back as they were and removes every temporary folder.
+    const std::string dirs[] = {name, name + ".sce_sys"};
+    const auto temp_of = [&](const std::string& dir, const char* suffix) { return saves / (dir + suffix); };
     bool ok = true;
-    for (const std::string& dir : {name, name + ".sce_sys"}) {
-        const fs::path temp = saves / (dir + ".bbload");
-        fs::remove_all(temp, ec);
-        fs::copy(from / dir, temp, fs::copy_options::recursive, ec);
+    for (const std::string& dir : dirs) {
+        fs::remove_all(temp_of(dir, ".bbload"), ec);
+        fs::remove_all(temp_of(dir, ".bbold"), ec);
+    }
+    for (const std::string& dir : dirs) {
+        fs::copy(from / dir, temp_of(dir, ".bbload"), fs::copy_options::recursive, ec);
         if (ec) {
             error = ec.message();
-            fs::remove_all(temp, ec);
             ok = false;
             break;
         }
     }
-    for (const std::string& dir : {name, name + ".sce_sys"}) {
-        if (!ok) {
-            break;
+    bool moved_aside[2] = {false, false}, moved_in[2] = {false, false};
+    for (int i = 0; ok && i < 2; ++i) {
+        if (fs::exists(saves / dirs[i], ec)) {
+            fs::rename(saves / dirs[i], temp_of(dirs[i], ".bbold"), ec);
+            if (ec) {
+                error = ec.message();
+                ok = false;
+                break;
+            }
+            moved_aside[i] = true;
         }
-        fs::remove_all(saves / dir, ec);
-        fs::rename(saves / (dir + ".bbload"), saves / dir, ec);
+    }
+    for (int i = 0; ok && i < 2; ++i) {
+        fs::rename(temp_of(dirs[i], ".bbload"), saves / dirs[i], ec);
         if (ec) {
             error = ec.message();
             ok = false;
+            break;
+        }
+        moved_in[i] = true;
+    }
+    std::error_code ignore;
+    if (!ok) {
+        for (int i = 0; i < 2; ++i) {
+            if (moved_in[i]) {
+                fs::remove_all(saves / dirs[i], ignore);
+            }
+            if (moved_aside[i]) {
+                fs::rename(temp_of(dirs[i], ".bbold"), saves / dirs[i], ignore);
+            }
+        }
+    }
+    for (const std::string& dir : dirs) {
+        fs::remove_all(temp_of(dir, ".bbload"), ignore);
+        if (ok) {
+            fs::remove_all(temp_of(dir, ".bbold"), ignore);
         }
     }
     if (ok && folder == "story") {
