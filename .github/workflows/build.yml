@@ -70,8 +70,20 @@ jobs:
           path: fsr4_shaders
           key: fsr4-${{ hashFiles('tools/fetch_fsr4_assets.sh', 'tools/fsr4_optimize.sh') }}
 
+      # Profile-guided build: pgo/merged.profdata comes from play sessions with an instrumented
+      # build (BB_PGO=generate). The runner's clang must read it (an older clang than the one that
+      # wrote it cannot); a missing or unreadable profile stops the build instead of shipping
+      # a build without it.
+      - name: Check the PGO profile
+        shell: msys2 {0}
+        run: |
+          clang --version | head -1
+          llvm-profdata show pgo/merged.profdata | tail -4
+
       - name: Build the port
         shell: msys2 {0}
+        env:
+          BB_PGO: use
         run: |
           ccache -z
           bash build.sh
