@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -651,7 +652,7 @@ void ApplyPending(int game) {
 } // namespace
 
 // runtime_checkpoint.c (BB_CHECKPOINT_TEST): practice mode on, with its copy, before a test jump.
-extern "C" int bbport_saves_start_practice(void) {
+static int StartPracticeImpl() {
     std::string message;
     const bool ok = BbSaves::StartPractice(message);
     if (!ok) {
@@ -663,7 +664,7 @@ extern "C" int bbport_saves_start_practice(void) {
 // runtime_savedata.c, before the game's first save mount: a slot chosen with Load is put back now, and a player
 // without a story save gets one from the campaign save as it is, before this session writes anything (a first
 // save written from Chapter Select would otherwise start it in the wrong place).
-extern "C" void bbport_saves_apply_pending(void) {
+static void ApplyPendingImpl() {
     const int game = BbSaves::Game();
     if (!game) {
         return;
@@ -682,7 +683,8 @@ extern "C" void bbport_saves_apply_pending(void) {
             fs::create_directories(temp, ec);
             bool ok = !ec;
             for (const auto& entry : fs::directory_iterator(saves, ec)) {
-                if (ok && entry.is_directory() && Utf8(entry.path().filename()).rfind("SAVEDATA", 0) == 0) {
+                std::error_code dir_ec;
+                if (ok && entry.is_directory(dir_ec) && Utf8(entry.path().filename()).rfind("SAVEDATA", 0) == 0) {
                     fs::copy(entry.path(), temp / entry.path().filename(), fs::copy_options::recursive, ec);
                     ok = !ec;
                 }
@@ -710,7 +712,7 @@ extern "C" void bbport_saves_apply_pending(void) {
 
 // runtime_savedata.c, after the game closed a save: when it was the campaign save, the story save follows it if
 // the new checkpoint plays on from the story save's, and stops following otherwise.
-extern "C" void bbport_saves_closed(const char* host_dir) {
+static void ClosedImpl(const char* host_dir) {
     const int game = BbSaves::Game();
     if (!game || !host_dir) {
         return;
@@ -750,4 +752,37 @@ extern "C" void bbport_saves_closed(const char* host_dir) {
     WriteStory(game, was.task, false);
     std::printf("Story save: kept at %s (the campaign save moved to %s)\n", BbSaves::Describe(was, false).c_str(),
                 BbSaves::Describe(now, false).c_str());
+}
+
+// The game's threads call these (runtime_checkpoint.c, runtime_savedata.c). A C++ exception escaping into that C code
+// ended the game with a fail-fast (0xC0000409) and no crash report; here it is logged, and the save in question is
+// left as it was (every step above copies first and replaces last).
+namespace {
+template <typename F>
+bool Guarded(const char* what, F&& body) {
+    try {
+        body();
+        return true;
+    } catch (const std::exception& e) {
+        std::printf("Save slots: %s failed: %s (saves left as they were)\n", what, e.what());
+    } catch (...) {
+        std::printf("Save slots: %s failed (saves left as they were)\n", what);
+    }
+    std::fflush(stdout);
+    return false;
+}
+} // namespace
+
+extern "C" int bbport_saves_start_practice(void) {
+    int ok = 0;
+    Guarded("practice start", [&] { ok = StartPracticeImpl(); });
+    return ok;
+}
+
+extern "C" void bbport_saves_apply_pending(void) {
+    Guarded("start-up check", [] { ApplyPendingImpl(); });
+}
+
+extern "C" void bbport_saves_closed(const char* host_dir) {
+    Guarded("story save update", [&] { ClosedImpl(host_dir); });
 }
