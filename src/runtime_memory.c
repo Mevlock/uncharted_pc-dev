@@ -230,20 +230,55 @@ static size_t save_protections(uintptr_t start, uintptr_t end, ProtRun **runs, s
 /* A partial map/unmap of a view (below) unmaps the whole view and maps the untouched pages back:
  * for that moment other threads (guest threads, GPU copy threads, draw preparation) found pages
  * missing that were never unmapped (a fatal fault). Faults inside the window wait for the carve
- * to end and retry (runtime_memory_wait_carve, from the fault handler). The pages come back
+ * to end and retry (runtime_memory_carve_retry, from the fault handler). The pages come back
  * writable (a view can't be raised above the protection it was mapped with: read-only first
  * stopped the game at the first partial unmap) and get their saved protections, GPU write
  * tracking included, right after each side is mapped: a write in that short gap is still not
  * tracked. Carves run under the write lock, so one at a time. */
 static volatile uintptr_t carve_lo, carve_hi;
 static volatile DWORD carve_thread;
-static volatile LONG carve_active;
-int runtime_memory_wait_carve(uintptr_t address) {
-    if (!InterlockedCompareExchange(&carve_active,0,0)) return 0;
-    if (address<carve_lo || address>=carve_hi || GetCurrentThreadId()==carve_thread) return 0;
-    while (InterlockedCompareExchange(&carve_active,0,0)) YieldProcessor();
+/* Odd while a carve runs (bumped after carve_lo/hi are set, and again at the end). A fault raised
+ * inside a carve can reach the handler just after the carve ended (exception dispatch takes
+ * microseconds); it must be retried too, not reported as fatal (code review 2026-11-04), so the
+ * last finished carve's range is kept in done_lo/hi (written only while carve_seq is odd). */
+static volatile LONG carve_seq;
+static volatile uintptr_t done_lo, done_hi;
+static __thread uintptr_t retried_page; static __thread LONG retried_seq;
+static int page_allows(uintptr_t address, int access) {
+    MEMORY_BASIC_INFORMATION m;
+    if (!VirtualQuery((void *)address,&m,sizeof(m)) || m.State!=MEM_COMMIT || (m.Protect & (PAGE_GUARD|PAGE_NOACCESS))) return 0;
+    const DWORD p=m.Protect&0xff;
+    if (access==1) return p==PAGE_READWRITE || p==PAGE_WRITECOPY || p==PAGE_EXECUTE_READWRITE || p==PAGE_EXECUTE_WRITECOPY;
+    if (access==8) return p==PAGE_EXECUTE || p==PAGE_EXECUTE_READ || p==PAGE_EXECUTE_READWRITE || p==PAGE_EXECUTE_WRITECOPY;
     return 1;
 }
+/* access: the access violation's kind (ExceptionInformation[0]: 0 read, 1 write, 8 execute).
+ * Returns 1 when the faulting access should simply run again. */
+int runtime_memory_carve_retry(uintptr_t address, int access) {
+    const LONG seq=InterlockedCompareExchange(&carve_seq,0,0);
+    if (seq&1) {
+        if (address<carve_lo || address>=carve_hi || GetCurrentThreadId()==carve_thread) return 0;
+        /* Spin briefly, then give the CPU away: the carver makes several Win32 calls, and
+         * higher-priority guest/GPU threads spinning on every core could starve it. */
+        for (unsigned n=0; InterlockedCompareExchange(&carve_seq,0,0)==seq; ++n) {
+            if (n<128) YieldProcessor();
+            else if (n<4096) { if (!SwitchToThread()) YieldProcessor(); }
+            else Sleep(1);
+        }
+        return 1;
+    }
+    /* No carve now: retry once if the page lies in the last carve's range (read consistently:
+     * no carve ended meanwhile) and allows this access now. Once per page and carve, so a fault
+     * the page really causes (a GPU-tracked write) still goes on to the other handlers. */
+    if (!seq) return 0;
+    const uintptr_t lo=done_lo, hi=done_hi;
+    if (InterlockedCompareExchange(&carve_seq,0,0)!=seq || address<lo || address>=hi) return 0;
+    const uintptr_t page=address&~(uintptr_t)(PAGE-1);
+    if ((retried_page==page && retried_seq==seq) || !page_allows(address,access)) return 0;
+    retried_page=page; retried_seq=seq;
+    return 1;
+}
+int runtime_memory_wait_carve(uintptr_t address) { return runtime_memory_carve_retry(address,0); }
 static void restore_protections(const ProtRun *runs, size_t from, size_t to) {
     for (size_t i=from;i<to;++i) {
         DWORD old;
@@ -266,7 +301,7 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
     if (keep_right) nruns=save_protections(b,hi,&runs,nruns,&capacity);
     if (keep_left || keep_right) {
         carve_lo=lo; carve_hi=hi; carve_thread=GetCurrentThreadId();
-        InterlockedExchange(&carve_active,1);
+        InterlockedIncrement(&carve_seq);
     }
     for (size_t i=first;i<last;++i) if (regions[i].mapped) {
         if (!UnmapViewOfFile2(GetCurrentProcess(),(void *)regions[i].start,MEM_PRESERVE_PLACEHOLDER))
@@ -298,7 +333,7 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
             restore_protections(runs,left_runs,nruns);
         }
     }
-    if (keep_left || keep_right) InterlockedExchange(&carve_active,0);
+    if (keep_left || keep_right) { done_lo=lo; done_hi=hi; InterlockedIncrement(&carve_seq); }
     free(runs);
     return at;
 }
@@ -432,8 +467,8 @@ static int unmap_v2(void) {
 }
 /* Tells the GPU side about every live mapping in [start,end) before the caller removes or
  * replaces it; called without the region lock (the hook waits for the GPU command thread). */
-static void pre_unmap(uintptr_t start, uintptr_t end) {
-    if (!hook_unmap || !unmap_v2() || start>=end) return;
+static int pre_unmap(uintptr_t start, uintptr_t end) {
+    if (!hook_unmap || !unmap_v2() || start>=end) return 0;
     hooks_lock();
     for (uintptr_t at=start; at<end;) {
         uintptr_t found[32][2]; size_t n=0;
@@ -450,6 +485,19 @@ static void pre_unmap(uintptr_t start, uintptr_t end) {
         at=found[n-1][1];
     }
     hooks_unlock();
+    return 1;
+}
+/* An operation announced with pre_unmap failed (unallocated physical memory, the flexible
+ * budget, a release that lost a race, a bad alignment): what is still
+ * mapped in [start,end) is announced again, or the GPU side would take live memory for unmapped
+ * and miss its CPU writes (code review 2026-11-04). Called with the region lock held, before
+ * write_unlock, so the MAP is queued ahead of anything a later operation queues. */
+static void reannounce_locked(uintptr_t start, uintptr_t end) {
+    for (size_t i=vma_index(start); i<vma_count && vmas[i].start<end; ++i) {
+        if (vmas[i].kind==KIND_RESERVED) continue;
+        uintptr_t a=vmas[i].start>start ? vmas[i].start : start, b=vmas[i].end<end ? vmas[i].end : end;
+        queue_hook(HOOK_MAP,a,b-a);
+    }
 }
 static int flex_test(uint64_t page) { return (int)((flex_bitmap[page/64]>>(page%64))&1); }
 static void flex_set(uint64_t first, uint64_t count, int used) {
@@ -622,11 +670,17 @@ static int memory_log(void) {
 }
 static ABI int32_t direct_map(void **out, uint64_t size, int prot, int flags, int64_t physical, uint64_t alignment) {
     void *requested=out ? *out : NULL;
-    if ((flags & MAP_FIXED_FLAG) && requested && size && !((uintptr_t)requested%PAGE))
-        pre_unmap((uintptr_t)requested,(uintptr_t)requested+align_up(size,PAGE));
+    /* Only a map that can replace a live mapping announces it: MAP_NO_OVERWRITE fails instead,
+     * and the argument checks of map_direct_locked are made first (a failed map keeps it). */
+    int announced=0;
+    if ((flags & MAP_FIXED_FLAG) && !(flags & MAP_NO_OVERWRITE) && requested && size && !(size%PAGE) &&
+        !((uintptr_t)requested%PAGE) && physical>=0 && !((uint64_t)physical%PAGE) && !(prot & ~0x37) &&
+        (!alignment || valid_alignment(alignment)))
+        announced=pre_unmap((uintptr_t)requested,(uintptr_t)requested+size);
     void *where=requested;
     write_lock();
     int32_t result=map_direct_locked(out ? &where : NULL,size,prot,flags,physical,alignment);
+    if (result && announced) reannounce_locked((uintptr_t)requested,(uintptr_t)requested+size);
     write_unlock();
     if (out && !result) *out=where;
     flush_hooks();
@@ -657,8 +711,9 @@ static int32_t unmap_locked(uintptr_t start, uint64_t size) {
 }
 static ABI int32_t direct_unmap(void *address, uint64_t size) {
     /* The GPU forgets the range before it disappears (as shadPS4's early GPU unmap). */
+    int announced=0;
     if (unmap_v2()) {
-        if (!((uintptr_t)address%PAGE) && size) pre_unmap((uintptr_t)address,(uintptr_t)address+align_up(size,PAGE));
+        if (!((uintptr_t)address%PAGE) && size) announced=pre_unmap((uintptr_t)address,(uintptr_t)address+align_up(size,PAGE));
     } else if (hook_unmap && !((uintptr_t)address%PAGE) && size) {
         hook_unmap((uintptr_t)address,align_up(size,PAGE));
     }
@@ -666,31 +721,47 @@ static ABI int32_t direct_unmap(void *address, uint64_t size) {
     size_t before=pending_count;
     int32_t result=unmap_locked((uintptr_t)address,size);
     pending_count=before; /* already notified above */
+    if (result && announced) reannounce_locked((uintptr_t)address,(uintptr_t)address+align_up(size,PAGE));
     write_unlock();
+    if (result && announced) flush_hooks();
     if (memory_log()) printf("Memory: unmap %p size=0x%" PRIx64 " result=0x%x\n",address,size,(unsigned)result);
     return result;
 }
 static ABI int32_t direct_release(uint64_t start, uint64_t size) {
     if (start % PAGE || size % PAGE) return INVALID;
     if (!size) return 0;
+    uintptr_t (*ranges)[2]=NULL; size_t n=0;
     if (unmap_v2() && hook_unmap) {
-        /* The guest ranges mapping the released pages, before the pages go (and are zeroed). */
-        uintptr_t (*ranges)[2]=NULL; size_t n=0, capacity=0;
+        /* The guest ranges mapping the released pages, before the pages go (and are zeroed).
+         * An invalid release is refused first: it must not make the GPU forget live ranges. */
+        size_t capacity=0;
         read_lock();
+        if (!direct_range_allocated(start,size)) { read_unlock(); return INVALID; }
         for (size_t i=0; i<vma_count; ++i) {
             const Vma *v=&vmas[i];
             uint64_t length=v->end-v->start;
             if (v->kind!=KIND_DIRECT || v->phys>=start+size || start>=v->phys+length) continue;
             uint64_t a=v->phys>start ? v->phys : start, b=v->phys+length<start+size ? v->phys+length : start+size;
-            if (n==capacity) { capacity=capacity ? capacity*2 : 16; ranges=realloc(ranges,capacity*sizeof(*ranges)); }
+            if (n==capacity) {
+                capacity=capacity ? capacity*2 : 16;
+                uintptr_t (*grown)[2]=realloc(ranges,capacity*sizeof(*ranges));
+                if (!grown) { fputs("STOP: out of memory for GPU memory notifications\n",stderr); runtime_quit(21); }
+                ranges=grown;
+            }
             ranges[n][0]=v->start+(a-v->phys); ranges[n][1]=v->start+(b-v->phys); ++n;
         }
         read_unlock();
         for (size_t i=0;i<n;++i) pre_unmap(ranges[i][0],ranges[i][1]);
-        free(ranges);
     }
     write_lock();
-    if (!direct_range_allocated(start,size)) { write_unlock(); return INVALID; }
+    if (!direct_range_allocated(start,size)) {
+        /* Released by another thread between the check and here: what is still mapped stays known. */
+        for (size_t i=0;i<n;++i) reannounce_locked(ranges[i][0],ranges[i][1]);
+        write_unlock(); free(ranges);
+        if (n) flush_hooks();
+        return INVALID;
+    }
+    free(ranges);
     /* Mappings of released physical pages disappear with them. */
     for (size_t i=0; i<vma_count;) {
         Vma v=vmas[i];
@@ -732,11 +803,17 @@ static int32_t map_flexible_locked(void **inout, uint64_t size, int prot, int fl
 }
 static ABI int32_t map_flexible(void **inout, uint64_t size, int prot, int flags) {
     if (memory_log()) printf("Memory: map flexible want=%p size=0x%" PRIx64 " prot=0x%x flags=0x%x\n",inout ? *inout : NULL,size,prot,flags);
-    if ((flags & MAP_FIXED_FLAG) && inout && *inout && size && !((uintptr_t)*inout%PAGE))
-        pre_unmap((uintptr_t)*inout,(uintptr_t)*inout+align_up(size,PAGE));
-    void *where=inout ? *inout : NULL;
+    /* As direct_map: announced only when the map can replace a live mapping, and re-announced
+     * when it then fails (the flexible budget is checked under the lock). */
+    void *requested=inout ? *inout : NULL;
+    int announced=0;
+    if ((flags & MAP_FIXED_FLAG) && !(flags & MAP_NO_OVERWRITE) && requested && size && !(size%PAGE) &&
+        !((uintptr_t)requested%PAGE) && !(prot & ~0x37))
+        announced=pre_unmap((uintptr_t)requested,(uintptr_t)requested+size);
+    void *where=requested;
     write_lock();
     int32_t result=map_flexible_locked(inout ? &where : NULL,size,prot,flags);
+    if (result && announced) reannounce_locked((uintptr_t)requested,(uintptr_t)requested+size);
     write_unlock();
     if (inout && !result) *inout=where;
     flush_hooks();
@@ -839,11 +916,15 @@ static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, in
     if (!per_entry) write_lock();
     for (; done<count; ++done) {
         BatchEntry *e=&entries[done];
+        const uintptr_t first=(uintptr_t)e->start, last=first+align_up(e->length,PAGE);
+        int announced=0;
         if (per_entry) {
-            /* Maps are fixed here (or MAP_FIXED): what they replace is announced like an unmap. */
-            if ((e->operation==1 || ((e->operation==0 || e->operation==3) && (flags & MAP_FIXED_FLAG))) &&
-                e->length && !((uintptr_t)e->start%PAGE))
-                pre_unmap((uintptr_t)e->start,(uintptr_t)e->start+align_up(e->length,PAGE));
+            /* Maps are fixed here (or MAP_FIXED): what they replace is announced like an unmap
+             * (not for MAP_NO_OVERWRITE or a size the map refuses anyway; see direct_map). */
+            const int map=(e->operation==0 || e->operation==3) && (flags & MAP_FIXED_FLAG) &&
+                          !(flags & MAP_NO_OVERWRITE) && !(e->length%PAGE);
+            if ((e->operation==1 || map) && e->length && !(first%PAGE))
+                announced=pre_unmap(first,last);
             write_lock();
         }
         if (memory_log())
@@ -858,6 +939,7 @@ static ABI int32_t batch_map2(BatchEntry *entries, int count, int *processed, in
         case 4: result=protect_locked((uintptr_t)where,e->length,(uint8_t)e->prot,e->type); break;
         default: result=INVALID;
         }
+        if (result && announced) reannounce_locked(first,last);
         if (per_entry) write_unlock();
         if (!result) e->start=where; /* after unlocking in the default mode */
         if (result) break;

@@ -202,6 +202,38 @@ static void direct_memory(void) {
     assert(*(uint64_t *)x==0); /* released allocation does not leak previous data */
     assert(release(a,length)==0); /* release also unmaps owned mapping */
 }
+/* GPU memory notifications (BB_UNMAP_V2, default on): a fixed map or release that fails must
+ * leave the GPU side believing the live range is still mapped (code review 2026-11-04). */
+void runtime_memory_set_gpu_hooks(void (*map)(uintptr_t,uint64_t),void (*unmap)(uintptr_t,uint64_t),
+                                  void (*invalidate)(uintptr_t,uint64_t));
+static uintptr_t hook_target; static int hook_target_mapped, hook_unmaps;
+static void test_hook_map(uintptr_t a, uint64_t size) { if (hook_target>=a && hook_target-a<size) hook_target_mapped=1; }
+static void test_hook_unmap(uintptr_t a, uint64_t size) {
+    if (hook_target>=a && hook_target-a<size) { hook_target_mapped=0; ++hook_unmaps; }
+}
+static void test_hook_invalidate(uintptr_t a, uint64_t size) { (void)a; (void)size; }
+static void gpu_hooks_after_failed_maps(void) {
+    Allocate alloc=GET(Allocate,"rTXw65xmLIA#p#J");
+    Map map=GET(Map,"L-Q3LEjIbgA#p#J");
+    Unmap unmap=GET(Unmap,"cQke9UuBQOk#p#J");
+    Release release=GET(Release,"MBuItvba6z8#p#J");
+    const uint64_t pool=536870912, length=16384, unallocated=0x10000000;
+    int64_t a=-1;
+    void *x=NULL;
+    assert(alloc(0,pool,length,0,0,&a)==0);
+    assert(map(&x,length,3,0,a,0)==0);
+    hook_target=(uintptr_t)x;
+    runtime_memory_set_gpu_hooks(test_hook_map,test_hook_unmap,test_hook_invalidate);
+    assert(hook_target_mapped==1);
+    void *at=x; /* fixed map of unallocated physical memory: refused after the announcement */
+    assert((uint32_t)map(&at,length,3,0x10,(int64_t)unallocated,0)==0x80020016 && hook_target_mapped==1);
+    const int unmaps=hook_unmaps; /* MAP_NO_OVERWRITE over a live range: never announced */
+    at=x; assert((uint32_t)map(&at,length,3,0x90,a,0)==0x8002000c && hook_target_mapped==1 && hook_unmaps==unmaps);
+    assert((uint32_t)release(unallocated,length)==0x80020016 && hook_target_mapped==1);
+    assert(unmap(x,length)==0 && hook_target_mapped==0);
+    assert(release(a,length)==0);
+    runtime_memory_set_gpu_hooks(NULL,NULL,NULL);
+}
 static void memory_primitives(void) {
     typedef void *(ABI *Set)(void *,int,size_t);
     typedef void *(ABI *Copy)(void *,const void *,size_t);
@@ -350,7 +382,7 @@ int main(int argc,char **argv) {
     if (argc>1 && !strcmp(argv[1],"--rwlock-lifecycle")) { rw_lifecycle(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-concurrency")) { rw_concurrency(); return 0; }
     if (argc>1 && !strcmp(argv[1],"--rwlock-timeouts")) { rw_timeouts(); return 0; }
-    libc_support(); posix_mutexes(); wall_time(); exit_handlers(); guards(); mutexes(); direct_memory(); memory_primitives();
+    libc_support(); posix_mutexes(); wall_time(); exit_handlers(); guards(); mutexes(); direct_memory(); gpu_hooks_after_failed_maps(); memory_primitives();
     rw_lifecycle(); rw_concurrency(); rw_timeouts();
     puts("PASS: callback lifecycle, guard ABI, mutex errors, shared direct memory, memory primitives, resolver scope");
     return 0;
