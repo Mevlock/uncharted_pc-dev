@@ -327,6 +327,91 @@ void Hint(const char* text) {
     }
 }
 
+// Checkpoints page: chapter, then checkpoint, then Go there (the game's own task jump, bbport_saves.cpp and
+// runtime_checkpoint.c). The first jump turns practice mode on: the game saves to a practice copy until it restarts.
+void CheckpointsPage() {
+    static std::vector<BbSaves::Checkpoint> list;
+    static int chapter = -1;
+    static int picked = -1;
+    static std::string message;
+    if (list.empty()) {
+        list = BbSaves::Checkpoints();
+    }
+    const BbSaves::Checkpoint now = BbSaves::Current();
+    if (chapter < 0) {
+        chapter = now.known ? now.chapter : (list.empty() ? 1 : list.front().chapter);
+    }
+    switch (BbSaves::JumpResult()) {
+    case 1: message = "Done."; break;
+    case -1: message = "This checkpoint is not in this release of the game."; break;
+    case -2: message = "Checkpoint jumps do not work with this release of the game."; break;
+    default: break;
+    }
+
+    ImGui::TextWrapped("Now: %s", BbSaves::Describe(now).c_str());
+    if (!BbSaves::JumpsAvailable()) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Checkpoint jumps work in Uncharted 3 for now (Uncharted 1 and 2 later).");
+        return;
+    }
+    if (BbSaves::Practising()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+        ImGui::TextWrapped("Practice mode: the game saves to a practice copy until you restart it. Your own save "
+                           "and story save are not touched.");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::TextDisabled("Jumping turns on practice mode: until the game restarts, it saves to a practice copy, "
+                            "not to your own save.");
+    }
+
+    // Chapters, from the list (game order).
+    std::string chapter_label;
+    for (const auto& c : list) {
+        if (c.chapter == chapter) {
+            chapter_label = std::to_string(c.chapter) + "  " + c.chapter_title;
+            break;
+        }
+    }
+    if (ImGui::BeginCombo("Chapter", chapter_label.c_str())) {
+        int last = -1;
+        for (const auto& c : list) {
+            if (c.chapter == last) {
+                continue;
+            }
+            last = c.chapter;
+            const std::string label = std::to_string(c.chapter) + "  " + c.chapter_title;
+            if (ImGui::Selectable(label.c_str(), c.chapter == chapter)) {
+                chapter = c.chapter;
+                picked = -1;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::BeginChild("##checkpoints", ImVec2(0.0f, ImGui::GetTextLineHeightWithSpacing() * 10.0f),
+                          ImGuiChildFlags_Borders)) {
+        for (int i = 0; i < static_cast<int>(list.size()); ++i) {
+            const auto& c = list[i];
+            if (c.chapter != chapter) {
+                continue;
+            }
+            const std::string label = std::to_string(c.number) + "  " + c.name + (c.task == now.task ? "  (now)" : "");
+            if (ImGui::Selectable(label.c_str(), i == picked)) {
+                picked = i;
+            }
+        }
+    }
+    ImGui::EndChild();
+    ImGui::BeginDisabled(picked < 0);
+    if (ImGui::Button("Go there") && picked >= 0) {
+        BbSaves::Jump(list[picked], message);
+    }
+    ImGui::EndDisabled();
+    if (!message.empty()) {
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", message.c_str());
+    }
+}
+
 // Save slots page: the story save, five slots and the copy taken before the last Load (bbport_saves.cpp).
 // Saving over a used slot, loading and moving the story save each ask first, on the page itself.
 void SaveSlotsPage() {
@@ -621,6 +706,10 @@ void Menu() {
     ImGui::EndTabItem();
     }
     // Save slots: Uncharted 1, 2 and 3 (the collection's menu has no campaign save).
+    if (BbSaves::Game() && ImGui::BeginTabItem("Checkpoints")) {
+        CheckpointsPage();
+        ImGui::EndTabItem();
+    }
     if (BbSaves::Game() && ImGui::BeginTabItem("Save slots")) {
         SaveSlotsPage();
         ImGui::EndTabItem();

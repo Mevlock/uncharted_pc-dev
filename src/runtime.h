@@ -100,6 +100,17 @@ uintptr_t runtime_savedata_resolve(const char *name);
 void runtime_trophy_configure(const char *dir);
 uintptr_t runtime_trophy_resolve(const char *name);
 void runtime_savedata_report(void);
+/* Checkpoint jumps (runtime_checkpoint.c): the overlay asks for a task, the frame hook runs the game's own jump;
+ * practice mode sends the campaign save to a practice copy until the game restarts. */
+void runtime_checkpoint_request(uint32_t task);
+int runtime_checkpoint_practice(void);
+void runtime_checkpoint_set_practice(int on);
+int runtime_checkpoint_result(void);
+int runtime_checkpoint_available(void);
+void __attribute__((ms_abi)) runtime_checkpoint_frame_eu(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                        const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_checkpoint_frame_us(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                        const uint64_t *regs);
 int runtime_savedata_pick(int32_t user, const char *title, const char (*names)[32], uint32_t count,
                           int which, const char *focus, char out[32], void *param_out);
 void runtime_thread_attach_host(const char *name);

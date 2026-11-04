@@ -24,6 +24,7 @@
 #include <fstream>
 #include <mutex>
 #include <system_error>
+#include <vector>
 
 #include <openssl/blowfish.h>
 
@@ -31,6 +32,11 @@ extern "C" {
 int runtime_savedata_dir(char* out, size_t size);
 int runtime_savedata_mounted(void);
 void runtime_restart(void);
+void runtime_checkpoint_request(uint32_t task);
+int runtime_checkpoint_practice(void);
+void runtime_checkpoint_set_practice(int on);
+int runtime_checkpoint_result(void);
+int runtime_checkpoint_available(void);
 }
 
 namespace fs = std::filesystem;
@@ -275,7 +281,9 @@ Checkpoint Current() {
     if (Game() && now - current_checked > std::chrono::seconds(1)) {
         current_checked = now;
         std::error_code ec;
-        const fs::path file = SavesDir() / SlotName(Game()) / "USR-DATA";
+        // In practice mode the game saves to the practice copy: "Now" follows it.
+        const fs::path file = (runtime_checkpoint_practice() ? GameBackups(Game()) / "practice" : SavesDir()) /
+                              SlotName(Game()) / "USR-DATA";
         const auto time = fs::last_write_time(file, ec);
         if (!ec && time != current_time && !runtime_savedata_mounted()) {
             current_time = time;
@@ -378,6 +386,58 @@ bool Load(int index, std::string& message) {
     return true;
 }
 
+std::vector<Checkpoint> Checkpoints() {
+    std::vector<Checkpoint> list;
+    for (const TaskRow& t : tasks) {
+        if (t.game == Game() && t.number) {
+            list.push_back(Lookup(t.game, t.task));
+        }
+    }
+    return list;
+}
+
+bool JumpsAvailable() {
+    return runtime_checkpoint_available() != 0;
+}
+
+bool Practising() {
+    return runtime_checkpoint_practice() != 0;
+}
+
+bool Jump(const Checkpoint& target, std::string& message) {
+    std::lock_guard guard(lock);
+    const int game = Game();
+    if (!game || !target.known || !JumpsAvailable()) {
+        message = "Checkpoint jumps work in Uncharted 3 for now.";
+        return false;
+    }
+    if (!Practising()) {
+        if (runtime_savedata_mounted()) {
+            message = "The game is saving: try again in a moment.";
+            return false;
+        }
+        // The practice copy starts as the campaign save; from now until the game restarts the game saves there.
+        std::error_code ec;
+        const fs::path practice = GameBackups(game) / "practice";
+        std::string error;
+        if (fs::exists(SavesDir() / SlotName(game) / "USR-DATA", ec) &&
+            !CopySave(SavesDir(), practice, SlotName(game), error)) {
+            message = "Could not start practice mode: " + error;
+            return false;
+        }
+        fs::create_directories(practice, ec);
+        runtime_checkpoint_set_practice(1);
+        std::printf("Checkpoints: practice mode on (campaign saves go to %s)\n", Utf8(practice).c_str());
+    }
+    runtime_checkpoint_request(target.task);
+    message = "Going to " + Describe(target) + "...";
+    return true;
+}
+
+int JumpResult() {
+    return runtime_checkpoint_result();
+}
+
 std::string Describe(const Checkpoint& c) {
     if (!c.known) {
         return c.task ? "an unknown checkpoint" : "no save yet";
@@ -477,7 +537,8 @@ extern "C" void bbport_saves_closed(const char* host_dir) {
         return;
     }
     const fs::path dir = fs::u8path(host_dir);
-    if (Utf8(dir.filename()) != SlotName(game)) {
+    // Only the player's own campaign save (not the practice copy of checkpoint jumps).
+    if (Utf8(dir.filename()) != SlotName(game) || dir.parent_path() != SavesDir()) {
         return;
     }
     std::lock_guard guard(lock);

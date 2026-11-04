@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace BbSaves {
 
@@ -46,6 +47,16 @@ bool MakeStory(std::string& message);
 // Puts a slot back: copies the current save to the undo slot, then restarts the game, which restores the slot
 // before it opens its saves. Continue then starts there.
 bool Load(int index, std::string& message);
+// The running game's playable checkpoints in game order.
+std::vector<Checkpoint> Checkpoints();
+// The running game's task jump is hooked (Uncharted 3, EU and 1.02 code).
+bool JumpsAvailable();
+// Practice mode is on: the game saves to a practice copy until it restarts.
+bool Practising();
+// Jumps the running game to a checkpoint at its next frame. The first jump turns practice mode on.
+bool Jump(const Checkpoint& target, std::string& message);
+// The outcome of the last jump once the game ran it: 1 done, -1 no such task, -2 not supported, 0 nothing new.
+int JumpResult();
 // "Checkpoint 57 · valve-room-entrance · Chapter 4 Run to Ground"
 std::string Describe(const Checkpoint& c);
 

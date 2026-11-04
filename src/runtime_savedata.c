@@ -184,6 +184,18 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     root(user,title,base,sizeof(base));
     snprintf(host,sizeof(host),"%s/%s",base,dir->data);
     snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,dir->data);
+    /* Practice mode (checkpoint jumps, runtime_checkpoint.c): the campaign save of the running game
+     * (SAVEDATA0<game>0) mounts from the practice copy the overlay made before the first jump. */
+    if (runtime_checkpoint_practice()) {
+        const char *exe=getenv("BB_EXE");
+        const int game=!exe ? 0 : strstr(exe,"big3") ? 3 : strstr(exe,"big2") ? 2 : !strcmp(exe,"eboot.bin") ? 1 : 0;
+        char campaign[16];
+        snprintf(campaign,sizeof(campaign),"SAVEDATA0%d0",game);
+        if (game && !strcmp(dir->data,campaign)) {
+            snprintf(host,sizeof(host),"%s.backups/u%d/practice/%s",base,game,dir->data);
+            snprintf(meta,sizeof(meta),"%s.backups/u%d/practice/%s.sce_sys",base,game,dir->data);
+        }
+    }
     struct stat st;
     int exists=!stat(host,&st) && S_ISDIR(st.st_mode);
     if ((mode & MODE_CREATE) && exists) return ERR_EXISTS;
