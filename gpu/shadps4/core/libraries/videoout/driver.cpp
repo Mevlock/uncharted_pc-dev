@@ -31,6 +31,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "shader_recompiler/specialization.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -525,6 +526,11 @@ void VideoOutDriver::Flip(const Request& req) {
         if (window >= 5.0) {
             const u32 compiles = Vulkan::g_bb_compiles.exchange(0);
             const u64 compile_ns = Vulkan::g_bb_compile_ns.exchange(0);
+            if (const u32 mismatches = Shader::g_spec_count_mismatches.exchange(0)) {
+                std::printf("Specializations: %u comparisons of permutations with another number of resources "
+                            "(kept apart)\n",
+                            mismatches);
+            }
             const u64 direct = Vulkan::Scheduler::direct_recordings.exchange(0);
             const u64 faults = BbStats::tracker_faults.exchange(0);
             // GPU command thread CPU time per draw: comparable between builds even when the scene

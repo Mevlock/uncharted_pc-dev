@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <bitset>
 
 #include "common/types.h"
@@ -12,6 +13,10 @@
 #include "shader_recompiler/profile.h"
 
 namespace Shader {
+
+/// bbport: comparisons of two specializations of one program whose resource lists differ in length (counted for
+/// the frame statistics; such a pair is not the same permutation).
+inline std::atomic<u32> g_spec_count_mismatches{0};
 
 struct VsAttribSpecialization {
     u32 divisor{};
@@ -226,6 +231,17 @@ struct StageSpecialization {
         }
 
         if (start != other.start) {
+            return false;
+        }
+
+        // bbport: the loops below walk this one's lists and index the other's. Two specializations of a program
+        // made from translations with another number of resources (a cache holding variants of several
+        // translations) are different permutations: matched, the shorter one's module would serve a pipeline laid
+        // out for the longer one (stage bindings overlapping: AMD fails or crashes), and the other's lists would be
+        // read past their end.
+        if (buffers.size() != other.buffers.size() || images.size() != other.images.size() ||
+            samplers.size() != other.samplers.size()) {
+            g_spec_count_mismatches.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
 
