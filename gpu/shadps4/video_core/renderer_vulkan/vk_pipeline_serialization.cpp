@@ -2263,7 +2263,7 @@ void PipelineCache::WarmUpThread() {
     std::atomic<u32> num_pipelines{0};
     // bbport: why a stored pipeline was not preloaded (the "stale" count): a stage not in the cache, the game built
     // it first, or the driver refused it.
-    std::atomic<u32> stale_no_stage{0}, stale_game_first{0}, stale_refused{0};
+    std::atomic<u32> stale_no_stage{0}, stale_game_first{0}, stale_refused{0}, stale_bindings{0};
     const auto build_stored = [&](size_t i) {
         auto& entry = stored[i];
         if (!entry.parsed) {
@@ -2300,6 +2300,7 @@ void PipelineCache::WarmUpThread() {
         std::array<const Shader::Info*, MaxShaderStages> program_infos{};
         std::array<vk::ShaderModule, MaxShaderStages> modules{};
         std::optional<Shader::Gcn::FetchShaderData> fetch_shader;
+        std::array<u32, MaxShaderStages> starts{};
         for (u32 stage = 0; stage < MaxShaderStages; ++stage) {
             const auto hash = entry.gkey.stage_hashes[stage];
             if (!hash) {
@@ -2313,8 +2314,32 @@ void PipelineCache::WarmUpThread() {
             infos[stage] = it->second->owner->info_template.get();
             program_infos[stage] = &it->second->owner->info;
             modules[stage] = it->second->module;
+            starts[stage] = it->second->spec.start.unified;
             if (it->second->fetch_shader) {
                 fetch_shader = it->second->fetch_shader;
+            }
+        }
+        // bbport: one descriptor set holds the stages' resources in stage order (fragment first), each stage's
+        // numbered on from where the one before ends (BuildDescSetLayout). A stored stage translated for another
+        // start (a variant list's recorded start, from a device whose fragment shader used another number of
+        // bindings) does not fit this layout: NVIDIA lets it through, AMD fails the pipeline and then crashes in
+        // its driver (VUID-VkGraphicsPipelineCreateInfo-layout-07988). Leave such a pipeline to the game.
+        if (!entry.gkey.split_sets) {
+            u32 next = 0;
+            for (u32 stage = 0; stage < MaxShaderStages; ++stage) {
+                if (!infos[stage]) {
+                    continue;
+                }
+                if (starts[stage] != next) {
+                    ++stale_bindings;
+                    return;
+                }
+                const auto& info = *infos[stage];
+                next += static_cast<u32>(info.buffers.size());
+                for (const auto& image : info.images) {
+                    next += image.NumBindings(info);
+                }
+                next += static_cast<u32>(info.samplers.size());
             }
         }
         // The game may need (and build) the same pipeline meanwhile: build it only once.
@@ -2682,8 +2707,8 @@ void PipelineCache::WarmUpThread() {
         LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
                     num_total_pipelines - num_pipelines.load());
         std::printf("Pipeline cache: not preloaded: %u with a stage not in the cache, %u built by the game first, "
-                    "%u refused by the driver\n",
-                    stale_no_stage.load(), stale_game_first.load(), stale_refused.load());
+                    "%u refused by the driver, %u with stage bindings that do not line up (left to the game)\n",
+                    stale_no_stage.load(), stale_game_first.load(), stale_refused.load(), stale_bindings.load());
     }
     std::printf("Pipeline cache: preloaded %u of %u pipelines (%u shaders, %u threads) in %.0f ms "
                 "(keys %.0f, shaders %.0f, programs %.0f, pipelines %.0f); the game could select from %.0f ms\n",
