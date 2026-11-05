@@ -2334,12 +2334,10 @@ void PipelineCache::WarmUpThread() {
                     ++stale_bindings;
                     return;
                 }
+                // Count as the game numbers the next stage on (Info::AddBindings): one per buffer, image and
+                // sampler. Not NumBindings: that reads the image's T#, which a stored template does not hold.
                 const auto& info = *infos[stage];
-                next += static_cast<u32>(info.buffers.size());
-                for (const auto& image : info.images) {
-                    next += image.NumBindings(info);
-                }
-                next += static_cast<u32>(info.samplers.size());
+                next += static_cast<u32>(info.buffers.size() + info.images.size() + info.samplers.size());
             }
         }
         // The game may need (and build) the same pipeline meanwhile: build it only once.
