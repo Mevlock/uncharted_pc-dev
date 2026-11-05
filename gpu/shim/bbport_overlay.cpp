@@ -455,12 +455,13 @@ void CheckpointsPage() {
         }
     }
     if (ImGui::BeginCombo(TI("Chapter"), chapter_label.c_str())) {
-        int last = -1;
+        // Each chapter once: a few checkpoints sit out of order (U3: two of chapter 12 come after chapter 13).
+        std::vector<int> shown;
         for (const auto& c : list) {
-            if (c.chapter == last) {
+            if (std::find(shown.begin(), shown.end(), c.chapter) != shown.end()) {
                 continue;
             }
-            last = c.chapter;
+            shown.push_back(c.chapter);
             const std::string label = std::to_string(c.chapter) + "  " + c.chapter_title;
             if (ImGui::Selectable(label.c_str(), c.chapter == chapter)) {
                 chapter = c.chapter;
