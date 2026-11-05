@@ -18,6 +18,8 @@
 
 namespace Vulkan {
 
+void BbGpuCheckpoint(vk::CommandBuffer cmd, const char* kind, u32 a, u32 b); // vk_rasterizer.cpp
+
 static vk::ImageType ConvertImageType(AmdGpu::ImageType type) noexcept {
     switch (type) {
     case AmdGpu::ImageType::Color1D:
@@ -295,8 +297,11 @@ void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
         FlushBarriers();
     }
 
-    scheduler.Record([image = src->GetImage(), buffer = dst->Handle(),
+    // BB_GPU_CHECKPOINTS: the download is marked too (width, first region's buffer offset in 64 KiB).
+    scheduler.Record([image = src->GetImage(), buffer = dst->Handle(), width = src->info.size.width,
+                      offset64k = download_copies.empty() ? 0u : u32(download_copies[0].bufferOffset >> 16),
                       regions = scheduler.RecordData(download_copies)](vk::CommandBuffer cmdbuf) {
+        BbGpuCheckpoint(cmdbuf, "image download", width, offset64k);
         cmdbuf.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, buffer,
                                  regions.size(), regions.data());
     });

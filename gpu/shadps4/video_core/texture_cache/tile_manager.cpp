@@ -31,6 +31,10 @@
 #include <magic_enum/magic_enum.hpp>
 #include <vk_mem_alloc.h>
 
+namespace Vulkan {
+void BbGpuCheckpoint(vk::CommandBuffer cmd, const char* kind, u32 a, u32 b); // vk_rasterizer.cpp
+}
+
 namespace VideoCore {
 
 struct TilingInfo {
@@ -271,6 +275,8 @@ void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::Descript
     const u32 max_groups_x = instance.MaxComputeWorkGroupCountX();
     scheduler.Record([pipeline, layout = *pl_layout, tiled, linear, params, dim_x,
                       max_groups_x](vk::CommandBuffer cmdbuf) {
+        // BB_GPU_CHECKPOINTS: the tiling dispatch is marked too (groups, tiled offset in 64 KiB).
+        Vulkan::BbGpuCheckpoint(cmdbuf, "tiling", dim_x, u32(tiled.offset >> 16));
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
         const std::array<vk::WriteDescriptorSet, 3> set_writes = {{
             {
