@@ -784,6 +784,35 @@ static size_t guest_hook_count;
 static uint64_t guest_image_size;
 uintptr_t runtime_image_base(void) { return (uintptr_t)image; }
 size_t runtime_image_size(void) { return (size_t)guest_image_size; }
+#ifdef _WIN32
+/* BB_KEEP_BYTES=offset=value,... (cheats.py, from BB_CHEATS): guest image bytes kept at a value (hex offsets),
+ * written every 100 ms: Naughty Dog's debug-menu switches ("No Reload", "One Hit Kills") live in memory the games
+ * create and may reset; their menu is unreachable, so the runtime holds them. Offsets past the image are ignored. */
+static DWORD WINAPI keep_bytes_thread(void *argument) {
+    struct { uint64_t offset; unsigned char value; } keep[16];
+    int count=0;
+    for (const char *p=argument; p && *p && count<16; ) {
+        char *end; uint64_t offset=strtoull(p,&end,16);
+        if (*end!='=') break;
+        unsigned long value=strtoul(end+1,&end,0);
+        if (offset<guest_image_size) {
+            keep[count].offset=offset;
+            keep[count].value=(unsigned char)value;
+            ++count;
+        }
+        p=*end==',' ? end+1 : NULL;
+    }
+    printf("Cheats: %d debug switches kept set\n", count);
+    for (;;) {
+        for (int i=0; i<count; ++i) {
+            volatile unsigned char *at=image+keep[i].offset;
+            if (*at!=keep[i].value) *at=keep[i].value;
+        }
+        Sleep(100);
+    }
+    return 0;
+}
+#endif
 /* A pointer argument into the image (or guest memory the tracker knows) shown as text. */
 static void print_hook_string(const char *name, uint64_t value) {
     const unsigned char *p=(const unsigned char *)(uintptr_t)value;
@@ -2314,6 +2343,8 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     SetThreadDescription(GetCurrentThread(),L"bb:GuestMain");   /* found by name by the sampler (BB_HITCH_MS) */
     if (getenv("BB_WATCH")) CloseHandle(CreateThread(NULL,0,watch_thread,getenv("BB_WATCH"),0,NULL));
+    if (getenv("BB_KEEP_BYTES") && *getenv("BB_KEEP_BYTES"))
+        CloseHandle(CreateThread(NULL,0,keep_bytes_thread,getenv("BB_KEEP_BYTES"),0,NULL));
 #endif
     /* argv: the executable and, after sceSystemServiceLoadExec, the arguments it was given
      * as its argv (--guest-argv: one per line, argv[0] first). */

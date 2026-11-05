@@ -53,6 +53,10 @@ USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log')
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
+# Naughty Dog's debug-menu switches the runtime keeps set (scripts/cheats.py KEEP; after BilalReloaded): the games
+# that have them.
+SWITCH_CHEATS = {'u2': ('noreload',), 'u3': ('noreload', 'onehit')}
+SWITCH_CHEAT_TITLES = {'noreload': 'No Reload', 'onehit': 'One-Hit Kills'}
 GAMES = [
     ('u1', "Drake's Fortune", 'Uncharted 1 · 2007', 'eboot.bin'),
     ('u2', 'Among Thieves', 'Uncharted 2 · 2009', 'big2-ps4_Shipping.elf'),
@@ -218,7 +222,8 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'pad_invert_y': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
-                **{f'{game}_devmode': False for game, _t, _s, _e in GAMES}}
+                **{f'{game}_devmode': False for game, _t, _s, _e in GAMES},
+                **{f'{game}_{cheat}': False for game, cheats in SWITCH_CHEATS.items() for cheat in cheats}}
 
 
 UI_LANGUAGE = 'en'
@@ -799,7 +804,9 @@ def game_environment(s, start=None):
     env['BB_UI_LANGUAGE'] = uncharted_i18n.language_code(str(s.get('ui_language') or ''))
     env['BB_CHEATS'] = ','.join([f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
                                  if s.get(f'{game}_infinite_{cheat}')] +
-                                [f'{game}:devmode' for game, _t, _s, _e in GAMES if s.get(f'{game}_devmode')])
+                                [f'{game}:devmode' for game, _t, _s, _e in GAMES if s.get(f'{game}_devmode')] +
+                                [f'{game}:{cheat}' for game, cheats in SWITCH_CHEATS.items() for cheat in cheats
+                                 if s.get(f'{game}_{cheat}')])
     # Developer mode also opens Naughty Dog's menus, which the games build but never open: F11 the Dev Menu, F8 the
     # Quick Menu (runtime_pad.c).
     if any(s.get(f'{game}_devmode') for game, _t, _s, _e in GAMES):
@@ -2154,6 +2161,8 @@ class Launcher:
             self.section(f, f'{title} · {subtitle}')
             self.check(f, f'{game}_infinite_health', _('Infinite Health'))
             self.check(f, f'{game}_infinite_ammo', _('Infinite Ammo'))
+            for cheat in SWITCH_CHEATS.get(game, ()):
+                self.check(f, f'{game}_{cheat}', _(SWITCH_CHEAT_TITLES[cheat]))
             self.check(f, f'{game}_devmode', _("Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu"))
 
     def build_advanced(self):

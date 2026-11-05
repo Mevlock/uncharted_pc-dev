@@ -190,6 +190,8 @@ EXTRA_TRANSLATIONS = {
         'Jeder Cheat wirkt nur in seinem eigenen Spiel; Änderungen werden beim Start des Spiels angewendet.',
         'Infinite Health': 'Unendliche Gesundheit',
         'Infinite Ammo': 'Unendliche Munition',
+        'No Reload': 'Kein Nachladen',
+        'One-Hit Kills': 'Tod mit einem Treffer',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Entwicklermodus: Debug-Text von Naughty Dog; F11 Dev Menu, F8 Quick Menu',
         'Shader preparation': 'Shader-Vorbereitung',
@@ -563,6 +565,8 @@ EXTRA_TRANSLATIONS = {
         "Ogni trucco vale solo per il proprio gioco; le modifiche si applicano all'avvio del gioco.",
         'Infinite Health': 'Salute infinita',
         'Infinite Ammo': 'Munizioni infinite',
+        'No Reload': 'Nessuna ricarica',
+        'One-Hit Kills': 'Uccisioni con un colpo',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Modalità sviluppatore: testo di debug di Naughty Dog; F11 Dev Menu, F8 Quick Menu',
         'Shader preparation': 'Preparazione degli shader',
@@ -935,6 +939,8 @@ EXTRA_TRANSLATIONS = {
         '各チートはそれぞれのゲームにのみ適用されます。変更はゲーム起動時に反映されます。',
         'Infinite Health': '体力無限',
         'Infinite Ammo': '弾薬無限',
+        'No Reload': 'リロード不要',
+        'One-Hit Kills': '一撃必殺',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         '開発者モード: Naughty Dog のデバッグ表示、F11 Dev Menu、F8 Quick Menu',
         'Shader preparation': 'シェーダーの準備',
@@ -1207,6 +1213,8 @@ EXTRA_TRANSLATIONS = {
         'Cheats': 'Trucos',
         'Infinite Health': 'Salud infinita',
         'Infinite Ammo': 'Munición infinita',
+        'No Reload': 'Sin recargar',
+        'One-Hit Kills': 'Muertes de un golpe',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Modo desarrollador: texto de depuración de Naughty Dog; F11 Dev Menu, F8 Quick Menu',
         'Shader preparation': 'Preparación de shaders',
@@ -1482,6 +1490,8 @@ EXTRA_TRANSLATIONS = {
         'Cheats': 'Trapaças',
         'Infinite Health': 'Vida infinita',
         'Infinite Ammo': 'Munição infinita',
+        'No Reload': 'Sem recarregar',
+        'One-Hit Kills': 'Mortes com um golpe',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Modo desenvolvedor: texto de depuração da Naughty Dog; F11 Dev Menu, F8 Quick Menu',
         'Shader preparation': 'Preparação de shaders',
@@ -1758,6 +1768,8 @@ EXTRA_TRANSLATIONS = {
         'Cheats': 'Triches',
         'Infinite Health': 'Santé infinie',
         'Infinite Ammo': 'Munitions infinies',
+        'No Reload': 'Pas de rechargement',
+        'One-Hit Kills': 'Tué en un coup',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Mode développeur : texte de débogage de Naughty Dog ; F11 Dev Menu, F8 Quick Menu',
         'Shader preparation': 'Préparation des shaders',

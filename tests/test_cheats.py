@@ -45,6 +45,13 @@ class CheatTests(unittest.TestCase):
         env = self.launcher.game_environment(self.settings(u2_infinite_ammo=True, u1_infinite_health=True))
         self.assertEqual(env['BB_CHEATS'], 'u1:health,u2:ammo')
 
+    def test_switch_cheats_default_off_and_reach_the_environment(self):
+        keys = [f'{g}_{c}' for g, cs in self.launcher.SWITCH_CHEATS.items() for c in cs]
+        self.assertEqual(sorted(keys), ['u2_noreload', 'u3_noreload', 'u3_onehit'])
+        self.assertFalse(any(self.launcher.APP_DEFAULTS[k] for k in keys))
+        env = self.launcher.game_environment(self.settings(u2_noreload=True, u3_onehit=True))
+        self.assertEqual(env['BB_CHEATS'], 'u2:noreload,u3:onehit')
+
     def test_run_keeps_only_the_running_games_cheats(self):
         cheats = 'u1:health,u2:ammo,u3:health,u3:ammo'
         self.assertEqual(self.runner.game_cheats(cheats, 'eboot.bin'), 'health')
@@ -139,6 +146,22 @@ class PatchFileTests(unittest.TestCase):
             spans.sort()
             self.assertTrue(all(a[1] <= b[0] for a, b in zip(spans, spans[1:])), sha)
         self.assertEqual(len(self.cheats.PATCHES), 6)
+
+    def test_keep_table_is_consistent(self):
+        u2, u3 = 'big2-ps4_Shipping.elf', 'big3-ps4_Shipping.elf'
+        for codes in (self.cheats.EU, self.cheats.US):
+            self.assertEqual(set(self.cheats.KEEP[codes[u2]]), {'noreload'})
+            self.assertEqual(set(self.cheats.KEEP[codes[u3]]), {'noreload', 'onehit'})
+            # Uncharted 3's cheat block: One Hit Kills sits 0x101 bytes after No Reload in both builds.
+            table = self.cheats.KEEP[codes[u3]]
+            self.assertEqual(table['onehit'][0] - table['noreload'][0], 0x101)
+
+    def test_keep_bytes_needs_a_known_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            exe = Path(directory) / 'game.elf'
+            exe.write_bytes(tiny_self(bytes(0x40)))
+            self.assertEqual(self.cheats.keep_bytes(exe, ['noreload', 'onehit']), '')
+            self.assertEqual(self.cheats.keep_bytes(exe, ['health']), '')
 
 
 if __name__ == '__main__':

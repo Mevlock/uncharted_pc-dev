@@ -59,6 +59,34 @@ DEVMODE = {
 for _code, _patch in DEVMODE.items():
     PATCHES[_code]['devmode'] = _patch
 
+# Naughty Dog's debug-menu switches, kept set by the runtime (BB_KEEP_BYTES): bytes in memory the game creates, so no
+# patch of the file reaches them. Uncharted 3's menu has "No Reload" and "One Hit Kills" in its cheat block (Infinite
+# Ammo +0x61, Infinite Grenades +0x62, No Reload +0x63, One Hit Kills +0x164); Uncharted 2 reads no-reload from the
+# byte after its Infinite Ammo switch (+0x3b; no menu item). 1.02 addresses by BilalReloaded; the EU 1.00 ones found
+# the same way (the menu items' base + offset).
+KEEP = {
+    US['big2-ps4_Shipping.elf']: {'noreload': [0x104f84b]},
+    EU['big2-ps4_Shipping.elf']: {'noreload': [0xe654bb]},
+    US['big3-ps4_Shipping.elf']: {'noreload': [0x17faa93], 'onehit': [0x17fab94]},
+    EU['big3-ps4_Shipping.elf']: {'noreload': [0x14c0923], 'onehit': [0x14c0a24]},
+}
+
+
+def keep_bytes(path, cheats):
+    """BB_KEEP_BYTES ("offset=1,...") for the enabled switch cheats of one executable; '' when none applies."""
+    if not any(c in ('noreload', 'onehit') for c in cheats):
+        return ''
+    try:
+        table = KEEP.get(code_hash(Path(path).read_bytes()), {})
+    except OSError:
+        return ''
+    keep = []
+    for name in cheats:
+        for offset in table.get(name, []):
+            keep.append(f'{offset:x}=1')
+            print(f'Cheats: {name} on')
+    return ','.join(keep)
+
 
 def code_hash(data):
     """SHA-1 of a SELF's loaded segments, or of the whole file when it is not a SELF."""
