@@ -390,6 +390,9 @@ struct LoadedStage {
     size_t perm_idx{};
     vk::ShaderModule module{};
     bool parsed = false; ///< metadata read: its permutation slot is known
+    /// bbport: a stored meta this build cannot read (another meta or translator version). Its number is not reserved,
+    /// so the game's next new permutation of the shader takes it; the keys naming the old one are removed.
+    bool stale = false;
     // Filled by the serial insertion:
     Program* owner{};
     std::optional<Shader::Gcn::FetchShaderData> fetch_shader{};
@@ -658,6 +661,31 @@ struct ListedVariant {
 };
 
 namespace {
+
+/// bbport: a variant line without its number and reference checksums (perm=, ck=) and a trailing CR: two lines with
+/// the same body describe the same variant.
+static std::string ListLineBody(std::string_view line) {
+    std::string out;
+    size_t pos = 0;
+    while (pos <= line.size()) {
+        size_t end = line.find('\t', pos);
+        if (end == std::string_view::npos) {
+            end = line.size();
+        }
+        auto field = line.substr(pos, end - pos);
+        if (!field.empty() && field.back() == '\r') {
+            field.remove_suffix(1);
+        }
+        if (!field.empty() && !field.starts_with("perm=") && !field.starts_with("ck=")) {
+            if (!out.empty()) {
+                out += '\t';
+            }
+            out += field;
+        }
+        pos = end + 1;
+    }
+    return out;
+}
 
 static std::optional<ListedVariant> ParseVariantLine(const std::string& line) {
     std::map<std::string, std::string> f;
@@ -1086,6 +1114,7 @@ static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(
 struct StoredPipeline {
     bool parsed = false;
     bool compute = false;
+    bool renumbered = false; ///< a shipped list's key rewritten to this cache's variant numbers
     GraphicsPipelineKey gkey{};
     GraphicsPipeline::SerializationSupport gsdata{};
     ComputePipelineKey ckey{};
@@ -2035,8 +2064,12 @@ void PipelineCache::WarmUpThread() {
         // are translated each run (and never saved, SaveShaderBinary).
         u64 checksum = 0;
         if (!LoadShaderMeta(meta_ar, stage.program->info, unused, stage.spec, stage.perm_idx,
-                            &checksum, &stage.inputs) ||
-            Shader::Backend::SPIRV::IsForcedShader(stage.program->info.pgm_hash) ||
+                            &checksum, &stage.inputs)) {
+            stage.stale = true;
+            stage.program.reset();
+            return;
+        }
+        if (Shader::Backend::SPIRV::IsForcedShader(stage.program->info.pgm_hash) ||
             BbMovieShaderScaled(stage.program->info.pgm_hash) ||
             BbNanGuard::BloomClampShader(stage.program->info.pgm_hash) ||
             BbFocusFix::FocusCentreShader(stage.program->info.pgm_hash)) {
@@ -2205,8 +2238,12 @@ void PipelineCache::WarmUpThread() {
     // 3. Into the program cache, in order. A permutation lives at its original index.
     std::unordered_map<u64, LoadedStage*> by_hash;
     std::vector<Program*> owners;
+    std::unordered_set<u64> stale_stages; // metas of another version: their numbers are free again
     for (size_t i = 0; i < stages.size(); ++i) {
         auto& stage = stages[i];
+        if (stage.stale) {
+            stale_stages.insert(stage_hashes[i]);
+        }
         if (!stage.parsed) {
             continue;
         }
@@ -2264,15 +2301,42 @@ void PipelineCache::WarmUpThread() {
     // bbport: why a stored pipeline was not preloaded (the "stale" count): a stage not in the cache, the game built
     // it first, or the driver refused it.
     std::atomic<u32> stale_no_stage{0}, stale_game_first{0}, stale_refused{0}, stale_bindings{0};
+    // bbport: stored keys that can never be right are removed from the cache: a key naming a stage whose meta is of
+    // another version (the game reuses that number for its next new permutation of the shader, and the key would then
+    // pair another variant), or one whose stages do not chain (such a key from a long-lived cache was the AMD crash of
+    // 0.3.6.44). Keys from the shipped lists (after the cache's own) are not stored files. The cache tools read
+    // players' caches as they are (BB_SPEC_DUMP, BB_KEY_DUMP, BB_VARIANT_LIST_OUT): nothing is removed then.
+    static const bool prune_keys = !std::getenv("BB_SPEC_DUMP") && !std::getenv("BB_KEY_DUMP") &&
+                                   !std::getenv("BB_VARIANT_LIST_OUT");
+    std::atomic<u32> removed_stale{0}, removed_unchained{0};
+    const auto remove_key = [&](size_t i, std::atomic<u32>& counter) {
+        if (!prune_keys || i >= names.size()) {
+            return;
+        }
+        db.Remove(Storage::BlobType::PipelineKey, names[i]);
+        stored[i].parsed = false; // not tried again by the list round
+        ++counter;
+    };
+    // bbport: the shipped list's graphics keys (after the cache's own, i >= names.size()) name stages by the list's
+    // numbers; the variant ship below works out the cache's number of each listed variant and rewrites them. Until
+    // then they wait (a list number the cache uses for another variant would pair the wrong one).
+    const bool ship_active = std::getenv("BB_VARIANT_SHIP") != nullptr;
+    std::atomic<bool> defer_list_keys{ship_active};
     const auto build_stored = [&](size_t i) {
         auto& entry = stored[i];
         if (!entry.parsed) {
+            return;
+        }
+        if (i >= names.size() && !entry.compute && defer_list_keys.load(std::memory_order_relaxed)) {
             return;
         }
         if (entry.compute) {
             const auto it = by_hash.find(entry.ckey.value);
             if (it == by_hash.end() || !it->second->ready) {
                 ++stale_no_stage;
+                if (stale_stages.contains(entry.ckey.value)) {
+                    remove_key(i, removed_stale);
+                }
                 return;
             }
             {
@@ -2293,7 +2357,12 @@ void PipelineCache::WarmUpThread() {
             }
             pipeline->RebindStage(&it->second->owner->info);
             std::unique_lock lock{pipelines_mutex};
-            num_pipelines += compute_pipelines.try_emplace(entry.ckey, std::move(pipeline)).second;
+            const bool added = compute_pipelines.try_emplace(entry.ckey, std::move(pipeline)).second;
+            num_pipelines += added;
+            lock.unlock();
+            if (added && entry.renumbered) {
+                RegisterPipelineData(entry.ckey, entry.csdata);
+            }
             return;
         }
         std::array<const Shader::Info*, MaxShaderStages> infos{};
@@ -2309,6 +2378,12 @@ void PipelineCache::WarmUpThread() {
             const auto it = by_hash.find(hash);
             if (it == by_hash.end() || !it->second->ready) {
                 ++stale_no_stage;
+                for (const auto h : entry.gkey.stage_hashes) {
+                    if (h && stale_stages.contains(h)) {
+                        remove_key(i, removed_stale);
+                        break;
+                    }
+                }
                 return;
             }
             infos[stage] = it->second->owner->info_template.get();
@@ -2332,6 +2407,7 @@ void PipelineCache::WarmUpThread() {
                 }
                 if (starts[stage] != next) {
                     ++stale_bindings;
+                    remove_key(i, removed_unchained);
                     return;
                 }
                 // Count as the game numbers the next stage on (Info::AddBindings): one per buffer, image and
@@ -2360,10 +2436,16 @@ void PipelineCache::WarmUpThread() {
             return;
         }
         pipeline->RebindStages(program_infos);
+        bool added = false;
         {
             std::unique_lock lock{pipelines_mutex};
-            num_pipelines +=
-                graphics_pipelines.try_emplace(entry.gkey, std::move(pipeline)).second;
+            added = graphics_pipelines.try_emplace(entry.gkey, std::move(pipeline)).second;
+            num_pipelines += added;
+        }
+        // A list key in this cache's numbers is saved as the cache's own: the next launch loads the variants it names
+        // (the cache loads the variants its keys name) and needs no rebuild.
+        if (added && entry.renumbered) {
+            RegisterPipelineData(entry.gkey, std::hash<GraphicsPipelineKey>{}(entry.gkey), entry.gsdata);
         }
         ReleaseClaim(claim_id);
     };
@@ -2443,6 +2525,12 @@ void PipelineCache::WarmUpThread() {
         if (const char* env = std::getenv("BB_SHIP_THREADS")) {
             ship_threads = std::clamp<u32>(u32(std::atoi(env)), 1, 64);
         }
+        // bbport: a variant's number is its order in the cache that made it, so the list's numbers and this cache's
+        // differ for a cache made before the list (play first, or an earlier list). ship_remap: a list stage hash ->
+        // the cache's stage hash of the same variant; the list's keys are rewritten with it before they are built.
+        std::unordered_map<u64, u64> ship_remap;
+        u32 same_number = 0, other_number = 0, number_taken = 0;
+        std::unordered_map<u64, std::vector<std::pair<size_t, std::string>>> cached_bodies; // per shader
         std::vector<ListedVariant> listed;
         if (std::FILE* f = std::fopen(ship, "r")) {
             std::string line;
@@ -2453,9 +2541,61 @@ void PipelineCache::WarmUpThread() {
                     continue;
                 }
                 if (auto v = ParseVariantLine(line)) {
-                    if (!by_hash.contains(HashCombine(v->hash, v->perm))) {
-                        listed.push_back(std::move(*v));
+                    const u64 list_hash = HashCombine(v->hash, v->perm);
+                    const auto it = by_hash.find(list_hash);
+                    // Predicted lines (image setups by slot, a start taken from a listed pixel shader) cannot be
+                    // compared before they are built: as before, the cache's variant of that number counts.
+                    const bool comparable = !v->by_slot && !v->start_from_ps;
+                    if (!comparable) {
+                        if (it != by_hash.end()) {
+                            ++same_number;
+                        } else {
+                            listed.push_back(std::move(*v));
+                        }
+                        line.clear();
+                        continue;
                     }
+                    // A variant is the same when its line is (apart from perm= and ck=): the specialization alone
+                    // cannot tell, part of its runtime info comes from the game's registers when it is built.
+                    const std::string body = ListLineBody(line);
+                    auto [bit, fresh] = cached_bodies.try_emplace(v->hash);
+                    if (fresh) {
+                        std::shared_lock lk{programs_mutex};
+                        if (const auto pit = program_cache.find(v->hash); pit != program_cache.end()) {
+                            const auto& modules = pit.value()->modules;
+                            for (size_t j = 0; j < modules.size(); ++j) {
+                                if (modules[j].module && modules[j].spec.Valid() &&
+                                    by_hash.contains(HashCombine(v->hash, j))) {
+                                    bit->second.emplace_back(
+                                        j, ListLineBody(VariantLine(v->hash, j, 0, modules[j].spec)));
+                                }
+                            }
+                        }
+                    }
+                    std::optional<size_t> match;
+                    for (const auto& [j, cached_body] : bit->second) {
+                        if (cached_body == body) {
+                            match = j;
+                            if (j == v->perm) {
+                                break;
+                            }
+                        }
+                    }
+                    if (match && *match == v->perm) {
+                        ++same_number;
+                        line.clear();
+                        continue;
+                    }
+                    if (match) {
+                        ship_remap[list_hash] = HashCombine(v->hash, *match);
+                        ++other_number;
+                        line.clear();
+                        continue;
+                    }
+                    if (it != by_hash.end()) {
+                        ++number_taken; // built and given a number of its own
+                    }
+                    listed.push_back(std::move(*v));
                 }
                 line.clear();
             }
@@ -2499,6 +2639,11 @@ void PipelineCache::WarmUpThread() {
             vk::ShaderModule existing{};
             Shader::StageSpecialization existing_spec;
             Program* existing_owner{};
+            // The number it ends up under: the list's when that is free in this cache, the one of the same variant
+            // already there, or a new one behind the cache's (the list's number holds another variant here).
+            size_t number = v.perm;
+            const u64 list_hash = HashCombine(v.hash, v.perm);
+            const bool list_number_used = by_hash.contains(list_hash);
             {
                 // The game is running (selection started at warm_done): GetProgram takes a new permutation's index
                 // from the module count under this program's claim and appends after compiling. Without the claim a
@@ -2517,53 +2662,66 @@ void PipelineCache::WarmUpThread() {
                 auto& modules = program->modules;
                 modules.resize(std::max(modules.size(), v.perm + 1));
                 const auto found = std::ranges::find(modules, spec, &Program::Module::spec);
-                if (modules[v.perm].module || (found != modules.end() && found->module)) {
-                    const auto& theirs = found != modules.end() && found->module ? *found : modules[v.perm];
-                    existing = theirs.module;
-                    existing_spec = theirs.spec;
+                if (found != modules.end() && found->module) {
+                    // The same variant is there (the game made it first, or the cache holds it under another number).
+                    number = size_t(std::distance(modules.begin(), found));
+                    existing = found->module;
+                    existing_spec = found->spec;
                     existing_owner = program;
-                    program = nullptr; // the game was first
+                    program = nullptr;
                 } else {
+                    // A number of the cache's own (a stored variant, a reserved slot, or one the game made meanwhile)
+                    // is not taken over: the variant goes behind them.
+                    if (list_number_used || modules[v.perm].module) {
+                        number = modules.size();
+                        modules.resize(number + 1);
+                    }
                     spec.info = &program->info;
-                    modules[v.perm] = {module, spec};
+                    modules[number] = {module, spec};
                 }
                 lk.unlock();
                 ReleaseClaim(v.hash);
             }
+            const u64 perm_hash = HashCombine(v.hash, number);
             if (!program) {
                 taken.fetch_add(1, std::memory_order_relaxed);
                 device.destroyShaderModule(module);
-                // The stored pipelines naming this permutation are built with the game's module.
+                // The stored pipelines naming this permutation are built with the module already there.
                 if (existing && existing_owner) {
                     std::scoped_lock lk{shipped_mutex};
+                    if (number != v.perm) {
+                        ship_remap[list_hash] = perm_hash;
+                    }
                     auto& stage = shipped.emplace_back();
                     stage.parsed = true;
                     stage.ready = true;
                     stage.owner = existing_owner;
                     stage.module = existing;
                     stage.spec = existing_spec;
-                    stage.perm_idx = v.perm;
+                    stage.perm_idx = number;
                     stage.fetch_shader = existing_spec.fetch_shader_data;
-                    new_stages.emplace_back(HashCombine(v.hash, v.perm), &stage);
+                    new_stages.emplace_back(perm_hash, &stage);
                 }
                 return true; // built (its end bindings count)
             }
             // Saved like a shader translated in play: the next launch loads it from the cache. A binary that depends on
             // settings (the scaled movie shader, the clamped bloom shader, ...) is not: it is prepared each launch.
-            const u64 perm_hash = HashCombine(v.hash, v.perm);
             if (!Shader::Backend::SPIRV::IsForcedShader(v.hash) && !BbMovieShaderScaled(v.hash) &&
                 !BbNanGuard::BloomClampShader(v.hash) && !BbFocusFix::FocusCentreShader(v.hash)) {
-                RegisterShaderBinary(std::move(spv), v.hash, v.perm);
+                RegisterShaderBinary(std::move(spv), v.hash, number);
             }
-            RegisterShaderMeta(*info, spec.fetch_shader_data, spec, perm_hash, v.perm);
+            RegisterShaderMeta(*info, spec.fetch_shader_data, spec, perm_hash, number);
             std::scoped_lock lk{shipped_mutex};
+            if (number != v.perm) {
+                ship_remap[list_hash] = perm_hash;
+            }
             auto& stage = shipped.emplace_back();
             stage.parsed = true;
             stage.ready = true;
             stage.owner = program;
             stage.module = module;
             stage.spec = spec;
-            stage.perm_idx = v.perm;
+            stage.perm_idx = number;
             stage.fetch_shader = spec.fetch_shader_data;
             new_stages.emplace_back(perm_hash, &stage);
             return true;
@@ -2571,6 +2729,33 @@ void PipelineCache::WarmUpThread() {
         for (const auto& [perm_hash, stage] : new_stages) {
             by_hash.emplace(perm_hash, stage);
         }
+        // The list's keys in this cache's numbers, then built with the cache's own.
+        u32 keys_renumbered = 0;
+        if (!ship_remap.empty()) {
+            for (size_t i = names.size(); i < stored.size(); ++i) {
+                auto& entry = stored[i];
+                if (!entry.parsed) {
+                    continue;
+                }
+                bool changed = false;
+                if (entry.compute) {
+                    if (const auto it = ship_remap.find(entry.ckey.value); it != ship_remap.end()) {
+                        entry.ckey.value = it->second;
+                        changed = true;
+                    }
+                } else {
+                    for (auto& h : entry.gkey.stage_hashes) {
+                        if (const auto it = ship_remap.find(h); h && it != ship_remap.end()) {
+                            h = it->second;
+                            changed = true;
+                        }
+                    }
+                }
+                entry.renumbered = changed;
+                keys_renumbered += changed;
+            }
+        }
+        defer_list_keys.store(false, std::memory_order_relaxed);
         const double t_built = elapsed_ms();
         const u32 before = num_pipelines.load();
         BbOverlay::SetShaderPreparation(2, 0, u32(stored.size()));
@@ -2585,6 +2770,10 @@ void PipelineCache::WarmUpThread() {
                     "the game first, %u failed, %u without code) in %.0f ms; then %u pipelines in %.0f ms\n",
                     listed.size(), t_read - t_ship, built.load(), taken.load(), failed.load(), no_code.load(),
                     t_built - t_read, num_pipelines.load() - before, elapsed_ms() - t_built);
+        std::printf("Variant ship numbers: %u listed variants under the same number in the cache, %u under another "
+                    "(found before building), %u whose number the cache uses for another variant; %zu list numbers "
+                    "mapped, %u list keys renumbered\n",
+                    same_number, other_number, number_taken, ship_remap.size(), keys_renumbered);
     }
     // The hold ends: the stored pipelines and the listed variants are ready before the game goes on.
     if (held) {
@@ -2707,6 +2896,11 @@ void PipelineCache::WarmUpThread() {
         std::printf("Pipeline cache: not preloaded: %u with a stage not in the cache, %u built by the game first, "
                     "%u refused by the driver, %u with stage bindings that do not line up (left to the game)\n",
                     stale_no_stage.load(), stale_game_first.load(), stale_refused.load(), stale_bindings.load());
+    }
+    if (removed_stale.load() || removed_unchained.load()) {
+        std::printf("Pipeline cache: removed %u stored keys naming a shader of an older cache and %u whose stage "
+                    "bindings do not line up\n",
+                    removed_stale.load(), removed_unchained.load());
     }
     std::printf("Pipeline cache: preloaded %u of %u pipelines (%u shaders, %u threads) in %.0f ms "
                 "(keys %.0f, shaders %.0f, programs %.0f, pipelines %.0f); the game could select from %.0f ms\n",
