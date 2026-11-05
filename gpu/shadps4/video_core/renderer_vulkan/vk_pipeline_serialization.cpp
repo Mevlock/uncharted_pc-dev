@@ -2369,7 +2369,7 @@ void PipelineCache::WarmUpThread() {
         std::array<const Shader::Info*, MaxShaderStages> program_infos{};
         std::array<vk::ShaderModule, MaxShaderStages> modules{};
         std::optional<Shader::Gcn::FetchShaderData> fetch_shader;
-        std::array<u32, MaxShaderStages> starts{};
+        std::array<u32, MaxShaderStages> starts{}, counts{};
         for (u32 stage = 0; stage < MaxShaderStages; ++stage) {
             const auto hash = entry.gkey.stage_hashes[stage];
             if (!hash) {
@@ -2390,6 +2390,8 @@ void PipelineCache::WarmUpThread() {
             program_infos[stage] = &it->second->owner->info;
             modules[stage] = it->second->module;
             starts[stage] = it->second->spec.start.unified;
+            const auto& own_spec = it->second->spec;
+            counts[stage] = u32(own_spec.buffers.size() + own_spec.images.size() + own_spec.samplers.size());
             if (it->second->fetch_shader) {
                 fetch_shader = it->second->fetch_shader;
             }
@@ -2400,20 +2402,31 @@ void PipelineCache::WarmUpThread() {
         // bindings) does not fit this layout: NVIDIA lets it through, AMD fails the pipeline and then crashes in
         // its driver (VUID-VkGraphicsPipelineCreateInfo-layout-07988). Leave such a pipeline to the game.
         if (!entry.gkey.split_sets) {
-            u32 next = 0;
+            // Two counts per stage, as the game numbers the next stage on (Info::AddBindings: one per buffer, image
+            // and sampler; not NumBindings, which reads a T# a stored template does not hold):
+            // - the program's template, from which the layout below is built: a pipeline is only built when the
+            //   stages chain by it;
+            // - the permutation's own specialization: a key that chains by it is a pipeline the game makes (a
+            //   permutation of the program that binds fewer resources than its template), kept in the cache and
+            //   left to the game; one that chains by neither is removed.
+            u32 next = 0, next_own = 0;
+            bool fits = true, own = true;
             for (u32 stage = 0; stage < MaxShaderStages; ++stage) {
                 if (!infos[stage]) {
                     continue;
                 }
-                if (starts[stage] != next) {
-                    ++stale_bindings;
-                    remove_key(i, removed_unchained);
-                    return;
-                }
-                // Count as the game numbers the next stage on (Info::AddBindings): one per buffer, image and
-                // sampler. Not NumBindings: that reads the image's T#, which a stored template does not hold.
+                fits = fits && starts[stage] == next;
+                own = own && starts[stage] == next_own;
                 const auto& info = *infos[stage];
                 next += static_cast<u32>(info.buffers.size() + info.images.size() + info.samplers.size());
+                next_own += counts[stage];
+            }
+            if (!fits) {
+                ++stale_bindings;
+                if (!own) {
+                    remove_key(i, removed_unchained);
+                }
+                return;
             }
         }
         // The game may need (and build) the same pipeline meanwhile: build it only once.

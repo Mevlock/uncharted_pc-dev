@@ -316,11 +316,15 @@ bool Instance::CreateDevice() {
         std::printf("Pipelines: graphics pipeline libraries %s (BB_GPL=1)\n",
                     graphics_pipeline_library ? "on" : "not supported");
     }
-    // bbport: Intel's Windows driver draws nothing with it (HD 630: black screen, issue #56; the
-    // God of War III port saw the same). BB_VERTEX_INPUT_DYNAMIC=1/0 forces it on or off.
+    // bbport: Intel's Windows driver drew nothing with it on older GPUs (HD 630: black screen, issue #56; the
+    // God of War III port saw the same). Intel Arc draws correctly with it (Arc iGPU, driver 101.9175, U3,
+    // 2026-11-06): it stays on there, so the shipped pipeline keys (made without vertex formats) can be prepared;
+    // the first session after the preparation is slow while the driver builds its own vertex code, later ones
+    // run normally. BB_VERTEX_INPUT_DYNAMIC=1/0 forces it on or off.
     const char* vertex_input_env = std::getenv("BB_VERTEX_INPUT_DYNAMIC");
+    const bool intel_arc = GetVendorID() == 0x8086 && GetModelName().find("Arc") != std::string_view::npos;
     const bool vertex_input_wanted =
-        vertex_input_env ? vertex_input_env[0] == '1' : GetVendorID() != 0x8086;
+        vertex_input_env ? vertex_input_env[0] == '1' : (GetVendorID() != 0x8086 || intel_arc);
     vertex_input_dynamic_state =
         vertex_input_wanted && add_extension(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
     list_restart = add_extension(VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME);

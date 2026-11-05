@@ -727,6 +727,10 @@ void FlushPipelineCacheForExit() {
 // bbport: shader/pipeline compile time on the GPU thread, reported by BB_FRAME_STATS.
 std::atomic<u64> g_bb_compile_ns;
 std::atomic<u32> g_bb_compiles;
+/// bbport: the same since the start, never reset (the overlay's FPS counter shows them), and the compiles of the
+/// draw-preparation workers (off the GPU thread).
+std::atomic<u32> g_bb_compiles_total, g_bb_worker_compiles_total;
+std::atomic<u64> g_bb_compile_ns_total;
 /// bbport (BB_FRAME_STATS): where the compile time goes: GCN translation, SPIR-V emission,
 /// shader module creation, compute pipelines and graphics pipelines built on the GPU thread.
 std::atomic<u64> g_bb_translate_ns, g_bb_emit_ns, g_bb_module_ns, g_bb_cs_pipeline_ns,
@@ -771,6 +775,10 @@ struct CompileTimer {
         if (!worker) {
             g_bb_compile_ns += ns;
             ++g_bb_compiles;
+            g_bb_compiles_total.fetch_add(1, std::memory_order_relaxed);
+            g_bb_compile_ns_total.fetch_add(ns, std::memory_order_relaxed);
+        } else {
+            g_bb_worker_compiles_total.fetch_add(1, std::memory_order_relaxed);
         }
         g_last_compile_ms.store(NowMs(), std::memory_order_relaxed);
         static const bool log = std::getenv("BB_COMPILE_LOG") != nullptr;

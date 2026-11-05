@@ -40,6 +40,13 @@ extern "C" void runtime_freeze_guest(int on);
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
+namespace Vulkan {
+// Shader and pipeline compiles since the start (vk_pipeline_cache.cpp): on the GPU thread (the ones a frame waits
+// for) and on the draw-preparation workers.
+extern std::atomic<u32> g_bb_compiles_total, g_bb_worker_compiles_total;
+extern std::atomic<u64> g_bb_compile_ns_total;
+} // namespace Vulkan
+
 // DejaVu Sans (Cyrillic), embedded (third_party/fonts, Bitstream Vera license).
 #ifdef _WIN32
 asm(".section .rdata,\"dr\"\n"
@@ -881,6 +888,41 @@ void FpsCounter() {
                            vram_gib, vram_total_gib);
     } else if (ram_total_gib > 0.0) {
         ImGui::TextColored(second_line, "RAM %.1f/%.0f GB", ram_gib, ram_total_gib);
+    }
+    // "Compiles in play 3 (12 ms)  10 s: 1  bg 40": the shader and pipeline compiles since the shader preparation
+    // finished, the ones the drawing thread did (each can hitch a frame; the 10 s figure counts the recent ones),
+    // and bg those the draw-preparation workers did off it. Orange for 2 s after a new one on the drawing thread.
+    if (PreparationFinished()) {
+        using Clock = std::chrono::steady_clock;
+        static bool based = false;
+        static u32 base_compiles = 0, base_worker = 0, seen = 0;
+        static u64 base_ns = 0;
+        static Clock::time_point last_new{};
+        static std::deque<std::pair<Clock::time_point, u32>> recent; // (time seen, count then)
+        const u32 total = Vulkan::g_bb_compiles_total.load(std::memory_order_relaxed);
+        const u32 worker_total = Vulkan::g_bb_worker_compiles_total.load(std::memory_order_relaxed);
+        const u64 ns_total = Vulkan::g_bb_compile_ns_total.load(std::memory_order_relaxed);
+        if (!based) {
+            based = true;
+            base_compiles = seen = total;
+            base_worker = worker_total;
+            base_ns = ns_total;
+        }
+        const auto now = Clock::now();
+        if (total != seen) {
+            seen = total;
+            last_new = now;
+        }
+        recent.emplace_back(now, total);
+        while (recent.size() > 1 && now - recent.front().first > std::chrono::seconds(10)) {
+            recent.pop_front();
+        }
+        const u32 in_play = total - base_compiles;
+        const u32 last_10s = total - recent.front().second;
+        const bool fresh = in_play && now - last_new < std::chrono::seconds(2);
+        ImGui::TextColored(fresh ? ImVec4(1.0f, 0.6f, 0.2f, 1.0f) : second_line,
+                           "Compiles in play %u (%.0f ms)  10 s: %u  bg %u", in_play,
+                           double(ns_total - base_ns) / 1e6, last_10s, worker_total - base_worker);
     }
     if (s.show_fps_graph && game_frame_count > 1) {
         static float graph[GraphFrames];
