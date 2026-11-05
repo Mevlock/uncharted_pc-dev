@@ -151,7 +151,7 @@ AA_SHARPNESS = [('0', 'Off'), ('0.2', 'Low'), ('0.4', 'Medium'), ('0.7', 'High')
 FRAME_GENERATION = [('off', 'Off'), ('fsr3', 'AMD FSR 3 Frame Generation (any GPU)'),
                     ('dlss', 'NVIDIA DLSS Frame Generation (GeForce RTX 40/50)')]
 BUTTON_PROMPTS = [('auto', 'Automatic (follows the device you used last)'),
-                  ('keyboard', 'Keyboard and mouse keys'), ('xbox', 'Xbox buttons'),
+                  ('keyboard', 'Keyboard and mouse keys'), ('xbox', 'Xbox buttons'), ('nintendo', 'Nintendo buttons (B A Y X)'),
                   ('0', "PlayStation buttons (the game's own)")]
 FRAME_GEN_MULTIPLIERS = [('2', '2× (one generated frame)'), ('3', '3× (DLSS on GeForce RTX 50)'),
                          ('4', '4× (DLSS on GeForce RTX 50)')]
