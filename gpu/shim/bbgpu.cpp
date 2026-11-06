@@ -290,7 +290,22 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             g_window_ready = true;
         }
         g_window_cv.notify_all();
-        while (window->PollEvents()) {
+        // A window thread that stops pumping holds up presenting (the controller off/on hitch, 0.3.6.44: 190-260 ms):
+        // slow passes are logged, with the time, to find what blocks.
+        for (;;) {
+            const auto poll_start = std::chrono::steady_clock::now();
+            const bool open = window->PollEvents();
+            const double poll_ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - poll_start).count();
+            if (poll_ms > 20.0) {
+                static int noted = 0;
+                if (noted++ < 30) {
+                    std::printf("Window: event pump took %.0f ms\n", poll_ms);
+                }
+            }
+            if (!open) {
+                break;
+            }
             SDL_Delay(2);
         }
         std::printf("Window closed (close button, Alt+F4 or system quit request)\n");

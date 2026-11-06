@@ -160,6 +160,151 @@ static void pad_rumble(SDL_Gamepad *g, uint16_t low, uint16_t high, uint32_t ms)
     SDL_RumbleGamepad(g,low,high,ms);
     pad_slow("rumble",start);
 }
+/* ---- the pad thread (BB_PAD_THREAD=0: off) ------------------------------------------------------------------------
+ * Switching a controller off or on makes SDL rescan the input devices for 100-300 ms with its joystick lock held.
+ * Every SDL controller call waits for that lock: the window's event pump (which updated the controllers) and then the
+ * game's pad reads stalled, one hitch per switch (0.3.6.44, measured 190-260 ms). SDL's controller update, opening and
+ * closing the pad, reading it, rumble and the light bar now all run on a thread of their own; the game reads a copy of
+ * the pad taken after each update (at most ~2 ms old), and rumble and the light bar are requests the thread carries
+ * out. A rescan then holds up only this thread: the game keeps the last state it saw. */
+typedef struct {
+    int present, device;           /* device: the button pictures (prompts_pad_device) */
+    unsigned long long buttons;    /* bit = SDL_GamepadButton */
+    int16_t axes[SDL_GAMEPAD_AXIS_COUNT];
+    int touch_count;
+    struct { float x, y; uint8_t id; } touch[2];
+} PadSnap;
+static int pad_thread_on(void) {
+    static int value=-1;
+    if (value<0) { const char *e=getenv("BB_PAD_THREAD"); value=!(e && e[0]=='0'); }
+    return value;
+}
+static int prompts_pad_device(SDL_Gamepad *g);
+static SDL_Gamepad *current_gamepad(void);
+/* The pad's state through SDL (on the pad thread, or on the game's thread with the thread off). */
+static void pad_fill(SDL_Gamepad *g, PadSnap *s) {
+    memset(s,0,sizeof(*s));
+    if (!g) return;
+    s->present=1;
+    for (int b=0;b<SDL_GAMEPAD_BUTTON_COUNT && b<64;++b)
+        if (SDL_GetGamepadButton(g,(SDL_GamepadButton)b)) s->buttons|=1ull<<b;
+    for (int a=0;a<SDL_GAMEPAD_AXIS_COUNT;++a) s->axes[a]=SDL_GetGamepadAxis(g,(SDL_GamepadAxis)a);
+    if (SDL_GetNumGamepadTouchpads(g)>0) {
+        const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);
+        for (int finger=0;finger<fingers && s->touch_count<2;++finger) {
+            bool down=false;
+            float x=0, y=0;
+            if (SDL_GetGamepadTouchpadFinger(g,0,finger,&down,&x,&y,NULL) && down) {
+                s->touch[s->touch_count].x=x; s->touch[s->touch_count].y=y; s->touch[s->touch_count].id=(uint8_t)finger;
+                ++s->touch_count;
+            }
+        }
+    }
+    s->device=prompts_pad_device(g);
+}
+static pthread_mutex_t snap_lock=PTHREAD_MUTEX_INITIALIZER;
+static PadSnap snap_shared;
+static char snap_name[96];          /* the open pad's name (runtime_pad_report) */
+/* Requests for the thread: rumble and the light bar (a sequence number each: the latest wins). */
+static pthread_mutex_t request_lock=PTHREAD_MUTEX_INITIALIZER;
+static unsigned rumble_seq, led_seq;
+static uint16_t rumble_low, rumble_high;
+static uint32_t rumble_ms;
+static uint8_t led_rgb[3];
+static void *pad_thread_main(void *arg) {
+    (void)arg;
+    unsigned rumble_done=0, led_done=0;
+    for (;;) {
+        const uint64_t start=now_us();
+        SDL_UpdateJoysticks();
+        const uint64_t took=now_us()-start;
+        if (took>20000) {
+            static unsigned noted;
+            if (noted++<20) printf("Runtime: controller update took %.0f ms (on the pad thread; the game went on)\n",took/1000.0);
+        }
+        SDL_Gamepad *g=current_gamepad();
+        PadSnap snap;
+        pad_fill(g,&snap);
+        pthread_mutex_lock(&snap_lock);
+        snap_shared=snap;
+        if (g) { const char *name=SDL_GetGamepadName(g); snprintf(snap_name,sizeof(snap_name),"%s",name ? name : "Game controller"); }
+        else snap_name[0]=0;
+        pthread_mutex_unlock(&snap_lock);
+        pthread_mutex_lock(&request_lock);
+        const unsigned rs=rumble_seq, ls=led_seq;
+        const uint16_t low=rumble_low, high=rumble_high;
+        const uint32_t ms=rumble_ms;
+        const uint8_t r=led_rgb[0], gg=led_rgb[1], b=led_rgb[2];
+        pthread_mutex_unlock(&request_lock);
+        if (rs!=rumble_done) { rumble_done=rs; pad_rumble(g,low,high,ms); }
+        if (ls!=led_done && g && now_us()>=pad_writes_after_us) {
+            led_done=ls;
+            const uint64_t led_start=now_us();
+            SDL_SetGamepadLED(g,r,gg,b);
+            pad_slow("light bar",led_start);
+        } else if (ls!=led_done && !g) led_done=ls;
+        SDL_Delay(2);
+    }
+    return NULL;
+}
+/* Started on the first pad read once SDL's gamepad part is up; SDL's own update in the event pump is turned off
+ * (window.cpp sets the same hint before SDL starts). */
+static int pad_thread_started;
+static void pad_thread_start(void) {
+    if (pad_thread_started) return;
+    pad_thread_started=1;
+    SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS,"0");
+    pthread_t thread;
+    if (pthread_create(&thread,NULL,pad_thread_main,NULL)==0) {
+        pthread_detach(thread);
+        printf("Runtime: controllers are updated and read on a thread of their own (BB_PAD_THREAD=0: off)\n");
+    } else {
+        SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS,"1");
+        pad_thread_started=-1;
+        printf("Runtime: the pad thread could not start: controllers are read on the game's thread\n");
+    }
+}
+/* The pad as the game sees it this read. */
+static void pad_snapshot(PadSnap *s) {
+    if (pad_thread_on() && pad_thread_started>=0) {
+        if (!pad_thread_started) {
+            /* (sdl_ready and SDL's event watches are set up by current_gamepad, on the pad thread) */
+            if (!SDL_WasInit(SDL_INIT_GAMEPAD) && !SDL_InitSubSystem(SDL_INIT_GAMEPAD)) { memset(s,0,sizeof(*s)); return; }
+            pad_thread_start();
+        }
+        if (pad_thread_started>0) {
+            pthread_mutex_lock(&snap_lock);
+            *s=snap_shared;
+            pthread_mutex_unlock(&snap_lock);
+            return;
+        }
+    }
+    pad_fill(current_gamepad(),s);
+}
+/* Rumble and the light bar: through the thread, or at once with it off. */
+static void pad_request_rumble(uint16_t low, uint16_t high, uint32_t ms) {
+    if (pad_thread_on() && pad_thread_started>0) {
+        pthread_mutex_lock(&request_lock);
+        rumble_low=low; rumble_high=high; rumble_ms=ms; ++rumble_seq;
+        pthread_mutex_unlock(&request_lock);
+        return;
+    }
+    pad_rumble(current_gamepad(),low,high,ms);
+}
+static void pad_request_led(uint8_t r, uint8_t g, uint8_t b) {
+    if (pad_thread_on() && pad_thread_started>0) {
+        pthread_mutex_lock(&request_lock);
+        led_rgb[0]=r; led_rgb[1]=g; led_rgb[2]=b; ++led_seq;
+        pthread_mutex_unlock(&request_lock);
+        return;
+    }
+    SDL_Gamepad *pad=current_gamepad();
+    if (pad && now_us()>=pad_writes_after_us) {
+        const uint64_t start=now_us();
+        SDL_SetGamepadLED(pad,r,g,b);
+        pad_slow("light bar",start);
+    }
+}
 /* Degrees of camera turn per mouse pixel at sensitivity 1 (0.08 felt "very slow", issue #18; the
  * launcher's slider and box go from 0.1 to 10 times this). */
 #define MOUSE_DEGREES_PER_PIXEL 0.15f
@@ -1424,7 +1569,9 @@ static void sample_host(PadData *d) {
     d->timestamp=runtime_guest_monotonic_us(); /* the game's clock (BB_TIME_SCALE) */
     static int loaded;
     if (!loaded) { load_input(); loaded=1; }
-    SDL_Gamepad *g=current_gamepad();
+    PadSnap pad;
+    pad_snapshot(&pad);
+    int g=pad.present;   /* a controller is there (its state: pad, read on the pad thread) */
     float mdx=0, mdy=0;
     uint32_t mouse=0;
     int wheel=0, captured=bbgpu_mouse_sample(&mdx,&mdy,&mouse,&wheel);
@@ -1448,38 +1595,30 @@ static void sample_host(PadData *d) {
         /* SDL delivers gamepad events in the background too (window.cpp): the game takes them
          * only while its window is in front. */
         const unsigned long long taps=__atomic_exchange_n(&pad_taps,0ull,__ATOMIC_RELAXED);
-        if (g && !bbgpu_window_foreground()) g=NULL;
+        if (g && !bbgpu_window_foreground()) g=0;
         if (g) {
             for (int a=0;a<16;++a) {
                 const int b=input.pad[a];
-                if (b>=0 && (SDL_GetGamepadButton(g,(SDL_GamepadButton)b) || (b<64 && (taps>>b & 1ull))))
+                if (b>=0 && ((b<64 && (pad.buttons>>b & 1ull)) || (b<64 && (taps>>b & 1ull))))
                     d->buttons|=actions[a].ps;
                 else if (b==PAD_TRIGGER_LEFT || b==PAD_TRIGGER_RIGHT) {
-                    const uint8_t v=trigger(SDL_GetGamepadAxis(g,b==PAD_TRIGGER_LEFT ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER
-                                                                                  : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+                    const uint8_t v=trigger(pad.axes[b==PAD_TRIGGER_LEFT ? SDL_GAMEPAD_AXIS_LEFT_TRIGGER
+                                                                         : SDL_GAMEPAD_AXIS_RIGHT_TRIGGER]);
                     if (v>30) d->buttons|=actions[a].ps;
                     if (actions[a].ps==BTN_L2 && v>d->l2) d->l2=v;
                     if (actions[a].ps==BTN_R2 && v>d->r2) d->r2=v;
                 }
             }
-            if (SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_TOUCHPAD) || (taps>>SDL_GAMEPAD_BUTTON_TOUCHPAD & 1ull))
+            if ((pad.buttons>>SDL_GAMEPAD_BUTTON_TOUCHPAD & 1ull) || (taps>>SDL_GAMEPAD_BUTTON_TOUCHPAD & 1ull))
                 d->buttons|=BTN_TOUCHPAD; /* DualSense/DS4 click */
             if ((d->buttons & BTN_L2) && !d->l2) d->l2=255;
             if ((d->buttons & BTN_R2) && !d->r2) d->r2=255;
-            d->left_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTX)); d->left_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_LEFTY));
-            d->right_x=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)); d->right_y=axis(SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY));
+            d->left_x=axis(pad.axes[SDL_GAMEPAD_AXIS_LEFTX]); d->left_y=axis(pad.axes[SDL_GAMEPAD_AXIS_LEFTY]);
+            d->right_x=axis(pad.axes[SDL_GAMEPAD_AXIS_RIGHTX]); d->right_y=axis(pad.axes[SDL_GAMEPAD_AXIS_RIGHTY]);
             if (input.pad_invert_y) d->right_y=(uint8_t)(255-d->right_y);
-            if (SDL_GetNumGamepadTouchpads(g)>0) {
-                const int fingers=SDL_GetNumGamepadTouchpadFingers(g,0);
-                for (int finger=0;finger<fingers && d->touch_count<2;++finger) {
-                    bool down=false;
-                    float x=0, y=0;
-                    if (SDL_GetGamepadTouchpadFinger(g,0,finger,&down,&x,&y,NULL) && down) {
-                        d->touches[d->touch_count++]=(PadTouch){.x=touch_axis(x,1919),
-                            .y=touch_axis(y,942),.id=(uint8_t)finger};
-                    }
-                }
-            }
+            for (int t=0;t<pad.touch_count && d->touch_count<2;++t)
+                d->touches[d->touch_count++]=(PadTouch){.x=touch_axis(pad.touch[t].x,1919),
+                    .y=touch_axis(pad.touch[t].y,942),.id=pad.touch[t].id};
         }
     /* The device used last picks the button prompts: the game's PlayStation buttons or pictures
      * of the bound keys (bbgpu_prompts_controller). A stick counts past half way, the mouse when
@@ -1490,12 +1629,12 @@ static void sample_host(PadData *d) {
     for (int a=0;a<ACTIONS && !keys_used;++a) keys_used=action_down(a,k,mouse,now);
     static int prompts_device=-1;
     if (pad_used!=keys_used) {
-        const int device=pad_used ? prompts_pad_device(g) : 0;
+        const int device=pad_used ? pad.device : 0;
         if (device!=prompts_device) {
             prompts_device=device;
             bbgpu_prompts_controller(device);
             keyboard_in_use=device==0;
-            if (keyboard_in_use && g) pad_rumble(g,0,0,0); /* the pad put down stops shaking */
+            if (keyboard_in_use && g) pad_request_rumble(0,0,0); /* the pad put down stops shaking */
         }
     }
         /* Keyboard and mouse, together with the controller. */
@@ -1830,7 +1969,7 @@ static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {
     info->dead_zone_left=info->dead_zone_right=2;
     info->connection_type=0; info->connected=1; info->device_class=0;
     pthread_mutex_lock(&lock);
-    current_gamepad();
+    if (!(pad_thread_on() && pad_thread_started>0)) current_gamepad();
     info->connected_count=connected_count ? connected_count : 1;
     pthread_mutex_unlock(&lock);
     return 0;
@@ -1839,12 +1978,11 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
-    SDL_Gamepad *g=input.pad_vibration && !keyboard_in_use ? current_gamepad() : NULL;
-    if (g) {
+    if (input.pad_vibration && !keyboard_in_use) {
         const unsigned strength=(unsigned)input.pad_vibration_strength;
         const uint16_t low=(uint16_t)((param[0]*257u*strength+50u)/100u);
         const uint16_t high=(uint16_t)((param[1]*257u*strength+50u)/100u);
-        pad_rumble(g,low,high,1000);
+        pad_request_rumble(low,high,1000);
     }
     pthread_mutex_unlock(&lock);
     return 0;
@@ -1852,12 +1990,7 @@ static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
 /* Light bar {r, g, b}: shown on controllers that have one (DualShock 4, DualSense). */
 static void set_led(uint8_t r, uint8_t g, uint8_t b) {
     pthread_mutex_lock(&lock);
-    SDL_Gamepad *pad=current_gamepad();
-    if (pad && now_us()>=pad_writes_after_us) {
-        const uint64_t start=now_us();
-        SDL_SetGamepadLED(pad,r,g,b);
-        pad_slow("light bar",start);
-    }
+    pad_request_led(r,g,b);
     pthread_mutex_unlock(&lock);
 }
 static ABI int32_t pad_light_bar(int32_t handle, const uint8_t *rgb) {
@@ -1884,7 +2017,17 @@ static const RuntimeExport exports[]={
     {"scePadSetLightBar",pad_light_bar}, {"scePadResetLightBar",pad_reset_light_bar},
 };
 uintptr_t runtime_pad_resolve(const char *name) { return RUNTIME_LOOKUP(exports,name); }
-void runtime_pad_report(void) { printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none"); }
+void runtime_pad_report(void) {
+    if (pad_thread_on() && pad_thread_started>0) {
+        char name[sizeof(snap_name)];
+        pthread_mutex_lock(&snap_lock);
+        snprintf(name,sizeof(name),"%s",snap_name[0] ? snap_name : "none");
+        pthread_mutex_unlock(&snap_lock);
+        printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,name);
+        return;
+    }
+    printf("Runtime: pad reads=%zu, gamepad=%s\n",reads,gamepad ? SDL_GetGamepadName(gamepad) : "none");
+}
 
 /* A loader command used by the launcher before the game starts: no Vulkan or guest memory. */
 int runtime_pad_tool(int test, int strength) {
