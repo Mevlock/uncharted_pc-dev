@@ -106,6 +106,11 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     if (const char* env = std::getenv("BB_PAD_BACKGROUND"); !(env && env[0] == '0')) {
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     }
+    // Controllers are updated on the runtime's pad thread (runtime_pad.c): a rescan when one is switched off or on held
+    // up this window's event pump, and presenting with it (0.3.6.44). BB_PAD_THREAD=0: the pump updates them.
+    if (const char* env = std::getenv("BB_PAD_THREAD"); !(env && env[0] == '0')) {
+        SDL_SetHint(SDL_HINT_AUTO_UPDATE_JOYSTICKS, "0");
+    }
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
     }
