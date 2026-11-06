@@ -20,6 +20,7 @@
 #include "gpu/bbgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <pthread.h>
 #include <time.h>
@@ -1227,6 +1228,103 @@ static const unsigned char u2_focus_reset[]={
     0xcd,0x41,                                    /* trap: int 0x41 */
 };
 _Static_assert(sizeof(u2_focus_reset)==sizeof(u2_focus_assert_code),"same size");
+/* U2 Chapter Select weapons (issue #16, 2026-11-06): the menu's Chapter Select plays the chapter's
+ * task group (PlayTask, mode 1). PlayTask first resets the player's settings to the default set
+ * (459d0e4e: only the .45 Defender, 40 rounds) and then applies the weapon set of the task it played
+ * or its parents; a group has none. The chapter's first checkpoint applies its own set when it
+ * activates only if its tasks.bin flags carry 0x20, and the first checkpoints of chapters 8 and 13
+ * (war-temple-1-inside-temple, valley-start) do not: Nate starts with the Defender, whose model
+ * those levels never load, so it is invisible and silent (the overlay's checkpoint jump plays the
+ * checkpoint itself and gets its Beretta, rifle and grenade). Here, after PlayTask(mode 1) of a task
+ * without data (a group), the first playable task that activates gets its set as flag 0x20 would
+ * give it (when the set has a gun); once. Continue (mode 2), checkpoint restarts and jumps to a
+ * checkpoint do not arm it. Chapters it changes: 6-10, 13, 14, 18, 20, 23, 24, 26.
+ * BB_CHAPTER_WEAPONS=0: off. */
+typedef void (__attribute__((sysv_abi)) *U2ApplySettings)(uint32_t set);
+static _Atomic int u2_chapter_start; /* armed by a group's PlayTask(mode 1) */
+static int u2_chapter_weapons_on(void) {
+    static int on=-1;
+    if (on<0) { const char *e=getenv("BB_CHAPTER_WEAPONS"); on=!(e && e[0]=='0'); }
+    return on;
+}
+static void u2_chapter_play(uint64_t task, uint64_t mode) {
+    if (!u2_chapter_weapons_on() || task<0x10000) return;
+    const int group=*(const uint64_t *)(uintptr_t)(task+0x50)==0;
+    atomic_store(&u2_chapter_start,(uint32_t)mode==1 && group);
+}
+static const unsigned char u2_apply_settings_eu[]={0x55,0x48,0x89,0xe5,0x31,0xf6,0xe8,0x25,0x2c,0xfd,0xff,0x48,0x85,
+                                                   0xc0,0x74,0x12,0x48,0x8d,0x3d,0xf1,0xd9,0xb9,0x00,0xb9};
+static const unsigned char u2_apply_settings_us[]={0x55,0x48,0x89,0xe5,0xe8,0x97,0x4e,0xfb,0xff,0x48,0x85,0xc0,0x74,
+                                                   0x17,0x48,0x8b,0x30,0x48,0x85,0xf6,0x74,0x0f,0x48,0x8d};
+static void u2_chapter_activate(uint64_t task, uint64_t image, uint64_t apply, const unsigned char *code, size_t size) {
+    if (!atomic_load(&u2_chapter_start) || task<0x10000) return;
+    if (memcmp((const void *)(uintptr_t)(image+apply),code,size)) {
+        atomic_store(&u2_chapter_start,0);
+        printf("Chapter weapons: the settings function is not where expected; nothing applied\n");
+        return;
+    }
+    const unsigned char *t=(const unsigned char *)(uintptr_t)task;
+    const unsigned char *data=*(const unsigned char *const *)(t+0x50);
+    if (!data || !(*(const uint32_t *)(data+0xd0)&6)) return; /* not playable (a group): wait */
+    atomic_store(&u2_chapter_start,0);
+    const uint32_t flags=*(const uint32_t *)(t+0x48), set=*(const uint32_t *)(data+0xc8);
+    if (flags&0x20 || !set) return; /* the game applies it itself */
+    /* Only a set with a gun: some first checkpoints name the empty set (65759d0e, the unarmed openings'),
+     * where the Defender is better than nothing (chapter 12, war-escape-watertower-fight). The set: five
+     * slots {name, weapon id +8, ammo +0x10} of 0x18 bytes; guns in the first three, f114b39d = none.
+     * The lookup is the one the settings function calls (EU: (id, 0) -> set; 1.02: (id) -> &set). */
+    const unsigned char *found=NULL;
+    if (apply==0x43b7e0) {
+        found=((const unsigned char *(__attribute__((sysv_abi)) *)(uint32_t, int))(uintptr_t)(image+0x40e410))(set,0);
+    } else {
+        const unsigned char *const *p=
+            ((const unsigned char *const *(__attribute__((sysv_abi)) *)(uint32_t))(uintptr_t)(image+0xa15300))(set);
+        found=p ? *p : NULL;
+    }
+    int gun=0;
+    for (int i=0;found && i<3;++i) {
+        const uint32_t weapon=*(const uint32_t *)(found+8+0x18*i);
+        if (weapon && weapon!=0xf114b39du) gun=1;
+    }
+    if (!gun) {
+        printf("Chapter weapons: Chapter Select start at task %08x: its set %08x has no gun; the game's "
+               "default kept\n",*(const uint32_t *)(t+8),set);
+        return;
+    }
+    printf("Chapter weapons: Chapter Select start at task %08x: its weapon set %08x applied (the game "
+           "leaves the default .45 Defender there)\n",*(const uint32_t *)(t+8),set);
+    fflush(stdout);
+    ((U2ApplySettings)(uintptr_t)(image+apply))(set);
+}
+static void __attribute__((ms_abi)) u2_chapter_play_hook(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                       const uint64_t *regs) {
+    (void)image; (void)r14; (void)regs;
+    u2_chapter_play(rdi,rsi);
+}
+static void __attribute__((ms_abi)) u2_chapter_activate_eu(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                           const uint64_t *regs) {
+    (void)rsi; (void)r14; (void)regs;
+    u2_chapter_activate(rdi,image,0x43b7e0,u2_apply_settings_eu,sizeof(u2_apply_settings_eu));
+}
+static void __attribute__((ms_abi)) u2_chapter_activate_us(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                           const uint64_t *regs) {
+    (void)rsi; (void)r14; (void)regs;
+    u2_chapter_activate(rdi,image,0xa60460,u2_apply_settings_us,sizeof(u2_apply_settings_us));
+}
+/* PlayTask and TaskActivate: their first 40 bytes in each release (the settings function is checked
+ * before it is called). */
+static const unsigned char u2_play_task_eu[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,
+    0x81,0xe4,0xe0,0xff,0xff,0xff,0x48,0x81,0xec,0x60,0x01,0x00,0x00,0x89,0xf3,0x49,0x89,0xfd,0x4c,0x8b,0x3d,0x11,
+    0xc0,0xa2,0x00,0x49};
+static const unsigned char u2_play_task_us[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,
+    0x81,0xe4,0xe0,0xff,0xff,0xff,0x48,0x81,0xec,0x80,0x01,0x00,0x00,0x41,0x89,0xf6,0x48,0x89,0xfb,0x4c,0x8b,0x3d,
+    0x18,0x2e,0x5f,0x00};
+static const unsigned char u2_task_activate_eu[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
+    0x48,0x81,0xe4,0xe0,0xff,0xff,0xff,0x48,0x81,0xec,0xa0,0x02,0x00,0x00,0x49,0x89,0xfd,0x48,0x8b,0x05,0x73,0x81,
+    0xa2,0x00,0x48,0x8b,0x00};
+static const unsigned char u2_task_activate_us[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
+    0x48,0x81,0xe4,0xe0,0xff,0xff,0xff,0x48,0x81,0xec,0xa0,0x02,0x00,0x00,0x48,0x89,0xfb,0x48,0x8b,0x05,0xbb,0xe8,
+    0x5e,0x00,0x48,0x8b,0x00};
 /* U2 "pAction != NULL" (moveactioncontroller.cpp:40): the player's move actions come from a pool
  * of 64 slots of 0x300 bytes (the object at character+0x2e8, pool at +0xf0). Two move states
  * swapping every frame (landing into a fight) keep one action each swap; at 144 fps bursts took
@@ -1518,6 +1616,14 @@ static const RuntimeGuestCallback guest_callbacks[]={
      sizeof(u2_focus_reset_us),NULL,u2_focus_reset_us},
     {"U2 leg IK NaN delta (US)",0x4713b9,u2_leg_ik_assert_code_us,sizeof(u2_leg_ik_assert_code_us),
      sizeof(u2_leg_ik_zero_us),NULL,u2_leg_ik_zero_us},
+    {"U2 Chapter Select weapons: PlayTask (EU)",0x4354f0,u2_play_task_eu,sizeof(u2_play_task_eu),6,
+     u2_chapter_play_hook,NULL},
+    {"U2 Chapter Select weapons: TaskActivate (EU)",0x439390,u2_task_activate_eu,sizeof(u2_task_activate_eu),6,
+     u2_chapter_activate_eu,NULL},
+    {"U2 Chapter Select weapons: PlayTask (1.02)",0xa57dc0,u2_play_task_us,sizeof(u2_play_task_us),6,
+     u2_chapter_play_hook,NULL},
+    {"U2 Chapter Select weapons: TaskActivate (1.02)",0xa5c320,u2_task_activate_us,sizeof(u2_task_activate_us),6,
+     u2_chapter_activate_us,NULL},
     {"U2 move action pool 256 slots",0x33872c,u2_move_pool_code,sizeof(u2_move_pool_code),
      sizeof(u2_move_pool_256),NULL,u2_move_pool_256},
     {"U1 move action pool 256 slots",0x2668fe,u1_move_pool_code,sizeof(u1_move_pool_code),
