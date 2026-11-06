@@ -2663,25 +2663,31 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
     slot.pending = true;
     fade_next = (fade_next + 1) % fade_slots.size();
 
+    // The games fade in slowly (U2 ice cave: 0.03 -> 0.22 over ~1.8 s, +0.1% a frame at 140 fps), so
+    // the rise is measured against the reading ~32 frames earlier (3% and a small floor). Readings
+    // are kept on every frame; a (near) black picture also opens the window: a checkpoint restart
+    // fades out and in without any camera cut (Drake restarts where he stood).
+    bool brightening = false;
+    const bool have_reading = brightness >= 0.0f;
+    if (have_reading) {
+        const bool have_earlier = fade_history_count >= fade_history.size();
+        const float oldest = have_earlier ? fade_history[fade_history_count % fade_history.size()]
+                                          : fade_history[0];
+        brightening = fade_history_count > 0 && brightness > oldest * 1.03f + 0.002f;
+        fade_history[fade_history_count % fade_history.size()] = brightness;
+        ++fade_history_count;
+        if (brightness < 0.03f) {
+            fade_window_until = now + std::chrono::seconds(5);
+            fade_steady = 0;
+        }
+        fade_previous = brightness;
+    }
     if (now >= fade_window_until || reset) {
         return false;
     }
-    // In the window: reset while dark or brightening, then until 8 steady frames. The games fade in
-    // slowly (U2 ice cave: 0.03 -> 0.22 over ~1.8 s, +0.1% a frame at 140 fps), so the rise is
-    // measured against the reading ~32 frames earlier (3% and a small floor).
-    bool fading = brightness < 0.0f; // no reading yet: still at the start
-    if (brightness >= 0.0f) {
-        const bool dark = brightness < 0.03f;
-        const float earlier = fade_history[fade_history_count % fade_history.size()];
-        const bool have_earlier = fade_history_count >= fade_history.size();
-        const float oldest = have_earlier ? earlier : fade_history[0];
-        const bool brightening =
-            fade_history_count > 0 && brightness > oldest * 1.03f + 0.002f;
-        fade_history[fade_history_count % fade_history.size()] = brightness;
-        ++fade_history_count;
-        fading = dark || brightening;
-        fade_previous = brightness;
-    }
+    // In the window: reset while the picture gets brighter (darkness alone does not: a dark scene
+    // keeps its history), then until 8 steady frames. No reading yet: the start of the window.
+    const bool fading = !have_reading ? fade_steady == 0 : brightening;
     fade_steady = fading ? 0 : fade_steady + 1;
     const bool resetting = fade_steady < 8;
     static int noted = 0;
