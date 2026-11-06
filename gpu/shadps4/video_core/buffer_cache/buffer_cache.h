@@ -409,6 +409,9 @@ private:
         u64 seq;
     };
     std::vector<UnmappedRange> unmapped_while_landing;
+    /// The landing writing guest memory past its unmapped check (landing_mutex): ForgetUnmapped
+    /// waits for it on landing_done_cv when the range holds one of its targets.
+    const Landing* landing_merging{nullptr};
     std::atomic<u64> landing_registered{0}, landing_done{0};
     bool landing_stop{false}, gate_running{false};
     std::atomic<u32> gate_outstanding{0}; ///< labels queued or running on the landing thread

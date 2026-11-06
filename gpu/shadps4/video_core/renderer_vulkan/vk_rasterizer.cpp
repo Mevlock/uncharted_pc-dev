@@ -5181,6 +5181,12 @@ void Rasterizer::DispatchDirect() {
         if ((a_wait || HleWaitAt()) && IsGuestMemoryShaderHLE(copy_hash) && (!wait_hash || copy_hash == wait_hash)) {
             const u64 end = draw_pipe->Head();
             hle_copy_end.store(end, std::memory_order_release);
+            if (hle_copy_count < HleCopySlots) {
+                hle_copies[(hle_copy_first + hle_copy_count++) % HleCopySlots] = {end, hle_draws};
+            } else {
+                // Full: the newest entry takes this copy too (keeps its earlier draw: waits sooner, never later).
+                hle_copies[(hle_copy_first + HleCopySlots - 1) % HleCopySlots].end = end;
+            }
             while (a_wait && !draw_pipe->Reached(end)) {
                 _mm_pause();
             }
@@ -5219,16 +5225,25 @@ void Rasterizer::WaitHleCopies(u32 where) {
     if (!(HleWaitAt() & where) || DrawPipe::OnStageB()) {
         return;
     }
-    const u64 end = hle_copy_end.load(std::memory_order_acquire);
-    if (!end || draw_pipe->Reached(end)) {
-        return;
-    }
     // The first N draws after a copy go on without waiting (BB_HLE_WAIT_SKIP=N overrides CopyLeadDraws, diagnosis).
     static const u32 skip = [] {
         const char* env = std::getenv("BB_HLE_WAIT_SKIP");
         return env ? u32(std::strtoul(env, nullptr, 10)) : CopyLeadDraws();
     }();
-    if (skip && where == 1) {
+    u64 end = 0;
+    // BB_COPY_LEAD_OLDEST=1: the bound counts from the oldest copy not run yet (code review A3: a copy every few
+    // draws restarts the count, so the lead is not bounded). It made stage A wait about as early as waiting at the
+    // first draw, ~5% lower dips in U3's market (0.3.6.44 A/B), so the default stays the count from the latest copy,
+    // which kept the U2 train free of flashes in play.
+    static const bool oldest = [] {
+        const char* env = std::getenv("BB_COPY_LEAD_OLDEST");
+        return env && env[0] == '1';
+    }();
+    if (skip && where == 1 && !oldest) {
+        end = hle_copy_end.load(std::memory_order_acquire);
+        if (!end || draw_pipe->Reached(end)) {
+            return;
+        }
         static thread_local u64 last_end = 0;
         static thread_local u32 passed = 0;
         if (end != last_end) {
@@ -5237,6 +5252,22 @@ void Rasterizer::WaitHleCopies(u32 where) {
         }
         if (passed < skip) {
             ++passed;
+            return;
+        }
+    } else if (skip && where == 1) {
+        // Counted from the oldest copy not run yet, not the latest: a copy every few draws must not restart it.
+        ++hle_draws;
+        while (hle_copy_count && draw_pipe->Reached(hle_copies[hle_copy_first].end)) {
+            hle_copy_first = (hle_copy_first + 1) % HleCopySlots;
+            --hle_copy_count;
+        }
+        if (!hle_copy_count || hle_draws - hle_copies[hle_copy_first].draw <= skip) {
+            return;
+        }
+        end = hle_copies[hle_copy_first].end;
+    } else {
+        end = hle_copy_end.load(std::memory_order_acquire);
+        if (!end || draw_pipe->Reached(end)) {
             return;
         }
     }
@@ -7168,8 +7199,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         // DynamicIndex mip array). A sampled count-1 null was invalid Vulkan there and shifted
         // every later binding of the stage (from BilalReloaded's port 0.8.0;
         // BB_TYPED_NULL_IMAGES=0: as before).
+        // Levels reversed (base above last; a zeroed address with stale level fields): 1, not the
+        // ~4e9 the unsigned difference gives (that looped until out of memory; code review A5). The
+        // layout of a null slot is not kept per pipeline, so a null T# whose levels differ from the
+        // one the pipeline was built with still writes its own count (as NumBindings did there).
         const u32 layout_count =
-            image_desc.mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex
+            image_desc.mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex &&
+                    tsharp.last_level >= tsharp.base_level
                 ? static_cast<u32>(tsharp.last_level - tsharp.base_level + 1)
                 : 1u;
         const auto bind_null = [&] {

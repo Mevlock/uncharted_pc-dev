@@ -1631,15 +1631,44 @@ bool BufferCache::WaitLandingTick(u64 tick) {
     return false;
 }
 
+// BB_LANDING_UNMAP_WAIT=0: an unmap does not wait for a landing that is writing into its range (code review A2),
+// and landings do not mark themselves (one lock and wake-up each); for A/B.
+static bool LandingUnmapWait() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_LANDING_UNMAP_WAIT");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
 void BufferCache::ForgetUnmapped(VAddr device_addr, u64 size) {
-    DrainSharedLandings();
     {
-        std::scoped_lock lk{landing_mutex};
+        std::unique_lock lk{landing_mutex};
         if (landing_registered_seq > landing_done_seq) {
             unmapped_while_landing.push_back(
                 {device_addr, device_addr + size, landing_registered_seq});
         }
+        // A landing past its unmapped check writes its targets without looking again: the
+        // range leaves only after it (CPU work, no GPU wait; code review A2).
+        const auto merging_here = [&] {
+            if (!landing_merging) {
+                return false;
+            }
+            for (size_t i = 0; i < landing_merging->targets.size(); ++i) {
+                const VAddr target = landing_merging->targets[i];
+                if (target < device_addr + size &&
+                    device_addr < target + landing_merging->copies[i].size) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        if (LandingUnmapWait()) {
+            landing_done_cv.wait(lk, [&] { return !merging_here(); });
+        }
     }
+    // After the wait: a landing that merged meanwhile reported its ranges, dropped here.
+    DrainSharedLandings();
     gpu_modified_ranges.Subtract(device_addr, size);
     shared_gpu_ranges.Subtract(device_addr, size);
     for (auto it = shared_before.lower_bound(device_addr);
@@ -1717,6 +1746,8 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
     Vulkan::Check(side.device.resetFences(*slot->fence));
     slot->staging.Invalidate(0, total);
     // Targets the guest unmapped after this landing was registered get nothing (ForgetUnmapped).
+    // From this snapshot on, an unmap of a target waits until the writes below are done
+    // (landing_merging): a VA mapped again meanwhile must not get this landing's old bytes.
     std::vector<std::pair<VAddr, VAddr>> gone;
     {
         std::scoped_lock lk{landing_mutex};
@@ -1725,48 +1756,84 @@ bool BufferCache::ExecuteLanding(Landing& landing) {
                 gone.emplace_back(range.lo, range.hi);
             }
         }
+        if (LandingUnmapWait()) {
+            landing_merging = &landing;
+        }
     }
-    const auto unmapped = [&gone](VAddr target, u64 size) {
-        return std::ranges::any_of(gone, [&](const auto& range) {
-            return target < range.second && range.first < target + size;
-        });
+    // Calls `land(target, offset into the copy, size)` for the pieces of copy i still mapped.
+    const auto for_each_mapped = [&gone, &landing](size_t i, auto&& land) {
+        const VAddr target = landing.targets[i];
+        const VAddr target_end = target + landing.copies[i].size;
+        const auto hits = [&](const auto& range) {
+            return target < range.second && range.first < target_end;
+        };
+        if (!std::ranges::any_of(gone, hits)) {
+            land(target, u64{0}, target_end - target);
+            return;
+        }
+        // Rare (an unmap during the landing): the pieces between the unmapped ranges.
+        std::vector<std::pair<VAddr, VAddr>> cut;
+        for (const auto& range : gone) {
+            if (hits(range)) {
+                cut.emplace_back(std::max(range.first, target), std::min(range.second, target_end));
+            }
+        }
+        std::ranges::sort(cut);
+        VAddr at = target;
+        for (const auto& [lo, hi] : cut) {
+            if (lo > at) {
+                land(at, at - target, lo - at);
+            }
+            at = std::max(at, hi);
+        }
+        if (at < target_end) {
+            land(at, at - target, target_end - at);
+        }
     };
     if (landing.shared) {
         // Only the bytes the guest has not rewritten since the page was handed over.
         SharedLanded done{.tick = landing.tick};
         std::vector<u8> now;
         for (size_t i = 0; i < landing.copies.size(); ++i) {
-            const u64 size = landing.copies[i].size;
-            const VAddr target = landing.targets[i];
-            if (unmapped(target, size)) {
-                done.ranges.push_back({target, target + size, false});
-                continue;
-            }
-            const u8* gpu = slot->staging.mapped_data.data() + landing.copies[i].dstOffset;
-            const u8* before = landing.before.data() + landing.copies[i].dstOffset;
-            now.resize(size);
-            memory->CopySparseMemory(target, now.data(), size);
-            const bool guest_kept = std::memcmp(now.data(), before, size) != 0;
-            // The guest keeps writing these pages: each word is replaced only if it still holds
-            // the handover's value (compared and written at once).
-            ForEachSharedBlockRun(target, now.data(), before, size, false, [&](u64 at, u64 bytes) {
-                memory->TryMergeBacking(reinterpret_cast<void*>(target + at), before + at, gpu + at,
-                                        bytes);
+            // Unmapped pieces report nothing: ForgetUnmapped dropped their state already, and a
+            // landing registered there after a new map must keep its own (code review A1).
+            for_each_mapped(i, [&](VAddr target, u64 offset, u64 size) {
+                const u8* gpu =
+                    slot->staging.mapped_data.data() + landing.copies[i].dstOffset + offset;
+                const u8* before = landing.before.data() + landing.copies[i].dstOffset + offset;
+                now.resize(size);
+                memory->CopySparseMemory(target, now.data(), size);
+                const bool guest_kept = std::memcmp(now.data(), before, size) != 0;
+                // The guest keeps writing these pages: each word is replaced only if it still
+                // holds the handover's value (compared and written at once).
+                ForEachSharedBlockRun(target, now.data(), before, size, false,
+                                      [&](u64 at, u64 bytes) {
+                                          memory->TryMergeBacking(
+                                              reinterpret_cast<void*>(target + at), before + at,
+                                              gpu + at, bytes);
+                                      });
+                done.ranges.push_back({target, target + size, guest_kept});
             });
-            done.ranges.push_back({target, target + size, guest_kept});
         }
         std::scoped_lock lk{shared_landed_mutex};
         shared_landed.push_back(std::move(done));
         shared_landed_pending.store(true, std::memory_order_release);
     } else {
         for (size_t i = 0; i < landing.copies.size(); ++i) {
-            if (unmapped(landing.targets[i], landing.copies[i].size)) {
-                continue;
-            }
-            memory->TryWriteBacking(reinterpret_cast<void*>(landing.targets[i]),
-                                    slot->staging.mapped_data.data() + landing.copies[i].dstOffset,
-                                    landing.copies[i].size);
+            for_each_mapped(i, [&](VAddr target, u64 offset, u64 size) {
+                memory->TryWriteBacking(reinterpret_cast<void*>(target),
+                                        slot->staging.mapped_data.data() +
+                                            landing.copies[i].dstOffset + offset,
+                                        size);
+            });
         }
+    }
+    if (LandingUnmapWait()) {
+        {
+            std::scoped_lock lk{landing_mutex};
+            landing_merging = nullptr;
+        }
+        landing_done_cv.notify_all();
     }
     side.Release(slot);
     return true;
