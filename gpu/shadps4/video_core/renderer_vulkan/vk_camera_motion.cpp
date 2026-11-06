@@ -400,6 +400,44 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                     }
                 }
             }
+            // bbport diagnosis (BB_VELOCITY_LOG=1): for 600 frames after a cut (and at the start),
+            // the camera's real change since the last frame against the motion the velocity pass's
+            // reprojection predicts at the screen centre (view z 5 and 100, in 1/1000 of the width).
+            static const bool velocity_log = std::getenv("BB_VELOCITY_LOG") != nullptr;
+            static int log_frames = 600;
+            if (camera.cut) {
+                log_frames = 600;
+            }
+            if (velocity_log && log_frames > 0 && has_last_camera) {
+                --log_frames;
+                const float dot = std::clamp((forward[0] * last_forward[0] + forward[1] * last_forward[1] +
+                                              forward[2] * last_forward[2]) / length, -1.0f, 1.0f);
+                const float dx = position[0] - last_position[0], dy = position[1] - last_position[1],
+                            dz = position[2] - last_position[2];
+                const auto predict = [&](float z, float u, float v, float* mu, float* mv) {
+                    const float vp[4] = {z * (camera.uv_to_view[0] * u + camera.uv_to_view[2]),
+                                         z * (camera.uv_to_view[1] * v + camera.uv_to_view[3]), z, 1.0f};
+                    float clip[3];
+                    for (int r = 0; r < 3; ++r) {
+                        clip[r] = 0.0f;
+                        for (int k = 0; k < 4; ++k) {
+                            clip[r] += camera.to_previous_clip[r * 4 + k] * vp[k];
+                        }
+                    }
+                    *mu = (0.5f * clip[0] / clip[2] + 0.5f - u) * 1000.0f;
+                    *mv = (0.5f - 0.5f * clip[1] / clip[2] - v) * 1000.0f;
+                };
+                float u5, v5, u100, v100, ue, ve;
+                predict(5.0f, 0.5f, 0.5f, &u5, &v5);
+                predict(100.0f, 0.5f, 0.5f, &u100, &v100);
+                predict(5.0f, 0.9f, 0.5f, &ue, &ve);
+                std::printf("Velocity: t=%.4f turned %.4f deg moved %.4f | predicted centre z5 %.3f,%.3f "
+                            "z100 %.3f,%.3f edge z5 %.3f,%.3f%s\n",
+                            std::chrono::duration<double>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count(),
+                            std::acos(dot) * 57.29578f, std::sqrt(dx * dx + dy * dy + dz * dz), u5, v5,
+                            u100, v100, ue, ve, camera.cut ? " CUT" : "");
+            }
             last_forward = {forward[0] / length, forward[1] / length, forward[2] / length};
             last_position = position;
             has_last_camera = true;
@@ -431,6 +469,25 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     }
 }
 
+/// bbport: BB_MOTION_DEADZONE=<pixels> (default 0.01; 0: off): velocity-pass motion below it is
+/// none (float rounding left +-0.0002 px alternating per column: DLSS drew stripes from it).
+static float motion_deadzone() {
+    static const float value = [] {
+        const char* env = std::getenv("BB_MOTION_DEADZONE");
+        return env && env[0] ? static_cast<float>(std::atof(env)) : 0.01f;
+    }();
+    return value;
+}
+
+
+static bool zero_motion_test() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_DLSS_ZERO_MOTION");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
 void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
                                   vk::ImageView motion_view, u32 width, u32 height,
                                   float jitter_scale) {
@@ -438,11 +495,12 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
     const PushConstants push{
         .reproject = camera.to_previous_clip,
         .proj = camera.uv_to_view,
-        .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], 0.0f, 0.0f},
+        .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], motion_deadzone(), 0.0f},
         .size = {float(width), float(height)},
         .jitter = {jitter[0] * jitter_scale, jitter[1] * jitter_scale},
         .previous_jitter = {previous_jitter[0] * jitter_scale, previous_jitter[1] * jitter_scale},
-        .mode = camera.valid && !camera.cut ? 2u : 3u,
+        // BB_DLSS_ZERO_MOTION=1 (diagnosis): no camera motion vectors at all.
+        .mode = (zero_motion_test() || !camera.valid || camera.cut) ? 3u : 2u,
     };
     const vk::DescriptorImageInfo depth_info{.imageView = depth_view,
                                              .imageLayout = vk::ImageLayout::eGeneral};

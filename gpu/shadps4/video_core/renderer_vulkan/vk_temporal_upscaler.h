@@ -206,6 +206,8 @@ private:
     /// bbport: DLSS selected and the bridge is ready (NVIDIA RTX, bbport_dlss.dll).
     [[nodiscard]] bool UseDlss() const;
     /// Records DLSS into `cmdbuf` (output in General). `hdr`: linear scene color input.
+    /// bbport: true while DLSS's history should be reset for a fade in (see the .cpp).
+    bool FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource& color, bool reset);
     bool RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
                     const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh, float frame_ms,
                     bool hdr);

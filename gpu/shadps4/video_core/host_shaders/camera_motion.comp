@@ -99,6 +99,13 @@ void main() {
         if (any(isnan(result)) || any(isinf(result))) {
             result = vec2(0.0);
         }
+        // bbport: previous_uv - scene_uv cancels near 0.5: float rounding left +-0.0002 px that
+        // alternated column by column with the camera still. DLSS (transformer) drew that field as
+        // fine vertical stripes for seconds after a load (U2 ice cave, 2026-11-06). Motion below
+        // the dead zone (prev_proj.z in this mode; 0.01 px by default) is none.
+        if (all(lessThan(abs(result), vec2(prev_proj.z)))) {
+            result = vec2(0.0);
+        }
     } else if (mode == 3) {
         result = vec2(0.0); // no camera this frame
     } else if (mode == 1) {

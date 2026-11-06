@@ -22,6 +22,7 @@
 #include "bbport_threads.h"
 #include "common/thread.h"
 #include "bbport_toggles.h"
+#include <atomic>
 #include <chrono>
 #include "ffx_vk_portable.h"
 #include "video_core/host_shaders/upscale_merge_comp.h"
@@ -39,6 +40,8 @@
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace Vulkan {
+extern std::atomic<long long> g_fade_cut_ns; // below (FadeReset)
+static int g_frames_since_cut = 100000; // bbport: frames since the last camera cut (dumps)
 void BbDrawLogNote(const char* text); // vk_rasterizer.cpp
 extern std::atomic<u64> g_flips;       // vk_rasterizer.cpp: flips so far
 
@@ -2009,7 +2012,21 @@ bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::I
                     vk::PipelineStageFlagBits2::eColorAttachmentOutput, color_access);
             reset = false;
             dispatched_last_frame = true;
-            if (const int dump = DumpFrame(); dump >= 0) {
+            // bbport diagnosis (BB_DUMP_AFTER_CUT=1 with BB_DUMP_DIR): the upscaler's images 30, 90,
+            // 180 and 600 frames after each camera cut, named by that frame count (+1000 per cut).
+            int dump = DumpFrame();
+            {
+                static const bool after_cut = std::getenv("BB_DUMP_AFTER_CUT") != nullptr;
+                static int cuts = 0;
+                if (g_frames_since_cut == 0) {
+                    ++cuts;
+                }
+                const int f = g_frames_since_cut++;
+                if (after_cut && dump < 0 && (f == 30 || f == 90 || f == 180 || f == 300 || f == 450 || f == 600 || f == 900 || f == 1500)) {
+                    dump = cuts * 1000 + f;
+                }
+            }
+            if (dump >= 0) {
                 DumpImages(instance, scheduler, cmdbuf, dump,
                            {{color_image, source_width, source_height, 4, "input", "rgba"},
                             {vk::Image(motion_image), w, h, 4, "motion", "rg16f"},
@@ -2214,6 +2231,8 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
     }
     if (camera_motion.ConsumeCut()) {
         reset = true; // a camera cut: the history is of the other shot
+        g_frames_since_cut = 0;
+        g_fade_cut_ns.store(1, std::memory_order_relaxed); // a new fade-in window (FadeReset)
     }
     const auto frame_jitter = jitter;
     jitter = velocity_jitter; // the frame's own jitter (OnFrameStart already chose the next)
@@ -2505,10 +2524,174 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
     return ok;
 }
 
+
 bool TemporalUpscaler::UseDlss() const {
     const Dlss* dlss = Dlss::Get();
     return BbSettings::Get().upscaler == BbSettings::UpscalerDlss && dlss && dlss->Available() &&
            !dlss_failed;
+}
+
+// bbport: fade-in detection for DLSS (see RecordDlss). File-level state: one upscaler at a time.
+namespace {
+struct FadeSlot {
+    VkBuffer buffer{};
+    VmaAllocation allocation{};
+    void* mapped{};
+    u64 tick{};
+    u32 bytes_per_pixel{};
+    bool pending{};
+};
+std::array<FadeSlot, 4> fade_slots{};
+u32 fade_next = 0;
+std::chrono::steady_clock::time_point fade_window_until{}, fade_last_call{};
+float fade_previous = -1.0f;
+int fade_steady = 0;
+std::array<float, 32> fade_history{}; // brightness readings of the window, a ring
+size_t fade_history_count = 0;
+constexpr u32 FadeSamples = 64;
+} // namespace
+std::atomic<long long> g_fade_cut_ns{0}; // set at a camera cut (ConsumeCut)
+
+bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource& color, bool reset) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_DLSS_FADE_RESET");
+        return !(env && env[0] == '0');
+    }();
+    if (!enabled) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    // A new window: the first frame, a return after 0.3 s without the scene, or a camera cut.
+    const bool first = fade_last_call.time_since_epoch().count() == 0;
+    const long long cut_ns = g_fade_cut_ns.exchange(0, std::memory_order_relaxed);
+    if (first || now - fade_last_call > std::chrono::milliseconds(300) || cut_ns != 0) {
+        fade_window_until = now + std::chrono::seconds(5);
+        fade_steady = 0;
+        fade_previous = -1.0f;
+        fade_history_count = 0;
+    }
+    fade_last_call = now;
+    u32 bpp = 0;
+    switch (color.format) {
+    case vk::Format::eR8G8B8A8Unorm:
+    case vk::Format::eR8G8B8A8Srgb:
+    case vk::Format::eB8G8R8A8Unorm:
+    case vk::Format::eB8G8R8A8Srgb:
+        bpp = 4;
+        break;
+    case vk::Format::eR16G16B16A16Sfloat:
+        bpp = 8;
+        break;
+    default:
+        return false;
+    }
+    // The brightness of a frame copied a few frames ago (finished on the GPU by now).
+    FadeSlot& slot = fade_slots[fade_next];
+    float brightness = -1.0f;
+    if (slot.pending && scheduler.IsFree(slot.tick)) {
+        vmaInvalidateAllocation(instance.GetAllocator(), slot.allocation, 0, VK_WHOLE_SIZE);
+        float sum = 0.0f;
+        for (u32 i = 0; i < FadeSamples; ++i) {
+            if (slot.bytes_per_pixel == 4) {
+                const u8* p = static_cast<const u8*>(slot.mapped) + i * 4;
+                sum += (p[0] + p[1] + p[2]) / (3.0f * 255.0f);
+            } else {
+                const u16* p = reinterpret_cast<const u16*>(static_cast<const u8*>(slot.mapped) + i * 8);
+                for (int c = 0; c < 3; ++c) {
+                    const u16 h = p[c];
+                    const u32 e = (h >> 10) & 0x1f, m = h & 0x3ff;
+                    const float v = e == 0 ? m / 1024.0f / 16384.0f
+                                           : (1.0f + m / 1024.0f) * std::ldexp(1.0f, int(e) - 15);
+                    sum += std::min(v, 4.0f) / 3.0f;
+                }
+            }
+        }
+        brightness = sum / FadeSamples;
+        slot.pending = false;
+    }
+    if (!slot.buffer || slot.bytes_per_pixel != bpp) {
+        if (slot.buffer) {
+            vmaDestroyBuffer(instance.GetAllocator(), slot.buffer, slot.allocation);
+            slot = {};
+        }
+        const VkBufferCreateInfo buffer_ci{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = VkDeviceSize(FadeSamples) * 8,
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        };
+        const VmaAllocationCreateInfo alloc_ci{
+            .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+            .usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+        };
+        VmaAllocationInfo info{};
+        if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &slot.buffer,
+                            &slot.allocation, &info) != VK_SUCCESS) {
+            slot = {};
+            return false;
+        }
+        slot.mapped = info.pMappedData;
+        slot.bytes_per_pixel = bpp;
+    }
+    // 64 pixels on an 8x8 grid over the middle 80% of the picture.
+    std::array<vk::BufferImageCopy, FadeSamples> regions{};
+    for (u32 i = 0; i < FadeSamples; ++i) {
+        const u32 gx = i % 8, gy = i / 8;
+        regions[i] = vk::BufferImageCopy{
+            .bufferOffset = VkDeviceSize(i) * bpp,
+            .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+            .imageOffset = {s32(color.width * (0.1f + 0.8f * (gx + 0.5f) / 8.0f)),
+                            s32(color.height * (0.1f + 0.8f * (gy + 0.5f) / 8.0f)), 0},
+            .imageExtent = {1, 1, 1},
+        };
+    }
+    const vk::MemoryBarrier2 before{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &before});
+    cmdbuf.copyImageToBuffer(color.image, vk::ImageLayout::eGeneral, slot.buffer, regions);
+    const vk::MemoryBarrier2 after{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &after});
+    slot.tick = scheduler.CurrentTick();
+    slot.pending = true;
+    fade_next = (fade_next + 1) % fade_slots.size();
+
+    if (now >= fade_window_until || reset) {
+        return false;
+    }
+    // In the window: reset while dark or brightening, then until 8 steady frames. The games fade in
+    // slowly (U2 ice cave: 0.03 -> 0.22 over ~1.8 s, +0.1% a frame at 140 fps), so the rise is
+    // measured against the reading ~32 frames earlier (3% and a small floor).
+    bool fading = brightness < 0.0f; // no reading yet: still at the start
+    if (brightness >= 0.0f) {
+        const bool dark = brightness < 0.03f;
+        const float earlier = fade_history[fade_history_count % fade_history.size()];
+        const bool have_earlier = fade_history_count >= fade_history.size();
+        const float oldest = have_earlier ? earlier : fade_history[0];
+        const bool brightening =
+            fade_history_count > 0 && brightness > oldest * 1.03f + 0.002f;
+        fade_history[fade_history_count % fade_history.size()] = brightness;
+        ++fade_history_count;
+        fading = dark || brightening;
+        fade_previous = brightness;
+    }
+    fade_steady = fading ? 0 : fade_steady + 1;
+    const bool resetting = fade_steady < 8;
+    static int noted = 0;
+    if (noted < 4000 && std::getenv("BB_DLSS_FADE_LOG")) {
+        ++noted;
+        std::printf("DLSS fade: t=%.3f brightness %.4f %s (steady %d)\n",
+                    std::chrono::duration<double>(now.time_since_epoch()).count(), brightness,
+                    resetting ? "reset" : "kept", fade_steady);
+    }
+    return resetting;
 }
 
 bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
@@ -2541,20 +2724,14 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
                 window = now;
             }
         }
-        // bbport: after a history reset (a checkpoint load, a camera cut) the game's own picture
-        // settles for a moment (U2 ice cave: fine vertical stripes for a few frames, TAA shows them
-        // in a flash); DLSS kept them as detail and they faded over 3-4 s (2026-11-06). Its
-        // history is reset again on every frame of BB_DLSS_SETTLE_MS after a reset (0: off).
-        static const auto settle = [] {
-            const char* env = std::getenv("BB_DLSS_SETTLE_MS");
-            return std::chrono::milliseconds(env && env[0] ? std::atoi(env) : 0);
-        }();
-        static std::chrono::steady_clock::time_point settle_until{};
-        const auto settle_now = std::chrono::steady_clock::now();
-        if (reset && settle.count() > 0) {
-            settle_until = settle_now + settle;
-        }
-        const bool settling = !reset && settle_now < settle_until;
+        // bbport: DLSS (preset K most) built fine vertical stripes into its history from the frames of
+        // a fade in from black (U2 ice cave after a load or a checkpoint restart, 2026-11-06: the input
+        // was clean, the output striped for 3-4 s; a history reset on those frames removed them). For
+        // 5 s after a camera cut or a return to the scene, the history is reset on every frame whose
+        // picture is still dark or getting brighter, and until it has held steady for 8 frames.
+        // Brightness: 64 pixels of the input copied to a ring of host buffers, read 4 frames later (no
+        // wait). BB_DLSS_FADE_RESET=0: off.
+        const bool settling = FadeReset(cmdbuf, color, reset);
         ok = dlss->Evaluate(cmdbuf, {
             .color = color,
             .depth = depth,
