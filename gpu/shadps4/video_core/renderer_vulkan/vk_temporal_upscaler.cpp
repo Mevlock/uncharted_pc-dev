@@ -2541,6 +2541,20 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
                 window = now;
             }
         }
+        // bbport: after a history reset (a checkpoint load, a camera cut) the game's own picture
+        // settles for a moment (U2 ice cave: fine vertical stripes for a few frames, TAA shows them
+        // in a flash); DLSS kept them as detail and they faded over 3-4 s (2026-11-06). Its
+        // history is reset again on every frame of BB_DLSS_SETTLE_MS after a reset (0: off).
+        static const auto settle = [] {
+            const char* env = std::getenv("BB_DLSS_SETTLE_MS");
+            return std::chrono::milliseconds(env && env[0] ? std::atoi(env) : 0);
+        }();
+        static std::chrono::steady_clock::time_point settle_until{};
+        const auto settle_now = std::chrono::steady_clock::now();
+        if (reset && settle.count() > 0) {
+            settle_until = settle_now + settle;
+        }
+        const bool settling = !reset && settle_now < settle_until;
         ok = dlss->Evaluate(cmdbuf, {
             .color = color,
             .depth = depth,
@@ -2550,7 +2564,7 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
                        vk::ImageAspectFlagBits::eColor, ow, oh},
             .jitter_x = sign * jitter[0],
             .jitter_y = sign * jitter[1],
-            .reset = reset,
+            .reset = reset || settling,
             .frame_ms = frame_ms,
             .sharpness = settings.sharpen ? std::min(settings.sharpness.load(), 1.0f) : 0.0f,
         });
