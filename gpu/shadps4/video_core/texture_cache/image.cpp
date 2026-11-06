@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <ranges>
+#include <unordered_map>
 #include <vector>
 #include <string>
 #include "common/assert.h"
@@ -95,6 +96,69 @@ UniqueImage::~UniqueImage() {
     Destroy();
 }
 
+void RecordImageBda(u64 address, u64 size, const char* name); // buffer.cpp
+void ForgetImageBda(u64 address);                              // buffer.cpp
+
+namespace {
+// bbport diagnosis (BB_IMAGE_ADDRESSES=1): a GPU crash reports a GPU virtual address; buffers are in
+// the crash record by their device address, images were not (Vulkan gives an image no address).
+// A buffer aliasing the image's allocation gets the memory's address; it is recorded with the
+// image's size and format and the buffer is destroyed again. The rare U3 start-up device lost
+// faulted at an address no buffer ever had (2026-11-06): an image's, perhaps freed.
+bool ImageAddressesOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_IMAGE_ADDRESSES");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+std::mutex image_va_mutex;
+std::unordered_map<VkImage, u64> image_va;
+
+void NoteImageAddress(vk::Device device, VmaAllocator allocator, VmaAllocation allocation, VkImage image,
+                      u64 size, const vk::ImageCreateInfo& ci) {
+    if (!ImageAddressesOn() || !device || !allocation || !size) {
+        return;
+    }
+    VkBufferCreateInfo buffer_ci{};
+    buffer_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_ci.size = size;
+    buffer_ci.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    VkBuffer buffer{};
+    if (vmaCreateAliasingBuffer(allocator, allocation, &buffer_ci, &buffer) != VK_SUCCESS) {
+        return;
+    }
+    const u64 address = device.getBufferAddress(vk::BufferDeviceAddressInfo{.buffer = vk::Buffer{buffer}});
+    device.destroyBuffer(vk::Buffer{buffer});
+    if (!address) {
+        return;
+    }
+    char name[40];
+    std::snprintf(name, sizeof(name), "image %ux%ux%u %s", ci.extent.width, ci.extent.height,
+                  ci.arrayLayers, vk::to_string(ci.format).c_str());
+    RecordImageBda(address, size, name);
+    std::scoped_lock lk{image_va_mutex};
+    image_va[image] = address;
+}
+
+void ForgetImageAddress(VkImage image) {
+    if (!ImageAddressesOn() || !image) {
+        return;
+    }
+    u64 address = 0;
+    {
+        std::scoped_lock lk{image_va_mutex};
+        const auto it = image_va.find(image);
+        if (it == image_va.end()) {
+            return;
+        }
+        address = it->second;
+        image_va.erase(it);
+    }
+    ForgetImageBda(address);
+}
+} // namespace
+
 namespace {
 // bbport: Uncharted 2 binds a 960x540 depth buffer as a storage image and back as a depth target
 // every frame, and TextureCache::ResolveDepthOverlap remakes it each way: two dedicated
@@ -124,6 +188,7 @@ bool RecyclingEnabled() {
 }
 
 void DestroyRecycled(const RecycledImage& entry) {
+    ForgetImageAddress(static_cast<VkImage>(entry.image));
     vmaDestroyImage(entry.allocator, entry.image, entry.allocation);
     Vulkan::Vram::image_bytes.fetch_sub(entry.size_bytes, std::memory_order_relaxed);
     Vulkan::Vram::image_count.fetch_sub(1, std::memory_order_relaxed);
@@ -167,6 +232,7 @@ void UniqueImage::Recycle() {
 
 void UniqueImage::Destroy() {
     if (image) {
+        ForgetImageAddress(static_cast<VkImage>(image));
         vmaDestroyImage(allocator, image, allocation);
         image = vk::Image{};
         allocation = {};
@@ -281,6 +347,7 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};
     size_bytes = alloc_info.size;
+    NoteImageAddress(device, allocator, allocation, unsafe_image, alloc_info.size, image_ci);
     Vulkan::Vram::image_bytes.fetch_add(size_bytes, std::memory_order_relaxed);
     Vulkan::Vram::image_count.fetch_add(1, std::memory_order_relaxed);
 }

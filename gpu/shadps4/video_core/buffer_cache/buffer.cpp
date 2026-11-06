@@ -140,6 +140,21 @@ void ForgetBda(u64 address) {
 }
 } // namespace
 
+/// bbport (BB_IMAGE_ADDRESSES=1): image memory ranges in the same record, named, so a GPU crash
+/// at an image's address names it (and says whether it was already destroyed).
+void RecordImageBda(u64 address, u64 size, const char* name) {
+    std::scoped_lock lk{bda_mutex};
+    if (bda_records.size() >= 8192) {
+        bda_records.erase(bda_records.begin(), bda_records.begin() + 1024);
+    }
+    BdaRecord record{address, size, true, {}};
+    std::snprintf(record.name, sizeof(record.name), "%s", name);
+    bda_records.push_back(record);
+}
+void ForgetImageBda(u64 address) {
+    ForgetBda(address);
+}
+
 void NameBda(u64 address, std::string_view name) {
     std::scoped_lock lk{bda_mutex};
     for (auto it = bda_records.rbegin(); it != bda_records.rend(); ++it) {
