@@ -1537,6 +1537,41 @@ static const unsigned char u1_menu_handler_eu_code[]={0x55,0x48,0x89,0xe5,0x41,0
                                                       0x48,0x81,0xec,0xd8,0x00,0x00,0x00,0x89,0xf3,0x49,0x89,0xfe};
 static const unsigned char u1_menu_handler_us_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
                                                       0x48,0x81,0xec,0xc8,0x00,0x00,0x00,0x89,0xf3,0x49,0x89,0xfe};
+/* U3 restart fall (BB_U3_PLATFORM_DELTA=0 = off). The character controller (1.02 0x1194ed0, 1.00 EU+US 0x7e0ce0;
+ * rbx = the controller) stores the motion of the platform its owner stands on for this frame: +0x90 = the platform's
+ * displacement / dt, +0xa0 its rotation (from the owner's attach struct). On a frame where the owner stands on a
+ * different platform than on the last frame, that "motion" is the jump between the two platforms' poses: at a cruise
+ * ship checkpoint restart Drake touches two spawn platforms in his first frames above ~70 fps and the controller reports
+ * ~3000 m/s and a 40 degree turn. The follow camera rides that delta and swings 16 m off; the level scripts test the
+ * camera against the level regions, drop the deck cargo for ~0.1 s, and Drake loses his floor and falls through the
+ * ship. Stepping onto another platform is not platform motion: the delta of such a frame is zero here (+0x90 xyz 0,
+ * +0xa0 identity). Hooked after the stores (1.02: lea r14, [rbx+0x10]; 1.00: lea r12, [rbx+0x10]; then lea r13,
+ * [rbx+0x20]). */
+static const unsigned char u3_platdelta_code[]={0x4c,0x8d,0x73,0x10,0x4c,0x8d,0x6b,0x20};
+static const unsigned char u3_platdelta_code_100[]={0x4c,0x8d,0x63,0x10,0x4c,0x8d,0x6b,0x20};
+static void __attribute__((ms_abi)) u3_platdelta(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)r14; (void)image;
+    static int on=-1;
+    if (on<0) { const char *e=getenv("BB_U3_PLATFORM_DELTA"); on=!(e && e[0]=='0'); }
+    if (!on) return;
+    const uint64_t ctrl=regs[0];
+    if (ctrl<0x10000) return;
+    /* the owner (handle +0xc0 slot / +0xc8 id) and its platform handle (owner +0xb8 slot, +0xc0 id) */
+    const uint64_t oslot=*(const uint64_t *)(uintptr_t)(ctrl+0xc0); const uint32_t oid=*(const uint32_t *)(uintptr_t)(ctrl+0xc8);
+    const uint64_t owner=oslot>0x10000 ? *(const uint64_t *)(uintptr_t)oslot : 0;
+    if (owner<0x10000 || !oid || *(const uint32_t *)(uintptr_t)(owner+0x7c)!=oid) return;
+    const uint64_t pslot=*(const uint64_t *)(uintptr_t)(owner+0xb8); const uint32_t pid=*(const uint32_t *)(uintptr_t)(owner+0xc0);
+    /* the last platform per owner id (owners move in memory; their id does not) */
+    static struct { uint32_t oid, pid; uint64_t pslot; } last[64];
+    int i=0, free_i=-1;
+    for (;i<64;++i) { if (last[i].oid==oid) break; if (!last[i].oid && free_i<0) free_i=i; }
+    if (i==64) { if (free_i<0) free_i=(int)(oid%64u); i=free_i; last[i].oid=oid; last[i].pid=pid; last[i].pslot=pslot; return; }
+    const int changed=last[i].pid!=pid || last[i].pslot!=pslot;
+    last[i].pid=pid; last[i].pslot=pslot;
+    if (!changed) return;
+    float *d=(float *)(uintptr_t)(ctrl+0x90), *q=(float *)(uintptr_t)(ctrl+0xa0);
+    d[0]=d[1]=d[2]=0.0f; q[0]=q[1]=q[2]=0.0f; q[3]=1.0f;
+}
 /* "Quit" in Uncharted 2's and 3's main menus (runtime_exit_menu.c): the store of the menu data's pointer after its
  * lookup (7 bytes moved) and the menu handler (13 push bytes moved), per game and code version. */
 static const unsigned char u2_eu_menu_store[]={0x49,0x89,0x86,0xa8,0x17,0x00,0x00,0x83,0x38,0x00,0x0f,0x8e};
@@ -1648,6 +1683,8 @@ static const RuntimeGuestCallback guest_callbacks[]={
      sizeof(u3_job_cave_stub),NULL,u3_job_cave_stub},
     {"U3 job descriptor guard (1.02, jump)",0xf88f5d,u3_job_loads_code,sizeof(u3_job_loads_code),
      sizeof(u3_job_loads_jump),NULL,u3_job_loads_jump},
+    {"U3 platform change is not platform motion (1.02)",0x1195038,u3_platdelta_code,8,8,u3_platdelta,NULL},
+    {"U3 platform change is not platform motion (1.00)",0x7e0df8,u3_platdelta_code_100,8,8,u3_platdelta,NULL},
 };
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     *count=sizeof(guest_callbacks)/sizeof(*guest_callbacks);
