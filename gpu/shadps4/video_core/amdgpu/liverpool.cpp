@@ -961,6 +961,9 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
 
         const PM4ItOpcode opcode = header->type3.opcode;
+        // shadPS4 #5541: the size read before running the packet; once it signals the guest, the
+        // guest may already reuse the buffer.
+        const u32 packet_words = header->type3.NumWords() + 1;
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
         if (rasterizer && Vulkan::Rasterizer::HleWaitAt()) {
             rasterizer->WaitHleCopies(8);
@@ -1018,7 +1021,7 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
                             static_cast<u32>(opcode), count);
         }
-        ccb = NextPacket(ccb, header->type3.NumWords() + 1);
+        ccb = NextPacket(ccb, packet_words);
     }
 
     FIBER_EXIT;
@@ -2161,7 +2164,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
                                 static_cast<u32>(opcode), count);
             }
-            dcb = NextPacket(dcb, header->type3.NumWords() + 1);
+            // shadPS4 #5541: the size read before running the packet (a flip or an EOP interrupt
+            // lets the guest reuse this buffer while we are still on it).
+            dcb = NextPacket(dcb, count + 1);
             break;
         }
     }
