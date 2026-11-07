@@ -32,7 +32,8 @@ public:
     bool AcquireNextImage();
 
     /// Presents the current image and move to the next one
-    bool Present();
+    /// latency_id: the game frame's id in low latency mode (0: a generated or repeated frame).
+    bool Present(u64 latency_id = 0);
 
     /// bbport (hitch diagnosis): the last Present's waits for the async submissions and the queue lock, and the
     /// present call itself (ms).

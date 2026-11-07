@@ -38,6 +38,7 @@ extern "C" void runtime_freeze_guest(int on);
 #include "imgui_internal.h"
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
@@ -872,15 +873,18 @@ void FpsCounter() {
     // frames on screen.
     // Lighter than TextDisabled, which is hard to read over the game.
     const ImVec4 second_line(0.8f, 0.8f, 0.8f, 1.0f);
+    // bbport: low latency mode: "Reflex" or "Anti-Lag 2" at the end while it is on.
+    const char* latency = Vulkan::LowLatency::Name();
     const float shown_fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
     if (s.frame_gen != BbSettings::FrameGenOff && shown_fps > game_fps * 1.2f) {
-        ImGui::TextColored(second_line, "%s %s  FG %dx %.0f", UpscalerShortName(s.upscaler),
+        ImGui::TextColored(second_line, "%s %s  FG %dx %.0f%s%s", UpscalerShortName(s.upscaler),
                             ShortRenderText(),
                             s.frame_gen == BbSettings::FrameGenDlss ? s.frame_gen_multiplier.load()
                                                                     : 2,
-                            shown_fps);
+                            shown_fps, latency ? "  " : "", latency ? latency : "");
     } else {
-        ImGui::TextColored(second_line, "%s %s", UpscalerShortName(s.upscaler), ShortRenderText());
+        ImGui::TextColored(second_line, "%s %s%s%s", UpscalerShortName(s.upscaler), ShortRenderText(),
+                           latency ? "  " : "", latency ? latency : "");
     }
     // "RAM 6.1/32 GB  VRAM 7.4/16 GB": the game's memory and video memory, once a second.
     UpdateMemory();

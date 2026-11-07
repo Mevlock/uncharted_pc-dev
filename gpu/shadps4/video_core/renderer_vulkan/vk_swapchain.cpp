@@ -11,6 +11,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
 namespace Vulkan {
@@ -57,6 +58,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
         exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
     const auto format = needs_hdr ? SURFACE_FORMAT_HDR : surface_format;
     const vk::SwapchainCreateInfoKHR swapchain_info = {
+        .pNext = LowLatency::SwapchainNext(),
         .surface = surface,
         .minImageCount = image_count,
         .imageFormat = format.format,
@@ -79,6 +81,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
     ASSERT_MSG(swapchain_result == vk::Result::eSuccess, "Failed to create swapchain: {}",
                vk::to_string(swapchain_result));
     swapchain = chain;
+    LowLatency::OnSwapchain(swapchain);
 
     SetupImages();
     RefreshSemaphores();
@@ -132,8 +135,14 @@ bool Swapchain::AcquireNextImage() {
     return !needs_recreation;
 }
 
-bool Swapchain::Present() {
+bool Swapchain::Present(u64 latency_id) {
+    // bbport: low latency mode (vk_low_latency.h): the game's frame carries its frame id.
+    const vk::PresentIdKHR present_id{
+        .swapchainCount = 1,
+        .pPresentIds = &latency_id,
+    };
     const vk::PresentInfoKHR present_info = {
+        .pNext = LowLatency::UsesPresentId() ? &present_id : nullptr,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],
         .swapchainCount = 1,
@@ -148,6 +157,7 @@ bool Swapchain::Present() {
     const auto t0 = Clock::now();
     WaitAsyncSubmits();
     const auto t1 = Clock::now();
+    LowLatency::PresentStart(latency_id); // bbport: low latency mode (vk_low_latency.h)
     vk::Result result;
     {
         std::scoped_lock queue_lk{g_graphics_queue_mutex};
@@ -158,6 +168,7 @@ bool Swapchain::Present() {
         last_queue_lock_ms = ms(t1, t2);
         last_present_call_ms = ms(t2, t3);
     }
+    LowLatency::PresentEnd(latency_id);
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
     } else {
@@ -277,6 +288,7 @@ void Swapchain::SetSurfaceProperties() {
 }
 
 void Swapchain::Destroy() {
+    LowLatency::OnSwapchainDestroy();
     vk::Device device = instance.GetDevice();
     const auto wait_result = device.waitIdle();
     if (wait_result != vk::Result::eSuccess) {

@@ -36,6 +36,7 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/button_prompts.h"
+#include "video_core/renderer_vulkan/vk_low_latency.h"
 
 extern "C" {
 // runtime_memory.c
@@ -473,6 +474,10 @@ extern "C" int bbgpu_overlay_captures_input(void) {
 
 extern "C" int bbgpu_preparation_screen(void) {
     return BbOverlay::PreparationScreenActive() ? 1 : 0;
+}
+
+extern "C" void bbgpu_input_sample(void) {
+    Vulkan::LowLatency::InputSample();
 }
 
 extern "C" void bbgpu_prepare_exit(void) {

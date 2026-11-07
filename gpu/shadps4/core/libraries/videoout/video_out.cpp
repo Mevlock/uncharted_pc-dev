@@ -19,6 +19,7 @@
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_low_latency.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -186,6 +187,7 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode
               flipArg);
 
     if (bufferIndex != -1) {
+        Vulkan::LowLatency::RenderSubmit(); // bbport: low latency mode, the game's frame goes out (before the BB_FRAME_PACE wait)
         PaceGuestFlip(); // bbport: BB_FRAME_PACE
     }
     if (!driver->SubmitFlip(port, bufferIndex, flipArg)) {
