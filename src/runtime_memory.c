@@ -286,6 +286,21 @@ static void restore_protections(const ProtRun *runs, size_t from, size_t to) {
             win_fail("restoring page protection",runs[i].start,runs[i].end-runs[i].start);
     }
 }
+/* A carve that keeps a mapped view around the hole unmaps the whole view and maps both sides back:
+ * with one large view per mapping that costs ~16 ms per partial unmap (a fork's U3 cutscene-start
+ * report: 244 MiB freed in 1 MiB pieces from a 2.9 GB mapping, 3.8 s of stalls). Slow ones are
+ * logged (diagnostics, always on: only carves over 4 ms print, the first 40 then every 50th). */
+static void carve_note(LARGE_INTEGER t0, uintptr_t lo, uintptr_t hi, uintptr_t a, uintptr_t b) {
+    static LARGE_INTEGER freq; static long slow; static double total;
+    LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    const double ms=(double)(t1.QuadPart-t0.QuadPart)*1000.0/(double)freq.QuadPart;
+    if (ms<4.0) return;
+    ++slow; total+=ms;
+    if (slow<=40 || slow%50==0)
+        printf("Memory: slow carve %.1f ms: a %" PRIu64 " KiB hole in a %" PRIu64 " MiB view (%ld slow, %.0f ms in all)\n",
+               ms,(uint64_t)((b-a)>>10),(uint64_t)((hi-lo)>>20),slow,total);
+}
 /* Leaves [a,b) as exactly one unmapped placeholder; returns its region index. */
 static size_t carve_host(uintptr_t a, uintptr_t b) {
     size_t first=region_index(a), last=first;
@@ -299,6 +314,8 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
     ProtRun *runs=NULL; size_t nruns=0, capacity=0, left_runs=0;
     if (keep_left) left_runs=nruns=save_protections(lo,a,&runs,nruns,&capacity);
     if (keep_right) nruns=save_protections(b,hi,&runs,nruns,&capacity);
+    LARGE_INTEGER carve_t0={0};
+    if (keep_left || keep_right) QueryPerformanceCounter(&carve_t0);
     if (keep_left || keep_right) {
         carve_lo=lo; carve_hi=hi; carve_thread=GetCurrentThreadId();
         InterlockedIncrement(&carve_seq);
@@ -334,6 +351,7 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
         }
     }
     if (keep_left || keep_right) { done_lo=lo; done_hi=hi; InterlockedIncrement(&carve_seq); }
+    if (keep_left || keep_right) carve_note(carve_t0,lo,hi,a,b);
     free(runs);
     return at;
 }

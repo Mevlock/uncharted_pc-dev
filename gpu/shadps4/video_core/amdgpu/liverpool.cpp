@@ -130,6 +130,22 @@ static const char* acb_task_name[] = NAME_ARRAY(ACB_TASK, MAX_NAMES);
 
 std::array<u8, 48_KB> Liverpool::ConstantEngine::constants_heap;
 
+// shadPS4 #5542 (diagnostics first): a chained indirect buffer replaces the rest of the buffer it is
+// in, while the parser runs it as a nested call and goes on after the packet (stale commands in a
+// reused buffer would run). Logged once per engine with the words left after it.
+static void NoteChainedIb(const PM4CmdIndirectBuffer* ib, const char* engine, size_t words_left) {
+    if (!ib->chain) {
+        return;
+    }
+    static std::atomic<int> seen[2];
+    const int which = engine[0] == 'g' ? 0 : 1;
+    if (seen[which].fetch_add(1, std::memory_order_relaxed) == 0) {
+        std::printf("GPU: chained indirect buffer on the %s queue (%zu words after the packet)\n", engine,
+                    words_left);
+        std::fflush(stdout);
+    }
+}
+
 static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset) {
     if (offset > span.size()) {
         LOG_ERROR(
@@ -2068,6 +2084,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::IndirectBuffer: {
                 const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+                NoteChainedIb(indirect_buffer, "graphics", dcb.size());
                 auto task = ProcessGraphics(
                     {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
                 // Tasks start suspended: the nested body (and its scan) runs on this resume.
@@ -2367,6 +2384,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         }
         case PM4ItOpcode::IndirectBuffer: {
             const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+            NoteChainedIb(indirect_buffer, "compute", acb.size());
             auto task = ProcessCompute<true>(
                 {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, vqid);
             RESUME_ASC(task, vqid);
