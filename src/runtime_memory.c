@@ -355,11 +355,33 @@ static size_t carve_host(uintptr_t a, uintptr_t b) {
     free(runs);
     return at;
 }
+/* Large mappings become one view per 16 MiB (address-aligned), from Alex's fork (ec638b52): a partial
+ * unmap remaps the rest of its view (carve_host), and the games free video memory in 1 MiB pieces from
+ * the start of a 3-4 GB mapping (U3 loads and cutscene starts: 5-33 ms each here, ~16 ms on his PC,
+ * seconds in all on a slow one). host_protect already works view by view. BB_VIEW_CHUNKS=0: one view. */
+#define VIEW_CHUNK (UINT64_C(16)<<20)
+static int view_chunks(void) {
+    static int value=-1;
+    if (value<0) { const char *v=getenv("BB_VIEW_CHUNKS"); value=!(v && v[0]=='0'); }
+    return value;
+}
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
     size_t i=carve_host(address,address+size);
     if (reserved) return 0;
-    regions[i].phys=phys; regions[i].mapped=1;
-    view_map(&regions[i],win_prot(prot));
+    const uintptr_t end=address+size;
+    const int chunks=view_chunks();
+    for (uintptr_t at=address; at<end; ++i) {
+        uintptr_t next=chunks ? (at+VIEW_CHUNK)&~(uintptr_t)(VIEW_CHUNK-1) : end;
+        if (next>=end) next=end;
+        else {
+            if (!VirtualFree((void *)at,next-at,MEM_RELEASE|MEM_PRESERVE_PLACEHOLDER)) win_fail("splitting a placeholder",at,next-at);
+            regions[i].end=next;
+            region_insert(i+1,(HostRegion){next,end,0,0});
+        }
+        regions[i].phys=phys+(at-address); regions[i].mapped=1;
+        view_map(&regions[i],win_prot(prot));
+        at=next;
+    }
     return 0;
 }
 static int host_unmap(uintptr_t address, uint64_t size) { carve_host(address,address+size); return 0; }
