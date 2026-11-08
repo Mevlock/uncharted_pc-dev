@@ -84,7 +84,6 @@ static void touch_click(PadData *d, int right) {
     d->touches[0]=(PadTouch){.x=right ? 1440 : 480,.y=471,.id=0};
 }
 
-/* Opens the first gamepad SDL knows about; called under lock. */
 /* The keyboard and mouse were used last (the prompts' device 0): the controller doesn't rumble
  * (antikmewzik's controls fork). */
 static int keyboard_in_use;
@@ -95,8 +94,8 @@ static int keyboard_in_use;
 static unsigned long long pad_taps; /* bit = SDL_GamepadButton, set on BUTTON_DOWN */
 static bool SDLCALL pad_tap_watch(void *userdata, SDL_Event *event) {
     (void)userdata;
-    if (event->type==SDL_EVENT_GAMEPAD_BUTTON_DOWN && event->gbutton.button<64 &&
-        (!gamepad || event->gbutton.which==SDL_GetGamepadID(gamepad)))
+    /* (any open pad: a press on another one makes it the pad in use, pad_pressed) */
+    if (event->type==SDL_EVENT_GAMEPAD_BUTTON_DOWN && event->gbutton.button<64)
         __atomic_or_fetch(&pad_taps,1ull<<event->gbutton.button,__ATOMIC_RELAXED);
     return true;
 }
@@ -111,11 +110,13 @@ static int pad_latch_enabled(void) {
  * second; a removed one is closed at once; rumble and the light bar back off for 2 s after a slow write. Calls
  * slower than 2 ms are logged ("Runtime: pad ... took"). */
 static volatile int pad_added=1, pad_removed;
+static volatile SDL_JoystickID pad_pressed; /* the pad that had the last button press */
 static uint64_t next_pad_scan_us, pad_writes_after_us;
 static bool SDLCALL pad_device_watch(void *userdata, SDL_Event *event) {
     (void)userdata;
     if (event->type==SDL_EVENT_GAMEPAD_ADDED) __atomic_store_n(&pad_added,1,__ATOMIC_RELEASE);
     else if (event->type==SDL_EVENT_GAMEPAD_REMOVED) __atomic_store_n(&pad_removed,1,__ATOMIC_RELEASE);
+    else if (event->type==SDL_EVENT_GAMEPAD_BUTTON_DOWN) __atomic_store_n(&pad_pressed,event->gbutton.which,__ATOMIC_RELEASE);
     return true;
 }
 static void pad_slow(const char *what, uint64_t start) {
@@ -126,6 +127,58 @@ static void pad_slow(const char *what, uint64_t start) {
         if (took>8000 && (what[0]=='r' || what[0]=='l')) pad_writes_after_us=now_us()+2000000; /* rumble, light */
     }
 }
+/* Every connected controller stays open and the game reads the one in use: the last that had a button pressed or a
+ * stick or trigger pushed past half way (from spacepepperoni's Linux port, 3329bf97). Only the first one SDL listed
+ * was read before, so a virtual or hidden pad listed first (Steam Input, DS4Windows, a handheld's built-in
+ * controller) won and the controller in the player's hands gave no input (upstream #629, #682, #653, #765, #762).
+ * A pad becomes the one in use on a press or a push (an edge), so a pad that reports a stick held all the time cannot
+ * keep taking over. With one controller nothing changes. Rumble and the light bar go to the pad in use. */
+#define MAX_GAMEPADS 8
+static SDL_Gamepad *gamepads[MAX_GAMEPADS];
+static int gamepad_count;
+static unsigned gamepad_pushed[MAX_GAMEPADS]; /* bit = axis past half way at the last look */
+static unsigned pad_axes_pushed(SDL_Gamepad *g) {
+    unsigned mask=0;
+    for (int a=0;a<SDL_GAMEPAD_AXIS_COUNT;++a) {
+        const int v=SDL_GetGamepadAxis(g,(SDL_GamepadAxis)a);
+        if (v>16384 || v<-16384) mask|=1u<<a;
+    }
+    return mask;
+}
+/* Closes pads that went away and (open_new) opens new ones. */
+static void list_gamepads(int open_new) {
+    for (int i=0;i<gamepad_count;) {
+        if (SDL_GamepadConnected(gamepads[i])) { ++i; continue; }
+        printf("Runtime: gamepad disconnected\n");
+        if (gamepads[i]==gamepad) gamepad=NULL;
+        SDL_CloseGamepad(gamepads[i]);
+        --gamepad_count;
+        gamepads[i]=gamepads[gamepad_count];
+        gamepad_pushed[i]=gamepad_pushed[gamepad_count];
+    }
+    if (!open_new) return;
+    int count=0;
+    SDL_JoystickID *ids=SDL_GetGamepads(&count);
+    for (int k=0;ids && k<count && gamepad_count<MAX_GAMEPADS;++k) {
+        int known=0;
+        for (int i=0;i<gamepad_count && !known;++i) known=SDL_GetGamepadID(gamepads[i])==ids[k];
+        if (known) continue;
+        SDL_Gamepad *g=SDL_OpenGamepad(ids[k]);
+        if (!g) continue;
+        gamepad_pushed[gamepad_count]=pad_axes_pushed(g);
+        gamepads[gamepad_count++]=g;
+        ++connected_count;
+        printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(g));
+    }
+    SDL_free(ids);
+}
+static void use_gamepad(SDL_Gamepad *g) {
+    if (g==gamepad) return;
+    if (gamepad && now_us()>=pad_writes_after_us) SDL_RumbleGamepad(gamepad,0,0,0); /* the old one stops */
+    gamepad=g;
+    static unsigned noted;
+    if (noted++<50) printf("Runtime: gamepad in use: %s\n",SDL_GetGamepadName(g));
+}
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) {
         sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
@@ -133,24 +186,31 @@ static SDL_Gamepad *current_gamepad(void) {
         if (sdl_ready>0) SDL_AddEventWatch(pad_device_watch,NULL);
     }
     if (sdl_ready<0) return NULL;
-    if (gamepad && (__atomic_exchange_n(&pad_removed,0,__ATOMIC_ACQ_REL) || !SDL_GamepadConnected(gamepad))) {
-        printf("Runtime: gamepad disconnected\n");
-        SDL_CloseGamepad(gamepad);
-        gamepad=NULL;
-        next_pad_scan_us=now_us()+1000000;
-    }
-    if (!gamepad) {
-        const uint64_t now=now_us();
-        if (!__atomic_exchange_n(&pad_added,0,__ATOMIC_ACQ_REL) && now<next_pad_scan_us) return NULL;
+    const uint64_t now=now_us();
+    const int removed=__atomic_exchange_n(&pad_removed,0,__ATOMIC_ACQ_REL);
+    const int added=__atomic_exchange_n(&pad_added,0,__ATOMIC_ACQ_REL);
+    if (removed || (gamepad && !SDL_GamepadConnected(gamepad))) {
+        /* (a pad going away can still be listed for a while: new ones are looked for on an added event or a second later) */
+        list_gamepads(0);
         next_pad_scan_us=now+1000000;
-        int count=0;
-        SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        if (ids && count>0) {
-            gamepad=SDL_OpenGamepad(ids[0]);
-            if (gamepad) { ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad)); }
-        }
-        SDL_free(ids);
+    }
+    if (added || (!gamepad_count && now>=next_pad_scan_us)) {
+        next_pad_scan_us=now+1000000;
+        list_gamepads(1);
         pad_slow("open",now);
+    }
+    if (!gamepad && gamepad_count) use_gamepad(gamepads[0]);
+    if (gamepad_count>1) {
+        const SDL_JoystickID pressed=__atomic_exchange_n(&pad_pressed,0,__ATOMIC_ACQ_REL);
+        SDL_Gamepad *next=NULL;
+        for (int i=0;i<gamepad_count;++i) {
+            const unsigned pushed=pad_axes_pushed(gamepads[i]);
+            if (gamepads[i]!=gamepad && !next && ((pushed & ~gamepad_pushed[i]) ||
+                                                  (pressed && SDL_GetGamepadID(gamepads[i])==pressed)))
+                next=gamepads[i];
+            gamepad_pushed[i]=pushed;
+        }
+        if (next) use_gamepad(next);
     }
     return gamepad;
 }
@@ -215,6 +275,7 @@ static uint8_t led_rgb[3];
 static void *pad_thread_main(void *arg) {
     (void)arg;
     unsigned rumble_done=0, led_done=0;
+    SDL_Gamepad *led_pad=NULL; /* the light bar's colour goes to a pad that becomes the one in use too */
     for (;;) {
         const uint64_t start=now_us();
         SDL_UpdateJoysticks();
@@ -238,6 +299,7 @@ static void *pad_thread_main(void *arg) {
         const uint8_t r=led_rgb[0], gg=led_rgb[1], b=led_rgb[2];
         pthread_mutex_unlock(&request_lock);
         if (rs!=rumble_done) { rumble_done=rs; pad_rumble(g,low,high,ms); }
+        if (g!=led_pad) { led_pad=g; if (g && ls) led_done=ls-1; }
         if (ls!=led_done && g && now_us()>=pad_writes_after_us) {
             led_done=ls;
             const uint64_t led_start=now_us();
