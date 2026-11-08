@@ -138,11 +138,27 @@ static void pad_slow(const char *what, uint64_t start) {
  * was read before, so a virtual or hidden pad listed first (Steam Input, DS4Windows, a handheld's built-in
  * controller) won and the controller in the player's hands gave no input (upstream #629, #682, #653, #765, #762).
  * A pad becomes the one in use on a press or a push (an edge), so a pad that reports a stick held all the time cannot
- * keep taking over. With one controller nothing changes. Rumble and the light bar go to the pad in use. */
+ * keep taking over. With one controller nothing changes. Rumble and the light bar go to the pad in use.
+ * A virtual mirror of the pad in the player's hands (Steam Input, DS4Windows) gets the same presses a few ms apart:
+ * another pad takes over only when the one in use has had no press or push for PAD_QUIET_US, and none in the
+ * PAD_CONFIRM_US after the other pad's (so the same input on both keeps the pad in use; before, every press could
+ * swap them, each swap stopping the old pad's rumble and moving the light bar). */
 #define MAX_GAMEPADS 8
+#define PAD_QUIET_US 400000u
+#define PAD_CONFIRM_US 60000u
 static SDL_Gamepad *gamepads[MAX_GAMEPADS];
 static int gamepad_count;
 static unsigned gamepad_pushed[MAX_GAMEPADS]; /* bit = axis past half way at the last look */
+static unsigned long long gamepad_held[MAX_GAMEPADS]; /* bit = SDL_GamepadButton held at the last look */
+static uint64_t gamepad_edge_us[MAX_GAMEPADS]; /* the last press or push (an edge) */
+static SDL_Gamepad *rumbled_pad;  /* the pad last given a rumble that may still run, until rumbled_until_us */
+static uint64_t rumbled_until_us;
+static unsigned long long pad_buttons_held(SDL_Gamepad *g) {
+    unsigned long long mask=0;
+    for (int b=0;b<SDL_GAMEPAD_BUTTON_COUNT && b<64;++b)
+        if (SDL_GetGamepadButton(g,(SDL_GamepadButton)b)) mask|=1ull<<b;
+    return mask;
+}
 static unsigned pad_axes_pushed(SDL_Gamepad *g) {
     unsigned mask=0;
     for (int a=0;a<SDL_GAMEPAD_AXIS_COUNT;++a) {
@@ -157,10 +173,13 @@ static void list_gamepads(int open_new) {
         if (SDL_GamepadConnected(gamepads[i])) { ++i; continue; }
         printf("Runtime: gamepad disconnected\n");
         if (gamepads[i]==gamepad) gamepad=NULL;
+        if (gamepads[i]==rumbled_pad) rumbled_pad=NULL;
         SDL_CloseGamepad(gamepads[i]);
         --gamepad_count;
         gamepads[i]=gamepads[gamepad_count];
         gamepad_pushed[i]=gamepad_pushed[gamepad_count];
+        gamepad_held[i]=gamepad_held[gamepad_count];
+        gamepad_edge_us[i]=gamepad_edge_us[gamepad_count];
     }
     if (!open_new) return;
     int count=0;
@@ -172,6 +191,8 @@ static void list_gamepads(int open_new) {
         SDL_Gamepad *g=SDL_OpenGamepad(ids[k]);
         if (!g) continue;
         gamepad_pushed[gamepad_count]=pad_axes_pushed(g);
+        gamepad_held[gamepad_count]=pad_buttons_held(g);
+        gamepad_edge_us[gamepad_count]=0;
         gamepads[gamepad_count++]=g;
         ++connected_count;
         printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(g));
@@ -180,10 +201,23 @@ static void list_gamepads(int open_new) {
 }
 static void use_gamepad(SDL_Gamepad *g) {
     if (g==gamepad) return;
-    if (gamepad && now_us()>=pad_writes_after_us) SDL_RumbleGamepad(gamepad,0,0,0); /* the old one stops */
+    const uint64_t now=now_us();
+    /* the old one stops, if it may still be rumbling */
+    if (gamepad && gamepad==rumbled_pad && now<rumbled_until_us && now>=pad_writes_after_us) {
+        SDL_RumbleGamepad(gamepad,0,0,0);
+        rumbled_pad=NULL;
+    }
     gamepad=g;
-    static unsigned noted;
-    if (noted++<50) printf("Runtime: gamepad in use: %s\n",SDL_GetGamepadName(g));
+    /* at most one line every 10 s, with the switches not logged in between */
+    static uint64_t logged_us;
+    static unsigned noted, unlogged;
+    if (noted<50 && (!logged_us || now-logged_us>=10000000u)) {
+        ++noted;
+        logged_us=now;
+        if (unlogged) printf("Runtime: gamepad in use: %s (%u switches not logged)\n",SDL_GetGamepadName(g),unlogged);
+        else printf("Runtime: gamepad in use: %s\n",SDL_GetGamepadName(g));
+        unlogged=0;
+    } else ++unlogged;
 }
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) {
@@ -207,14 +241,34 @@ static SDL_Gamepad *current_gamepad(void) {
     }
     if (!gamepad && gamepad_count) use_gamepad(gamepads[0]);
     if (gamepad_count>1) {
+        /* candidate: another pad that had an edge while the one in use was quiet; it takes over once the one in use
+         * stays quiet for PAD_CONFIRM_US more (a mirror's copy of the same press arrives in that time) */
+        static SDL_Gamepad *candidate;
+        static uint64_t candidate_us;
         const SDL_JoystickID pressed=__atomic_exchange_n(&pad_pressed,0,__ATOMIC_ACQ_REL);
+        uint64_t current_edge=0;
+        int candidate_open=0;
         SDL_Gamepad *next=NULL;
         for (int i=0;i<gamepad_count;++i) {
             const unsigned pushed=pad_axes_pushed(gamepads[i]);
-            if (gamepads[i]!=gamepad && !next && ((pushed & ~gamepad_pushed[i]) ||
-                                                  (pressed && SDL_GetGamepadID(gamepads[i])==pressed)))
-                next=gamepads[i];
+            const unsigned long long held=pad_buttons_held(gamepads[i]);
+            if ((pushed & ~gamepad_pushed[i]) || (held & ~gamepad_held[i]) ||
+                (pressed && SDL_GetGamepadID(gamepads[i])==pressed))
+                gamepad_edge_us[i]=now;
             gamepad_pushed[i]=pushed;
+            gamepad_held[i]=held;
+            if (gamepads[i]==gamepad) current_edge=gamepad_edge_us[i];
+            if (gamepads[i]==candidate) candidate_open=1;
+        }
+        if (!candidate_open) candidate=NULL;
+        for (int i=0;i<gamepad_count && !candidate;++i)
+            if (gamepads[i]!=gamepad && gamepad_edge_us[i]==now && (!current_edge || now-current_edge>=PAD_QUIET_US)) {
+                candidate=gamepads[i];
+                candidate_us=now;
+            }
+        if (candidate) {
+            if (candidate==gamepad || (current_edge && current_edge+PAD_QUIET_US>candidate_us)) candidate=NULL; /* the one in use had the same input */
+            else if (now-candidate_us>=PAD_CONFIRM_US) { next=candidate; candidate=NULL; }
         }
         if (next) use_gamepad(next);
     }
@@ -226,6 +280,8 @@ static void pad_rumble(SDL_Gamepad *g, uint16_t low, uint16_t high, uint32_t ms)
     const uint64_t start=now_us();
     SDL_RumbleGamepad(g,low,high,ms);
     pad_slow("rumble",start);
+    if (low || high) { rumbled_pad=g; rumbled_until_us=start+(uint64_t)ms*1000u; }
+    else if (g==rumbled_pad) rumbled_pad=NULL;
 }
 /* ---- the pad thread (BB_PAD_THREAD=0: off) ------------------------------------------------------------------------
  * Switching a controller off or on makes SDL rescan the input devices for 100-300 ms with its joystick lock held.
