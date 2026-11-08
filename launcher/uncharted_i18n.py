@@ -12,6 +12,7 @@ LANGUAGES = [
     ('es', 'Español'),
     ('pt', 'Português'),
     ('fr', 'Français'),
+    ('ru', 'Русский'),
     ('de', 'Deutsch'),
     ('it', 'Italiano'),
     ('ja', '日本語'),

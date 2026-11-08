@@ -31,6 +31,9 @@ bool window_focused{true};
 // only then (runtime_pad.c, bbgpu_window_foreground). SDL's keyboard focus can be lost while the
 // window stays in front, and with it SDL dropped the gamepad events (from BilalReloaded's port).
 std::atomic<bool> window_foreground{true};
+// Alt+Enter switched between window and fullscreen: its Enter is kept from the game until released
+// (Enter is a default key for Options).
+std::atomic<bool> enter_swallowed{false};
 
 u32 MouseBit(u8 button) {
     switch (button) {
@@ -97,12 +100,17 @@ extern "C" int bbgpu_window_foreground(void) {
     return window_foreground.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
+extern "C" int bbgpu_window_enter_swallowed(void) {
+    return enter_swallowed.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 namespace Frontend {
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
     // Their events come whatever SDL thinks of the keyboard focus; whether the game is in front
-    // is decided from Windows instead (window_foreground). BB_PAD_BACKGROUND=0: as before.
+    // is decided from Windows instead (window_foreground). BB_PAD_BACKGROUND=0: as before;
+    // BB_PAD_BACKGROUND=1: the game also takes them while another window is in front (runtime_pad.c).
     if (const char* env = std::getenv("BB_PAD_BACKGROUND"); !(env && env[0] == '0')) {
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     }
@@ -243,6 +251,25 @@ bool WindowSDL::PollEvents() {
             }
             UpdateTextTitle();
             continue;
+        }
+        // Alt+Enter: window <-> fullscreen while playing (the launcher's Fullscreen is SDL's borderless
+        // fullscreen on the desktop's mode, as here). The swapchain follows the size change through the
+        // resize events below (the presenter recreates it when the window size differs). Leaving
+        // fullscreen gives the window its own size back (BB_WINDOW_SIZE as the game started, or the
+        // last window size). The Enter is kept from the game (Options) until it is released.
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+            (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER) && (event.key.mod & SDL_KMOD_ALT)) {
+            const bool full = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
+            if (SDL_SetWindowFullscreen(window, !full)) {
+                LOG_INFO(Frontend, "Alt+Enter: {}", full ? "window" : "fullscreen");
+            } else {
+                LOG_WARNING(Frontend, "Alt+Enter: could not switch: {}", SDL_GetError());
+            }
+            enter_swallowed = true;
+            continue;
+        }
+        if (event.type == SDL_EVENT_KEY_UP && (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER)) {
+            enter_swallowed = false;
         }
         // BB_TEXTURE_DUMP=1: F10 saves the textures of the next frame (user/texture_dump).
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F10 && !event.key.repeat) {

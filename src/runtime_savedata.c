@@ -154,6 +154,135 @@ static int remove_entry(const char *path, const struct stat *st, int flag, struc
 static void remove_tree(const char *path) { nftw(path,remove_entry,16,FTW_DEPTH|FTW_PHYS); }
 #endif
 
+/* Save auto-repair (the idea from BilalReloaded's port 0.8.0, his #311: a power cut while saving).
+ * Each time the game closes a save, every file in it that holds data (not empty, not all zero bytes)
+ * is copied to <title>.backups/auto/<dir name>/; a file that is empty or all zeros is never copied,
+ * so a good backup is never replaced by a broken file. When the game opens a save, a file in it that
+ * is empty or all zeros while its backup holds data is put back from the backup (logged). Files are
+ * only repaired, never added or removed. A save the game deletes moves its backup to
+ * <dir name>.deleted (so a new save of that name is not "repaired" from the old one).
+ * The practice copy of checkpoint jumps is left alone. BB_SAVE_BACKUP=0: off. */
+#define BACKUP_MAX_FILE (256u<<20)
+static pthread_mutex_t backup_lock=PTHREAD_MUTEX_INITIALIZER;
+static int backup_enabled(void) {
+    static int on=-1;
+    if (on<0) { const char *e=getenv("BB_SAVE_BACKUP"); on=!(e && e[0]=='0'); }
+    return on;
+}
+/* A whole file (NULL: missing, unreadable or too big); *size its length. */
+static unsigned char *read_whole(const char *path, size_t *size) {
+    *size=0;
+    FILE *f=fopen(path,"rb");
+    if (!f) return NULL;
+    unsigned char *data=NULL;
+    long n=fseek(f,0,SEEK_END) ? -1 : ftell(f);
+    if (n>=0 && (unsigned long)n<=BACKUP_MAX_FILE && !fseek(f,0,SEEK_SET)) {
+        data=malloc(n ? (size_t)n : 1);
+        if (data && fread(data,1,(size_t)n,f)!=(size_t)n) { free(data); data=NULL; }
+        if (data) *size=(size_t)n;
+    }
+    fclose(f);
+    return data;
+}
+static int holds_data(const unsigned char *data, size_t size) {
+    for (size_t i=0;data && i<size;++i) if (data[i]) return 1;
+    return 0;
+}
+static int is_temp_name(const char *name) {
+    const size_t n=strlen(name);
+    return name[0]=='.' || (n>6 && !strcmp(name+n-6,".bbtmp"));
+}
+/* backup=1: the files of `from` (the save) that hold data into `to` (its backup).
+ * backup=0: the files of `to` (the save) that are empty or all zeros put back from `from` (the backup). */
+static void backup_walk(const char *from, const char *to, int backup, int depth, const char *save) {
+    if (depth>4) return;
+    DIR *dir=opendir(from);
+    if (!dir) return;
+    for (struct dirent *e; (e=readdir(dir));) {
+        if (is_temp_name(e->d_name)) continue;
+        char src[760], dst[760];
+        snprintf(src,sizeof(src),"%s/%s",from,e->d_name);
+        snprintf(dst,sizeof(dst),"%s/%s",to,e->d_name);
+        struct stat st;
+        if (stat(src,&st)) continue;
+        if (S_ISDIR(st.st_mode)) {
+            struct stat target;
+            if (backup || (!stat(dst,&target) && S_ISDIR(target.st_mode))) backup_walk(src,dst,backup,depth+1,save);
+            continue;
+        }
+        if (!S_ISREG(st.st_mode)) continue;
+        size_t src_size, dst_size;
+        unsigned char *src_data=read_whole(src,&src_size);
+        if (!src_data) continue;
+        struct stat target;
+        const int dst_exists=!stat(dst,&target) && S_ISREG(target.st_mode);
+        unsigned char *dst_data=dst_exists ? read_whole(dst,&dst_size) : NULL;
+        if (backup) {
+            /* only a file with data, and only when it changed */
+            if (holds_data(src_data,src_size) &&
+                !(dst_data && dst_size==src_size && !memcmp(dst_data,src_data,src_size))) {
+                if (make_dirs(to) || write_atomic(dst,src_data,src_size))
+                    printf("Runtime: save backup of '%s/%s' could not be written\n",save,e->d_name);
+            } else if (!holds_data(src_data,src_size)) {
+                printf("Runtime: save '%s/%s' is %s: its backup is kept as it was\n",save,e->d_name,
+                       src_size ? "all zeros" : "empty");
+            }
+        } else if (dst_exists && holds_data(src_data,src_size) && !holds_data(dst_data,dst_data ? dst_size : 0) &&
+                   (dst_data || !target.st_size)) {
+            /* (dst_data NULL with a size: unreadable, left alone) */
+            if (write_atomic(dst,src_data,src_size))
+                printf("Runtime: save '%s/%s' is %s and could not be restored from its backup\n",save,e->d_name,
+                       target.st_size ? "all zeros" : "empty");
+            else
+                printf("Runtime: save '%s/%s' was %s: restored from its backup (%zu bytes, backups/auto)\n",save,
+                       e->d_name,target.st_size ? "all zeros" : "empty",src_size);
+        }
+        free(src_data);
+        free(dst_data);
+    }
+    closedir(dir);
+}
+static void backup_path(const char *base, const char *name, char *out, size_t size) {
+    snprintf(out,size,"%s.backups/auto/%s",base,name);
+}
+/* host: the save's folder; only the player's own saves (base/name) are backed up. */
+static int backup_target(const char *host, char *base_out, size_t base_size, char *name_out, size_t name_size) {
+    const char *slash=strrchr(host,'/');
+    if (!slash || !backup_enabled()) return 0;
+    snprintf(base_out,base_size,"%.*s",(int)(slash-host),host);
+    snprintf(name_out,name_size,"%s",slash+1);
+    return !strstr(base_out,".backups");
+}
+static void save_backup(const char *host) {
+    char base[700], name[64], backup[800];
+    if (!backup_target(host,base,sizeof(base),name,sizeof(name))) return;
+    backup_path(base,name,backup,sizeof(backup));
+    pthread_mutex_lock(&backup_lock);
+    backup_walk(host,backup,1,0,name);
+    pthread_mutex_unlock(&backup_lock);
+}
+static void save_repair(const char *host) {
+    char base[700], name[64], backup[800];
+    if (!backup_target(host,base,sizeof(base),name,sizeof(name))) return;
+    backup_path(base,name,backup,sizeof(backup));
+    pthread_mutex_lock(&backup_lock);
+    backup_walk(backup,host,0,0,name);
+    pthread_mutex_unlock(&backup_lock);
+}
+static void save_backup_deleted(const char *host) {
+    char base[700], name[64], backup[800], old[820];
+    if (!backup_target(host,base,sizeof(base),name,sizeof(name))) return;
+    backup_path(base,name,backup,sizeof(backup));
+    snprintf(old,sizeof(old),"%s.deleted",backup);
+    pthread_mutex_lock(&backup_lock);
+    struct stat st;
+    if (!stat(backup,&st)) {
+        remove_tree(old);
+        if (rename(backup,old)) remove_tree(backup);
+    }
+    pthread_mutex_unlock(&backup_lock);
+}
+
 static ABI int32_t save_initialize(const void *param) { (void)param; initialized=1; return 0; }
 static ABI int32_t save_terminate(void) {
     if (!initialized) return ERR_NOT_INITIALIZED;
@@ -204,6 +333,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     int exists=!stat(host,&st) && S_ISDIR(st.st_mode);
     if ((mode & MODE_CREATE) && exists) return ERR_EXISTS;
     if (!(mode & (MODE_CREATE|MODE_CREATE2)) && !exists) return ERR_NOT_FOUND;
+    if (exists) save_repair(host); /* an empty or zeroed file (a power cut while saving) from its backup */
     pthread_mutex_lock(&lock);
     int slot=-1;
     for (int i=0;i<SLOTS;++i) {
@@ -253,7 +383,9 @@ static ABI int32_t save_umount(const MountPoint *point) {
     char host[700]="";
     if (slot>=0) { runtime_file_unmount(point->data); slots[slot].used=0; snprintf(host,sizeof(host),"%s",slots[slot].host); }
     pthread_mutex_unlock(&lock);
-    /* A save closed: the overlay's story save follows the game's campaign saves (bbport_saves.cpp). */
+    /* A save closed: its files with data are backed up (save auto-repair), and the overlay's story save
+     * follows the game's campaign saves (bbport_saves.cpp). */
+    if (slot>=0) save_backup(host);
     if (slot>=0) bbport_saves_closed(host);
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
@@ -304,6 +436,7 @@ static ABI int32_t save_delete(const Delete *d) {
     if (stat(host,&st)) return ERR_NOT_FOUND;
     remove_tree(host);
     remove_tree(meta);
+    save_backup_deleted(host);
     printf("Runtime: save data '%s' deleted\n",d->dir->data);
     return 0;
 }
