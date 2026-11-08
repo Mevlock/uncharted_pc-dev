@@ -48,7 +48,7 @@ class InputConfigTests(unittest.TestCase):
                 self.assertIn('key.rotate_ccw=R\n', text)
                 self.assertIn('key.rotate_cw=T\n', text)
                 self.assertIn('key.walk=Left Ctrl\n', text)
-                self.assertIn('walk_speed=45\n', text)
+                self.assertIn('walk_speed=65\n', text)
                 # a default key the player already gave to something else stays theirs
                 LAUNCHER.write_input_ini({'key_bindings': {'cross': 'R', 'square': 'Left Ctrl'}, 'walk_speed': '70'})
                 text = path.read_text(encoding='utf-8')
@@ -61,8 +61,8 @@ class InputConfigTests(unittest.TestCase):
                 self.assertIn('key.rotate_ccw=R\n', path.read_text(encoding='utf-8'))
             finally:
                 LAUNCHER.input_ini_path = original
-        self.assertEqual(LAUNCHER.walk_speed({'walk_speed': '5'}), 10)
-        self.assertEqual(LAUNCHER.walk_speed({'walk_speed': 'x'}), 45)
+        self.assertEqual(LAUNCHER.walk_speed({'walk_speed': '5'}), 50)
+        self.assertEqual(LAUNCHER.walk_speed({'walk_speed': 'x'}), 65)
 
     def test_controller_in_the_background_is_an_option(self):
         self.assertFalse(LAUNCHER.APP_DEFAULTS['pad_background'])

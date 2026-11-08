@@ -192,7 +192,7 @@ STICK_ACTIONS = [
 # Keys added after players already had their own bindings: the default is left out where the player
 # already uses that key for something else.
 LATE_ACTIONS = ('rotate_ccw', 'rotate_cw', 'walk')
-WALK_SPEED_MIN, WALK_SPEED_MAX = 10, 100
+WALK_SPEED_MIN, WALK_SPEED_MAX = 50, 100
 DEFAULT_KEYS = {a: k for a, _t, k, _p in BUTTON_ACTIONS} | {a: k for a, _t, k in STICK_ACTIONS}
 DEFAULT_PAD = {a: p for a, _t, _k, p in BUTTON_ACTIONS}
 PAD_BUTTONS = [('a', 'A / Cross'), ('b', 'B / Circle'), ('x', 'X / Square'), ('y', 'Y / Triangle'),
@@ -238,7 +238,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
                 'mouse_aim_sensitivity': '1.0', 'mouse_vertical': '1.0',
-                'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '45', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
+                'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '65', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
                 **{f'{game}_devmode': False for game, _t, _s, _e in GAMES},
@@ -556,9 +556,9 @@ def vibration_strength(s):
 def walk_speed(s):
     """How far the walk key lets the movement keys push the stick (percent, input.ini walk_speed)."""
     try:
-        return min(WALK_SPEED_MAX, max(WALK_SPEED_MIN, int(float(s.get('walk_speed', 45)))))
+        return min(WALK_SPEED_MAX, max(WALK_SPEED_MIN, int(float(s.get('walk_speed', 65)))))
     except (TypeError, ValueError):
-        return 45
+        return 65
 
 
 def controller_probe_path():
@@ -1949,7 +1949,7 @@ class Launcher:
         self.row(f, _('Walk speed'),
                  Slider(self.tk, self.target(f), self.var('walk_speed'), WALK_SPEED_MIN, WALK_SPEED_MAX, 5,
                         COLORS, self.px, self.font_ui_md, fmt='{:.0f}', width=300, suffix='%'),
-                 _('How far the walk key pushes the stick. Default is 45%.'))
+                 _('How far the walk key pushes the stick. Default is 65%; below about 55% the games do not move the character.'))
 
         self.section(f, _('Controller'))
         self.note(f, _('Which controller button gives each PS4 button (Xbox / PlayStation names).'), top=2)

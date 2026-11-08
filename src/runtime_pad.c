@@ -14,7 +14,7 @@
  *       touchpad misc1 paddle1..paddle4) or "none", for the button actions above.
  *   mouse_look=1  mouse_sensitivity=1.0  mouse_invert_y=0  pad_invert_y=0
  *   mouse_aim_sensitivity=1.0 (times the sensitivity while aiming)  mouse_vertical=1.0 (times it for up/down)
- *   pad_vibration=1  pad_vibration_strength=100  walk_speed=45 (walk key deflection, percent)
+ *   pad_vibration=1  pad_vibration_strength=100  walk_speed=65 (walk key deflection, percent, 50-100)
  *
  * Defaults (no file): WASD move, mouse look, left button R2 (fire), right button L2 (aim),
  * Space Cross, C Circle, F Square, E Triangle, Q L1, G R1, Left Shift L3, V R3, Escape/Enter
@@ -514,7 +514,7 @@ static void load_input(void) {
     }
     input.mouse_look=1; input.mouse_sensitivity=1.0f;
     input.mouse_aim_sensitivity=1.0f; input.mouse_vertical=1.0f;
-    input.pad_vibration=1; input.pad_vibration_strength=100; input.walk_speed=45;
+    input.pad_vibration=1; input.pad_vibration_strength=100; input.walk_speed=65;
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
     if (f) {
@@ -535,7 +535,7 @@ static void load_input(void) {
             else if (!strcmp(key,"pad_vibration_strength")) input.pad_vibration_strength=atoi(value);
             else if (!strcmp(key,"walk_speed")) {
                 const int v=atoi(value);
-                input.walk_speed=v<10 ? 10 : v>100 ? 100 : v;
+                input.walk_speed=v<50 ? 50 : v>100 ? 100 : v; /* below about 55% the games' dead zone keeps the character still */
             }
             else for (int a=0;a<ACTIONS;++a) {
                 if (!strncmp(key,"key.",4) && !strcmp(key+4,actions[a].name)) set_keys(a,value);
