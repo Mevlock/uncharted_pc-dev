@@ -351,6 +351,7 @@ bool WindowSDL::PollEvents() {
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST: {
             window_focused = false;
+            enter_swallowed = false; // its key-up may go to another window
             std::scoped_lock lock{mouse_mutex};
             mouse_buttons = 0;
             break;
@@ -375,6 +376,12 @@ bool WindowSDL::PollEvents() {
         default:
             break;
         }
+    }
+    // The window mode change (or another window holding the keys meanwhile) can swallow Enter's key-up:
+    // once neither Enter is held, the game gets Enter again.
+    if (enter_swallowed.load(std::memory_order_relaxed)) {
+        const bool* keys = SDL_GetKeyboardState(nullptr);
+        if (!keys || (!keys[SDL_SCANCODE_RETURN] && !keys[SDL_SCANCODE_KP_ENTER])) enter_swallowed = false;
     }
     return is_open;
 }
