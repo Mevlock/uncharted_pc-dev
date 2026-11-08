@@ -289,7 +289,9 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
         /* Apply per-channel volume and map PS4 8ch (L R C LFE SL SR BL BR) to SDL 7.1 order. */
         unsigned char converted[2048*8*4];
         static const int remap[8]={0,1,2,3,6,7,4,5};
-        for (size_t f=0;f<(size_t)p->frames;++f) for (int c=0;c<p->channels;++c) {
+        /* No SDL stream (timer sink, BB_AUDIO=none) and no dump: nothing takes the samples. */
+        const int wanted=p->stream || p->dump;
+        if (wanted) for (size_t f=0;f<(size_t)p->frames;++f) for (int c=0;c<p->channels;++c) {
             int target=p->channels==8 && !p->std_layout ? remap[c] : c;
             size_t from=f*(size_t)p->channels+(size_t)c, to=f*(size_t)p->channels+(size_t)target;
             float gain=(float)p->volume[c]/VOLUME_0DB;
@@ -303,7 +305,7 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
         const unsigned char *queue_data=converted;
         size_t queue_bytes=bytes;
         unsigned char folded[2048*6*4];
-        if (p->channels==8 && p->out_channels<8) {
+        if (p->stream && p->channels==8 && p->out_channels>0 && p->out_channels<8) {
             const int n=p->out_channels;
             for (size_t f=0;f<(size_t)p->frames;++f) {
                 float s[8], o[6];
