@@ -109,7 +109,7 @@ struct Values {
     /// hue correction, per-channel tone mapping, highlights start (the SDR brightness above which
     /// the scene's extended highlights take over; 0 = the earlier ramp, from the file or the
     /// environment only). The game's SDR picture in HDR10: decode gamma and saturation (Oklab
-    /// chroma).
+    /// chroma). Gamut expansion (everything): the colours spread towards a wider gamut.
     std::atomic<float> hdr_paper_white{203.0f};
     std::atomic<float> hdr_peak_nits{1000.0f};
     std::atomic<float> hdr_exposure{1.0f};
@@ -123,6 +123,8 @@ struct Values {
     std::atomic<float> hdr_highlight_start{0.6f};
     std::atomic<float> hdr_sdr_gamma{2.2f};
     std::atomic<float> hdr_sdr_saturation{1.1f};
+    /// Gamut expansion (both outputs): 0 accurate, 1 as Display P3, 2 as Rec. 2020.
+    std::atomic<float> hdr_gamut_expansion{0.0f};
 
     /// Startup settings for the explicit BB_RENDER_RES compatibility patch only.
     int startup_preset = NativeAA;

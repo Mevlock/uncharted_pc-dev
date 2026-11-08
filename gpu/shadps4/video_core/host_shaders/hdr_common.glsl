@@ -7,6 +7,33 @@ const mat3 BT709_TO_BT2020 = mat3(
     0.3292820, 0.9195400, 0.0880132,
     0.0433136, 0.0113612, 0.8955950);
 
+// Display P3 (D65) to Rec. 2020, linear. Gamut expansion reads the Rec. 709 values as P3 ones.
+const mat3 P3_TO_BT2020 = mat3(
+    0.7538330, 0.0457438, -0.0012103,
+    0.1985974, 0.9417772, 0.0176017,
+    0.0475696, 0.0124789, 0.9836086);
+
+// Rec. 2020 luminance (Y) weights.
+const vec3 BT2020_Y = vec3(0.2627002, 0.6779981, 0.0593017);
+
+// Gamut expansion (0-2): what a wide-gamut screen does with an SDR picture, its primaries stretched
+// to the panel's. 0: Rec. 709 placed exactly in Rec. 2020 (accurate); 1: the values read as
+// Display P3; 2: read as Rec. 2020 itself; in between a blend of the two neighbouring matrices.
+// Every matrix maps white to white (D65), so greys stay neutral; the result is scaled back to the
+// accurate conversion's luminance, so brightness (paper white, highlights) does not change.
+// Rec. 709 linear -> Rec. 2020 linear.
+vec3 Bt2020FromBt709(vec3 c, float expansion) {
+    const vec3 accurate = BT709_TO_BT2020 * c;
+    if (expansion <= 0.0) {
+        return accurate;
+    }
+    const vec3 p3 = P3_TO_BT2020 * c;
+    const vec3 wide = expansion <= 1.0 ? mix(accurate, p3, expansion)
+                                       : mix(p3, c, min(expansion, 2.0) - 1.0);
+    const float y = dot(accurate, BT2020_Y), wide_y = dot(wide, BT2020_Y);
+    return y > 0.0 && wide_y > 1e-6 ? wide * clamp(y / wide_y, 0.25, 4.0) : wide;
+}
+
 // SMPTE ST 2084 inverse EOTF: absolute nits -> PQ signal.
 vec3 PqFromNits(vec3 nits) {
     const float m1 = 0.1593017578125, m2 = 78.84375;
@@ -48,14 +75,15 @@ vec3 Bt709FromOklab(vec3 lab) {
 // `linear`: as an sRGB view reads the picture (above 1.0: the HDR scene, already in the domain
 // where gamma 2.2 gives its own value). `saturation` scales the Oklab chroma (lightness and hue
 // kept; 1.0: none): colours past Rec. 709 land in Rec. 2020's wider gamut instead of clipping.
+// `expansion`: gamut expansion (Bt2020FromBt709; 0: accurate).
 // Rec. 709, white = paper_nits -> HDR10 signal.
 vec3 Hdr10FromPicture(vec3 linear, float paper_nits, float peak_nits, float gamma,
-                      float saturation) {
+                      float saturation, float expansion) {
     vec3 rel = pow(SrgbEncodeExt(linear), vec3(gamma));
     if (saturation != 1.0) {
         vec3 lab = OklabFromBt709(rel);
         lab.yz *= saturation;
         rel = Bt709FromOklab(lab);
     }
-    return PqFromNits(clamp(BT709_TO_BT2020 * (rel * paper_nits), 0.0, peak_nits));
+    return PqFromNits(clamp(Bt2020FromBt709(rel * paper_nits, expansion), 0.0, peak_nits));
 }

@@ -29,6 +29,9 @@ public:
         /// the scene HDR composite 2.2 and 1.0, its own domain).
         float sdr_gamma = 2.2f;
         float sdr_saturation = 1.0f;
+        /// bbport (hdr 2, both the SDR picture and the scene HDR composite): gamut expansion,
+        /// 0 accurate Rec. 709 in Rec. 2020, 1 read as Display P3, 2 read as Rec. 2020.
+        float gamut_expansion = 0.0f;
     };
     /// bbport: `hdr` values.
     static constexpr u32 HdrGuestPq = 1;

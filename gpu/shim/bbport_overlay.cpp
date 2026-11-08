@@ -422,6 +422,11 @@ void HdrSection(BbSettings::Values& s) {
     Hint(T("Gamma: 2.2 is the display the games were made for; 2.4 gives deeper shadows. "
            "Saturation: 1.00 is the game's own colour; above it colours get stronger, using the "
            "wider colour range of HDR."));
+    // Both outputs (the last step before the HDR10 signal), so outside the two groups.
+    SliderIn(TI("Gamut expansion"), s.hdr_gamut_expansion, 0.0f, 2.0f, "%.2f");
+    Hint(T("Spreads colours into the HDR colour range, like wide-gamut monitors show SDR; 0 = "
+           "accurate colours, 1 = as a P3 monitor, 2 = the full HDR range. Brightness stays the "
+           "same."));
     if (ImGui::Button(TI("Reset HDR settings"))) {
         BbSettings::ResetHdr();
         dirty = true;
@@ -430,10 +435,10 @@ void HdrSection(BbSettings::Values& s) {
     const std::string values = fmt::format(
         "paper {:.0f}, peak {:.0f} | exposure {:.2f}, start {:.2f}, saturation {:.2f}, highlights "
         "{:.2f}, contrast {:.2f}, colour {:.2f}, blowout {:.2f}, hue {:.2f}, per-channel {} | "
-        "gamma {:.2f}, picture saturation {:.2f}",
+        "gamma {:.2f}, picture saturation {:.2f} | gamut expansion {:.2f}",
         t.paper_white, t.peak_nits, t.exposure, t.highlight_start, t.saturation,
         t.highlight_saturation, t.contrast, t.chrominance, t.blowout, t.hue_correction,
-        t.per_channel != 0.0f ? "on" : "off", t.sdr_gamma, t.sdr_saturation);
+        t.per_channel != 0.0f ? "on" : "off", t.sdr_gamma, t.sdr_saturation, t.gamut_expansion);
     TextGrey(values.c_str());
 }
 

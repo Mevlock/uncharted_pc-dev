@@ -54,6 +54,7 @@ Tuning Current() {
     t.highlight_start = v.hdr_highlight_start.load(r);
     t.sdr_gamma = v.hdr_sdr_gamma.load(r);
     t.sdr_saturation = v.hdr_sdr_saturation.load(r);
+    t.gamut_expansion = v.hdr_gamut_expansion.load(r);
     return t;
 }
 

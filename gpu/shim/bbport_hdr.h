@@ -35,6 +35,10 @@ struct Tuning {
     // The game's SDR picture in HDR10 (post process pass): decode gamma, Oklab chroma scale.
     float sdr_gamma;
     float sdr_saturation;
+    /// Both outputs (the SDR picture and the scene HDR composite), the last step before PQ:
+    /// 0 accurate (Rec. 709 exactly in Rec. 2020), 1 the colours read as Display P3, 2 as
+    /// Rec. 2020 (as wide-gamut screens stretch SDR); luminance kept.
+    float gamut_expansion;
 };
 [[nodiscard]] Tuning Current();
 

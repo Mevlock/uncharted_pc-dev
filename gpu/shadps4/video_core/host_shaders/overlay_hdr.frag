@@ -21,6 +21,7 @@ layout (push_constant) uniform settings {
     float peak_nits;
     float sdr_gamma;
     float sdr_saturation;
+    float gamut_expansion; // bbport (hdr 2): Bt2020FromBt709, 0 accurate
 } pp;
 
 void main() {

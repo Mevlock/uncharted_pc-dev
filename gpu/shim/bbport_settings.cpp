@@ -97,6 +97,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.hdr_sdr_gamma = Clamp(f, 1.8f, 2.8f);
     } else if (key == "hdr_sdr_saturation") {
         v.hdr_sdr_saturation = Clamp(f, 0.0f, 2.0f);
+    } else if (key == "hdr_gamut_expansion") {
+        v.hdr_gamut_expansion = Clamp(f, 0.0f, 2.0f);
     } else if (key == "output_res") {
         for (int r = 0; r < OutputCount; ++r) {
             if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
@@ -159,6 +161,7 @@ void Load() {
         {"BB_HDR_PER_CHANNEL", "hdr_per_channel"},  {"BB_HDR_SDR_GAMMA", "hdr_sdr_gamma"},
         {"BB_HDR_SDR_SATURATION", "hdr_sdr_saturation"},
         {"BB_HDR_HIGHLIGHT_START", "hdr_highlight_start"},
+        {"BB_HDR_GAMUT_EXPANSION", "hdr_gamut_expansion"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env)) {
@@ -271,12 +274,12 @@ void Save() {
                  "hdr_paper_white=%.0f\nhdr_peak_nits=%.0f\nhdr_exposure=%.2f\nhdr_saturation=%.2f\n"
                  "hdr_highlight_saturation=%.2f\nhdr_contrast=%.2f\nhdr_chrominance=%.2f\n"
                  "hdr_blowout=%.2f\nhdr_hue_correction=%.2f\nhdr_per_channel=%d\nhdr_sdr_gamma=%.2f\n"
-                 "hdr_sdr_saturation=%.2f\nhdr_highlight_start=%.2f\n",
+                 "hdr_sdr_saturation=%.2f\nhdr_highlight_start=%.2f\nhdr_gamut_expansion=%.2f\n",
                  v.hdr_paper_white.load(), v.hdr_peak_nits.load(), v.hdr_exposure.load(),
                  v.hdr_saturation.load(), v.hdr_highlight_saturation.load(), v.hdr_contrast.load(),
                  v.hdr_chrominance.load(), v.hdr_blowout.load(), v.hdr_hue_correction.load(),
                  int(v.hdr_per_channel.load()), v.hdr_sdr_gamma.load(), v.hdr_sdr_saturation.load(),
-                 v.hdr_highlight_start.load());
+                 v.hdr_highlight_start.load(), v.hdr_gamut_expansion.load());
     std::fclose(file);
 }
 
@@ -294,7 +297,8 @@ void ResetHdr() {
                                 {&v.hdr_hue_correction, defaults.hdr_hue_correction.load()},
                                 {&v.hdr_highlight_start, defaults.hdr_highlight_start.load()},
                                 {&v.hdr_sdr_gamma, defaults.hdr_sdr_gamma.load()},
-                                {&v.hdr_sdr_saturation, defaults.hdr_sdr_saturation.load()}}) {
+                                {&v.hdr_sdr_saturation, defaults.hdr_sdr_saturation.load()},
+                                {&v.hdr_gamut_expansion, defaults.hdr_gamut_expansion.load()}}) {
         field->store(value);
     }
     v.hdr_per_channel = defaults.hdr_per_channel.load();
@@ -329,6 +333,7 @@ bool SetHdrKey(const std::string& key, const std::string& value, std::string& ap
         {"hdr_sdr_gamma", &v.hdr_sdr_gamma},
         {"hdr_sdr_saturation", &v.hdr_sdr_saturation},
         {"hdr_highlight_start", &v.hdr_highlight_start},
+        {"hdr_gamut_expansion", &v.hdr_gamut_expansion},
     };
     for (const auto& [name, field] : keys) {
         if (key != name) {

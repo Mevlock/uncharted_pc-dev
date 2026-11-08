@@ -787,6 +787,22 @@ TRANSLATIONS = {
         'ガンマ: 2.2 はゲームが作られた時のディスプレイです。2.4 ではシャドウのコントラストが上がります。'
         'サチュレーション: 1.00 はゲーム本来のカラーです。これより上ではカラーが強くなり、HDR のワイドな'
         'カラーガマットを使います。'),
+    'Gamut expansion': L('Expansión de la gama', 'Expansão da gama', 'Expansion de la gamme', 'Farbraumerweiterung',
+                         'Espansione della gamma', 'ガマット エクスパンション'),
+    'Spreads colours into the HDR colour range, like wide-gamut monitors show SDR; 0 = accurate colours, 1 = as a P3 '
+    'monitor, 2 = the full HDR range. Brightness stays the same.': L(
+        'Extiende los colores a la gama de color del HDR, como los monitores de gama amplia muestran el SDR; 0 = colores '
+        'exactos, 1 = como un monitor P3, 2 = toda la gama del HDR. El brillo no cambia.',
+        'Espalha as cores pela gama de cores do HDR, como os monitores de gama ampla mostram o SDR; 0 = cores exatas, '
+        '1 = como um monitor P3, 2 = toda a gama do HDR. O brilho não muda.',
+        'Étend les couleurs dans la gamme de couleurs du HDR, comme les écrans à gamme étendue affichent le SDR ; '
+        '0 = couleurs exactes, 1 = comme un écran P3, 2 = toute la gamme du HDR. La luminosité ne change pas.',
+        'Spreizt die Farben in den Farbraum von HDR, wie Monitore mit großem Farbraum SDR zeigen; 0 = genaue Farben, '
+        '1 = wie ein P3-Monitor, 2 = der ganze HDR-Farbraum. Die Helligkeit bleibt gleich.',
+        "Allarga i colori nella gamma di colori dell'HDR, come i monitor a gamma ampia mostrano l'SDR; 0 = colori "
+        "esatti, 1 = come un monitor P3, 2 = tutta la gamma dell'HDR. La luminosità non cambia.",
+        'ワイドガマットのモニターで SDR を表示する時のように、カラーを HDR のカラーガマットへひろげます。'
+        '0 = 正確なカラー、1 = P3 モニターと同じ、2 = HDR のカラーガマットいっぱい。明るさは変わりません。'),
     'Reset HDR settings': L('Restablecer ajustes HDR', 'Redefinir configurações HDR', 'Réinitialiser les réglages HDR',
                             'HDR-Einstellungen zurücksetzen', 'Ripristina le impostazioni HDR', 'HDR 設定をリセット'),
 }

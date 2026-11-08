@@ -768,6 +768,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         pp_settings.peak_nits = tuning.peak_nits;
         pp_settings.sdr_gamma = float_display ? 2.2f : tuning.sdr_gamma;
         pp_settings.sdr_saturation = float_display ? 1.0f : tuning.sdr_saturation;
+        // Gamut expansion: the last step of both (the overlay keeps accurate colours).
+        pp_settings.gamut_expansion = tuning.gamut_expansion;
     }
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr && !encode_hdr);
