@@ -1149,12 +1149,11 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     const auto t1 = Clock::now();
 
     // Present to swapchain.
+    bool presented = true;
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
         const auto t2 = Clock::now();
-        if (!swapchain.Present(latency_id) && window.GetWidth() != 0 && window.GetHeight() != 0) {
-            swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        }
+        presented = swapchain.Present(latency_id);
         const auto t3 = Clock::now();
         if (slow_ms > 0 && ms(t0, t3) > slow_ms) {
             char gpu_done[32] = "(not waited)";
@@ -1167,6 +1166,10 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
                         ms(t1, t2), swapchain.last_async_ms, swapchain.last_queue_lock_ms,
                         swapchain.last_present_call_ms);
         }
+    }
+    // Recreate (its Destroy) waits for the device under the submit lock: after releasing it.
+    if (!presented && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
     return true;
 }

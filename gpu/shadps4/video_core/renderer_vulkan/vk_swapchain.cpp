@@ -12,6 +12,7 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_low_latency.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
 namespace Vulkan {
@@ -98,13 +99,8 @@ void Swapchain::SetHDR(bool hdr) {
         return;
     }
 
-    auto result = instance.GetDevice().waitIdle();
-    if (result != vk::Result::eSuccess) {
-        LOG_WARNING(ImGui, "Failed to wait for Vulkan device idle on mode change: {}",
-                    vk::to_string(result));
-    }
-
     needs_hdr = hdr;
+    // Recreate's Destroy waits for the device under the submit lock.
     Recreate(width, height);
     ImGui::Core::OnSurfaceFormatChange(needs_hdr ? SURFACE_FORMAT_HDR.format
                                                  : surface_format.format);
@@ -290,6 +286,11 @@ void Swapchain::SetSurfaceProperties() {
 void Swapchain::Destroy() {
     LowLatency::OnSwapchainDestroy();
     vk::Device device = instance.GetDevice();
+    // bbport: vkDeviceWaitIdle needs the queues externally synchronized: the GPU command thread
+    // submits under submit_mutex while the presenter recreates the swapchain (a window resize, a
+    // display mode change). From moistman7's PR #156 to BilalReloaded's port (display changes
+    // with DLSS lost the device). Callers must not hold submit_mutex.
+    std::scoped_lock submit_lock{Scheduler::submit_mutex};
     const auto wait_result = device.waitIdle();
     if (wait_result != vk::Result::eSuccess) {
         LOG_WARNING(Render_Vulkan, "Failed to wait for device to become idle: {}",
