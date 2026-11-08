@@ -43,11 +43,11 @@ vars `BB_HDR_*` override the file. Paper white and peak come from the launcher o
 |---|---|---|---|---|
 | Paper white | `hdr_paper_white` | 80-500 | 203 (launcher) | 300 (user's room/monitor) |
 | Peak brightness | `hdr_peak_nits` | 400-10000 | 1000 (launcher) | 1000 (monitor peak) |
-| Exposure | `hdr_exposure` | 0.25-4 | 1.00 | 1.00 |
+| Exposure | `hdr_exposure` | 0.25-4 | 1.00 | **1.05** |
 | Highlights start | `hdr_highlight_start` | 0.10-0.95 | 0.60 | **0.70** |
 | Saturation | `hdr_saturation` | 0-2 | 1.10 | **1.05** |
 | Highlight saturation | `hdr_highlight_saturation` | 0-2 | 1.00 | **0.90** |
-| Contrast | `hdr_contrast` | 0.5-2 | 1.00 | **1.20** |
+| Contrast | `hdr_contrast` | 0.5-2 | 1.00 | **1.10** |
 | Colour restoration (per-channel chrominance correction) | `hdr_chrominance` | 0-1 | 1.00 | 1.00 |
 | Blowout restoration | `hdr_blowout` | 0-1 | 0.00 | **0.25** |
 | Hue correction | `hdr_hue_correction` | 0-1 | 1.00 | 1.00 |
@@ -83,7 +83,12 @@ its slider moved, logged (`HDR tune: hdr_saturation=1.20 (file)`) and saved to `
      midtone colour 0.999, highlight colour 1.001, highlights 1.9x SDR, top 1% about 620 nits.
    - The same values on Uncharted 2 Nepal (a dim scene with no highlights): midtone brightness -5.6% (contrast 1.20
      deepens dark scenes a little), colour +1.6%. One default set fits both.
-4. **User's look** with the matched values: "not bad, might have to tweak a bit". Final values pending.
+4. **Uncharted 1** jungle (#1 save, dark, no highlights): with the U3 values the midtones came out 15% darker than
+   SDR (contrast 1.20 deepens dark scenes); the matcher raised exposure to 1.10. **Compromise for all three**
+   (contrast 1.10, exposure 1.05, the rest as matched in U3), one measurement each: U1 midtones -0.8% / colour
+   +2.2%, U2 +4.5% / +3.7%, U3 +5.7% / +0.6% with highlights 1.78x SDR, colour 0.97, top 1% about 605 nits.
+   This is the tuned set in the table.
+5. **User's look** with the U3-only values (contrast 1.20, exposure 1.00): "not bad, might have to tweak a bit". Final values pending.
 
 ## Open
 
