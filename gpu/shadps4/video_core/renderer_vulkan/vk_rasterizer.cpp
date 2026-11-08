@@ -29,6 +29,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "bbport_hdr.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "bbport_threads.h"
 #include <vulkan/vulkan_format_traits.hpp>
@@ -905,7 +906,131 @@ bool Rasterizer::SyncSrtReads(const Shader::SrtReadLog& log) {
     return true;
 }
 
-Rasterizer::~Rasterizer() = default;
+Rasterizer::~Rasterizer() {
+    if (hdr_settings_buffer) {
+        vmaDestroyBuffer(instance.GetAllocator(), hdr_settings_buffer, hdr_settings_allocation);
+    }
+}
+
+// bbport: scene HDR (TemporalUpscaler::HdrScene, gpu/hdr/README.md). The tone pass is drawn again
+// with its HDR replacement into the Tone shadow (the peak and paper-white nits in a buffer at the
+// replacement's settings binding); the pass after it again with the Tone shadow in place of its
+// input (binding 2) into the Scene shadow, through its RGBA16F variant: the game's own math
+// (distortion, overlays, the 2.2 power) on the HDR values. Same constants, buffers and render
+// area; the game's own draws are untouched. From moistman7's PR #156 to BilalReloaded's port.
+void Rasterizer::RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderState& state,
+                                 bool is_indexed, u32 num_indices, u32 num_instances,
+                                 u32 first_vertex, u32 first_instance) {
+    using Shadow = TemporalUpscaler::HdrShadow;
+    const vk::Pipeline handle = pipeline.HdrHandle();
+    const auto* ps = pipeline.GetStages()[u32(Shader::SwStage::Fragment)];
+    if (!handle || !ps || !upscaler->HdrScene() || state.num_color_attachments != 1 ||
+        pipeline.SplitSets()) {
+        return;
+    }
+    Pipeline::DescriptorWrites writes = set_writes;
+    vk::DescriptorBufferInfo settings_info{};
+    vk::DescriptorImageInfo tone_info{};
+    Shadow which{};
+    if (pipeline.GetHdrRole() == GraphicsPipeline::HdrRole::Tone) {
+        if (!hdr_settings_buffer) {
+            const VkBufferCreateInfo buffer_info = static_cast<VkBufferCreateInfo>(
+                vk::BufferCreateInfo{.size = 16, .usage = vk::BufferUsageFlagBits::eStorageBuffer});
+            const VmaAllocationCreateInfo alloc_info{
+                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                         VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                .usage = VMA_MEMORY_USAGE_AUTO,
+            };
+            VkBuffer buffer{};
+            VmaAllocationInfo mapped{};
+            if (vmaCreateBuffer(instance.GetAllocator(), &buffer_info, &alloc_info, &buffer,
+                                &hdr_settings_allocation, &mapped) != VK_SUCCESS ||
+                !mapped.pMappedData) {
+                return;
+            }
+            // RenoDX's peak and diffuse white (gpu/hdr/fs_3371ae8d_hdr.hlsl), fixed for the session.
+            const std::array<float, 4> nits{BbHdr::PeakNits(), BbHdr::PaperWhite(), 0.0f, 0.0f};
+            std::memcpy(mapped.pMappedData, nits.data(), sizeof(nits));
+            vmaFlushAllocation(instance.GetAllocator(), hdr_settings_allocation, 0, VK_WHOLE_SIZE);
+            hdr_settings_buffer = vk::Buffer{buffer};
+        }
+        settings_info = {hdr_settings_buffer, 0, 16};
+        writes.push_back({.dstBinding = pipeline.HdrSettingsBinding(),
+                          .descriptorCount = 1,
+                          .descriptorType = vk::DescriptorType::eStorageBuffer,
+                          .pBufferInfo = &settings_info});
+        which = Shadow::Tone;
+    } else if (upscaler->HdrPostPass(ps->pgm_hash)) {
+        tone_info = {.imageView = upscaler->ToneShadowView(),
+                     .imageLayout = vk::ImageLayout::eGeneral};
+        bool swapped = false;
+        for (auto& write : writes) {
+            if (write.dstBinding == 2 && write.descriptorCount == 1 &&
+                write.descriptorType == vk::DescriptorType::eSampledImage) {
+                write.pImageInfo = &tone_info;
+                swapped = true;
+            }
+        }
+        if (!swapped) {
+            static bool noted = false;
+            if (!noted) {
+                noted = true;
+                std::printf("HDR: the pass after the tone pass reads no image at binding 2: no "
+                            "scene HDR\n");
+            }
+            return;
+        }
+        which = Shadow::Scene;
+    } else {
+        return;
+    }
+    const auto target = upscaler->HdrShadowTarget(which, state.width, state.height);
+    scheduler.EndRendering();
+    const auto shadow_barrier = [&](vk::ImageLayout old_layout, vk::PipelineStageFlags2 src,
+                                    vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst,
+                                    vk::AccessFlags2 dst_access) {
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = src,
+            .srcAccessMask = src_access,
+            .dstStageMask = dst,
+            .dstAccessMask = dst_access,
+            .oldLayout = old_layout,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = target.image,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        scheduler.Record([b](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        });
+    };
+    shadow_barrier(vk::ImageLayout::eUndefined, vk::PipelineStageFlagBits2::eAllCommands,
+                   vk::AccessFlagBits2::eMemoryRead,
+                   vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                   vk::AccessFlagBits2::eColorAttachmentWrite);
+    RenderState shadow = state;
+    shadow.color_attachments[0].image_view = target.view;
+    shadow.color_attachments[0].image_layout = vk::ImageLayout::eGeneral;
+    shadow.color_attachments[0].is_clear = 0;
+    shadow.depth_stencil_attachment.depth_clear = false;
+    shadow.depth_stencil_attachment.stencil_clear = false;
+    scheduler.BeginRendering(shadow);
+    pipeline.BindResources(writes, push_data);
+    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+        if (is_indexed) {
+            cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex), first_instance);
+        } else {
+            cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
+        }
+    });
+    scheduler.EndRendering();
+    shadow_barrier(vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                   vk::AccessFlagBits2::eColorAttachmentWrite,
+                   vk::PipelineStageFlagBits2::eAllCommands,
+                   vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderStorageRead |
+                       vk::AccessFlagBits2::eTransferRead);
+    upscaler->HdrShadowDrawn(which);
+}
 
 inline const AmdGpu::Regs& Rasterizer::Regs() const {
     return stage_regs ? *stage_regs : liverpool->regs;
@@ -4799,6 +4924,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
         }
     });
+    // bbport (scene HDR): the tone pass and the pass after it, drawn again into the HDR shadows.
+    if (pipeline->GetHdrRole() != GraphicsPipeline::HdrRole::None && !batched) [[unlikely]] {
+        RecordHdrShadow(*pipeline, state, is_indexed, num_indices, num_instances, first_vertex,
+                        first_instance);
+    }
     if (upscaler->Enabled() && cb_descs[0].first) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         upscaler->OnDrawRecorded(ps ? ps->pgm_hash : 0, cb_descs[0].first);

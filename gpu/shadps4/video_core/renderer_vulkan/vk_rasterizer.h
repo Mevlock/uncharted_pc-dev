@@ -286,6 +286,12 @@ private:
     void UpdateViewportScissorState() const;
     void UpdateDepthStencilState() const;
     void UpdatePrimitiveState(bool is_indexed) const;
+    /// bbport (scene HDR): a draw of the tone pass or the pass after it again into its HDR shadow.
+    void RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderState& state,
+                         bool is_indexed, u32 num_indices, u32 num_instances, u32 first_vertex,
+                         u32 first_instance);
+    vk::Buffer hdr_settings_buffer{}; ///< the tone pass replacement's peak / paper-white nits
+    VmaAllocation hdr_settings_allocation{};
     void UpdateRasterizationState() const;
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
 

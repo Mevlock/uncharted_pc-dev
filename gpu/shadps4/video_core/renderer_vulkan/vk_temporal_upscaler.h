@@ -138,8 +138,37 @@ public:
         vk::Image image;
         vk::Format format;
         u32 width, height;
+        /// bbport (scene HDR): the HDR scene before the UI (RGBA16F, ShaderReadOnlyOptimal, the
+        /// display's size) when `image` is the HDR composite; null otherwise.
+        vk::ImageView hdr_hudless{};
     };
     bool DisplayOverride(VAddr address, Display& display);
+
+    /// bbport: Uncharted 2's scene HDR (BbHdr::Scene, gpu/hdr/README.md). The tone pass is drawn
+    /// again with its HDR replacement into the Tone shadow; the pass after it (BB_HUDLESS_PS) again
+    /// with that shadow as its input into the Scene shadow (linear HDR, the game's distortion and
+    /// overlays included), which the upscale reads instead of the game's 8-bit frame
+    /// (RunScaledVelocity); the presenter shows the HDR composite of it and the frame's HUD.
+    enum class HdrShadow { Tone, Scene };
+    struct ShadowTarget {
+        vk::Image image;
+        vk::ImageView view;
+    };
+    [[nodiscard]] bool HdrScene() const noexcept {
+        return hdr_scene;
+    }
+    /// The shadow's RGBA16F image at w x h (made or resized here), for this frame's draw.
+    ShadowTarget HdrShadowTarget(HdrShadow which, u32 w, u32 h);
+    void HdrShadowDrawn(HdrShadow which) {
+        (which == HdrShadow::Tone ? tone_shadow : scene_shadow).drawn = true;
+    }
+    /// The pass after the tone pass, with a Tone shadow drawn this frame to read.
+    [[nodiscard]] bool HdrPostPass(u64 ps_hash) const noexcept {
+        return hdr_scene && hudless_hash && u32(ps_hash) == hudless_hash && tone_shadow.drawn;
+    }
+    [[nodiscard]] vk::ImageView ToneShadowView() const noexcept {
+        return *tone_shadow.view;
+    }
 
 private:
     /// bbport: views of guest images the upscaler reads, kept across frames: FSR 4 registers
@@ -172,8 +201,14 @@ private:
                       const VideoCore::Image& depth, vk::Image color_image,
                       vk::ImageView color_view, vk::Format color_format, vk::Image depth_image,
                       vk::ImageView depth_view, u32 source_width, u32 source_height, u32 w, u32 h,
-                      u32 ow, u32 oh);
+                      u32 ow, u32 oh, bool hdr_input = false);
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
+    /// bbport (scene HDR): after the upscale of the HDR scene into output_image (General): the
+    /// 8-bit frame the HUD draws into (ui_image) and the scene in the presenter's domain, in place.
+    void RecordHdrSplit(vk::CommandBuffer cmdbuf, u32 w, u32 h);
+    /// At the flip: the HDR composite of the scene and the frame's HUD (hdr_composite_image).
+    void RecordHdrComposite(vk::CommandBuffer cmdbuf);
+    void CreateHdrPipelines();
     void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
     void PrepareUiDepth(VideoCore::ImageId depth);
     /// Render size below the scaled-preset output size (the resolution patch is on).
@@ -354,6 +389,26 @@ private:
     vk::UniqueImageView extra_sharpen_view;
     u32 extra_sharpen_width = 0, extra_sharpen_height = 0;
     vk::UniqueImageView ui_storage_view;
+
+    // bbport: scene HDR (HdrScene).
+    bool hdr_scene = false; ///< BbHdr::Scene at start
+    struct ShadowImage {
+        VideoCore::UniqueImage image;
+        vk::UniqueImageView view;
+        u32 width = 0, height = 0;
+        bool drawn = false; ///< this frame
+    };
+    ShadowImage tone_shadow, scene_shadow;
+    bool last_hdr_input = false; ///< the upscaler's input domain last frame (its history)
+    bool hdr_frame = false;      ///< output_image holds the shown frame's HDR scene (split done)
+    VAddr hdr_address = 0;       ///< the display buffer of that frame
+    vk::ImageLayout hdr_output_layout = vk::ImageLayout::eGeneral; ///< output_image's, after it
+    VideoCore::UniqueImage hdr_composite_image;
+    vk::UniqueImageView hdr_composite_view;
+    u32 hdr_composite_width = 0, hdr_composite_height = 0;
+    vk::UniqueDescriptorSetLayout hdr_desc_layout;
+    vk::UniquePipelineLayout hdr_pipeline_layout;
+    vk::UniquePipeline hdr_split_pipeline, hdr_composite_pipeline;
 };
 
 } // namespace Vulkan

@@ -708,12 +708,14 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     vk::ImageView image_view{};
     vk::Extent2D image_size{};
+    // bbport (scene HDR): the upscaler's HDR composite (RGBA16F, linear, read as it is).
+    const bool float_display = upscaled && display.format == vk::Format::eR16G16B16A16Sfloat;
     if (upscaled) {
         const auto device = instance.GetDevice();
         image_view = Check(device.createImageView({
             .image = display.image,
             .viewType = vk::ImageViewType::e2D,
-            .format = view_info.format,
+            .format = float_display ? display.format : view_info.format,
             .components = {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
                            vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eOne},
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
@@ -807,8 +809,14 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         vk::Image hudless{};
         vk::ImageView hudless_view{};
         vk::Extent2D hudless_size{};
-        if (const auto source = frame_generator->Hudless(view_info.format, hudless_size);
-            source && hudless_size == image_size) {
+        // Scene HDR: the HDR scene before the UI (the upscaler's, the frame equals it there).
+        vk::ImageView source = display.hdr_hudless;
+        if (float_display && source) {
+            hudless_size = image_size;
+        } else {
+            source = frame_generator->Hudless(view_info.format, hudless_size);
+        }
+        if (source && hudless_size == image_size) {
             if (hudless_frame.width != frame->width || hudless_frame.height != frame->height ||
                 !hudless_frame.image) {
                 // The previous frame's generation may still read it on the GPU (the switch from

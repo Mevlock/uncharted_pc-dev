@@ -11,10 +11,12 @@
 #include <utility>
 #include <boost/container/small_vector.hpp>
 
+#include "bbport_hdr.h"
 #include "bbport_threads.h"
 #include "common/assert.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_discard_frag.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_quad_rect.h"
+#include "video_core/host_shaders/hdr_tone_3371ae8d.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -33,6 +35,69 @@ static constexpr std::array LogicalStageToStageBit = {
     vk::ShaderStageFlagBits::eGeometry,
     vk::ShaderStageFlagBits::eCompute,
 };
+
+namespace {
+
+// bbport: scene HDR (BbHdr::Scene, gpu/hdr/README.md): the pipelines that get an HDR variant,
+// only with HDR on at start. The tone pass replacement matches the tone pass as translated for
+// NVIDIA's driver (manual interpolation through VK_KHR_fragment_shader_barycentric); elsewhere the
+// interface differs, and the picture stays HDR10 output of the SDR frame.
+constexpr u32 HdrTonePs = 0x3371ae8du;
+
+u32 HdrPostPs() {
+    static const u32 hash = [] {
+        const char* env = std::getenv("BB_HUDLESS_PS");
+        return env ? u32(std::strtoull(env, nullptr, 16)) : 0u;
+    }();
+    return hash;
+}
+
+GraphicsPipeline::HdrRole HdrRoleOf(const Instance& instance, const Shader::Profile& profile,
+                                    const GraphicsPipelineKey& key, const Shader::Info* ps) {
+    if (!BbHdr::Scene() || !ps || key.num_color_attachments != 1 || key.split_sets ||
+        profile.batched_graphics || key.color_buffers[0].blend_self_scale) {
+        return GraphicsPipeline::HdrRole::None;
+    }
+    const u32 hash = u32(ps->pgm_hash);
+    const bool tone = hash == HdrTonePs, post = HdrPostPs() && hash == HdrPostPs();
+    if (!tone && !post) {
+        return GraphicsPipeline::HdrRole::None;
+    }
+    const bool usable = instance.IsFragmentShaderBarycentricSupported() &&
+                        instance.GetDriverID() == vk::DriverId::eNvidiaProprietary;
+    if (!usable) {
+        static std::once_flag logged;
+        std::call_once(logged, [] {
+            std::printf("HDR: no scene HDR on this GPU (the tone pass replacement needs the NVIDIA "
+                        "driver with fragment shader barycentrics): HDR10 output of the SDR "
+                        "picture\n");
+            std::fflush(stdout);
+        });
+        return GraphicsPipeline::HdrRole::None;
+    }
+    return tone ? GraphicsPipeline::HdrRole::Tone : GraphicsPipeline::HdrRole::Post;
+}
+
+// The replacement with its settings buffer (binding 12 in the file) at `binding`.
+std::vector<u32> HdrToneCode(u32 binding) {
+    std::vector<u32> code(std::begin(HDR_TONE_3371AE8D), std::end(HDR_TONE_3371AE8D));
+    u32 patched = 0;
+    for (size_t i = 5; i + 3 < code.size();) {
+        const u32 count = code[i] >> 16, opcode = code[i] & 0xffff;
+        if (count == 0) {
+            break;
+        }
+        // OpDecorate <id> Binding 12
+        if (opcode == 71 && count == 4 && code[i + 2] == 33 && code[i + 3] == 12) {
+            code[i + 3] = binding;
+            ++patched;
+        }
+        i += count;
+    }
+    return patched == 1 ? code : std::vector<u32>{};
+}
+
+} // namespace
 
 GraphicsPipeline::GraphicsPipeline(
     const Instance& instance, Scheduler& scheduler, DescriptorHeap& desc_heap,
@@ -468,6 +533,55 @@ GraphicsPipeline::GraphicsPipeline(
     }
     pipeline = std::move(pipe);
     SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
+
+    // bbport (scene HDR, HdrRole): the same draw into an RGBA16F target: the tone pass with its
+    // HDR replacement (Tone), the pass after it with its own shader (Post). Built only when HDR is
+    // on at start; nothing else changes for this pipeline.
+    if (hdr_role != HdrRole::None) {
+        auto hdr_formats = color_formats;
+        hdr_formats[0] = vk::Format::eR16G16B16A16Sfloat;
+        auto hdr_rendering_ci = pipeline_rendering_ci;
+        hdr_rendering_ci.pColorAttachmentFormats = hdr_formats.data();
+        auto hdr_stages = shader_stages;
+        vk::ShaderModule replacement{};
+        if (hdr_role == HdrRole::Tone) {
+            const auto code = HdrToneCode(hdr_settings_binding);
+            if (!code.empty()) {
+                replacement = Check<"create the HDR tone shader">(device.createShaderModule({
+                    .codeSize = code.size() * sizeof(u32),
+                    .pCode = code.data(),
+                }));
+            }
+            for (auto& stage_ci : hdr_stages) {
+                if (stage_ci.stage == vk::ShaderStageFlagBits::eFragment) {
+                    stage_ci.module = replacement;
+                    stage_ci.pSpecializationInfo = nullptr;
+                }
+            }
+        }
+        if (hdr_role == HdrRole::Post || replacement) {
+            auto hdr_info = pipeline_info;
+            hdr_info.pNext = &hdr_rendering_ci;
+            hdr_info.pStages = hdr_stages.data();
+            hdr_info.stageCount = u32(hdr_stages.size());
+            auto [hdr_result, hdr_pipe] = device.createGraphicsPipelineUnique(pipeline_cache, hdr_info);
+            if (hdr_result == vk::Result::eSuccess && hdr_pipe) {
+                hdr_pipeline = std::move(hdr_pipe);
+                SetObjectName(device, *hdr_pipeline, "Graphics Pipeline {} HDR", debug_str);
+                std::printf("HDR: %s pipeline for pixel shader %08x\n",
+                            hdr_role == HdrRole::Tone ? "tone pass replacement" : "post pass float",
+                            u32(GetStage(Shader::SwStage::Fragment).pgm_hash));
+            } else {
+                std::printf("HDR: the %s pipeline was refused (%s)\n",
+                            hdr_role == HdrRole::Tone ? "tone pass" : "post pass",
+                            vk::to_string(hdr_result).c_str());
+            }
+            std::fflush(stdout);
+        }
+        if (replacement) {
+            device.destroyShaderModule(replacement);
+        }
+    }
 }
 
 GraphicsPipeline::~GraphicsPipeline() = default;
@@ -847,6 +961,18 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
         ASSERT_MSG(pre_result == vk::Result::eSuccess,
                    "Failed to create pre-raster descriptor set layout: {}", vk::to_string(pre_result));
         pre_raster_layout = std::move(pre_layout);
+    }
+    // bbport (scene HDR): the tone pass replacement's settings buffer after the translated
+    // bindings (gpu/hdr/README.md).
+    hdr_role = HdrRoleOf(instance, profile, key, stages[u32(Shader::SwStage::Fragment)]);
+    if (hdr_role == HdrRole::Tone) {
+        hdr_settings_binding = binding;
+        bindings.push_back({
+            .binding = binding++,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eFragment,
+        });
     }
     uses_push_descriptors = binding < instance.MaxPushDescriptors();
     const auto flags = uses_push_descriptors
