@@ -181,7 +181,17 @@ STICK_ACTIONS = [
     ('ls_left', 'Move left', 'A'), ('ls_right', 'Move right', 'D'),
     ('rs_up', 'Look up', 'I'), ('rs_down', 'Look down', 'K'),
     ('rs_left', 'Look left', 'J'), ('rs_right', 'Look right', 'L'),
+    ('rotate_ccw', 'Turn valve / wheel counter-clockwise (hold)', 'R'),
+    ('rotate_cw', 'Turn valve / wheel clockwise (hold)', 'T'),
+    ('walk', 'Walk (hold with the movement keys)', 'Left Ctrl'),
 ]
+# Hold a rotate key and the left stick circles: the games' valves, wheels and cranks ask for the stick
+# turned in circles, which the eight movement-key directions cannot do. Walk: the movement keys push the
+# stick part way (walk_speed). Both by drakolordx7, from his fork (46aec0d3, 6455d6bb).
+# Keys added after players already had their own bindings: the default is left out where the player
+# already uses that key for something else.
+LATE_ACTIONS = ('rotate_ccw', 'rotate_cw', 'walk')
+WALK_SPEED_MIN, WALK_SPEED_MAX = 10, 100
 DEFAULT_KEYS = {a: k for a, _t, k, _p in BUTTON_ACTIONS} | {a: k for a, _t, k in STICK_ACTIONS}
 DEFAULT_PAD = {a: p for a, _t, _k, p in BUTTON_ACTIONS}
 PAD_BUTTONS = [('a', 'A / Cross'), ('b', 'B / Circle'), ('x', 'X / Square'), ('y', 'Y / Triangle'),
@@ -224,7 +234,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
-                'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
+                'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '45', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
                 **{f'{game}_devmode': False for game, _t, _s, _e in GAMES},
@@ -517,6 +527,14 @@ def vibration_strength(s):
         return 100
 
 
+def walk_speed(s):
+    """How far the walk key lets the movement keys push the stick (percent, input.ini walk_speed)."""
+    try:
+        return min(WALK_SPEED_MAX, max(WALK_SPEED_MIN, int(float(s.get('walk_speed', 45)))))
+    except (TypeError, ValueError):
+        return 45
+
+
 def controller_probe_path():
     """The packaged or development loader, which also provides the lightweight controller probe."""
     configured = os.environ.get('BB_PROBE')
@@ -693,9 +711,21 @@ def input_ini_path():
     return Path(os.environ.get('BB_INPUT_CONFIG', DATA_DIR / 'input.ini'))
 
 
+def key_bindings(s):
+    """Every action's keys ("A|B"): the player's own, else the defaults; a late action's default key that
+    the player already gave to something else stays theirs (the late action is left unbound)."""
+    saved = s.get('key_bindings') or {}
+    keys = {**DEFAULT_KEYS, **saved}
+    taken = {k.strip() for a, v in keys.items() if a not in LATE_ACTIONS or a in saved for k in v.split('|')}
+    for action in LATE_ACTIONS:
+        if action not in saved and DEFAULT_KEYS[action] in taken:
+            keys[action] = ''
+    return keys
+
+
 def write_input_ini(s):
     """input.ini: the keyboard, mouse and controller bindings the game reads at start."""
-    keys = {**DEFAULT_KEYS, **(s.get('key_bindings') or {})}
+    keys = key_bindings(s)
     pad = {**DEFAULT_PAD, **(s.get('pad_bindings') or {})}
     lines = ['# Uncharted controls (written by the launcher, Controls page)',
              f"mouse_look={1 if s.get('mouse_look', True) else 0}",
@@ -703,7 +733,8 @@ def write_input_ini(s):
              f"mouse_invert_y={1 if s.get('mouse_invert_y') else 0}",
              f"pad_invert_y={1 if s.get('pad_invert_y') else 0}",
              f"pad_vibration={1 if s.get('pad_vibration', True) else 0}",
-             f"pad_vibration_strength={vibration_strength(s)}"]
+             f"pad_vibration_strength={vibration_strength(s)}",
+             f"walk_speed={walk_speed(s)}"]
     lines += [f'key.{action}={keys.get(action, "")}' for action in DEFAULT_KEYS]
     lines += [f'pad.{action}={pad.get(action, "none")}' for action in DEFAULT_PAD]
     path = input_ini_path()
@@ -1868,6 +1899,10 @@ class Launcher:
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
         self.pill(holder, _('Default keys'), self.reset_keys).pack(side='left')
+        self.row(f, _('Walk speed'),
+                 Slider(self.tk, self.target(f), self.var('walk_speed'), WALK_SPEED_MIN, WALK_SPEED_MAX, 5,
+                        COLORS, self.px, self.font_ui_md, fmt='{:.0f}', width=300, suffix='%'),
+                 _('How far the walk key pushes the stick. Default is 45%.'))
 
         self.section(f, _('Controller'))
         self.note(f, _('Which controller button gives each PS4 button (Xbox / PlayStation names).'), top=2)
@@ -1913,7 +1948,7 @@ class Launcher:
         self.controller_test_button.configure(state='disabled')
 
     def key_list(self, action):
-        value = (self.app.get('key_bindings') or {}).get(action, DEFAULT_KEYS[action])
+        value = key_bindings(self.app).get(action, '')
         parts = (value.split('|') + ['', ''])[:2]
         return [p.strip() for p in parts]
 

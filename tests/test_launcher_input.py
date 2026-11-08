@@ -37,6 +37,36 @@ class InputConfigTests(unittest.TestCase):
         self.assertEqual(LAUNCHER.vibration_strength({'pad_vibration_strength': '250'}), 100)
         self.assertEqual(LAUNCHER.vibration_strength({'pad_vibration_strength': 'invalid'}), 100)
 
+    def test_walk_and_rotate_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'input.ini'
+            original = LAUNCHER.input_ini_path
+            LAUNCHER.input_ini_path = lambda: path
+            try:
+                LAUNCHER.write_input_ini({})
+                text = path.read_text(encoding='utf-8')
+                self.assertIn('key.rotate_ccw=R\n', text)
+                self.assertIn('key.rotate_cw=T\n', text)
+                self.assertIn('key.walk=Left Ctrl\n', text)
+                self.assertIn('walk_speed=45\n', text)
+                # a default key the player already gave to something else stays theirs
+                LAUNCHER.write_input_ini({'key_bindings': {'cross': 'R', 'square': 'Left Ctrl'}, 'walk_speed': '70'})
+                text = path.read_text(encoding='utf-8')
+                self.assertIn('key.rotate_ccw=\n', text)
+                self.assertIn('key.walk=\n', text)
+                self.assertIn('key.rotate_cw=T\n', text)
+                self.assertIn('walk_speed=70\n', text)
+                # bound on purpose: kept
+                LAUNCHER.write_input_ini({'key_bindings': {'cross': 'R', 'rotate_ccw': 'R'}})
+                self.assertIn('key.rotate_ccw=R\n', path.read_text(encoding='utf-8'))
+            finally:
+                LAUNCHER.input_ini_path = original
+        self.assertEqual(LAUNCHER.walk_speed({'walk_speed': '5'}), 10)
+        self.assertEqual(LAUNCHER.walk_speed({'walk_speed': 'x'}), 45)
+
+    def test_controller_in_the_background_is_an_option(self):
+        self.assertFalse(LAUNCHER.APP_DEFAULTS['pad_background'])
+
     def test_controller_probe_response(self):
         info = LAUNCHER.parse_controller_probe(
             'connected=1\nname=DualSense Wireless Controller\nrumble=1\ntested=1\n')

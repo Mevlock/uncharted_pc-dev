@@ -5,16 +5,21 @@
  *   key.<action>=<key or mouse name>[|<second>]   SDL key names ("Space", "Left Shift", "W"),
  *       "Mouse Left", "Mouse Right", "Mouse Middle", "Mouse 4", "Mouse 5", "Wheel Up",
  *       "Wheel Down"; actions: cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad
- *       up down left right, ls_up ls_down ls_left ls_right, rs_up rs_down rs_left rs_right.
+ *       up down left right, ls_up ls_down ls_left ls_right, rs_up rs_down rs_left rs_right,
+ *       rotate_ccw rotate_cw (held: the left stick circles counter-clockwise / clockwise, for
+ *       the valves and wheels that ask for the stick turned in circles), walk (held: the
+ *       movement keys push the left stick only part of the way, so the character walks).
  *   pad.<action>=<controller button>   SDL names (a b x y leftshoulder rightshoulder
  *       lefttrigger righttrigger leftstick rightstick back start dpup dpdown dpleft dpright
  *       touchpad misc1 paddle1..paddle4) or "none", for the button actions above.
  *   mouse_look=1  mouse_sensitivity=1.0  mouse_invert_y=0  pad_invert_y=0
- *   pad_vibration=1  pad_vibration_strength=100
+ *   pad_vibration=1  pad_vibration_strength=100  walk_speed=45 (walk key deflection, percent)
  *
  * Defaults (no file): WASD move, mouse look, left button R2 (fire), right button L2 (aim),
  * Space Cross, C Circle, F Square, E Triangle, Q L1, G R1, Left Shift L3, V R3, Escape/Enter
- * Options, Tab touchpad, arrow keys and the wheel the d-pad, IJKL the right stick. */
+ * Options, Tab touchpad, arrow keys and the wheel the d-pad, IJKL the right stick, R and T
+ * turn the left stick round counter-clockwise and clockwise, Left Ctrl walks (the rotate and
+ * walk keys by drakolordx7, from his fork: 46aec0d3, 6455d6bb). */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "gpu/bbgpu.h"
@@ -379,7 +384,8 @@ static void pad_request_led(uint8_t r, uint8_t g, uint8_t b) {
 enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL, BIND_LAYOUT };
 typedef struct { uint8_t kind; int32_t code; } Bind;
 typedef struct { const char *name; uint32_t ps; const char *keys; const char *pad; } Action;
-enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT, ACTIONS };
+enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT,
+       A_ROT_CCW, A_ROT_CW, A_WALK, ACTIONS };
 static const Action actions[ACTIONS]={
     {"cross",BTN_CROSS,"Space","a"}, {"circle",BTN_CIRCLE,"C","b"}, {"square",BTN_SQUARE,"F","x"},
     {"triangle",BTN_TRIANGLE,"E","y"}, {"l1",BTN_L1,"Q","leftshoulder"}, {"r1",BTN_R1,"G","rightshoulder"},
@@ -390,13 +396,14 @@ static const Action actions[ACTIONS]={
     {"left",BTN_LEFT,"Left|Wheel Up","dpleft"}, {"right",BTN_RIGHT,"Right|Wheel Down","dpright"},
     {"ls_up",0,"W",NULL}, {"ls_down",0,"S",NULL}, {"ls_left",0,"A",NULL}, {"ls_right",0,"D",NULL},
     {"rs_up",0,"I",NULL}, {"rs_down",0,"K",NULL}, {"rs_left",0,"J",NULL}, {"rs_right",0,"L",NULL},
+    {"rotate_ccw",0,"R",NULL}, {"rotate_cw",0,"T",NULL}, {"walk",0,"Left Ctrl",NULL},
 };
 #define PAD_TRIGGER_LEFT (-2)
 #define PAD_TRIGGER_RIGHT (-3)
 static struct {
     Bind keys[ACTIONS][2];
     int pad[16];               /* SDL_GamepadButton, PAD_TRIGGER_*, or -1 */
-    int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength;
+    int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength, walk_speed;
     float mouse_sensitivity;
 } input;
 
@@ -446,7 +453,7 @@ static void load_input(void) {
         if (a<16) input.pad[a]=parse_pad(actions[a].pad);
     }
     input.mouse_look=1; input.mouse_sensitivity=1.0f;
-    input.pad_vibration=1; input.pad_vibration_strength=100;
+    input.pad_vibration=1; input.pad_vibration_strength=100; input.walk_speed=45;
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
     if (f) {
@@ -463,6 +470,10 @@ static void load_input(void) {
             else if (!strcmp(key,"pad_invert_y")) input.pad_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"pad_vibration")) input.pad_vibration=atoi(value)!=0;
             else if (!strcmp(key,"pad_vibration_strength")) input.pad_vibration_strength=atoi(value);
+            else if (!strcmp(key,"walk_speed")) {
+                const int v=atoi(value);
+                input.walk_speed=v<10 ? 10 : v>100 ? 100 : v;
+            }
             else for (int a=0;a<ACTIONS;++a) {
                 if (!strncmp(key,"key.",4) && !strcmp(key+4,actions[a].name)) set_keys(a,value);
                 else if (a<16 && !strncmp(key,"pad.",4) && !strcmp(key+4,actions[a].name)) input.pad[a]=parse_pad(value);
@@ -1824,8 +1835,37 @@ static int prompts_pad_device(SDL_Gamepad *g) {
     return south==SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 1 : south==SDL_GAMEPAD_BUTTON_LABEL_B ? 3 : 2;
 }
 
+/* Turning the left stick in circles (valves, wheels, cranks: the games detect the turn from the
+ * stick passing the four directions up, left, down, right in order, each at most 0.31 s after the
+ * last, and rolling the eight movement-key directions never does). While a rotate key is held the
+ * left stick circles at full deflection, 1.25 turns a second, a smooth sweep that starts where the
+ * stick points (the movement keys held, or up). `rotate_dir`: -1 counter-clockwise, 1 clockwise.
+ * (By drakolordx7, from his fork, 46aec0d3.) */
+#define ROTATE_TURNS_PER_SECOND 1.25f
+static int host_rotate;               /* the rotate keys held right now (set in sample_host) */
+static float rotate_angle;            /* radians clockwise from up */
+static uint64_t rotate_last_us;
+static void rotate_stick(PadData *d, int rotate_dir, uint64_t now) {
+    if (!rotate_dir) { rotate_last_us=0; return; }
+    if (!rotate_last_us || now-rotate_last_us>100000) {
+        const float x=((float)d->left_x-127.5f)/127.5f, y=((float)d->left_y-127.5f)/127.5f;
+        rotate_angle=x*x+y*y>0.25f ? SDL_atan2f(x,-y) : 0.0f;
+    } else {
+        float dt=(float)(now-rotate_last_us)*1e-6f;
+        if (dt>0.05f) dt=0.05f;
+        rotate_angle+=(float)rotate_dir*dt*ROTATE_TURNS_PER_SECOND*6.2831853f;
+        if (rotate_angle>6.2831853f) rotate_angle-=6.2831853f;
+        if (rotate_angle<0.0f) rotate_angle+=6.2831853f;
+    }
+    rotate_last_us=now;
+    const float x=127.5f+127.5f*SDL_sinf(rotate_angle), y=127.5f-127.5f*SDL_cosf(rotate_angle);
+    d->left_x=(uint8_t)(x<0.0f ? 0 : x>255.0f ? 255 : (int)(x+0.5f));
+    d->left_y=(uint8_t)(y<0.0f ? 0 : y>255.0f ? 255 : (int)(y+0.5f));
+}
+
 static void injected_mouse(float *dx, float *dy);
 static void sample_host(PadData *d) {
+    host_rotate=0;
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
     d->orientation[3]=1.0f;
@@ -1920,8 +1960,17 @@ static void sample_host(PadData *d) {
         if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
         const int lx=action_down(A_LS_RIGHT,k,mouse,now)-action_down(A_LS_LEFT,k,mouse,now);
         const int ly=action_down(A_LS_DOWN,k,mouse,now)-action_down(A_LS_UP,k,mouse,now);
-        if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
-        if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
+        if ((lx || ly) && action_down(A_WALK,k,mouse,now)) {
+            /* Walk: the key direction at walk_speed percent of full deflection (diagonals too; by
+             * drakolordx7, from his fork, 6455d6bb). */
+            const float scale=127.5f*(float)input.walk_speed/100.0f/((lx && ly) ? 1.41421356f : 1.0f);
+            if (lx) d->left_x=(uint8_t)(int)(127.5f+(float)lx*scale+0.5f);
+            if (ly) d->left_y=(uint8_t)(int)(127.5f+(float)ly*scale+0.5f);
+        } else {
+            if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
+            if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
+        }
+        host_rotate=action_down(A_ROT_CW,k,mouse,now)-action_down(A_ROT_CCW,k,mouse,now);
         rx=action_down(A_RS_RIGHT,k,mouse,now)-action_down(A_RS_LEFT,k,mouse,now);
         ry=action_down(A_RS_DOWN,k,mouse,now)-action_down(A_RS_UP,k,mouse,now);
         if (rx) d->right_x=(uint8_t)(rx<0 ? 0 : 255);
@@ -1976,8 +2025,8 @@ static void sample_host(PadData *d) {
  * tokens, re-read when it changes: button names (cross circle square triangle l1 r1 l2 r2 l3 r3
  * options touchpad touchpad_left touchpad_right up down left right) are held while listed;
  * touchpad defaults to a left-side click; lx= ly= rx= ry= (0..255) override
- * the sticks. An empty file releases everything. */
-static struct { uint32_t buttons; int stick[4]; int touch_side; float mouse[2]; } injected={0,{-1,-1,-1,-1},-1,{0,0}};
+ * the sticks; rot_ccw rot_cw turn the left stick round (the rotate keys). An empty file releases everything. */
+static struct { uint32_t buttons; int stick[4]; int touch_side; float mouse[2]; int rotate; } injected={0,{-1,-1,-1,-1},-1,{0,0},0};
 static int replay_armed;      /* 1 while a BB_PAD_REPLAY recording plays, 2 once it ended */
 static uint64_t replay_start; /* 0: (re)start at the next sample */
 /* Scripted mouse motion (mx= my=, pixels/s) as this sample's mouse movement (sample_host). */
@@ -2020,8 +2069,11 @@ static void read_inject(void) {
     injected.touch_side=-1;
     for (int i=0;i<4;++i) injected.stick[i]=-1;
     injected.mouse[0]=injected.mouse[1]=0.0f;
+    injected.rotate=0;
     char token[64];
     while (fscanf(f,"%63s",token)==1) {
+        if (!strcmp(token,"rot_ccw")) injected.rotate=-1; /* the rotate keys, scripted */
+        if (!strcmp(token,"rot_cw")) injected.rotate=1;
         if (!strcmp(token,"replay") && replay_armed!=1) { replay_armed=1; replay_start=0; } /* BB_PAD_REPLAY */
         if (!strcmp(token,"touchpad_left") || !strcmp(token,"touchpad_right")) {
             injected.buttons|=BTN_TOUCHPAD;
@@ -2183,6 +2235,7 @@ static void sample(PadData *d) {
     if (injected.buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
+    rotate_stick(d,injected.rotate ? injected.rotate : host_rotate,now_us());
     /* U2, U3 (no joypad callback): the right stick held a little while the mouse turns the follow
      * camera's direction (follow_push, see follow_camera), unless the stick is in use */
     const uint64_t now=now_us();
