@@ -3,6 +3,18 @@
 
 EXTRA_TRANSLATIONS = {
     'de': {
+        'HDR':
+        'HDR',
+        'Peak brightness (nits)':
+        'Spitzenhelligkeit (Nits)',
+        'Paper white (nits)':
+        'Papierweiß (Nits)',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        'HDR10-Ausgabe auf einem HDR-Bildschirm (schalte zuerst „HDR verwenden“ in den Windows-Anzeigeeinstellungen ein; sonst startet das Spiel in SDR). Uncharted 2 erhält mit einer Renderauflösung und DLSS, FSR 4, XeSS oder TAA auf einer GeForce auch die helleren Lichter seiner eigenen Szene; sonst wird das Bild des Spiels in HDR10 mit dem Papierweiß unten gezeigt.',
+        "The brightest highlights: set it to your display's peak brightness.":
+        'Die hellsten Lichter: stelle die Spitzenhelligkeit deines Bildschirms ein.',
+        'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
+        'Die Helligkeit von Weiß im Spiel, im HUD und in den Menüs. 203 ist der HDR-Referenzwert; in einem hellen Raum höher stellen.',
         '{} of {} earned · {}%': '{} von {} erhalten · {} %',
         'Version {}': 'Version {}',
         "what's new": 'Neuerungen',
@@ -382,6 +394,18 @@ EXTRA_TRANSLATIONS = {
         'Bronze': 'Bronze',
     },
     'it': {
+        'HDR':
+        'HDR',
+        'Peak brightness (nits)':
+        'Luminosità di picco (nit)',
+        'Paper white (nits)':
+        'Bianco carta (nit)',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        "Uscita HDR10 su uno schermo HDR (attiva prima «Usa HDR» nelle impostazioni dello schermo di Windows; altrimenti il gioco parte in SDR). Uncharted 2 ottiene anche le luci più brillanti della sua scena con una risoluzione di rendering e DLSS, FSR 4, XeSS o TAA su una GeForce; altrimenti l'immagine del gioco è mostrata in HDR10 con il bianco carta qui sotto.",
+        "The brightest highlights: set it to your display's peak brightness.":
+        'Le luci più brillanti: impostala sulla luminosità di picco del tuo schermo.',
+        'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
+        "La luminosità del bianco nel gioco, nell'HUD e nei menu. 203 è il riferimento HDR; alzala in una stanza luminosa.",
         '{} of {} earned · {}%': '{} di {} ottenuti · {}%',
         'Version {}': 'Versione {}',
         "what's new": 'novità',
@@ -761,6 +785,18 @@ EXTRA_TRANSLATIONS = {
         'Bronze': 'Bronzo',
     },
     'ja': {
+        'HDR':
+        'HDR',
+        'Peak brightness (nits)':
+        'ピーク輝度 (nit)',
+        'Paper white (nits)':
+        'ペーパーホワイト (nit)',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        'HDR ディスプレイで HDR10 出力します（先に Windows のディスプレイ設定で「HDR を使用する」をオンにしてください。オフのままだと SDR で起動します）。Uncharted 2 は、描画解像度と GeForce の DLSS・FSR 4・XeSS・TAA を使うと、シーン自体のより明るいハイライトも得られます。それ以外ではゲームの映像を下のペーパーホワイトで HDR10 表示します。',
+        "The brightest highlights: set it to your display's peak brightness.":
+        '最も明るいハイライトです。ディスプレイのピーク輝度に合わせてください。',
+        'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
+        'ゲーム内、HUD、メニューの白の明るさです。203 が HDR の基準値です。明るい部屋では上げてください。',
         '{} of {} earned · {}%': '{} / {} 獲得 · {}%',
         'Version {}': 'バージョン {}',
         "what's new": '新機能',
@@ -1134,6 +1170,18 @@ EXTRA_TRANSLATIONS = {
         'Bronze': 'ブロンズ',
     },
     'es': {
+        'HDR':
+        'HDR',
+        'Peak brightness (nits)':
+        'Brillo máximo (nits)',
+        'Paper white (nits)':
+        'Blanco de papel (nits)',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        'Salida HDR10 en una pantalla HDR (activa antes «Usar HDR» en la configuración de pantalla de Windows; si no, el juego empieza en SDR). Uncharted 2 también obtiene las luces más brillantes de su propia escena con una resolución de renderizado y DLSS, FSR 4, XeSS o TAA en una GeForce; si no, la imagen del juego se muestra en HDR10 con el blanco de papel de abajo.',
+        "The brightest highlights: set it to your display's peak brightness.":
+        'Las luces más brillantes: ajústalo al brillo máximo de tu pantalla.',
+        'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
+        'El brillo del blanco en el juego, el HUD y los menús. 203 es la referencia HDR; súbelo en una habitación luminosa.',
         '{} of {} earned · {}%': '{} de {} conseguidos · {}%',
         'Version {}': 'Versión {}',
         "what's new": 'novedades',
@@ -1416,6 +1464,18 @@ EXTRA_TRANSLATIONS = {
         'Bronze': 'Bronce',
     },
     'pt': {
+        'HDR':
+        'HDR',
+        'Peak brightness (nits)':
+        'Brilho máximo (nits)',
+        'Paper white (nits)':
+        'Branco de papel (nits)',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        'Saída HDR10 em uma tela HDR (ative antes "Usar HDR" nas configurações de vídeo do Windows; sem isso o jogo começa em SDR). Uncharted 2 também ganha os realces mais brilhantes da própria cena com uma resolução de renderização e DLSS, FSR 4, XeSS ou TAA em uma GeForce; caso contrário, a imagem do jogo é mostrada em HDR10 com o branco de papel abaixo.',
+        "The brightest highlights: set it to your display's peak brightness.":
+        'Os realces mais brilhantes: ajuste para o brilho máximo da sua tela.',
+        'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
+        'O brilho do branco no jogo, no HUD e nos menus. 203 é a referência HDR; aumente em um ambiente claro.',
         '{} of {} earned · {}%': '{} de {} conquistados · {}%',
         'Version {}': 'Versão {}',
         "what's new": 'novidades',
@@ -1699,6 +1759,18 @@ EXTRA_TRANSLATIONS = {
         'Bronze': 'Bronze',
     },
     'fr': {
+        'HDR':
+        'HDR',
+        'Peak brightness (nits)':
+        'Luminosité maximale (nits)',
+        'Paper white (nits)':
+        'Blanc papier (nits)',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        "Sortie HDR10 sur un écran HDR (activez d'abord « Utiliser le HDR » dans les paramètres d'affichage de Windows ; sinon le jeu démarre en SDR). Uncharted 2 obtient aussi les hautes lumières plus vives de sa propre scène avec une résolution de rendu et DLSS, FSR 4, XeSS ou TAA sur une GeForce ; sinon l'image du jeu est affichée en HDR10 au blanc papier ci-dessous.",
+        "The brightest highlights: set it to your display's peak brightness.":
+        'Les hautes lumières les plus vives : réglez-la sur la luminosité maximale de votre écran.',
+        'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
+        'La luminosité du blanc dans le jeu, le HUD et les menus. 203 est la référence HDR ; augmentez-la dans une pièce claire.',
         '{} of {} earned · {}%': '{} sur {} obtenus · {} %',
         'Version {}': 'Version {}',
         "what's new": 'nouveautés',
