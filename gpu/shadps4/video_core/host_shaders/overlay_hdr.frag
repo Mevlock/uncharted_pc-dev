@@ -19,6 +19,8 @@ layout (push_constant) uniform settings {
     bool downscale;
     float paper_nits;
     float peak_nits;
+    float sdr_gamma;
+    float sdr_saturation;
 } pp;
 
 void main() {

@@ -7,6 +7,7 @@
 #include <mutex>
 #include <vector>
 
+#include "bbport_hdr.h"
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "shader_recompiler/ir/passes/srt.h"
@@ -290,8 +291,12 @@ private:
     void RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderState& state,
                          bool is_indexed, u32 num_indices, u32 num_instances, u32 first_vertex,
                          u32 first_instance);
-    vk::Buffer hdr_settings_buffer{}; ///< the tone pass replacement's peak / paper-white nits
+    vk::Buffer hdr_settings_buffer{}; ///< the tone pass replacement's settings (BbHdr::Tuning), a ring
     VmaAllocation hdr_settings_allocation{};
+    void* hdr_settings_mapped = nullptr;
+    u32 hdr_settings_stride = 0, hdr_settings_slot = 0;
+    bool hdr_settings_written = false;
+    BbHdr::Tuning hdr_settings_last{};
     void UpdateRasterizationState() const;
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
 

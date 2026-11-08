@@ -25,6 +25,10 @@ public:
         /// brightest highlights, in nits.
         float paper_nits = 203.0f;
         float peak_nits = 1000.0f;
+        /// bbport (hdr 2): the picture's decode gamma and Oklab chroma scale (BbHdr::Tuning; for
+        /// the scene HDR composite 2.2 and 1.0, its own domain).
+        float sdr_gamma = 2.2f;
+        float sdr_saturation = 1.0f;
     };
     /// bbport: `hdr` values.
     static constexpr u32 HdrGuestPq = 1;

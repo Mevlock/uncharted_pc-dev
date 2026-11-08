@@ -7,10 +7,19 @@
 // license, which applies to renodx/ only. The port's additions: the HdrSettings buffer, the
 // renodx_* captures and main_hdr_shadow (RenoDX tone mapping of the pre-tonemap color).
 //
-// HDR tone replacement. Live settings use binding 12; guest bindings 0-9 stay intact.
+// HDR tone replacement. Live settings use binding 12; guest bindings 0-9 stay intact. The
+// buffer's layout is BbHdr::Tuning (gpu/shim/bbport_hdr.h): the menu's HDR section, every frame.
 [[vk::binding(12, 0)]] ByteAddressBuffer HdrSettings;
 #define RENODX_PEAK_WHITE_NITS asfloat(HdrSettings.Load(0))
 #define RENODX_DIFFUSE_WHITE_NITS asfloat(HdrSettings.Load(4))
+#define RENODX_TONE_MAP_EXPOSURE asfloat(HdrSettings.Load(8))
+#define RENODX_TONE_MAP_SATURATION asfloat(HdrSettings.Load(12))
+#define RENODX_TONE_MAP_HIGHLIGHT_SATURATION asfloat(HdrSettings.Load(16))
+#define RENODX_TONE_MAP_CONTRAST asfloat(HdrSettings.Load(20))
+#define RENODX_PER_CHANNEL_CHROMINANCE_CORRECTION asfloat(HdrSettings.Load(24))
+#define RENODX_PER_CHANNEL_BLOWOUT_RESTORATION asfloat(HdrSettings.Load(28))
+#define RENODX_TONE_MAP_HUE_CORRECTION asfloat(HdrSettings.Load(32))
+#define RENODX_TONE_MAP_PER_CHANNEL asfloat(HdrSettings.Load(36))
 #include "draw.hlsl"
 ByteAddressBuffer ssbo_1_1 : register(t0, space0);
 ByteAddressBuffer ssbo_2_1 : register(t1, space0);

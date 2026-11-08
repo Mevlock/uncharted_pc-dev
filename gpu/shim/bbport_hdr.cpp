@@ -7,21 +7,12 @@
 #include <cstdlib>
 
 #include "bbport_saves.h"
+#include "bbport_settings.h"
 
 namespace BbHdr {
 namespace {
 
 std::atomic<bool> g_output{false};
-
-float Number(const char* name, float fallback, float lo, float hi) {
-    const char* value = std::getenv(name);
-    if (!value || !*value) {
-        return fallback;
-    }
-    char* end = nullptr;
-    const float parsed = std::strtof(value, &end);
-    return end == value ? fallback : std::clamp(parsed, lo, hi);
-}
 
 } // namespace
 
@@ -33,14 +24,32 @@ bool Requested() {
     return on;
 }
 
+// BbSettings::Load reads BB_HDR_PEAK_NITS and BB_HDR_PAPER_WHITE (they override bbport.ini).
 float PeakNits() {
-    static const float nits = Number("BB_HDR_PEAK_NITS", 1000.0f, 400.0f, 10000.0f);
-    return nits;
+    return BbSettings::Get().hdr_peak_nits.load(std::memory_order_relaxed);
 }
 
 float PaperWhite() {
-    static const float nits = Number("BB_HDR_PAPER_WHITE", 203.0f, 80.0f, 500.0f);
-    return nits;
+    return BbSettings::Get().hdr_paper_white.load(std::memory_order_relaxed);
+}
+
+Tuning Current() {
+    const auto& v = BbSettings::Get();
+    constexpr auto r = std::memory_order_relaxed;
+    Tuning t{};
+    t.peak_nits = v.hdr_peak_nits.load(r);
+    t.paper_white = v.hdr_paper_white.load(r);
+    t.exposure = v.hdr_exposure.load(r);
+    t.saturation = v.hdr_saturation.load(r);
+    t.highlight_saturation = v.hdr_highlight_saturation.load(r);
+    t.contrast = v.hdr_contrast.load(r);
+    t.chrominance = v.hdr_chrominance.load(r);
+    t.blowout = v.hdr_blowout.load(r);
+    t.hue_correction = v.hdr_hue_correction.load(r);
+    t.per_channel = v.hdr_per_channel.load(r) ? 1.0f : 0.0f;
+    t.sdr_gamma = v.hdr_sdr_gamma.load(r);
+    t.sdr_saturation = v.hdr_sdr_saturation.load(r);
+    return t;
 }
 
 void SetOutput(bool on) {

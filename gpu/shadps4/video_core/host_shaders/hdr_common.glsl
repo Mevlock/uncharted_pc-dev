@@ -22,10 +22,40 @@ vec3 SrgbEncodeExt(vec3 linear) {
                lessThan(linear, vec3(0.0031308)));
 }
 
+// Oklab (Bjorn Ottosson) from and to linear Rec. 709.
+vec3 OklabFromBt709(vec3 c) {
+    const vec3 lms = vec3(dot(c, vec3(0.4122214708, 0.5363325363, 0.0514459929)),
+                          dot(c, vec3(0.2119034982, 0.6806995451, 0.1073969566)),
+                          dot(c, vec3(0.0883024619, 0.2817188376, 0.6299787005)));
+    const vec3 r = sign(lms) * pow(abs(lms), vec3(1.0 / 3.0));
+    return vec3(dot(r, vec3(0.2104542553, 0.7936177850, -0.0040720468)),
+                dot(r, vec3(1.9779984951, -2.4285922050, 0.4505937099)),
+                dot(r, vec3(0.0259040371, 0.7827717662, -0.8086757660)));
+}
+
+vec3 Bt709FromOklab(vec3 lab) {
+    const vec3 r = vec3(dot(lab, vec3(1.0, 0.3963377774, 0.2158037573)),
+                        dot(lab, vec3(1.0, -0.1055613458, -0.0638541728)),
+                        dot(lab, vec3(1.0, -0.0894841775, -1.2914855480)));
+    const vec3 lms = r * r * r;
+    return vec3(dot(lms, vec3(4.0767416621, -3.3077115913, 0.2309699292)),
+                dot(lms, vec3(-1.2684380046, 2.6097574011, -0.3413193965)),
+                dot(lms, vec3(-0.0041960863, -0.7034186147, 1.7076147010)));
+}
+
 // The games' pictures are made for a gamma 2.2 display: the stored (sRGB-encoded) value v shows
-// at v^2.2 of white. `linear`: as an sRGB view reads the picture (above 1.0: the HDR scene, already
-// in the domain where this gives its own value). Rec. 709, white = paper_nits -> HDR10 signal.
-vec3 Hdr10FromPicture(vec3 linear, float paper_nits, float peak_nits) {
-    const vec3 nits = pow(SrgbEncodeExt(linear), vec3(2.2)) * paper_nits;
-    return PqFromNits(clamp(BT709_TO_BT2020 * nits, 0.0, peak_nits));
+// at v^gamma of white (2.2; the menu's HDR section can pick another, e.g. 2.4 for a BT.1886 look).
+// `linear`: as an sRGB view reads the picture (above 1.0: the HDR scene, already in the domain
+// where gamma 2.2 gives its own value). `saturation` scales the Oklab chroma (lightness and hue
+// kept; 1.0: none): colours past Rec. 709 land in Rec. 2020's wider gamut instead of clipping.
+// Rec. 709, white = paper_nits -> HDR10 signal.
+vec3 Hdr10FromPicture(vec3 linear, float paper_nits, float peak_nits, float gamma,
+                      float saturation) {
+    vec3 rel = pow(SrgbEncodeExt(linear), vec3(gamma));
+    if (saturation != 1.0) {
+        vec3 lab = OklabFromBt709(rel);
+        lab.yz *= saturation;
+        rel = Bt709FromOklab(lab);
+    }
+    return PqFromNits(clamp(BT709_TO_BT2020 * (rel * paper_nits), 0.0, peak_nits));
 }

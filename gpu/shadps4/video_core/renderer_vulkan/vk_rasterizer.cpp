@@ -933,9 +933,15 @@ void Rasterizer::RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderS
     vk::DescriptorImageInfo tone_info{};
     Shadow which{};
     if (pipeline.GetHdrRole() == GraphicsPipeline::HdrRole::Tone) {
+        // The menu's HDR settings (BbHdr::Tuning) change live: each change takes the next slot
+        // of a ring, so frames still in flight keep reading the values they were recorded with.
+        constexpr u32 slots = 64;
         if (!hdr_settings_buffer) {
+            const u32 align = u32(std::max<vk::DeviceSize>(instance.StorageMinAlignment(), 256));
+            hdr_settings_stride = u32((sizeof(BbHdr::Tuning) + align - 1) / align * align);
             const VkBufferCreateInfo buffer_info = static_cast<VkBufferCreateInfo>(
-                vk::BufferCreateInfo{.size = 16, .usage = vk::BufferUsageFlagBits::eStorageBuffer});
+                vk::BufferCreateInfo{.size = vk::DeviceSize(hdr_settings_stride) * slots,
+                                     .usage = vk::BufferUsageFlagBits::eStorageBuffer});
             const VmaAllocationCreateInfo alloc_info{
                 .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
                          VMA_ALLOCATION_CREATE_MAPPED_BIT,
@@ -948,13 +954,24 @@ void Rasterizer::RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderS
                 !mapped.pMappedData) {
                 return;
             }
-            // RenoDX's peak and diffuse white (gpu/hdr/fs_3371ae8d_hdr.hlsl), fixed for the session.
-            const std::array<float, 4> nits{BbHdr::PeakNits(), BbHdr::PaperWhite(), 0.0f, 0.0f};
-            std::memcpy(mapped.pMappedData, nits.data(), sizeof(nits));
-            vmaFlushAllocation(instance.GetAllocator(), hdr_settings_allocation, 0, VK_WHOLE_SIZE);
             hdr_settings_buffer = vk::Buffer{buffer};
+            hdr_settings_mapped = mapped.pMappedData;
+            hdr_settings_slot = slots - 1;
         }
-        settings_info = {hdr_settings_buffer, 0, 16};
+        const BbHdr::Tuning tuning = BbHdr::Current();
+        if (!hdr_settings_written ||
+            std::memcmp(&tuning, &hdr_settings_last, sizeof(tuning)) != 0) {
+            hdr_settings_slot = (hdr_settings_slot + 1) % slots;
+            const vk::DeviceSize offset = vk::DeviceSize(hdr_settings_slot) * hdr_settings_stride;
+            std::memcpy(static_cast<u8*>(hdr_settings_mapped) + offset, &tuning, sizeof(tuning));
+            vmaFlushAllocation(instance.GetAllocator(), hdr_settings_allocation, offset,
+                               sizeof(tuning));
+            hdr_settings_last = tuning;
+            hdr_settings_written = true;
+        }
+        settings_info = {hdr_settings_buffer,
+                         vk::DeviceSize(hdr_settings_slot) * hdr_settings_stride,
+                         sizeof(BbHdr::Tuning)};
         writes.push_back({.dstBinding = pipeline.HdrSettingsBinding(),
                           .descriptorCount = 1,
                           .descriptorType = vk::DescriptorType::eStorageBuffer,

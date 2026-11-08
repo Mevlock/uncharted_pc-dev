@@ -179,7 +179,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     if (own_hdr) {
         FrameGenerator::ColorFormat = vk::Format::eA2B10G10R10UnormPack32;
         pp_settings.hdr = HostPasses::PostProcessingPass::HdrEncode;
-        pp_settings.paper_nits = BbHdr::PaperWhite();
+        pp_settings.paper_nits = BbHdr::PaperWhite(); // then each frame (PrepareFrame)
         pp_settings.peak_nits = BbHdr::PeakNits();
         pp_pass.Create(device, FrameGenerator::ColorFormat, swapchain.GetHdrFormat());
     } else {
@@ -760,6 +760,15 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     // FSR's HDR sampling is for a guest PQ picture; the HDR10 encode reads the game's own one.
     const bool encode_hdr = pp_settings.hdr == HostPasses::PostProcessingPass::HdrEncode;
+    // HDR10 output: the menu's HDR settings, live. The scene HDR composite keeps gamma 2.2 and its
+    // own colours (its domain: hdr_scene.comp; the tone pass replacement has its own saturation).
+    if (encode_hdr) {
+        const BbHdr::Tuning tuning = BbHdr::Current();
+        pp_settings.paper_nits = tuning.paper_white;
+        pp_settings.peak_nits = tuning.peak_nits;
+        pp_settings.sdr_gamma = float_display ? 2.2f : tuning.sdr_gamma;
+        pp_settings.sdr_saturation = float_display ? 1.0f : tuning.sdr_saturation;
+    }
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr && !encode_hdr);
 

@@ -101,6 +101,25 @@ struct Values {
     std::atomic<int> dlssg_max_multiplier{1};
     std::atomic<const char*> frame_gen_problem{nullptr};
 
+    /// HDR10 output (BbHdr, bbport_hdr.h), live from the menu's HDR section. Paper white and peak
+    /// start from the launcher (BB_HDR_PAPER_WHITE / BB_HDR_PEAK_NITS) when it sets them. Scene
+    /// HDR (the tone pass replacement, RenoDX): exposure, saturation, highlight saturation,
+    /// contrast, colour restoration (per-channel chrominance correction), blowout restoration,
+    /// hue correction, per-channel tone mapping. The game's SDR picture in HDR10: decode gamma
+    /// and saturation (Oklab chroma).
+    std::atomic<float> hdr_paper_white{203.0f};
+    std::atomic<float> hdr_peak_nits{1000.0f};
+    std::atomic<float> hdr_exposure{1.0f};
+    std::atomic<float> hdr_saturation{1.1f};
+    std::atomic<float> hdr_highlight_saturation{1.0f};
+    std::atomic<float> hdr_contrast{1.0f};
+    std::atomic<float> hdr_chrominance{1.0f};
+    std::atomic<float> hdr_blowout{0.0f};
+    std::atomic<float> hdr_hue_correction{1.0f};
+    std::atomic<bool> hdr_per_channel{false};
+    std::atomic<float> hdr_sdr_gamma{2.2f};
+    std::atomic<float> hdr_sdr_saturation{1.1f};
+
     /// Startup settings for the explicit BB_RENDER_RES compatibility patch only.
     int startup_preset = NativeAA;
     int startup_upscaler = UpscalerFsr3;
@@ -109,6 +128,9 @@ struct Values {
     int startup_model_lod = 0;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;
+    /// The HDR section's Reset: paper white and peak as the game started (the launcher's).
+    float startup_hdr_paper_white = 203.0f;
+    float startup_hdr_peak_nits = 1000.0f;
 };
 
 Values& Get();
@@ -127,6 +149,8 @@ int RenderPreset();
 bool ResolutionNeedsRestart();
 /// Writes the file (menu changes).
 void Save();
+/// The HDR section's defaults (the menu's Reset); paper white and peak as at start.
+void ResetHdr();
 
 /// Render resolution divisor of a preset (1.0 native, 1.5 quality, ...).
 float PresetScale(int preset);
