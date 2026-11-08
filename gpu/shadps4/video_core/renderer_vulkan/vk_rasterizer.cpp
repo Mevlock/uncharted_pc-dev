@@ -45,6 +45,7 @@ extern "C" unsigned runtime_render_width, runtime_render_height;
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 
 namespace Vulkan {
+bool BbMovieShaderSize(u64 pgm_hash, u32& width, u32& height); // vk_pipeline_cache.cpp
 
 // bbport diagnosis: BB_CONST_CHECK=<shader hash>: the constants of that shader's draws as they
 // were packed for recording (user data, the flattened resource table read through it, constant
@@ -5546,7 +5547,28 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         .indirect = false,
     };
     const u32 workgroup_split = Shader::WorkgroupSplit(cs.cs_split_eligible, hw_cs);
-    const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
+    u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y;
+    const u32 dim_z = cs_program.dim_z;
+    // bbport: the movie shader (YUV to RGB, one pixel per thread of a 32x2 group) is dispatched
+    // with the render width / 32 groups, rounded down: exact at 1920, 16 columns short at 3440 (the
+    // right edge kept what was there before, a white bar). The groups are raised to cover the
+    // movie's size; the threads past the image's edge write nothing (robustImageAccess2).
+    // From moistman7's PR #156 to BilalReloaded's port.
+    if (u32 movie_w = 0, movie_h = 0; BbMovieShaderSize(cs.pgm_hash, movie_w, movie_h)) {
+        const u32 tx = cs_program.num_thread_x.full, ty = cs_program.num_thread_y.full;
+        const u32 need_x = tx ? (movie_w + tx - 1) / tx : dim_x;
+        const u32 need_y = ty ? (movie_h + ty - 1) / ty : dim_y;
+        if (dim_x < need_x || dim_y < need_y) {
+            static std::atomic<int> noted{0};
+            if (noted++ == 0) {
+                std::printf("Movie: dispatch %ux%u groups raised to %ux%u (%ux%u pixels)\n", dim_x,
+                            dim_y, std::max(dim_x, need_x), std::max(dim_y, need_y), movie_w,
+                            movie_h);
+            }
+            dim_x = std::max(dim_x, need_x);
+            dim_y = std::max(dim_y, need_y);
+        }
+    }
     const u32 groups_x = dim_x * (workgroup_split > 1 ? workgroup_split : Shader::CtaSplitFactor(cs.pgm_hash));
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, groups_x, dim_y, dim_z);

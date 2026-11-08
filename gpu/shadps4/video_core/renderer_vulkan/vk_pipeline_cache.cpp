@@ -1828,6 +1828,10 @@ bool BbMovieShaderScaled(u64 pgm_hash) {
     return u32(pgm_hash) == 0xc85d9816u && MovieShaderSize(nullptr, nullptr);
 }
 
+bool BbMovieShaderSize(u64 pgm_hash, u32& width, u32& height) {
+    return u32(pgm_hash) == 0xc85d9816u && MovieShaderSize(&width, &height);
+}
+
 static std::vector<u32> ScaleMovieShader(std::span<const u32> code) {
     std::vector<u32> out(code.begin(), code.end());
     u32 w = 1920, h = 1080;
