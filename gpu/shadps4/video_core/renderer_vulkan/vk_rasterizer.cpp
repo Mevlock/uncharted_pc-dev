@@ -5846,8 +5846,11 @@ void Rasterizer::VramStats() {
     const auto counts = pipeline_cache.GetVramCounts();
     static size_t last_pipelines = 0;
     const size_t pipelines = counts.graphics + counts.compute + counts.batched;
+    // signed: the counts can shrink (pipelines dropped), a size_t difference would wrap
+    const long long pipeline_delta =
+        static_cast<long long>(pipelines) - static_cast<long long>(last_pipelines);
     const std::string pipeline_change =
-        had_line ? fmt::format("+{}", pipelines - last_pipelines) : std::string("n/a");
+        had_line ? fmt::format("{:+}", pipeline_delta) : std::string("n/a");
     last_pipelines = pipelines;
     const std::string line = fmt::format(
         "VRAM stats: t={} s; driver usage {} of budget {} MiB ({} in 30 s; heaps "
