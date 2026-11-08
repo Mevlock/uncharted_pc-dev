@@ -5708,7 +5708,8 @@ void Rasterizer::OnSubmit() {
 // given back, reserved address space; bound windows unused for 60 s or more, the amount a
 // give-back could free, and how much of that holds GPU data, which cannot go), the other
 // buffers by kind, the images by kind, VMA's blocks and what is left ("other": driver, pipelines,
-// descriptor pools, swapchain, upscalers; Vulkan cannot split it). A burst of guest map/unmap
+// descriptor pools, swapchain, upscalers; Vulkan cannot split it, so the pipelines, pipeline
+// library parts, shader programs and descriptor pools kept are counted beside it). A burst of guest map/unmap
 // (BB_VRAM_LOAD_MB per second, default 64; a level or area load) or a checkpoint test jump
 // (BB_TEST_JUMP_EVERY) gives a "VRAM load:" line with the totals before and after, once the
 // mapping has been quiet for 10 s. Sampled once a second on the GPU thread (cheap totals); the
@@ -5840,6 +5841,14 @@ void Rasterizer::VramStats() {
             : std::string();
     const std::string change =
         had_line ? signed_mib(vram.usage, last_line.usage) : std::string("n/a");
+    // What "other" holds that the port keeps for the whole session: pipelines (their shader code
+    // lives in driver memory, partly video memory) and descriptor pools.
+    const auto counts = pipeline_cache.GetVramCounts();
+    static size_t last_pipelines = 0;
+    const size_t pipelines = counts.graphics + counts.compute + counts.batched;
+    const std::string pipeline_change =
+        had_line ? fmt::format("+{}", pipelines - last_pipelines) : std::string("n/a");
+    last_pipelines = pipelines;
     const std::string line = fmt::format(
         "VRAM stats: t={} s; driver usage {} of budget {} MiB ({} in 30 s; heaps "
         "usage/budget/size, *=device-local: {}{}); arenas: allocated {} MiB (+{} in system "
@@ -5850,7 +5859,8 @@ void Rasterizer::VramStats() {
         "MiB ({}), textures {} MiB ({}), GPU-written {}, outside the cache {}, kept for "
         "recycling {}, deleted not yet freed {}; VMA blocks {} MiB ({} blocks, {} allocations "
         "{} MiB); other (driver, pipelines, descriptor pools, swapchain, upscalers) {} MiB; "
-        "guest mapped {} MiB ({} calls), unmapped {} MiB ({} calls) in 30 s",
+        "pipelines {} ({} in 30 s): graphics {}, compute {}, batched {}, library parts {}, "
+        "programs {}, descriptor pools {}; guest mapped {} MiB ({} calls), unmapped {} MiB ({} calls) in 30 s",
         seconds, mib(vram.usage), mib(vram.budget), change, vram.heaps, ballast,
         mib(arenas.chunk_bytes), mib(arenas.chunk_host_bytes), mib(arenas.bound_bytes),
         mib(arenas.free_run_bytes), mib(arenas.held_bytes), mib(arenas.probation_bytes),
@@ -5861,7 +5871,9 @@ void Rasterizer::VramStats() {
         images.target_count, mib(images.texture_bytes), images.texture_count,
         mib(images.gpu_written_bytes), mib(outside_cache), mib(recycled),
         mib(images.pending_free_bytes), mib(vram.vma_block_bytes), vram.vma_blocks,
-        vram.vma_allocs, mib(vram.vma_alloc_bytes), other, mib(t.mapped - last_line.mapped),
+        vram.vma_allocs, mib(vram.vma_alloc_bytes), other, pipelines, pipeline_change,
+        counts.graphics, counts.compute, counts.batched, counts.library_parts, counts.programs,
+        counts.descriptor_pools, mib(t.mapped - last_line.mapped),
         t.map_calls - last_line.map_calls, mib(t.unmapped - last_line.unmapped),
         t.unmap_calls - last_line.unmap_calls);
     std::printf("%s\n", line.c_str());

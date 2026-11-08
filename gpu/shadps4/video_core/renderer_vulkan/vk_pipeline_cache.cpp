@@ -614,6 +614,23 @@ PipelineCache::~PipelineCache() {
     }
 }
 
+PipelineCache::VramCounts PipelineCache::GetVramCounts() {
+    VramCounts c{};
+    {
+        std::shared_lock lock{pipelines_mutex};
+        c.graphics = graphics_pipelines.size();
+        c.compute = compute_pipelines.size();
+        c.batched = batched_pipelines.size() + batched_graphics.size();
+    }
+    {
+        std::shared_lock lock{programs_mutex};
+        c.programs = program_cache.size();
+    }
+    c.library_parts = LibraryParts::Count();
+    c.descriptor_pools = desc_heap.PoolCount();
+    return c;
+}
+
 bool PipelineCache::AsyncCompilation() const {
     return compiler != nullptr;
 }
