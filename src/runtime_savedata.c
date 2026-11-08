@@ -157,10 +157,15 @@ static void remove_tree(const char *path) { nftw(path,remove_entry,16,FTW_DEPTH|
 /* Save auto-repair (the idea from BilalReloaded's port 0.8.0, his #311: a power cut while saving).
  * Each time the game closes a save, every file in it that holds data (not empty, not all zero bytes)
  * is copied to <title>.backups/auto/<dir name>/; a file that is empty or all zeros is never copied,
- * so a good backup is never replaced by a broken file. When the game opens a save, a file in it that
- * is empty or all zeros while its backup holds data is put back from the backup (logged). Files are
- * only repaired, never added or removed. A save the game deletes moves its backup to
- * <dir name>.deleted (so a new save of that name is not "repaired" from the old one).
+ * so a good backup is never replaced by a broken file. The close also writes <dir name>/.closed: per
+ * file whether that close left it with data ("D <path>") or empty or all zeros ("E <path>").
+ * When the game opens a save, a file in it that is empty or all zeros while its backup holds data is
+ * put back from the backup (logged) only if the last close left it with data: it was broken outside a
+ * close (a power cut or a crash while saving), not emptied by the game itself (backups from builds
+ * without .closed: repaired as before). Files are only repaired, never added or removed, and a file
+ * with data is never overwritten. A save the game deletes moves its backup to <dir name>.deleted, and
+ * a save whose folder is gone when the game opens or creates it (a new save, or one deleted outside the
+ * game) moves it to <dir name>.stale: a new save of that name is not "repaired" from the old one.
  * The practice copy of checkpoint jumps is left alone. BB_SAVE_BACKUP=0: off. */
 #define BACKUP_MAX_FILE (256u<<20)
 static pthread_mutex_t backup_lock=PTHREAD_MUTEX_INITIALIZER;
@@ -192,22 +197,45 @@ static int is_temp_name(const char *name) {
     const size_t n=strlen(name);
     return name[0]=='.' || (n>6 && !strcmp(name+n-6,".bbtmp"));
 }
-/* backup=1: the files of `from` (the save) that hold data into `to` (its backup).
- * backup=0: the files of `to` (the save) that are empty or all zeros put back from `from` (the backup). */
-static void backup_walk(const char *from, const char *to, int backup, int depth, const char *save) {
+/* The last close's state of a save's files (.closed in its backup): a text of "D <path>\n" / "E <path>\n" lines. */
+typedef struct { char *text; size_t size, capacity; } Closed;
+static void closed_add(Closed *c, char kind, const char *rel) {
+    const size_t n=strlen(rel)+3;
+    if (c->size+n+1>c->capacity) {
+        size_t capacity=c->capacity ? c->capacity*2 : 1024;
+        while (capacity<c->size+n+1) capacity*=2;
+        char *text=realloc(c->text,capacity);
+        if (!text) return;
+        c->text=text; c->capacity=capacity;
+    }
+    c->size+=(size_t)snprintf(c->text+c->size,c->capacity-c->size,"%c %s\n",kind,rel);
+}
+/* Whether the last close left `rel` with data (`closed`: the .closed text, "\n" first). */
+static int closed_had_data(const char *closed, const char *rel) {
+    char needle[800];
+    snprintf(needle,sizeof(needle),"\nD %s\n",rel);
+    return strstr(closed,needle)!=NULL;
+}
+/* backup=1: the files of `from` (the save) that hold data into `to` (its backup), each file's state into `out`.
+ * backup=0: the files of `to` (the save) that are empty or all zeros put back from `from` (the backup), if `closed`
+ * (the last close's states; NULL: not known) says that close left them with data. `rel`: the path in the save. */
+static void backup_walk(const char *from, const char *to, int backup, int depth, const char *save, const char *rel,
+                        Closed *out, const char *closed) {
     if (depth>4) return;
     DIR *dir=opendir(from);
     if (!dir) return;
     for (struct dirent *e; (e=readdir(dir));) {
         if (is_temp_name(e->d_name)) continue;
-        char src[760], dst[760];
+        char src[760], dst[760], path[700];
         snprintf(src,sizeof(src),"%s/%s",from,e->d_name);
         snprintf(dst,sizeof(dst),"%s/%s",to,e->d_name);
+        snprintf(path,sizeof(path),"%s%s%s",rel,*rel ? "/" : "",e->d_name);
         struct stat st;
         if (stat(src,&st)) continue;
         if (S_ISDIR(st.st_mode)) {
             struct stat target;
-            if (backup || (!stat(dst,&target) && S_ISDIR(target.st_mode))) backup_walk(src,dst,backup,depth+1,save);
+            if (backup || (!stat(dst,&target) && S_ISDIR(target.st_mode)))
+                backup_walk(src,dst,backup,depth+1,save,path,out,closed);
             continue;
         }
         if (!S_ISREG(st.st_mode)) continue;
@@ -218,6 +246,7 @@ static void backup_walk(const char *from, const char *to, int backup, int depth,
         const int dst_exists=!stat(dst,&target) && S_ISREG(target.st_mode);
         unsigned char *dst_data=dst_exists ? read_whole(dst,&dst_size) : NULL;
         if (backup) {
+            if (out) closed_add(out,holds_data(src_data,src_size) ? 'D' : 'E',path);
             /* only a file with data, and only when it changed */
             if (holds_data(src_data,src_size) &&
                 !(dst_data && dst_size==src_size && !memcmp(dst_data,src_data,src_size))) {
@@ -230,7 +259,10 @@ static void backup_walk(const char *from, const char *to, int backup, int depth,
         } else if (dst_exists && holds_data(src_data,src_size) && !holds_data(dst_data,dst_data ? dst_size : 0) &&
                    (dst_data || !target.st_size)) {
             /* (dst_data NULL with a size: unreadable, left alone) */
-            if (write_atomic(dst,src_data,src_size))
+            if (closed && !closed_had_data(closed,path))
+                printf("Runtime: save '%s/%s' is %s as the game left it at its last close: not restored\n",save,
+                       e->d_name,target.st_size ? "all zeros" : "empty");
+            else if (write_atomic(dst,src_data,src_size))
                 printf("Runtime: save '%s/%s' is %s and could not be restored from its backup\n",save,e->d_name,
                        target.st_size ? "all zeros" : "empty");
             else
@@ -254,31 +286,48 @@ static int backup_target(const char *host, char *base_out, size_t base_size, cha
     return !strstr(base_out,".backups");
 }
 static void save_backup(const char *host) {
-    char base[700], name[64], backup[800];
+    char base[700], name[64], backup[800], closed_path[820];
     if (!backup_target(host,base,sizeof(base),name,sizeof(name))) return;
     backup_path(base,name,backup,sizeof(backup));
+    snprintf(closed_path,sizeof(closed_path),"%s/.closed",backup);
+    Closed closed={0};
     pthread_mutex_lock(&backup_lock);
-    backup_walk(host,backup,1,0,name);
+    backup_walk(host,backup,1,0,name,"",&closed,NULL);
+    if (make_dirs(backup) || write_atomic(closed_path,closed.text ? closed.text : "",closed.size))
+        printf("Runtime: save backup state of '%s' could not be written\n",name);
     pthread_mutex_unlock(&backup_lock);
+    free(closed.text);
 }
 static void save_repair(const char *host) {
-    char base[700], name[64], backup[800];
+    char base[700], name[64], backup[800], closed_path[820];
     if (!backup_target(host,base,sizeof(base),name,sizeof(name))) return;
     backup_path(base,name,backup,sizeof(backup));
+    snprintf(closed_path,sizeof(closed_path),"%s/.closed",backup);
     pthread_mutex_lock(&backup_lock);
-    backup_walk(backup,host,0,0,name);
+    size_t size=0;
+    unsigned char *text=read_whole(closed_path,&size);
+    char *closed=NULL;
+    if (text) {
+        closed=malloc(size+2);
+        if (closed) { closed[0]='\n'; memcpy(closed+1,text,size); closed[size+1]=0; }
+        free(text);
+    }
+    backup_walk(backup,host,0,0,name,"",NULL,closed);
     pthread_mutex_unlock(&backup_lock);
+    free(closed);
 }
-static void save_backup_deleted(const char *host) {
+/* The save's backup moved aside to <dir name><suffix> (replacing an older one there). */
+static void save_backup_aside(const char *host, const char *suffix, const char *why) {
     char base[700], name[64], backup[800], old[820];
     if (!backup_target(host,base,sizeof(base),name,sizeof(name))) return;
     backup_path(base,name,backup,sizeof(backup));
-    snprintf(old,sizeof(old),"%s.deleted",backup);
+    snprintf(old,sizeof(old),"%s%s",backup,suffix);
     pthread_mutex_lock(&backup_lock);
     struct stat st;
     if (!stat(backup,&st)) {
         remove_tree(old);
         if (rename(backup,old)) remove_tree(backup);
+        if (why) printf("Runtime: save '%s' %s: its old backup moved to backups/auto/%s%s\n",name,why,name,suffix);
     }
     pthread_mutex_unlock(&backup_lock);
 }
@@ -334,6 +383,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     if ((mode & MODE_CREATE) && exists) return ERR_EXISTS;
     if (!(mode & (MODE_CREATE|MODE_CREATE2)) && !exists) return ERR_NOT_FOUND;
     if (exists) save_repair(host); /* an empty or zeroed file (a power cut while saving) from its backup */
+    else save_backup_aside(host,".stale","has no folder"); /* new, or deleted outside the game */
     pthread_mutex_lock(&lock);
     int slot=-1;
     for (int i=0;i<SLOTS;++i) {
@@ -436,7 +486,7 @@ static ABI int32_t save_delete(const Delete *d) {
     if (stat(host,&st)) return ERR_NOT_FOUND;
     remove_tree(host);
     remove_tree(meta);
-    save_backup_deleted(host);
+    save_backup_aside(host,".deleted",NULL);
     printf("Runtime: save data '%s' deleted\n",d->dir->data);
     return 0;
 }
