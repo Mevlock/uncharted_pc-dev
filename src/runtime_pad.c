@@ -10,6 +10,7 @@
  *       lefttrigger righttrigger leftstick rightstick back start dpup dpdown dpleft dpright
  *       touchpad misc1 paddle1..paddle4) or "none", for the button actions above.
  *   mouse_look=1  mouse_sensitivity=1.0  mouse_invert_y=0  pad_invert_y=0
+ *   mouse_aim_sensitivity=1.0 (times the sensitivity while aiming)  mouse_vertical=1.0 (times it for up/down)
  *   pad_vibration=1  pad_vibration_strength=100
  *
  * Defaults (no file): WASD move, mouse look, left button R2 (fire), right button L2 (aim),
@@ -397,7 +398,10 @@ static struct {
     Bind keys[ACTIONS][2];
     int pad[16];               /* SDL_GamepadButton, PAD_TRIGGER_*, or -1 */
     int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength;
-    float mouse_sensitivity;
+    volatile float mouse_sensitivity;
+    /* Times the sensitivity while aiming (L2), and for up and down (looking and aiming). The in-game
+     * menu changes all three while the game runs (runtime_mouse_set, another thread: plain floats). */
+    volatile float mouse_aim_sensitivity, mouse_vertical;
 } input;
 
 /* Whether `name` is one of the keys in `defaults` ("Escape|Return"). */
@@ -446,6 +450,7 @@ static void load_input(void) {
         if (a<16) input.pad[a]=parse_pad(actions[a].pad);
     }
     input.mouse_look=1; input.mouse_sensitivity=1.0f;
+    input.mouse_aim_sensitivity=1.0f; input.mouse_vertical=1.0f;
     input.pad_vibration=1; input.pad_vibration_strength=100;
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
@@ -459,6 +464,8 @@ static void load_input(void) {
             const char *key=line, *value=eq+1;
             if (!strcmp(key,"mouse_look")) input.mouse_look=atoi(value)!=0;
             else if (!strcmp(key,"mouse_sensitivity")) input.mouse_sensitivity=(float)atof(value);
+            else if (!strcmp(key,"mouse_aim_sensitivity")) input.mouse_aim_sensitivity=(float)atof(value);
+            else if (!strcmp(key,"mouse_vertical")) input.mouse_vertical=(float)atof(value);
             else if (!strcmp(key,"mouse_invert_y")) input.mouse_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"pad_invert_y")) input.pad_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"pad_vibration")) input.pad_vibration=atoi(value)!=0;
@@ -469,10 +476,12 @@ static void load_input(void) {
             }
         }
         fclose(f);
-        printf("Runtime: controls from %s (mouse look %s, sensitivity %.2f)\n",path,
-               input.mouse_look ? "on" : "off",input.mouse_sensitivity);
+        printf("Runtime: controls from %s (mouse look %s, sensitivity %.2f, aiming x%.2f, vertical x%.2f)\n",path,
+               input.mouse_look ? "on" : "off",input.mouse_sensitivity,input.mouse_aim_sensitivity,input.mouse_vertical);
     }
     if (input.mouse_sensitivity<=0.0f) input.mouse_sensitivity=1.0f;
+    if (input.mouse_aim_sensitivity<=0.0f) input.mouse_aim_sensitivity=1.0f;
+    if (input.mouse_vertical<=0.0f) input.mouse_vertical=1.0f;
     if (input.pad_vibration_strength<0) input.pad_vibration_strength=0;
     if (input.pad_vibration_strength>100) input.pad_vibration_strength=100;
     bbgpu_mouse_configure(input.mouse_look);
@@ -625,6 +634,26 @@ static volatile int follow_direct=1;
 static float follow_kept=1.0f;            /* average fraction of a turn still there the next frame */
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
 static volatile int aim_stick_fallback; /* raw aim: the aiming camera puts its direction back (U1): the stick turns it */
+/* Degrees of turn per mouse pixel: the sensitivity, times the aiming one while aim is held (also
+ * while aiming blends in, and on the stick paths), times the vertical one for up and down. */
+static float mouse_scale(int vertical) {
+    float k=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+    if (aim_held) k*=input.mouse_aim_sensitivity;
+    if (vertical) k*=input.mouse_vertical;
+    return k;
+}
+/* The in-game menu: the current values (any pointer may be NULL) and changes (applied at once, for
+ * this session; values <= 0 are left as they are). */
+void runtime_mouse_get(float *look, float *aim, float *vertical) {
+    if (look) *look=input.mouse_sensitivity;
+    if (aim) *aim=input.mouse_aim_sensitivity;
+    if (vertical) *vertical=input.mouse_vertical;
+}
+void runtime_mouse_set(float look, float aim, float vertical) {
+    if (look>0.0f) input.mouse_sensitivity=look;
+    if (aim>0.0f) input.mouse_aim_sensitivity=aim;
+    if (vertical>0.0f) input.mouse_vertical=vertical;
+}
 static int raw_aim_armed(uint64_t now) {
     return aim_held && aim_direct_us && (now-aim_direct_us<1000000 || now-aim_press_us<1500000);
 }
@@ -710,7 +739,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     float shown=heading; /* the shown camera's yaw (debug output) */
     double age=0.0;
     if (mouse_debug() && (!bbgpu_camera_yaw(&shown,&age) || age>0.25)) shown=heading;
-    const float turn=camera_test_rate>0.0f ? camera_test_rate : dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+    const float turn=camera_test_rate>0.0f ? camera_test_rate : dx*mouse_scale(0);
     /* the wanted heading and how far the direction is short of it (degrees still to turn). The
      * camera rests 0.15 s after the mouse stopped, once the direction has reached the wanted heading
      * (fast turns go beyond what the game keeps in a frame) or at the latest after 0.5 s. */
@@ -784,7 +813,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         const float top_limit=arc_env>=0.0f ? arc_env : arc_max;
         float *arc=(float *)(uintptr_t)(camera+arc_offset);
         const float cur=*arc, top=cur>top_limit ? cur : top_limit;
-        float v=cur+(input.mouse_invert_y ? -dy : dy)*(MOUSE_DEGREES_PER_PIXEL/arc_degrees)*input.mouse_sensitivity;
+        float v=cur+(input.mouse_invert_y ? -dy : dy)*mouse_scale(1)/arc_degrees;
         *arc=v<0.0f ? 0.0f : v>top ? top : v;
     }
 }
@@ -805,7 +834,7 @@ static void cover_camera(float *dir, float *pitch, const float *limits) {
     if (aim_held) return; /* the aiming camera takes the mouse */
     if (mouse_debug()) printf("Mouse: cover t=%.4f dx=%.1f dy=%.1f heading=%.2f pitch=%.2f limits=%.1f..%.1f\n",
                               now*1e-6,dx,dy,heading_of(dir),*pitch,limits ? -limits[1] : 0.0f,limits ? limits[0] : 0.0f);
-    const float turn=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+    const float turn=dx*mouse_scale(0);
     if (turn!=0.0f) {
         const float a=turn*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
         const float x=dir[0], z=dir[2];
@@ -813,7 +842,7 @@ static void cover_camera(float *dir, float *pitch, const float *limits) {
         dir[2]=x*s+z*c;
     }
     if (dy!=0.0f && limits) {
-        float v=*pitch-(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+        float v=*pitch-(input.mouse_invert_y ? -dy : dy)*mouse_scale(1);
         if (v>limits[0]) v=limits[0];
         if (v<-limits[1]) v=-limits[1];
         *pitch=v;
@@ -871,7 +900,7 @@ static void raw_aim(const char *game, uint64_t controller, const uint64_t *regs,
     aim_dx=aim_dy=0.0f;
     pthread_mutex_unlock(&camera_lock);
     aim_direct_us=now;
-    const float k=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*aim_scale;
+    const float k=mouse_scale(0)*aim_scale, k_vertical=mouse_scale(1)*aim_scale;
     if (mouse_debug()) printf("Mouse: aim t=%.4f ctl=%#llx yaw=%.3f pitch=%.3f dx=%.1f dy=%.1f\n",now*1e-6,(unsigned long long)controller,
                               SDL_atan2f(-dir[0],-dir[2])*57.29578f,SDL_atan2f(dir[1],SDL_sqrtf(dir[0]*dir[0]+dir[2]*dir[2]))*57.29578f,dx,dy);
     /* While aim is held the game may swap in new aiming cameras (after a roll: a new one about
@@ -970,7 +999,7 @@ static void raw_aim(const char *game, uint64_t controller, const uint64_t *regs,
     }
     if (dx!=0.0f || dy!=0.0f) {
         turned_yaw+=dx*k;
-        turned_pitch+=-(input.mouse_invert_y ? -dy : dy)*k;
+        turned_pitch+=-(input.mouse_invert_y ? -dy : dy)*k_vertical;
     }
     const float yaw=turned_yaw-g->yaw, pitch=turned_pitch-g->pitch;
     g->sent_yaw=yaw; g->sent_pitch=pitch;
@@ -1234,7 +1263,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
     else {
         /* the turn rate (degrees/s) the mouse asks for, through the inverse of the aiming curve
          * measured in U1: 45 x^2 degrees/s up to x = 1, then about 54 x - 9 (x = 3: 152, x = 6: 324) */
-        const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity/dt;
+        const float scale=mouse_scale(0)/dt, scale_y=mouse_scale(1)/dt;
         const int following=camera_hook_us && now-camera_hook_us<50000;
         if (raw_aim_armed(now) && !aim_stick_fallback) dx=dy=0.0f; /* raw aim turns it */
         float push=0.0f;
@@ -1248,10 +1277,10 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
         const float extra=!aim_held && following && !follow_direct ? follow_correction*4.0f : 0.0f;
         x=curve(dx*scale+extra)+push;
         /* aiming turns vertically at about 0.45 times the horizontal rate for the same stick value */
-        y=curve((input.mouse_invert_y ? -dy : dy)*scale/(aim_held ? 0.45f : 1.0f));
+        y=curve((input.mouse_invert_y ? -dy : dy)*scale_y/(aim_held ? 0.45f : 1.0f));
         /* US 1.02: past full deflection the aiming camera turns at 45 * x^0.65 (as U2's) */
         if (aim_held && u1_us_curve) {
-            const float rx=dx*scale, ry=(input.mouse_invert_y ? -dy : dy)*scale/0.45f;
+            const float rx=dx*scale, ry=(input.mouse_invert_y ? -dy : dy)*scale_y/0.45f;
             if (rx>45.0f || rx<-45.0f) x=rx>0.0f ? SDL_powf(rx/45.0f,1.0f/0.65f) : -SDL_powf(-rx/45.0f,1.0f/0.65f);
             if (ry>45.0f || ry<-45.0f) y=ry>0.0f ? SDL_powf(ry/45.0f,1.0f/0.65f) : -SDL_powf(-ry/45.0f,1.0f/0.65f);
         }
@@ -1948,9 +1977,9 @@ static void sample_host(PadData *d) {
         if (dt>0.0f) {
             if (dt>0.1f) dt=0.1f;
             /* turn rate in degrees/s, smoothed over 12 ms (mouse reports arrive in bursts) */
-            const float alpha=1.0f-SDL_expf(-dt/0.012f), scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+            const float alpha=1.0f-SDL_expf(-dt/0.012f), scale=mouse_scale(0), scale_y=mouse_scale(1);
             mouse_vx+=alpha*(mdx/dt*scale-mouse_vx);
-            mouse_vy+=alpha*((input.mouse_invert_y ? -mdy : mdy)/dt*scale-mouse_vy);
+            mouse_vy+=alpha*((input.mouse_invert_y ? -mdy : mdy)/dt*scale_y-mouse_vy);
             if (mdx==0 && mouse_vx>-1.0f && mouse_vx<1.0f) mouse_vx=0;
             if (mdy==0 && mouse_vy>-1.0f && mouse_vy<1.0f) mouse_vy=0;
         }

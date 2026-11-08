@@ -213,6 +213,8 @@ TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab
 WIN_NUMPAD = {**{0x60 + n: f'Keypad {n}' for n in range(10)},
               0x6A: 'Keypad *', 0x6B: 'Keypad +', 0x6D: 'Keypad -', 0x6E: 'Keypad .', 0x6F: 'Keypad /'}
 MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (the game's default pace is 1)
+# Times the sensitivity while aiming, and for up and down (1 = the same as looking / sideways).
+MOUSE_RATIO_MIN, MOUSE_RATIO_MAX = 0.25, 4.0
 # Insert opens the in-game settings menu; Left Alt frees the mouse cursor.
 RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
@@ -224,6 +226,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
+                'mouse_aim_sensitivity': '1.0', 'mouse_vertical': '1.0',
                 'pad_invert_y': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
@@ -509,6 +512,14 @@ def mouse_sensitivity(s):
         return '1.00'
 
 
+def mouse_ratio(s, key):
+    """A saved multiplier of the sensitivity (aiming, vertical) as the game reads it: in the slider's range."""
+    try:
+        return f"{min(MOUSE_RATIO_MAX, max(MOUSE_RATIO_MIN, float(s.get(key)))):.2f}"
+    except (TypeError, ValueError):
+        return '1.00'
+
+
 def vibration_strength(s):
     """Saved vibration percentage, clamped at the launcher/runtime boundary."""
     try:
@@ -700,6 +711,8 @@ def write_input_ini(s):
     lines = ['# Uncharted controls (written by the launcher, Controls page)',
              f"mouse_look={1 if s.get('mouse_look', True) else 0}",
              f"mouse_sensitivity={mouse_sensitivity(s)}",
+             f"mouse_aim_sensitivity={mouse_ratio(s, 'mouse_aim_sensitivity')}",
+             f"mouse_vertical={mouse_ratio(s, 'mouse_vertical')}",
              f"mouse_invert_y={1 if s.get('mouse_invert_y') else 0}",
              f"pad_invert_y={1 if s.get('pad_invert_y') else 0}",
              f"pad_vibration={1 if s.get('pad_vibration', True) else 0}",
@@ -1831,6 +1844,17 @@ class Launcher:
                         COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
                  _('How far the camera turns for a mouse movement; 1.00 is the default. Drag the slider or '
                    'type a number (0.1 to 10) for a faster turn.'))
+        self.row(f, _('Aiming sensitivity'),
+                 Slider(self.tk, self.target(f), self.var('mouse_aim_sensitivity'), MOUSE_RATIO_MIN, MOUSE_RATIO_MAX,
+                        0.05, COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
+                 _('Times the mouse sensitivity while aiming (right mouse button or L2): 1.00 turns as fast '
+                   'as looking around, 0.50 half as fast for finer aim. The in-game menu (Insert) changes it '
+                   'while you play.'))
+        self.row(f, _('Vertical sensitivity'),
+                 Slider(self.tk, self.target(f), self.var('mouse_vertical'), MOUSE_RATIO_MIN, MOUSE_RATIO_MAX,
+                        0.05, COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
+                 _('Times the sensitivity for moving the mouse up and down, looking and aiming: 1.00 is the '
+                   'same as sideways.'))
         self.check(f, 'mouse_invert_y', _('Invert the mouse vertically'))
 
         self.section(f, _('Button pictures'))

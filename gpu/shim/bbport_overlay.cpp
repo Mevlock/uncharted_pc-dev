@@ -100,6 +100,8 @@ extern "C" const unsigned char bb_font_ja_ttf[];
 extern "C" const unsigned char bb_font_ja_ttf_end[];
 
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
+extern "C" void runtime_mouse_get(float* look, float* aim, float* vertical); // runtime_pad.c
+extern "C" void runtime_mouse_set(float look, float aim, float vertical);
 
 namespace BbOverlay {
 
@@ -799,6 +801,25 @@ void Menu() {
     Hint(T("Generated frames between the game's own: 60 FPS on screen becomes 120. Adds a little "
            "input latency; menus and cutscene videos are not generated. The launcher's Frame rate "
            "limit counts generated frames."));
+
+    // The mouse: the sensitivities live in the runtime (runtime_pad.c); a change turns the next frame's motion.
+    ImGui::SeparatorText(T("Mouse"));
+    {
+        float look = 1.0f, aim = 1.0f, vertical = 1.0f;
+        runtime_mouse_get(&look, &aim, &vertical);
+        const ImGuiSliderFlags log = ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp;
+        if (ImGui::SliderFloat(TI("Mouse sensitivity"), &look, 0.1f, 10.0f, "%.2f", log)) {
+            runtime_mouse_set(look, 0.0f, 0.0f);
+        }
+        if (ImGui::SliderFloat(TI("Aiming sensitivity"), &aim, 0.25f, 4.0f, "%.2f", log)) {
+            runtime_mouse_set(0.0f, aim, 0.0f);
+        }
+        if (ImGui::SliderFloat(TI("Vertical sensitivity"), &vertical, 0.25f, 4.0f, "%.2f", log)) {
+            runtime_mouse_set(0.0f, 0.0f, vertical);
+        }
+        Hint(T("Aiming: times the mouse sensitivity while aiming (1.00 the same as looking around). Vertical: "
+               "times it for up and down. Ctrl+click to type a value."));
+    }
 
     ImGui::SeparatorText(T("Other"));
     Checkbox(TI("FPS counter in the corner"), s.show_fps);
