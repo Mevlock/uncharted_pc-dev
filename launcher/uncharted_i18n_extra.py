@@ -394,6 +394,7 @@ EXTRA_TRANSLATIONS = {
         'How far the walk key pushes the stick. Default is 45%.': 'Wie weit die Gehtaste den Stick neigt. Standard ist 45 %.',
         'Turn valve / wheel counter-clockwise (hold)': 'Ventil / Rad gegen den Uhrzeigersinn drehen (halten)',
         'Turn valve / wheel clockwise (hold)': 'Ventil / Rad im Uhrzeigersinn drehen (halten)',
+        'Alt+Enter switches between window and fullscreen while you play.': 'Alt+Eingabe wechselt während des Spielens zwischen Fenster und Vollbild.',
     },
     'it': {
         '{} of {} earned · {}%': '{} di {} ottenuti · {}%',
@@ -787,6 +788,7 @@ EXTRA_TRANSLATIONS = {
         'How far the walk key pushes the stick. Default is 45%.': 'Quanto il tasto per camminare inclina la levetta. Predefinito: 45%.',
         'Turn valve / wheel counter-clockwise (hold)': 'Girare valvola / ruota in senso antiorario (tenere premuto)',
         'Turn valve / wheel clockwise (hold)': 'Girare valvola / ruota in senso orario (tenere premuto)',
+        'Alt+Enter switches between window and fullscreen while you play.': 'Alt+Invio passa da finestra a schermo intero e viceversa mentre giochi.',
     },
     'ja': {
         '{} of {} earned · {}%': '{} / {} 獲得 · {}%',
@@ -1174,6 +1176,7 @@ EXTRA_TRANSLATIONS = {
         'How far the walk key pushes the stick. Default is 45%.': '歩くキーでスティックを倒す量。初期値は45%。',
         'Turn valve / wheel counter-clockwise (hold)': 'バルブ／ハンドルを反時計回りに回す（押し続ける）',
         'Turn valve / wheel clockwise (hold)': 'バルブ／ハンドルを時計回りに回す（押し続ける）',
+        'Alt+Enter switches between window and fullscreen while you play.': 'プレイ中に Alt+Enter でウィンドウとフルスクリーンを切り替えられます。',
     },
     'es': {
         '{} of {} earned · {}%': '{} de {} conseguidos · {}%',
@@ -1470,6 +1473,7 @@ EXTRA_TRANSLATIONS = {
         'How far the walk key pushes the stick. Default is 45%.': 'Cuánto inclina la palanca la tecla de caminar. Por defecto, 45%.',
         'Turn valve / wheel counter-clockwise (hold)': 'Girar válvula / rueda en sentido antihorario (mantener)',
         'Turn valve / wheel clockwise (hold)': 'Girar válvula / rueda en sentido horario (mantener)',
+        'Alt+Enter switches between window and fullscreen while you play.': 'Alt+Intro cambia entre ventana y pantalla completa mientras juegas.',
     },
     'pt': {
         '{} of {} earned · {}%': '{} de {} conquistados · {}%',
@@ -1767,6 +1771,7 @@ EXTRA_TRANSLATIONS = {
         'How far the walk key pushes the stick. Default is 45%.': 'Quanto a tecla de andar inclina o analógico. O padrão é 45%.',
         'Turn valve / wheel counter-clockwise (hold)': 'Girar válvula / roda no sentido anti-horário (segurar)',
         'Turn valve / wheel clockwise (hold)': 'Girar válvula / roda no sentido horário (segurar)',
+        'Alt+Enter switches between window and fullscreen while you play.': 'Alt+Enter alterna entre janela e tela cheia enquanto você joga.',
     },
     'fr': {
         '{} of {} earned · {}%': '{} sur {} obtenus · {} %',
@@ -2065,5 +2070,6 @@ EXTRA_TRANSLATIONS = {
         'How far the walk key pushes the stick. Default is 45%.': 'Inclinaison du stick avec la touche de marche. Par défaut : 45 %.',
         'Turn valve / wheel counter-clockwise (hold)': 'Tourner une vanne / roue dans le sens antihoraire (maintenir)',
         'Turn valve / wheel clockwise (hold)': 'Tourner une vanne / roue dans le sens horaire (maintenir)',
+        'Alt+Enter switches between window and fullscreen while you play.': 'Alt+Entrée bascule entre fenêtre et plein écran pendant la partie.',
     },
 }

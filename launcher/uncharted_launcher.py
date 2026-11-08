@@ -1753,7 +1753,7 @@ class Launcher:
 
     def build_display(self):
         f = self.page('display', _('Display'), _('How the game window is shown.'))
-        self.check(f, 'fullscreen', _('Fullscreen'))
+        self.check(f, 'fullscreen', _('Fullscreen'), _('Alt+Enter switches between window and fullscreen while you play.'))
         self.row(f, _('Presentation'), self.choice(f, 'present_mode', PRESENT_MODES, 34),
                  _('Mailbox shows each frame as soon as it is ready without tearing; FIFO waits for the display.'))
         refresh = display_refresh_rate()

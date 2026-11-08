@@ -506,7 +506,11 @@ static uint8_t mouse_axis(float rate) {
 }
 static int bind_down(const Bind *b, const bool *k, uint32_t mouse, uint64_t now) {
     switch (b->kind) {
-    case BIND_KEY: return k && k[b->code];
+    case BIND_KEY:
+        /* Alt+Enter switches window <-> fullscreen (window.cpp): that Enter is not a game key. */
+        if (k && (b->code==SDL_SCANCODE_RETURN || b->code==SDL_SCANCODE_KP_ENTER) &&
+            (k[SDL_SCANCODE_LALT] || k[SDL_SCANCODE_RALT] || bbgpu_window_enter_swallowed())) return 0;
+        return k && k[b->code];
     case BIND_LAYOUT: {
         const SDL_Scancode code=k ? SDL_GetScancodeFromKey((SDL_Keycode)b->code,NULL) : SDL_SCANCODE_UNKNOWN;
         return code!=SDL_SCANCODE_UNKNOWN && k[code];
