@@ -387,6 +387,8 @@ EXTRA_TRANSLATIONS = {
         'Gold': 'Gold',
         'Silver': 'Silber',
         'Bronze': 'Bronze',
+        'Keep the controller working in the background': 'Controller auch im Hintergrund verwenden',
+        'The game takes the controller also while another window is in front (the game on one screen, other programs on the other). The keyboard and mouse only work while the game window is in front.': 'Das Spiel nimmt den Controller auch an, während ein anderes Fenster im Vordergrund ist (das Spiel auf einem Bildschirm, andere Programme auf dem anderen). Tastatur und Maus funktionieren nur, solange das Spielfenster im Vordergrund ist.',
     },
     'it': {
         '{} of {} earned · {}%': '{} di {} ottenuti · {}%',
@@ -773,6 +775,8 @@ EXTRA_TRANSLATIONS = {
         'Gold': 'Oro',
         'Silver': 'Argento',
         'Bronze': 'Bronzo',
+        'Keep the controller working in the background': 'Il controller funziona anche in background',
+        'The game takes the controller also while another window is in front (the game on one screen, other programs on the other). The keyboard and mouse only work while the game window is in front.': "Il gioco accetta il controller anche quando un'altra finestra è in primo piano (il gioco su uno schermo, altri programmi sull'altro). Tastiera e mouse funzionano solo quando la finestra del gioco è in primo piano.",
     },
     'ja': {
         '{} of {} earned · {}%': '{} / {} 獲得 · {}%',
@@ -1153,6 +1157,8 @@ EXTRA_TRANSLATIONS = {
         'Gold': 'ゴールド',
         'Silver': 'シルバー',
         'Bronze': 'ブロンズ',
+        'Keep the controller working in the background': 'バックグラウンドでもコントローラーを使う',
+        'The game takes the controller also while another window is in front (the game on one screen, other programs on the other). The keyboard and mouse only work while the game window is in front.': 'ほかのウィンドウが前面にあるときもゲームがコントローラーの入力を受け付けます（ゲームを一方の画面に、ほかのプログラムをもう一方の画面に表示する場合など）。キーボードとマウスはゲームのウィンドウが前面にあるときだけ使えます。',
     },
     'es': {
         '{} of {} earned · {}%': '{} de {} conseguidos · {}%',
@@ -1442,6 +1448,8 @@ EXTRA_TRANSLATIONS = {
         'Gold': 'Oro',
         'Silver': 'Plata',
         'Bronze': 'Bronce',
+        'Keep the controller working in the background': 'El control sigue funcionando en segundo plano',
+        'The game takes the controller also while another window is in front (the game on one screen, other programs on the other). The keyboard and mouse only work while the game window is in front.': 'El juego recibe el control también mientras otra ventana está delante (el juego en una pantalla y otros programas en la otra). El teclado y el ratón solo funcionan mientras la ventana del juego está delante.',
     },
     'pt': {
         '{} of {} earned · {}%': '{} de {} conquistados · {}%',
@@ -1732,6 +1740,8 @@ EXTRA_TRANSLATIONS = {
         'Gold': 'Ouro',
         'Silver': 'Prata',
         'Bronze': 'Bronze',
+        'Keep the controller working in the background': 'O controle continua funcionando em segundo plano',
+        'The game takes the controller also while another window is in front (the game on one screen, other programs on the other). The keyboard and mouse only work while the game window is in front.': 'O jogo recebe o controle mesmo quando outra janela está em primeiro plano (o jogo em uma tela, outros programas na outra). O teclado e o mouse só funcionam enquanto a janela do jogo está em primeiro plano.',
     },
     'fr': {
         '{} of {} earned · {}%': '{} sur {} obtenus · {} %',
@@ -2023,5 +2033,7 @@ EXTRA_TRANSLATIONS = {
         'Gold': 'Or',
         'Silver': 'Argent',
         'Bronze': 'Bronze',
+        'Keep the controller working in the background': 'La manette fonctionne aussi en arrière-plan',
+        'The game takes the controller also while another window is in front (the game on one screen, other programs on the other). The keyboard and mouse only work while the game window is in front.': "Le jeu reçoit la manette même quand une autre fenêtre est au premier plan (le jeu sur un écran, d'autres programmes sur l'autre). Le clavier et la souris ne fonctionnent que lorsque la fenêtre du jeu est au premier plan.",
     },
 }

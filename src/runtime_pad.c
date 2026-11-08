@@ -1857,9 +1857,20 @@ static void sample_host(PadData *d) {
     static int layout_logged;
     if (k && !layout_logged) { layout_logged=1; log_layout_keys(); }
         /* SDL delivers gamepad events in the background too (window.cpp): the game takes them
-         * only while its window is in front. */
+         * only while its window is in front, unless the player chose the controller to keep working
+         * in the background (BB_PAD_BACKGROUND=1, launcher Controls page; the game on one screen,
+         * other programs on the other). The keyboard and mouse are only ever read in front. */
         const unsigned long long taps=__atomic_exchange_n(&pad_taps,0ull,__ATOMIC_RELAXED);
-        if (g && !bbgpu_window_foreground()) g=0;
+        static int pad_background=-1;
+        if (pad_background<0) {
+            const char *e=getenv("BB_PAD_BACKGROUND");
+            pad_background=e && e[0]=='1';
+            if (pad_background) printf("Runtime: the controller keeps working while the game window is in the background\n");
+        }
+        if (!bbgpu_window_foreground()) {
+            if (!pad_background) g=0;
+            k=NULL; mouse=0; wheel=0; captured=0; wheel_until_us[0]=wheel_until_us[1]=0;
+        }
         if (g) {
             for (int a=0;a<16;++a) {
                 const int b=input.pad[a];

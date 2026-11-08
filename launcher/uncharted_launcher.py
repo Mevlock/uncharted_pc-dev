@@ -224,7 +224,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
-                'pad_invert_y': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
+                'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
                 **{f'{game}_devmode': False for game, _t, _s, _e in GAMES},
@@ -808,6 +808,9 @@ def game_environment(s, start=None):
     if str(s.get('speakers') or 'auto') != 'auto':
         env['BB_SPEAKERS'] = str(s['speakers'])
     env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
+    # The controller also while another window is in front (runtime_pad.c; keyboard and mouse never).
+    if s.get('pad_background', False):
+        env['BB_PAD_BACKGROUND'] = '1'
     # The in-game menu (Insert) speaks the launcher's language.
     env['BB_UI_LANGUAGE'] = uncharted_i18n.language_code(str(s.get('ui_language') or ''))
     env['BB_CHEATS'] = ','.join([f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
@@ -1879,6 +1882,10 @@ class Launcher:
             var.trace_add('write', lambda *_a, b=box, v=var: b.current(values.index(v.get())))
             self.row(f, _(title), box)
         self.check(f, 'pad_invert_y', _('Invert the right stick vertically'))
+        self.check(f, 'pad_background', _('Keep the controller working in the background'),
+                   _('The game takes the controller also while another window is in front (the game on one '
+                     'screen, other programs on the other). The keyboard and mouse only work while the game '
+                     'window is in front.'))
         card = self.target(f)
         holder = self.tk.Frame(card, bg=CARD)
         holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))

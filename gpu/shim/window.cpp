@@ -102,7 +102,8 @@ namespace Frontend {
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
     // Their events come whatever SDL thinks of the keyboard focus; whether the game is in front
-    // is decided from Windows instead (window_foreground). BB_PAD_BACKGROUND=0: as before.
+    // is decided from Windows instead (window_foreground). BB_PAD_BACKGROUND=0: as before;
+    // BB_PAD_BACKGROUND=1: the game also takes them while another window is in front (runtime_pad.c).
     if (const char* env = std::getenv("BB_PAD_BACKGROUND"); !(env && env[0] == '0')) {
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     }
