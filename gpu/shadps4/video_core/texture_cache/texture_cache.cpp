@@ -2108,6 +2108,29 @@ void TextureCache::GarbageCollectImages() {
     }
 }
 
+TextureCache::ImageStats TextureCache::GetImageStats() {
+    ImageStats stats{};
+    std::scoped_lock lock{mutex};
+    for (Image& image : slot_images) {
+        u64 bytes = 0;
+        for (const auto& backing : image.backing_images) {
+            bytes += backing.image.size_bytes;
+        }
+        if (image.usage.render_target || image.usage.depth_target) {
+            stats.target_bytes += bytes;
+            ++stats.target_count;
+        } else {
+            stats.texture_bytes += bytes;
+            ++stats.texture_count;
+        }
+        if (True(image.flags & ImageFlagBits::GpuModified)) {
+            stats.gpu_written_bytes += bytes;
+        }
+    }
+    stats.pending_free_bytes = pending_free_bytes.load(std::memory_order_relaxed);
+    return stats;
+}
+
 void TextureCache::GarbageCollectSamplers() {
     total_used_samplers = samplers.size();
     if (total_used_samplers < trigger_gc_samplers) {

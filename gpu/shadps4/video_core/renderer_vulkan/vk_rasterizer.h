@@ -226,6 +226,8 @@ public:
     u64 Flush();
     void Finish();
     void OnSubmit();
+    /// bbport (BB_VRAM_STATS=1, diagnostics): the "VRAM stats:" and "VRAM load:" lines (OnSubmit).
+    void VramStats();
 
     PipelineCache& GetPipelineCache() {
         return pipeline_cache;

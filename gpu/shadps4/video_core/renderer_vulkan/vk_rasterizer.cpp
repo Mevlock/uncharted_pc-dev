@@ -7,7 +7,9 @@
 #include <set>
 #include <tuple>
 #include <cmath>
+#include <chrono>
 #include <ctime>
+#include <fmt/format.h>
 #include <filesystem>
 #include "core/libraries/videoout/driver.h"
 #include <xxhash.h>
@@ -34,6 +36,7 @@
 #include <vulkan/vulkan_format_traits.hpp>
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_vram.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
@@ -5695,7 +5698,177 @@ void Rasterizer::OnSubmit() {
     texture_cache.UpdateButtonPrompts();
     texture_cache.RunGarbageCollector();
     buffer_cache.ReclaimArenaMemory(); // bbport: VRAM give-back
+    VramStats();
     runtime.TickFrame();
+}
+
+// bbport diagnostics (BB_VRAM_STATS=1, off by default): where the video memory goes over a long
+// session. Every 30 s one "VRAM stats:" line (MiB): the driver's usage and budget
+// (VK_EXT_memory_budget, per heap), the buffer arenas (memory allocated, bound to guest ranges,
+// given back, reserved address space; bound windows unused for 60 s or more, the amount a
+// give-back could free, and how much of that holds GPU data, which cannot go), the other
+// buffers by kind, the images by kind, VMA's blocks and what is left ("other": driver, pipelines,
+// descriptor pools, swapchain, upscalers; Vulkan cannot split it). A burst of guest map/unmap
+// (BB_VRAM_LOAD_MB per second, default 64; a level or area load) or a checkpoint test jump
+// (BB_TEST_JUMP_EVERY) gives a "VRAM load:" line with the totals before and after, once the
+// mapping has been quiet for 10 s. Sampled once a second on the GPU thread (cheap totals); the
+// full line walks the image cache and the bound arena ranges.
+void Rasterizer::VramStats() {
+    if (!Vulkan::Vram::Stats()) {
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    struct Totals {
+        u64 usage = 0, arena_alloc = 0, arena_bound = 0, images = 0, buffers = 0;
+        u64 mapped = 0, unmapped = 0, map_calls = 0, unmap_calls = 0;
+    };
+    static const Clock::time_point start = Clock::now();
+    static Clock::time_point next_sample = start, next_line = start + 30s;
+    const Clock::time_point now = Clock::now();
+    if (now < next_sample) {
+        return;
+    }
+    next_sample = now + 1s;
+    const u64 seconds =
+        u64(std::chrono::duration_cast<std::chrono::seconds>(now - start).count());
+    const auto mib = [](u64 bytes) { return bytes >> 20; };
+    const auto signed_mib = [](u64 after, u64 before) {
+        return after >= before ? fmt::format("+{}", (after - before) >> 20)
+                               : fmt::format("-{}", (before - after) >> 20);
+    };
+
+    Totals t;
+    t.usage = instance.QueryVramTotals(false).usage;
+    {
+        const auto arenas = buffer_cache.GetArenaStats(false);
+        t.arena_alloc = arenas.chunk_bytes;
+        t.arena_bound = arenas.bound_bytes;
+    }
+    t.images = Vulkan::Vram::image_bytes.load(std::memory_order_relaxed);
+    t.buffers = Vulkan::Vram::buffer_bytes.load(std::memory_order_relaxed);
+    t.mapped = Vulkan::Vram::guest_mapped_bytes.load(std::memory_order_relaxed);
+    t.unmapped = Vulkan::Vram::guest_unmapped_bytes.load(std::memory_order_relaxed);
+    t.map_calls = Vulkan::Vram::guest_map_calls.load(std::memory_order_relaxed);
+    t.unmap_calls = Vulkan::Vram::guest_unmap_calls.load(std::memory_order_relaxed);
+
+    // Level and area loads.
+    static const u64 burst_bytes = [] {
+        const char* env = std::getenv("BB_VRAM_LOAD_MB");
+        const u64 value = env && env[0] ? std::strtoull(env, nullptr, 10) : 64;
+        return std::max<u64>(value, 1) << 20;
+    }();
+    static Totals prev = t, before{};
+    static bool in_load = false;
+    static const char* load_reason = "";
+    static Clock::time_point load_start{}, last_busy{};
+    static u32 seen_jump = 0;
+    const u64 moved = (t.mapped - prev.mapped) + (t.unmapped - prev.unmapped);
+    const u32 jump = Vulkan::Vram::test_jump_seq.load(std::memory_order_relaxed);
+    const bool jumped = jump != seen_jump;
+    seen_jump = jump;
+    if (!in_load && (moved >= burst_bytes || jumped)) {
+        in_load = true;
+        load_reason = jumped ? "test jump" : "guest map/unmap burst";
+        load_start = now - 1s;
+        before = prev;
+        last_busy = now;
+    }
+    if (in_load) {
+        if (moved >= burst_bytes / 4 || jumped) {
+            last_busy = now;
+        }
+        if (now - last_busy >= 10s) {
+            in_load = false;
+            const auto took =
+                std::chrono::duration_cast<std::chrono::seconds>(last_busy - load_start);
+            const std::string line = fmt::format(
+                "VRAM load: t={} s, {} ({} s busy): guest mapped {} MiB ({} calls), unmapped {} "
+                "MiB ({} calls); driver usage {} -> {} MiB ({}), arenas allocated {} -> {} ({}), "
+                "arenas bound {} -> {} ({}), images {} -> {} ({}), buffers {} -> {} ({})",
+                seconds, load_reason, took.count(), mib(t.mapped - before.mapped),
+                t.map_calls - before.map_calls, mib(t.unmapped - before.unmapped),
+                t.unmap_calls - before.unmap_calls, mib(before.usage), mib(t.usage),
+                signed_mib(t.usage, before.usage), mib(before.arena_alloc), mib(t.arena_alloc),
+                signed_mib(t.arena_alloc, before.arena_alloc), mib(before.arena_bound),
+                mib(t.arena_bound), signed_mib(t.arena_bound, before.arena_bound),
+                mib(before.images), mib(t.images), signed_mib(t.images, before.images),
+                mib(before.buffers), mib(t.buffers), signed_mib(t.buffers, before.buffers));
+            std::printf("%s\n", line.c_str());
+            std::fflush(stdout);
+        }
+    }
+    prev = t;
+
+    if (now < next_line) {
+        return;
+    }
+    next_line = now + 30s;
+    static Totals last_line{};
+    static bool had_line = false;
+
+    const auto vram = instance.QueryVramTotals(true);
+    const auto arenas = buffer_cache.GetArenaStats(true);
+    const auto images = texture_cache.GetImageStats();
+    const u64 recycled = VideoCore::UniqueImage::RecycledBytes();
+    const u64 cached_images = images.target_bytes + images.texture_bytes;
+    const u64 all_images = t.images;
+    const u64 outside_cache =
+        all_images > cached_images + recycled ? all_images - cached_images - recycled : 0;
+    const auto kind = [](int k) {
+        return fmt::format("{}/{}", Vulkan::Vram::buffer_kind_bytes[k].load() >> 20,
+                           Vulkan::Vram::buffer_kind_count[k].load());
+    };
+    const u64 accounted = vram.vma_block_bytes + arenas.chunk_bytes;
+    const std::string other = vram.usage >= accounted
+                                  ? fmt::format("{}", (vram.usage - accounted) >> 20)
+                                  : fmt::format("-{}", (accounted - vram.usage) >> 20);
+    const u64 chunks = arenas.chunk_bytes + arenas.chunk_host_bytes;
+    const u64 never_carved =
+        chunks > arenas.chunk_carved_bytes ? chunks - arenas.chunk_carved_bytes : 0;
+    const std::string unused =
+        arenas.ages_known
+            ? fmt::format("unused >= 60 s {} MiB in {} windows, {} MiB of it GPU data (a "
+                          "give-back could free {} MiB)",
+                          mib(arenas.unused_bytes), arenas.unused_windows,
+                          mib(arenas.unused_gpu_bytes),
+                          mib(arenas.unused_bytes - arenas.unused_gpu_bytes))
+            : std::string("unused windows not known (give-back off: BB_ARENA_RECLAIM=0)");
+    const std::string ballast =
+        vram.ballast_bytes
+            ? fmt::format("; less {} MiB simulator ballast", mib(vram.ballast_bytes))
+            : std::string();
+    const std::string change =
+        had_line ? signed_mib(vram.usage, last_line.usage) : std::string("n/a");
+    const std::string line = fmt::format(
+        "VRAM stats: t={} s; driver usage {} of budget {} MiB ({} in 30 s; heaps "
+        "usage/budget/size, *=device-local: {}{}); arenas: allocated {} MiB (+{} in system "
+        "memory), bound {}, free for reuse {}, given back waiting for the GPU {}, on probation "
+        "{}, never handed out {}, reserved {} MiB in {} sparse buffers; {}; give-back limit {} "
+        "MiB, given back so far {} MiB; other buffers: {} MiB device-local (MiB/count: device "
+        "{}, upload {}, read-back {}, stream {}); images: {} MiB ({}): render targets/depth {} "
+        "MiB ({}), textures {} MiB ({}), GPU-written {}, outside the cache {}, kept for "
+        "recycling {}, deleted not yet freed {}; VMA blocks {} MiB ({} blocks, {} allocations "
+        "{} MiB); other (driver, pipelines, descriptor pools, swapchain, upscalers) {} MiB; "
+        "guest mapped {} MiB ({} calls), unmapped {} MiB ({} calls) in 30 s",
+        seconds, mib(vram.usage), mib(vram.budget), change, vram.heaps, ballast,
+        mib(arenas.chunk_bytes), mib(arenas.chunk_host_bytes), mib(arenas.bound_bytes),
+        mib(arenas.free_run_bytes), mib(arenas.held_bytes), mib(arenas.probation_bytes),
+        mib(never_carved), mib(arenas.reserved_bytes), arenas.arenas, unused,
+        mib(arenas.limit_bytes), mib(arenas.released_total_bytes), mib(t.buffers), kind(0),
+        kind(1), kind(2), kind(3), mib(all_images),
+        Vulkan::Vram::image_count.load(std::memory_order_relaxed), mib(images.target_bytes),
+        images.target_count, mib(images.texture_bytes), images.texture_count,
+        mib(images.gpu_written_bytes), mib(outside_cache), mib(recycled),
+        mib(images.pending_free_bytes), mib(vram.vma_block_bytes), vram.vma_blocks,
+        vram.vma_allocs, mib(vram.vma_alloc_bytes), other, mib(t.mapped - last_line.mapped),
+        t.map_calls - last_line.map_calls, mib(t.unmapped - last_line.unmapped),
+        t.unmap_calls - last_line.unmap_calls);
+    std::printf("%s\n", line.c_str());
+    std::fflush(stdout);
+    last_line = t;
+    last_line.usage = vram.usage;
+    had_line = true;
 }
 
 const PreparedStage* Rasterizer::FindPreparedStage(const Shader::Info& stage) const {
@@ -8547,6 +8720,10 @@ bool Rasterizer::IsMapped(VAddr addr, u64 size) {
 }
 
 void Rasterizer::MapMemory(VAddr addr, u64 size) {
+    if (Vulkan::Vram::Stats()) {
+        Vulkan::Vram::guest_mapped_bytes.fetch_add(size, std::memory_order_relaxed);
+        Vulkan::Vram::guest_map_calls.fetch_add(1, std::memory_order_relaxed);
+    }
     {
         std::scoped_lock lock{mapped_ranges_mutex};
         mapped_ranges += decltype(mapped_ranges)::interval_type::right_open(addr, addr + size);
@@ -8558,6 +8735,10 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
+    if (Vulkan::Vram::Stats()) {
+        Vulkan::Vram::guest_unmapped_bytes.fetch_add(size, std::memory_order_relaxed);
+        Vulkan::Vram::guest_unmap_calls.fetch_add(1, std::memory_order_relaxed);
+    }
     // bbport: guest threads unmap memory (games that move their pages do it hundreds of times
     // per level load). The caches are changed on the command processor thread, between draws:
     // a texture freed while that thread was preparing a draw with it reached the GPU destroyed

@@ -6,6 +6,9 @@
 //                        memory).
 //   BB_TEST_VRAM_SOFT=1  with it: report N but do not fail allocations (drivers that page).
 //   BB_VRAM_LOG=1        a line with the memory split every 5 s.
+//   BB_VRAM_STATS=1      diagnostics: a "VRAM stats:" line every 30 s (where the video memory is,
+//                        what a give-back could free) and a "VRAM load:" line around each level or
+//                        area load (Rasterizer::VramStats).
 #pragma once
 
 #include <atomic>
@@ -63,10 +66,28 @@ inline bool Log() {
     return log;
 }
 
+/// BB_VRAM_STATS=1 (diagnostics, off by default).
+inline bool Stats() {
+    static const bool stats = [] {
+        const char* env = std::getenv("BB_VRAM_STATS");
+        return env && env[0] == '1';
+    }();
+    return stats;
+}
+
+// BB_VRAM_STATS: guest memory mapped and unmapped for the GPU (a burst is a level or area load),
+// and the checkpoint test jumps (BB_TEST_JUMP_EVERY, bbport_saves.cpp): each one starts a load.
+inline std::atomic<u64> guest_mapped_bytes{0}, guest_unmapped_bytes{0};
+inline std::atomic<u64> guest_map_calls{0}, guest_unmap_calls{0};
+inline std::atomic<u32> test_jump_seq{0};
+
 // Bytes by owner (device-local memory the port allocated).
 inline std::atomic<u64> image_bytes{0}, image_count{0};
 inline std::atomic<u64> arena_bytes{0}, arena_count{0}, arena_host_bytes{0};
 inline std::atomic<u64> buffer_bytes{0}; ///< device-local VMA buffers
+/// BB_VRAM_STATS: buffer_bytes by VideoCore::MemoryType (DeviceLocal, HostUncached, HostCached,
+/// Stream, Sparse), with their counts.
+inline std::atomic<u64> buffer_kind_bytes[5]{}, buffer_kind_count[5]{};
 // Set by the instance: whether `bytes` more device-local memory fit the (simulated) card.
 inline bool (*allows)(u64 bytes) = nullptr;
 inline bool Allows(u64 bytes) {

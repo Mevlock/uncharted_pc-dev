@@ -4024,6 +4024,7 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
     has_pending_unbinds |= !deferred;
     resident_in_use_blocks -= blocks;
+    released_total_blocks += blocks;
     return blocks;
 }
 
@@ -4068,6 +4069,7 @@ void BufferCache::ReclaimArenaMemory() {
         std::fflush(stdout);
         return std::max<u64>(mib, 16) << 20; // 16..63: stress tests only
     }();
+    reclaim_limit_bytes = limit;
     static const u16 age_epochs = [] {
         const char* env = std::getenv("BB_ARENA_RECLAIM_AGE_S");
         const int seconds = env && env[0] ? std::atoi(env) : 60;
@@ -4212,6 +4214,84 @@ void BufferCache::ReclaimArenaMemory() {
                     static_cast<unsigned long long>(probation_rescued), probation.size());
         std::fflush(stdout);
     }
+}
+
+BufferCache::ArenaStats BufferCache::GetArenaStats(bool ages) {
+    ArenaStats st{};
+    for (const Buffer& arena : arenas) {
+        ++st.arenas;
+        st.reserved_bytes += arena.size_bytes;
+    }
+    for (const ArenaChunk& chunk : arena_chunks) {
+        (chunk.host ? st.chunk_host_bytes : st.chunk_bytes) += chunk.size;
+        st.chunk_carved_bytes += chunk.used;
+    }
+    st.bound_bytes = resident_in_use_blocks << block_shift;
+    for (const FreeRun& run : free_runs) {
+        st.free_run_bytes += run.blocks << block_shift;
+    }
+    for (const FreeRun& run : quarantined_runs) {
+        st.held_bytes += run.blocks << block_shift;
+    }
+    for (const auto& batch : deferred_unbinds) {
+        for (const Backing& piece : batch.pieces) {
+            st.held_bytes += (piece.end - piece.start) << block_shift;
+        }
+    }
+    for (const Probation& p : probation) {
+        st.probation_bytes += p.blocks << block_shift;
+    }
+    st.released_total_bytes = released_total_blocks << block_shift;
+    st.limit_bytes = reclaim_limit_bytes;
+    // The window ages advance in ReclaimArenaMemory (2 s epochs); with BB_ARENA_RECLAIM=0 they
+    // stay unknown.
+    st.ages_known = reclaim_limit_bytes != 0;
+    if (!st.ages_known || !ages) {
+        return st;
+    }
+    constexpr u16 unused_epochs = 30; // 60 s
+    const auto gpu_data = [&](VAddr lo, u64 size) {
+        bool late = false;
+        for (const auto& read_back : late_read_backs) {
+            late = late || (read_back.address < lo + size && read_back.address + read_back.size > lo);
+        }
+        return late || gpu_modified_ranges.Intersects(lo, size) ||
+               memory_tracker->IsRegionGpuModified(lo, size) || shared_gpu_ranges.Intersects(lo, size);
+    };
+    // Bound bytes per 1 MiB window, in address order (resident_ranges is sorted).
+    u64 window = ~u64{0}, window_bytes = 0;
+    const auto flush = [&] {
+        if (window == ~u64{0} || !window_bytes) {
+            return;
+        }
+        const u16 epoch = window_epoch[window].load(std::memory_order_relaxed);
+        if (epoch && static_cast<u16>(reclaim_epoch - epoch) < unused_epochs) {
+            return;
+        }
+        st.unused_bytes += window_bytes;
+        ++st.unused_windows;
+        const VAddr lo = window << ReclaimWindowBits;
+        if (gpu_data(lo, u64(1) << ReclaimWindowBits)) {
+            st.unused_gpu_bytes += window_bytes;
+        }
+    };
+    for (const auto& backing : resident_ranges) {
+        const u64 start = backing.start << block_shift;
+        const u64 end = backing.end << block_shift;
+        for (u64 at = start; at < end;) {
+            const u64 w = at >> ReclaimWindowBits;
+            const u64 w_end = std::min(end, (w + 1) << ReclaimWindowBits);
+            if (w != window) {
+                flush();
+                window = w;
+                window_bytes = 0;
+            }
+            window_bytes += w_end - at;
+            at = w_end;
+        }
+    }
+    flush();
+    return st;
 }
 
 } // namespace VideoCore
