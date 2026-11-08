@@ -2282,6 +2282,8 @@ EXTRA_TRANSLATIONS = {
         'Medium': 'Средняя',
         'Mouse': 'Мышь',
         'Mouse sensitivity': 'Чувствительность мыши',
+        'Unlock all rewards': 'Открыть все награды',
+        'Every reward in Bonuses (skins, weapons, render modes, art galleries, gameplay tweaks such as Slow Motion or Mirror World) and every story cutscene, in all three games; rewards that normally need the game finished first can be turned on right away. Nothing is written to the save: turned off, the menus show your own progress again. Treasures, medals and trophies are not touched. By BilalReloaded.': 'Все награды в разделе «Бонусы» (облики, оружие, режимы изображения, галереи, игровые настройки вроде замедленного движения или зеркального мира) и все сюжетные ролики во всех трёх играх; награды, для которых обычно нужно пройти игру, можно включить сразу. В сохранение ничего не записывается: если выключить, меню снова показывают ваш собственный прогресс. Сокровища, медали и трофеи не затрагиваются. Автор: BilalReloaded.',
         'Aiming sensitivity': 'Чувствительность при прицеливании',
         'Vertical sensitivity': 'Вертикальная чувствительность',
         'Times the mouse sensitivity while aiming (right mouse button or L2): 1.00 turns as fast as looking around, 0.50 half as fast for finer aim. The in-game menu (Insert) changes it while you play.': 'Множитель чувствительности мыши при прицеливании (правая кнопка мыши или L2): 1.00 — так же быстро, как при обзоре, 0.50 — вдвое медленнее для более точного прицеливания. Меню в игре (Insert) меняет его во время игры.',
