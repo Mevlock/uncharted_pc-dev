@@ -33,7 +33,7 @@
 
 typedef struct {
     int used, type, channels, is_float, frames, sample_bytes, std_layout;
-    int fold_stereo; /* 8 channels folded to stereo here for a device with fewer channels */
+    int out_channels; /* 8-channel ports: channels sent to SDL (2, 6 or 8); the game's mix is folded here */
     int32_t volume[8];
     SDL_AudioStream *stream;
     uint64_t next_deadline_ns; /* next return of sceAudioOutOutput */
@@ -73,6 +73,35 @@ static void audio_note(const char *format, ...) {
     fflush(stdout);
 }
 static pthread_mutex_t sdl_lock=PTHREAD_MUTEX_INITIALIZER; /* device queries vs. the driver switch; after table_lock */
+/* From drakolordx7's change in the upstream port (a50d3ff8, PR #392): the speaker layout the games are told
+ * (sceAudioOutGetPortState: channel) and that 8-channel ports are mixed down to here: 2, 6 (5.1) or 8 (7.1).
+ * BB_SPEAKERS = auto (the default output device's channel count; Windows' speaker setup picks it), stereo/2,
+ * 5.1/6, 7.1/8. A device that reports no channels (WASAPI cannot read the format of some sound cards) counts
+ * as stereo. */
+static int speaker_count(void) {
+    static int count;
+    pthread_mutex_lock(&sdl_lock);
+    if (count) { int known=count; pthread_mutex_unlock(&sdl_lock); return known; }
+    const char *mode=getenv("BB_SPEAKERS");
+    int device=0, queried=0;
+    if (mode && (!strcmp(mode,"2") || !strcmp(mode,"stereo"))) count=2;
+    else if (mode && (!strcmp(mode,"6") || !strcmp(mode,"5.1"))) count=6;
+    else if (mode && (!strcmp(mode,"8") || !strcmp(mode,"7.1"))) count=8;
+    else {
+        SDL_AudioSpec spec={0};
+        queried=1;
+        if (SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&spec,NULL)) device=spec.channels;
+        count = device>=8 ? 8 : device>=6 ? 6 : 2;
+    }
+    audio_note("Runtime: speakers %s (output device %d channels): the game is told %d channels\n",
+               mode && *mode ? mode : "auto",device,count);
+    if (queried && device<=0)
+        audio_note("Runtime: speakers: the output device reports 0 channels (%s); treating it as stereo\n",
+                   SDL_GetError()[0] ? SDL_GetError() : "format unknown");
+    int known=count;
+    pthread_mutex_unlock(&sdl_lock);
+    return known;
+}
 static int explicit_driver; /* SDL_AUDIO_DRIVER or BB_AUDIO names the backend: never switch away from it */
 static int sdl_audio(void) {
     if (sdl_ready<0) {
@@ -195,18 +224,11 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     p->sample_bytes=p->is_float ? 4 : 2; p->frames=(int)length; p->std_layout=format>=6;
     for (int c=0;c<8;++c) p->volume[c]=VOLUME_0DB;
     if (sdl_audio()) {
-        /* The games are told the output is stereo (sceAudioOutGetPortState) and fill only the
-           front pair of 8-channel buffers. SDL's 7.1 to stereo downmix scales that pair by
-           about 0.3: on a stereo device everything played far too quietly. Fold here instead. */
-        /* A device whose format can't be read (WASAPI fails on some sound cards: the case the
-           fallback below is for) counts as stereo. The query holds sdl_lock: another port may be
-           switching the driver. */
-        SDL_AudioSpec device={0};
-        pthread_mutex_lock(&sdl_lock);
-        const int known=SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&device,NULL);
-        pthread_mutex_unlock(&sdl_lock);
-        p->fold_stereo = p->channels==8 && (!known || device.channels<8);
-        SDL_AudioSpec spec={p->is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16, p->fold_stereo ? 2 : p->channels, 48000};
+        /* The game mixes for the layout it is told (speaker_count). A stereo-only mix leaves the surround
+           channels empty: SDL's own 7.1 to stereo downmix scales the front pair by about 0.3 (far too quiet),
+           so fewer speakers than 7.1 are folded here instead. */
+        p->out_channels = p->channels==8 ? speaker_count() : p->channels;
+        SDL_AudioSpec spec={p->is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16, p->out_channels, 48000};
         p->stream=open_stream(id,&spec);
         if (p->stream) SDL_ResumeAudioStreamDevice(p->stream);
         else { fflush(stdout); fprintf(stderr,"Runtime: SDL audio stream failed (%s); port %d uses the timer sink\n",SDL_GetError(),id); }
@@ -221,7 +243,7 @@ static ABI int32_t audio_open(int32_t user, int32_t type, int32_t index, uint32_
     ++ports_opened;
     pthread_mutex_unlock(&table_lock);
     printf("Runtime: audio port %d opened (type %d, %d ch, %s, %u frames%s)\n",id,type,p->channels,p->is_float ? "float" : "s16",length,
-           p->fold_stereo ? ", folded to stereo" : "");
+           p->out_channels==2 && p->channels==8 ? ", folded to stereo" : p->out_channels==6 && p->channels==8 ? ", folded to 5.1" : "");
     return (type<<16) | id | 0x20000000;
 }
 static ABI int32_t audio_close(int32_t handle) {
@@ -275,26 +297,31 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
             else { int16_t v; memcpy(&v,(const char *)data+from*2,2); v=(int16_t)((float)v*gain); memcpy(converted+to*2,&v,2); }
         }
         if (p->dump) fwrite(converted,1,bytes,p->dump);
-        /* Stereo device: FL/FR at full level, centre and surrounds at -3 dB (LFE dropped). */
+        /* Fewer speakers than the game's 7.1 mix: stereo gets FL/FR at full level and centre and
+           surrounds at -3 dB (LFE dropped); 5.1 keeps FL FR FC LFE and adds the back pair to the
+           sides at -3 dB. */
         const unsigned char *queue_data=converted;
         size_t queue_bytes=bytes;
-        unsigned char folded[2048*2*4];
-        if (p->fold_stereo) {
+        unsigned char folded[2048*6*4];
+        if (p->channels==8 && p->out_channels<8) {
+            const int n=p->out_channels;
             for (size_t f=0;f<(size_t)p->frames;++f) {
-                float s[8];
+                float s[8], o[6];
                 for (int c=0;c<8;++c) {
                     if (p->is_float) memcpy(&s[c],converted+(f*8+(size_t)c)*4,4);
                     else { int16_t v; memcpy(&v,converted+(f*8+(size_t)c)*2,2); s[c]=(float)v/32768.0f; }
                 }
                 /* SDL 7.1 order: FL FR FC LFE BL BR SL SR */
-                float l=s[0]+0.7071f*(s[2]+s[4]+s[6]), r=s[1]+0.7071f*(s[2]+s[5]+s[7]);
-                l=l>1.0f ? 1.0f : l<-1.0f ? -1.0f : l;
-                r=r>1.0f ? 1.0f : r<-1.0f ? -1.0f : r;
-                if (p->is_float) { memcpy(folded+f*8,&l,4); memcpy(folded+f*8+4,&r,4); }
-                else { int16_t a=(int16_t)(l*32767.0f), b=(int16_t)(r*32767.0f); memcpy(folded+f*4,&a,2); memcpy(folded+f*4+2,&b,2); }
+                if (n==6) { o[0]=s[0]; o[1]=s[1]; o[2]=s[2]; o[3]=s[3]; o[4]=s[6]+0.7071f*s[4]; o[5]=s[7]+0.7071f*s[5]; }
+                else { o[0]=s[0]+0.7071f*(s[2]+s[4]+s[6]); o[1]=s[1]+0.7071f*(s[2]+s[5]+s[7]); }
+                for (int c=0;c<n;++c) {
+                    float v=o[c]>1.0f ? 1.0f : o[c]<-1.0f ? -1.0f : o[c];
+                    if (p->is_float) memcpy(folded+(f*(size_t)n+(size_t)c)*4,&v,4);
+                    else { int16_t a=(int16_t)(v*32767.0f); memcpy(folded+(f*(size_t)n+(size_t)c)*2,&a,2); }
+                }
             }
             queue_data=folded;
-            queue_bytes=(size_t)p->frames*2*(size_t)p->sample_bytes;
+            queue_bytes=(size_t)p->frames*(size_t)n*(size_t)p->sample_bytes;
         }
         if (p->stats) {
             uint64_t now=now_ns();
@@ -382,7 +409,8 @@ static ABI int32_t audio_state(int32_t handle, PortState *state) {
     switch (p->type) {
     case 2: case 3: state->output=0x40; state->channel=1; break;          /* headphone */
     case 4: state->output=0x04; state->channel=1; state->volume=127; break; /* pad speaker */
-    default: state->output=0x01; state->channel=(uint8_t)(p->channels>2 ? 2 : p->channels); break;
+    /* The speaker layout of the output: the game picks its mix (stereo, 5.1, 7.1) from this. */
+    default: state->output=0x01; state->channel=(uint8_t)(p->channels>2 ? speaker_count() : p->channels); break;
     }
     return 0;
 }
