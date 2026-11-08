@@ -521,8 +521,13 @@ void CheckpointsPage() {
                 ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.5f, 0.2f, 0.55f));
                 ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.25f, 0.6f, 0.25f, 0.7f));
             }
-            if (ImGui::Selectable(label.c_str(), i == picked || (is_current && picked < 0))) {
+            if (ImGui::Selectable(label.c_str(), i == picked || (is_current && picked < 0),
+                                  ImGuiSelectableFlags_AllowDoubleClick)) {
                 picked = i;
+                // A double click goes there at once (the same as picking it and pressing Go there).
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    BbSaves::Jump(list[i], message);
+                }
             }
             if (is_current) {
                 ImGui::PopStyleColor(3);
@@ -538,6 +543,7 @@ void CheckpointsPage() {
         BbSaves::Jump(list[picked], message);
     }
     ImGui::EndDisabled();
+    Hint(T("Or double-click a checkpoint in the list."));
     if (!message.empty()) {
         ImGui::SameLine();
         ImGui::TextWrapped("%s", message.c_str());
