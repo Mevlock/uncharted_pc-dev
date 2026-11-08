@@ -10,6 +10,7 @@ Frozen with PyInstaller the same Uncharted.exe also runs the game without the wi
 (`--play`), run.py (`--run`) and the preparation scripts (`--script`), so a packaged port
 needs no Python installation.
 """
+import copy
 import ctypes
 import json
 import os
@@ -239,6 +240,20 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
                 **{f'{game}_devmode': False for game, _t, _s, _e in GAMES},
                 **{f'{game}_{cheat}': False for game, cheats in SWITCH_CHEATS.items() for cheat in cheats}}
+
+
+# Advanced > Reset all settings keeps where things are and who plays: the game and saves folders, the
+# game chosen, the console and launcher languages, the player name, the cover art and the trophy page's
+# game. Everything else in APP_DEFAULTS (display, controls, cheats, game options, advanced) goes back.
+RESET_KEEP = {'game_dir', 'game_dir_u1', 'game_dir_u2', 'game_dir_u3', 'user_dir', 'start', 'language',
+              'ui_language', 'player_name', 'trophy_game', 'art_banner', 'art_u1', 'art_u2', 'art_u3',
+              'art_crops', 'notes_hide_after_update'}
+
+
+def reset_settings(s):
+    """The settings s with every option outside RESET_KEEP back to its default (keys the launcher keeps
+    for itself, outside APP_DEFAULTS, are left alone)."""
+    return {**s, **{key: copy.deepcopy(value) for key, value in APP_DEFAULTS.items() if key not in RESET_KEEP}}
 
 
 UI_LANGUAGE = 'en'
@@ -2289,6 +2304,19 @@ class Launcher:
                           justify='left').pack(anchor='w')
             self.pill(holder, _('Official releases'), lambda: webbrowser.open(RELEASES_PAGE)
                       ).pack(anchor='w', pady=(8, 0))
+        self.section(f, _('Reset'))
+        self.note(f, _('Puts every display, controls, cheats, game and advanced option back to its default. The '
+                       'game folders, the saves folder, the console and launcher languages, the player name and '
+                       'the cover art stay as they are. Your saves are not touched.'), top=2)
+        card = self.target(f)
+        holder = self.tk.Frame(card, bg=CARD)
+        holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(12, 0))
+        self.pill(holder, _('Reset all settings'), self.ask_reset).pack(side='left')
+        self.reset_confirm = self.tk.Frame(holder, bg=CARD)
+        self.tk.Label(self.reset_confirm, text=_('Reset every setting to its default?'), bg=CARD, fg=GOLD,
+                      font=self.font_ui).pack(side='left')
+        self.pill(self.reset_confirm, _('Reset'), self.reset_all).pack(side='left', padx=(12, 0))
+        self.pill(self.reset_confirm, _('Cancel'), self.cancel_reset).pack(side='left', padx=(8, 0))
 
     def build_log(self):
         tk = self.tk
@@ -2356,6 +2384,29 @@ class Launcher:
         page = self.current_page or 'advanced'
         self.save_settings()  # a locked settings file must not keep the old language on screen
         UI_LANGUAGE = uncharted_i18n.language_code(self.app['ui_language'])
+        self.rebuild(page)
+
+    def ask_reset(self):
+        """Reset all settings, step one: the confirmation line beside the button."""
+        self.reset_confirm.pack(side='left', padx=(self.px(16), 0))
+
+    def cancel_reset(self):
+        self.reset_confirm.pack_forget()
+
+    def reset_all(self):
+        """Reset all settings, step two: every option back to its default (reset_settings keeps the folders,
+        the languages, the player name and the cover art), saved, and the pages built again."""
+        new = reset_settings(self.current())
+        self.app.clear()
+        self.app.update(new)
+        self.vars = {}
+        self.pad_vars = None  # (collect must not write the old controller buttons back)
+        self.save_settings()
+        self.rebuild('advanced')
+        self.status.configure(text=_('All settings are back to their defaults.'), fg=GOLD)
+
+    def rebuild(self, page):
+        """Every page built again from the settings (a new interface language, a reset)."""
         for child in self.root.winfo_children():
             child.destroy()
         # The rebuild drops the widgets these point at: a kept update_box hid the offer and made
