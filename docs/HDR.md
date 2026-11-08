@@ -54,8 +54,29 @@ vars `BB_HDR_*` override the file. Paper white and peak come from the launcher o
 | Per-channel tone mapping | `hdr_per_channel` | 0/1 | 0 | 0 |
 | SDR picture gamma (HDR10 of the SDR image) | `hdr_sdr_gamma` | 1.8-2.8 | 2.20 | 2.20 (not tuned) |
 | SDR picture saturation | `hdr_sdr_saturation` | 0-2 | 1.10 | 1.10 (not tuned) |
+| Gamut expansion (both outputs) | `hdr_gamut_expansion` | 0-2 | 0.00 (accurate) | 0.00 (user to try) |
 
 The tuned column is the next default set (not in the code yet), pending the user's final look.
+
+Env overrides: `BB_HDR_GAMUT_EXPANSION` like the others. The menu shows Gamut expansion below the SDR
+picture group, for scene HDR and the SDR picture alike.
+
+### Gamut expansion
+
+Wide-gamut SDR monitors (the user's Alienware AW3423DWF, QD-OLED, ~99% DCI-P3) in their default modes stretch
+sRGB colours to the panel's own primaries, so SDR there looks more vivid than accurate HDR, which places Rec. 709
+colours exactly inside Rec. 2020. Gamut expansion does that stretch on purpose. It is the last step before PQ,
+in `Hdr10FromPicture` (`host_shaders/hdr_common.glsl`, `Bt2020FromBt709`), which both outputs pass through: the
+SDR picture / menus / movies, and the scene HDR composite (the float display frame goes through the same post
+process encode). Our overlay is not expanded.
+
+- 0: the Rec. 709 -> Rec. 2020 matrix (accurate). 1: the values read as Display P3 (D65), P3 -> Rec. 2020
+  matrix. 2: read as Rec. 2020 directly (identity). In between, a linear blend of the two neighbouring matrices.
+- Every matrix maps white to white (D65): greys stay neutral.
+- The result is scaled so its Rec. 2020 luminance equals the accurate conversion's (scale clamped 0.25-4), so
+  paper white, highlights and the brightness match above are unchanged; only chroma moves.
+- Live via the post process push constants (`gamut_expansion`, 4 bytes more); HDR off: never runs.
+- Since 2026-11-08 the user's monitor runs DisplayHDR True Black 400 (peak about 450 nits): set peak to match.
 
 ## Live tuning file
 
