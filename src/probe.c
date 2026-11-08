@@ -785,9 +785,10 @@ static uint64_t guest_image_size;
 uintptr_t runtime_image_base(void) { return (uintptr_t)image; }
 size_t runtime_image_size(void) { return (size_t)guest_image_size; }
 #ifdef _WIN32
-/* BB_KEEP_BYTES=offset=value,... (cheats.py, from BB_CHEATS): guest image bytes kept at a value (hex offsets),
- * written every 100 ms: Naughty Dog's debug-menu switches ("No Reload", "One Hit Kills") live in memory the games
- * create and may reset; their menu is unreachable, so the runtime holds them. Offsets past the image are ignored. */
+/* BB_KEEP_BYTES=offset=value,... (cheats.py, from BB_CHEATS and BB_UNLOCK_REWARDS): guest image bytes kept at a
+ * value (hex offsets), written every 100 ms: Naughty Dog's debug-menu switches ("No Reload", "One Hit Kills",
+ * "Give all Store Items", "Give All Movies") live in memory the games create and may reset; their menu is
+ * unreachable, so the runtime holds them. Offsets past the image are ignored. */
 static DWORD WINAPI keep_bytes_thread(void *argument) {
     struct { uint64_t offset; unsigned char value; } keep[16];
     int count=0;
@@ -802,7 +803,7 @@ static DWORD WINAPI keep_bytes_thread(void *argument) {
         }
         p=*end==',' ? end+1 : NULL;
     }
-    printf("Cheats: %d debug switches kept set\n", count);
+    printf("Debug switches kept set (cheats, unlock all rewards): %d\n", count);
     for (;;) {
         for (int i=0; i<count; ++i) {
             volatile unsigned char *at=image+keep[i].offset;

@@ -133,6 +133,9 @@ EXTRA_TRANSLATIONS = {
         'Unlock all chapters': 'Alle Kapitel freischalten',
         'Every chapter in Chapter Select and the Brutal difficulty from the start, in all three games. Saves and progress are not changed; turned off, the menus show your own progress. By BilalReloaded.':
         'Alle Kapitel in der Kapitelauswahl und der Schwierigkeitsgrad Brutal von Anfang an, in allen drei Spielen. Spielstände und Fortschritt bleiben unverändert; ausgeschaltet zeigen die Menüs deinen eigenen Fortschritt. Von BilalReloaded.',
+        'Unlock all rewards': 'Alle Belohnungen freischalten',
+        'Every reward in Bonuses (skins, weapons, render modes, art galleries, gameplay tweaks such as Slow Motion or Mirror World) and every story cutscene, in all three games; rewards that normally need the game finished first can be turned on right away. Nothing is written to the save: turned off, the menus show your own progress again. Treasures, medals and trophies are not touched. By BilalReloaded.':
+        'Alle Belohnungen unter Boni (Skins, Waffen, Grafikmodi, Kunstgalerien, Spielvarianten wie Zeitlupe oder Spiegelwelt) und alle Story-Zwischensequenzen, in allen drei Spielen; Belohnungen, die sonst erst nach dem Durchspielen gehen, lassen sich sofort einschalten. In den Spielstand wird nichts geschrieben: ausgeschaltet zeigen die Menüs wieder deinen eigenen Fortschritt. Schätze, Medaillen und Trophäen bleiben unberührt. Von BilalReloaded.',
         "Skip the friends' stats notice": 'Hinweis zu Freundesstatistiken überspringen',
         "Continue and New Game go straight into the game: the game gets a local player name instead of 'signed out' and does not stop on the notice that friends' stats are not available. Nothing goes online.":
         "Fortsetzen und Neues Spiel führen direkt ins Spiel: Das Spiel erhält einen lokalen Spielernamen statt 'abgemeldet' und hält nicht beim Hinweis an, dass Freundesstatistiken nicht verfügbar sind. Es wird nichts online übertragen.",
@@ -520,6 +523,9 @@ EXTRA_TRANSLATIONS = {
         'Unlock all chapters': 'Sblocca tutti i capitoli',
         'Every chapter in Chapter Select and the Brutal difficulty from the start, in all three games. Saves and progress are not changed; turned off, the menus show your own progress. By BilalReloaded.':
         "Tutti i capitoli in Selezione capitolo e la difficoltà Brutale fin dall'inizio, in tutti e tre i giochi. Salvataggi e progressi non cambiano; se disattivato, i menu mostrano i tuoi progressi. Di BilalReloaded.",
+        'Unlock all rewards': 'Sblocca tutte le ricompense',
+        'Every reward in Bonuses (skins, weapons, render modes, art galleries, gameplay tweaks such as Slow Motion or Mirror World) and every story cutscene, in all three games; rewards that normally need the game finished first can be turned on right away. Nothing is written to the save: turned off, the menus show your own progress again. Treasures, medals and trophies are not touched. By BilalReloaded.':
+        'Tutte le ricompense in Bonus (skin, armi, modalità grafiche, gallerie, varianti di gioco come Rallentatore o Mondo specchio) e tutti i filmati della storia, in tutti e tre i giochi; le ricompense che di solito richiedono di finire il gioco si possono attivare subito. Nel salvataggio non viene scritto nulla: se disattivato, i menu mostrano di nuovo i tuoi progressi. Tesori, medaglie e trofei non vengono toccati. Di BilalReloaded.',
         "Skip the friends' stats notice": "Salta l'avviso sulle statistiche degli amici",
         "Continue and New Game go straight into the game: the game gets a local player name instead of 'signed out' and does not stop on the notice that friends' stats are not available. Nothing goes online.":
         "Continua e Nuova partita entrano subito nel gioco: il gioco riceve un nome giocatore locale invece di 'disconnesso' e non si ferma sull'avviso che le statistiche degli amici non sono disponibili. Nulla viene inviato online.",
@@ -906,6 +912,9 @@ EXTRA_TRANSLATIONS = {
         'Unlock all chapters': 'すべてのチャプターを解放',
         'Every chapter in Chapter Select and the Brutal difficulty from the start, in all three games. Saves and progress are not changed; turned off, the menus show your own progress. By BilalReloaded.':
         '3作品すべてで、最初からチャプターセレクトの全チャプターと難易度「BRUTAL」を選べます。セーブデータと進行状況は変更されません。オフにするとメニューには自分の進行状況が表示されます。作成: BilalReloaded。',
+        'Unlock all rewards': 'すべての報酬を解放',
+        'Every reward in Bonuses (skins, weapons, render modes, art galleries, gameplay tweaks such as Slow Motion or Mirror World) and every story cutscene, in all three games; rewards that normally need the game finished first can be turned on right away. Nothing is written to the save: turned off, the menus show your own progress again. Treasures, medals and trophies are not touched. By BilalReloaded.':
+        '3作品すべてで、ボーナスの全報酬（スキン、武器、描画モード、アートギャラリー、スローモーションやミラーワールドなどのゲーム調整）とストーリーのムービーをすべて解放します。通常はクリア後にしか有効にできない報酬もすぐに有効にできます。セーブデータには何も書き込まれません。オフにするとメニューには再び自分の進行状況が表示されます。お宝、メダル、トロフィーは変更されません。作成: BilalReloaded。',
         "Skip the friends' stats notice": 'フレンドの統計に関するお知らせをスキップ',
         "Continue and New Game go straight into the game: the game gets a local player name instead of 'signed out' and does not stop on the notice that friends' stats are not available. Nothing goes online.":
         '「つづきから」と「ニューゲーム」ですぐにゲームが始まります。ゲームには「サインアウト中」の代わりにローカルのプレイヤー名が渡され、フレンドの統計が利用できないというお知らせで止まりません。オンライン通信は行いません。',
@@ -1190,6 +1199,9 @@ EXTRA_TRANSLATIONS = {
         'Unlock all chapters': 'Desbloquear todos los capítulos',
         'Every chapter in Chapter Select and the Brutal difficulty from the start, in all three games. Saves and progress are not changed; turned off, the menus show your own progress. By BilalReloaded.':
         'Todos los capítulos en Selección de capítulo y la dificultad Brutal desde el principio, en los tres juegos. Las partidas y el progreso no cambian; al desactivarlo, los menús muestran tu propio progreso. Por BilalReloaded.',
+        'Unlock all rewards': 'Desbloquear todas las recompensas',
+        'Every reward in Bonuses (skins, weapons, render modes, art galleries, gameplay tweaks such as Slow Motion or Mirror World) and every story cutscene, in all three games; rewards that normally need the game finished first can be turned on right away. Nothing is written to the save: turned off, the menus show your own progress again. Treasures, medals and trophies are not touched. By BilalReloaded.':
+        'Todas las recompensas de Extras (aspectos, armas, modos de imagen, galerías de arte, ajustes de juego como Cámara lenta o Mundo espejo) y todas las cinemáticas de la historia, en los tres juegos; las recompensas que normalmente exigen terminar el juego se pueden activar enseguida. No se escribe nada en la partida guardada: al desactivarlo, los menús vuelven a mostrar tu propio progreso. Tesoros, medallas y trofeos no se tocan. Por BilalReloaded.',
         "Skip the friends' stats notice": 'Saltar el aviso de estadísticas de amigos',
         "Continue and New Game go straight into the game: the game gets a local player name instead of 'signed out' and does not stop on the notice that friends' stats are not available. Nothing goes online.":
         "Continuar y Nueva partida entran directamente en el juego: el juego recibe un nombre de jugador local en lugar de 'sesión cerrada' y no se detiene en el aviso de que las estadísticas de amigos no están disponibles. No se conecta nada a internet.",
@@ -1479,6 +1491,9 @@ EXTRA_TRANSLATIONS = {
         'Unlock all chapters': 'Desbloquear todos os capítulos',
         'Every chapter in Chapter Select and the Brutal difficulty from the start, in all three games. Saves and progress are not changed; turned off, the menus show your own progress. By BilalReloaded.':
         'Todos os capítulos em Seleção de capítulo e a dificuldade Brutal desde o início, nos três jogos. Jogos salvos e progresso não são alterados; desativado, os menus mostram seu próprio progresso. Por BilalReloaded.',
+        'Unlock all rewards': 'Desbloquear todas as recompensas',
+        'Every reward in Bonuses (skins, weapons, render modes, art galleries, gameplay tweaks such as Slow Motion or Mirror World) and every story cutscene, in all three games; rewards that normally need the game finished first can be turned on right away. Nothing is written to the save: turned off, the menus show your own progress again. Treasures, medals and trophies are not touched. By BilalReloaded.':
+        'Todas as recompensas em Bônus (visuais, armas, modos de imagem, galerias de arte, ajustes de jogo como Câmera lenta ou Mundo espelhado) e todas as cenas da história, nos três jogos; recompensas que normalmente exigem terminar o jogo podem ser ativadas na hora. Nada é gravado no jogo salvo: desativado, os menus voltam a mostrar seu próprio progresso. Tesouros, medalhas e troféus não são alterados. Por BilalReloaded.',
         "Skip the friends' stats notice": 'Pular o aviso de estatísticas de amigos',
         "Continue and New Game go straight into the game: the game gets a local player name instead of 'signed out' and does not stop on the notice that friends' stats are not available. Nothing goes online.":
         "Continuar e Novo jogo entram direto no jogo: o jogo recebe um nome de jogador local em vez de 'desconectado' e não para no aviso de que as estatísticas de amigos não estão disponíveis. Nada é enviado online.",
@@ -1769,6 +1784,9 @@ EXTRA_TRANSLATIONS = {
         'Unlock all chapters': 'Débloquer tous les chapitres',
         'Every chapter in Chapter Select and the Brutal difficulty from the start, in all three games. Saves and progress are not changed; turned off, the menus show your own progress. By BilalReloaded.':
         'Tous les chapitres dans Sélection du chapitre et la difficulté Brutal dès le départ, dans les trois jeux. Les sauvegardes et la progression ne sont pas modifiées ; une fois désactivé, les menus affichent votre propre progression. Par BilalReloaded.',
+        'Unlock all rewards': 'Débloquer toutes les récompenses',
+        'Every reward in Bonuses (skins, weapons, render modes, art galleries, gameplay tweaks such as Slow Motion or Mirror World) and every story cutscene, in all three games; rewards that normally need the game finished first can be turned on right away. Nothing is written to the save: turned off, the menus show your own progress again. Treasures, medals and trophies are not touched. By BilalReloaded.':
+        "Toutes les récompenses des Bonus (tenues, armes, modes de rendu, galeries d'art, réglages de jeu comme Ralenti ou Monde miroir) et toutes les cinématiques de l'histoire, dans les trois jeux ; les récompenses qui demandent normalement d'avoir fini le jeu peuvent être activées tout de suite. Rien n'est écrit dans la sauvegarde : une fois désactivé, les menus affichent à nouveau votre propre progression. Trésors, médailles et trophées ne sont pas modifiés. Par BilalReloaded.",
         "Skip the friends' stats notice": 'Passer l’avis sur les statistiques des amis',
         "Continue and New Game go straight into the game: the game gets a local player name instead of 'signed out' and does not stop on the notice that friends' stats are not available. Nothing goes online.":
         "Continuer et Nouvelle partie lancent directement le jeu : le jeu reçoit un nom de joueur local au lieu de 'déconnecté' et ne s’arrête pas sur l’avis indiquant que les statistiques des amis ne sont pas disponibles. Rien n’est envoyé en ligne.",

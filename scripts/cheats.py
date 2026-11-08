@@ -1,7 +1,8 @@
 """Compile the enabled cheats of one executable into cheats.bin for bb-probe --patches.
 
-Cheats are "health" and "ammo". A patch is written only when the executable's game code is listed and the bytes at
-its address are the expected ones; anything else is reported and skipped, never an error.
+Cheats are "health" and "ammo" (and "rewards": Unlock all rewards). A patch is written only when the executable's
+game code is listed and the bytes at its address are the expected ones; anything else is reported and skipped, never
+an error.
 Addresses are image offsets (virtual addresses of the SELF's load segments).
 """
 import hashlib
@@ -72,19 +73,93 @@ KEEP = {
 }
 
 
+# Unlock all rewards (BB_UNLOCK_REWARDS=1, launcher Game > Unlock all rewards; run.py adds 'rewards' to every
+# game's list). From BilalReloaded's Uncharted port (tools/probe_uncharted.py REWARD_POKES / REWARD_PATCHES,
+# GPL-2.0-or-later, made for 1.02); the 1.00 sites found the same way. Nothing is written to the save: turned off,
+# the Bonuses menus show the player's own progress again; treasures, medals and trophies are not touched.
+#
+# Uncharted 2 and 3: Naughty Dog's debug-menu switches "Give all Store Items" and "Give All Movies" (the menu is
+# unreachable), kept set by the runtime: every reward and story cutscene reads as unlocked while they are set. Each
+# is checked against the menu item that points at it: (offset, address of that rip-relative lea, its bytes).
+REWARD_SWITCHES = {
+    US['big2-ps4_Shipping.elf']: [(0x1114178, 0x3fed99, '488d05d853d100'), (0x1114179, 0x40007f, '488d05f340d100')],
+    EU['big2-ps4_Shipping.elf']: [(0xeb67f0, 0x14f1a9, '488d054076d600'), (0xeb67f1, 0x14f570, '488d0d7a72d600')],
+    US['big3-ps4_Shipping.elf']: [(0x17b2a94, 0x4bae0b, '488d05827c2f01'), (0x17b2a95, 0x4bb57b, '488d0513752f01')],
+    EU['big3-ps4_Shipping.elf']: [(0x1429524, 0x100763, '488d15ba8d3201'), (0x1429525, 0x1008b1, '488d156d8c3201')],
+}
+# Code patches (address, original, replacement; one byte changes in each). Uncharted 2 and 3 let some rewards
+# (tweaks, render modes) be enabled only once the game was finished on that difficulty: the reward screen's item
+# info sets "needs the game finished" (+0xe) to 1 before clearing it from the save's finished-difficulty bits; it is
+# set to 0. Drake's Fortune keeps each reward's status in its own record (bit 0 unlocked) and its debug switch writes
+# them, so its checks are patched instead: every reward reads as unlocked, usable and counted, can be enabled
+# without finishing the game first, and the Story Cutscenes list skips no chapter (the status bytes are untouched).
+_U1_REWARDS = (
+    # IsUnlocked(item): and al, 1 -> mov al, 1
+    ('item check', 'b001803f00750d4885f674098a86880000002401', 'b001803f00750d4885f674098a8688000000b001'),
+    # IsUnlocked(category, id): the same
+    ('id check', '75134d85e4740c418a8424880000002401eb02', '75134d85e4740c418a842488000000b001eb02'),
+    # the "Unlocked N of 47" counter: je skip -> je +0
+    ('counter', '4c89f275154885c07422f68088000000017419', '4c89f275154885c07422f68088000000017400'),
+    # usable-by-id check: je not -> je +0
+    ('usable by id', '41803e00750af684088800000001741e488d55d4', '41803e00750af6840888000000017400488d55d4'),
+    # CanEnable: test [item+0x88], 1; sete dl (dl = locked) -> setb dl (test clears CF)
+    ('enable check', '41f68688000000010f94c24584ff0f95c184c0', '41f68688000000010f92c24584ff0f95c184c0'),
+    # CanEnable's "finish the game on this difficulty first": mov r13b, 1 -> mov r13b, 0
+    ('finished first', '448bb87848000041b5014183ff067338', '448bb87848000041b5004183ff067338'),
+    # Story Cutscenes list: cmp [node+0x50], 0; js skip (chapter not reached) -> js +0
+    ('story cutscenes', '488b7840837f50000f88880000004c8b4210', '488b7840837f50000f88000000004c8b4210'),
+)
+REWARD_PATCHES = {
+    US['eboot.bin']: [(label, address, original, replacement) for address, (label, original, replacement) in
+                      zip((0x32c330, 0x32c3c8, 0x32c506, 0x32cd44, 0x32c8a8, 0x32c80f, 0x138aad), _U1_REWARDS)],
+    EU['eboot.bin']: [(label, address, original, replacement) for address, (label, original, replacement) in
+                      zip((0x32bbb0, 0x32bc48, 0x32bd86, 0x32c5c4, 0x32c128, 0x32c08f, 0x13882d), _U1_REWARDS)],
+    US['big2-ps4_Shipping.elf']: [('finished first', 0xa4ca2f, '7441c6430e01833d401fa800', '7441c6430e00833d401fa800')],
+    EU['big2-ps4_Shipping.elf']: [('finished first', 0x430484, '753641c6450e01e8304bd9ff', '753641c6450e00e8304bd9ff')],
+    US['big3-ps4_Shipping.elf']: [('finished first', 0x4bd550, '74054c39f0725c41c6450e01488d05',
+                                   '74054c39f0725c41c6450e00488d05')],
+    EU['big3-ps4_Shipping.elf']: [('finished first', 0x101f65, '754541c6450e01488d3d65e02f01',
+                                   '754541c6450e00488d3d65e02f01')],
+}
+
+
+def reward_switches(data, code):
+    """Offsets of the 'give all' switches of this build whose menu items point at them; the rest are reported."""
+    switches = REWARD_SWITCHES.get(code, [])
+    if not switches:
+        return []
+    elf, _header, program_headers, _segments, _missing = prepare.parse_self(data)
+    offsets = []
+    for offset, lea, encoding in switches:
+        encoding = bytes.fromhex(encoding)
+        target = lea + len(encoding) + struct.unpack_from('<i', encoding, 3)[0]
+        if image_bytes(elf, program_headers, lea, len(encoding)) != encoding or target != offset:
+            print(f'Unlock all rewards: switch {offset:#x} skipped, unexpected code at {lea:#x}')
+            continue
+        offsets.append(offset)
+    return offsets
+
+
 def keep_bytes(path, cheats):
     """BB_KEEP_BYTES ("offset=1,...") for the enabled switch cheats of one executable; '' when none applies."""
-    if not any(c in ('noreload', 'onehit') for c in cheats):
+    if not any(c in ('noreload', 'onehit', 'rewards') for c in cheats):
         return ''
     try:
-        table = KEEP.get(code_hash(Path(path).read_bytes()), {})
-    except OSError:
+        data = Path(path).read_bytes()
+        code = code_hash(data)
+        table = KEEP.get(code, {})
+        rewards = reward_switches(data, code) if 'rewards' in cheats else []
+    except (OSError, ValueError, KeyError, IndexError, struct.error) as error:
+        print(f'Cheats: switches not kept ({error})')
         return ''
     keep = []
     for name in cheats:
         for offset in table.get(name, []):
             keep.append(f'{offset:x}=1')
             print(f'Cheats: {name} on')
+    if rewards:
+        keep += [f'{offset:x}=1' for offset in rewards]
+        print(f'Unlock all rewards: {len(rewards)} give-all switches kept set')
     return ','.join(keep)
 
 
@@ -113,12 +188,26 @@ def image_bytes(elf, program_headers, address, size):
 def compile_cheats(path, cheats):
     """[(address, replacement bytes)] for the enabled cheats; reasons go to stdout."""
     data = Path(path).read_bytes()
-    table = PATCHES.get(code_hash(data))
+    code = code_hash(data)
+    table = PATCHES.get(code)
     if table is None:
         print(f'Cheats: {Path(path).name} is not a supported version; none applied')
+        if 'rewards' in cheats:
+            print(f'Unlock all rewards: {Path(path).name} is not a supported version; not applied')
         return []
     elf, _header, program_headers, _segments, _missing = prepare.parse_self(data)
     writes = []
+    if 'rewards' in cheats:
+        applied = []
+        for label, address, original, replacement in REWARD_PATCHES.get(code, []):
+            original, replacement = bytes.fromhex(original), bytes.fromhex(replacement)
+            if image_bytes(elf, program_headers, address, len(original)) != original:
+                print(f'Unlock all rewards: {label} skipped, unexpected code at {address:#x}')
+                continue
+            writes.append((address, replacement))
+            applied.append(label)
+        if applied:
+            print(f'Unlock all rewards: {", ".join(applied)} patched')
     for name in cheats:
         if name not in table:
             continue
