@@ -397,10 +397,28 @@ bool Load(int index, std::string& message) {
     return true;
 }
 
+// Entries the game's task list marks playable that are no place to start from: Naughty Dog's test entries
+// (U1 ricks-test-1/2, U2 playtest, destructible-test-1, treasure-test-1) and a bookkeeping step (U3
+// ldn-buddy-remove-combat-skills, between London and the Chateau). Left out of the Checkpoints page; their
+// numbers stay, so the list keeps the game's numbering.
+static bool HiddenTask(int game, uint32_t task) {
+    static const struct { int game; uint32_t task; } hidden[] = {
+        {1, 0x626acf3c}, {1, 0x6f29e9e5},
+        {2, 0x5d5e2861}, {2, 0xcdfaf8f7}, {2, 0x74d7c0f9},
+        {3, 0x490efeff},
+    };
+    for (const auto& h : hidden) {
+        if (h.game == game && h.task == task) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<Checkpoint> Checkpoints() {
     std::vector<Checkpoint> list;
     for (const TaskRow& t : tasks) {
-        if (t.game == Game() && t.number) {
+        if (t.game == Game() && t.number && !HiddenTask(t.game, t.task)) {
             list.push_back(Lookup(t.game, t.task));
         }
     }
