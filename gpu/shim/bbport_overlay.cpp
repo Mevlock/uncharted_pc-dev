@@ -27,6 +27,7 @@
 #endif
 #include <windows.h>
 #endif
+#include "bbport_hdr.h"
 #include "bbport_i18n.h"
 #include "bbport_saves.h"
 #include "bbport_settings.h"
@@ -368,6 +369,69 @@ void Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
     float v = value;
     const bool changed = ImGui::SliderFloat(label, &v, lo, hi, "%.2f");
     Store(value, v, changed);
+}
+
+// A slider kept in its range when a value is typed (Ctrl+click).
+void SliderIn(const char* label, std::atomic<float>& value, float lo, float hi, const char* format,
+              ImGuiSliderFlags flags = 0) {
+    float v = value;
+    const bool changed =
+        ImGui::SliderFloat(label, &v, lo, hi, format, flags | ImGuiSliderFlags_AlwaysClamp);
+    Store(value, v, changed);
+}
+
+void Hint(const char* text);
+void TextGrey(const char* text);
+
+// HDR10 output (BbHdr): the picture settings, live (BbHdr::Current, read each frame by the
+// presenter and the tone pass replacement), kept in bbport.ini.
+void HdrSection(BbSettings::Values& s) {
+    if (!BbHdr::Output()) {
+        return;
+    }
+    ImGui::SeparatorText(T("HDR"));
+    SliderIn(TI("Paper white (nits)"), s.hdr_paper_white, 80.0f, 500.0f, "%.0f");
+    SliderIn(TI("Peak brightness (nits)"), s.hdr_peak_nits, 400.0f, 10000.0f, "%.0f",
+             ImGuiSliderFlags_Logarithmic);
+    Hint(T("Paper white: the brightness of white in the game, the HUD and the menus. Peak: your "
+           "display's peak brightness. Both start from the launcher's values each time the game "
+           "starts."));
+    if (BbHdr::Scene()) {
+        ImGui::TextUnformatted(T("Scene HDR (the game's own highlights)"));
+        SliderIn(TI("Exposure"), s.hdr_exposure, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        SliderIn(TI("Saturation"), s.hdr_saturation, 0.0f, 2.0f, "%.2f");
+        SliderIn(TI("Highlight saturation"), s.hdr_highlight_saturation, 0.0f, 2.0f, "%.2f");
+        SliderIn(TI("Contrast"), s.hdr_contrast, 0.5f, 2.0f, "%.2f");
+        SliderIn(TI("Colour restoration"), s.hdr_chrominance, 0.0f, 1.0f, "%.2f");
+        SliderIn(TI("Blowout restoration"), s.hdr_blowout, 0.0f, 1.0f, "%.2f");
+        SliderIn(TI("Hue correction"), s.hdr_hue_correction, 0.0f, 1.0f, "%.2f");
+        Checkbox(TI("Per-channel tone mapping"), s.hdr_per_channel);
+        Hint(T("The tone mapping of the game's scene into HDR (RenoDX). Colour restoration brings "
+               "back the colour strength of the game's own grading (per-channel chrominance "
+               "correction); blowout restoration keeps colour in highlights that would turn white; "
+               "hue correction keeps the game's hues. Per-channel tone mapping: each colour channel "
+               "on its own, as the game's curve does (richer colours, bright ones shift towards "
+               "white); off: by brightness."));
+    }
+    ImGui::TextUnformatted(T("The game's picture in HDR (menus, videos, no scene HDR)"));
+    SliderIn(TI("Gamma"), s.hdr_sdr_gamma, 1.8f, 2.8f, "%.2f");
+    SliderIn(TI("Picture saturation"), s.hdr_sdr_saturation, 0.0f, 2.0f, "%.2f");
+    Hint(T("Gamma: 2.2 is the display the games were made for; 2.4 gives deeper shadows. "
+           "Saturation: 1.00 is the game's own colour; above it colours get stronger, using the "
+           "wider colour range of HDR."));
+    if (ImGui::Button(TI("Reset HDR settings"))) {
+        BbSettings::ResetHdr();
+        dirty = true;
+    }
+    const BbHdr::Tuning t = BbHdr::Current();
+    const std::string values = fmt::format(
+        "paper {:.0f}, peak {:.0f} | exposure {:.2f}, saturation {:.2f}, highlights {:.2f}, "
+        "contrast {:.2f}, colour {:.2f}, blowout {:.2f}, hue {:.2f}, per-channel {} | gamma "
+        "{:.2f}, picture saturation {:.2f}",
+        t.paper_white, t.peak_nits, t.exposure, t.saturation, t.highlight_saturation, t.contrast,
+        t.chrominance, t.blowout, t.hue_correction, t.per_channel != 0.0f ? "on" : "off",
+        t.sdr_gamma, t.sdr_saturation);
+    TextGrey(values.c_str());
 }
 
 // A grey note that wraps at the window's edge (TextDisabled does not wrap: translated notes ran off the window).
@@ -748,6 +812,8 @@ void Menu() {
     Hint(T("Generated frames between the game's own: 60 FPS on screen becomes 120. Adds a little "
            "input latency; menus and cutscene videos are not generated. The launcher's Frame rate "
            "limit counts generated frames."));
+
+    HdrSection(s);
 
     ImGui::SeparatorText(T("Other"));
     Checkbox(TI("FPS counter in the corner"), s.show_fps);
