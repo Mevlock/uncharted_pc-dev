@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <string>
+#include <array>
+#include <cstdio>
+#include "bbport_hdr.h"
 #include "bbport_settings.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -57,7 +61,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
     const u32 queue_family_indices_count = exclusive ? 1u : 2u;
     const vk::SharingMode sharing_mode =
         exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
-    const auto format = needs_hdr ? SURFACE_FORMAT_HDR : surface_format;
+    const auto format = needs_hdr ? hdr_format : surface_format;
     const vk::SwapchainCreateInfoKHR swapchain_info = {
         .pNext = LowLatency::SwapchainNext(),
         .surface = surface,
@@ -102,7 +106,7 @@ void Swapchain::SetHDR(bool hdr) {
     needs_hdr = hdr;
     // Recreate's Destroy waits for the device under the submit lock.
     Recreate(width, height);
-    ImGui::Core::OnSurfaceFormatChange(needs_hdr ? SURFACE_FORMAT_HDR.format
+    ImGui::Core::OnSurfaceFormatChange(needs_hdr ? hdr_format.format
                                                  : surface_format.format);
 }
 
@@ -192,6 +196,40 @@ void Swapchain::FindPresentFormat() {
         }) != formats.end();
     // Also make sure that user allowed us to use HDR
     supports_hdr &= EmulatorSettings.IsHdrAllowed();
+    // bbport: the port's own HDR10 output (BB_HDR=1, the launcher's Display > HDR): an HDR10
+    // (Rec. 2020 PQ) format, 10-bit first, chosen at start; without one the output stays SDR.
+    if (BbHdr::Requested()) {
+        constexpr std::array candidates{vk::Format::eA2B10G10R10UnormPack32,
+                                        vk::Format::eA2R10G10B10UnormPack32,
+                                        vk::Format::eR16G16B16A16Sfloat};
+        const vk::SurfaceFormatKHR* found = nullptr;
+        for (const vk::Format candidate : candidates) {
+            for (const vk::SurfaceFormatKHR& sformat : formats) {
+                if (!found && sformat.format == candidate &&
+                    sformat.colorSpace == vk::ColorSpaceKHR::eHdr10St2084EXT) {
+                    found = &sformat;
+                }
+            }
+        }
+        if (found) {
+            hdr_format = *found;
+            supports_hdr = true;
+            needs_hdr = true; // the swapchain is HDR10 from its creation on
+            std::printf("HDR: swapchain %s, %s\n", vk::to_string(hdr_format.format).c_str(),
+                        vk::to_string(hdr_format.colorSpace).c_str());
+            BbHdr::SetOutput(true);
+        } else {
+            std::string offered;
+            for (const vk::SurfaceFormatKHR& sformat : formats) {
+                offered += " " + vk::to_string(sformat.format) + "/" +
+                           vk::to_string(sformat.colorSpace);
+            }
+            std::printf("HDR: the display offers no HDR10 format (turn on 'Use HDR' in Windows "
+                        "display settings, or the display has no HDR): SDR output. Offered:%s\n",
+                        offered.c_str());
+        }
+        std::fflush(stdout);
+    }
 
     // If there is a single undefined surface format, the device doesn't care, so we'll just use
     // RGBA sRGB.
@@ -357,7 +395,7 @@ void Swapchain::SetupImages() {
         auto [im_view_result, im_view] = device.createImageView(vk::ImageViewCreateInfo{
             .image = images[i],
             .viewType = vk::ImageViewType::e2D,
-            .format = needs_hdr ? SURFACE_FORMAT_HDR.format : surface_format.format,
+            .format = needs_hdr ? hdr_format.format : surface_format.format,
             .subresourceRange =
                 {
                     .aspectMask = vk::ImageAspectFlagBits::eColor,
