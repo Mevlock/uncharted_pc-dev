@@ -4101,8 +4101,8 @@ void BufferCache::ReclaimArenaMemory() {
     u64 limit_now = limit;
     u64 target = limit / 4 * 3;
     if (usage_pct > 5) {
-        const u64 usage = instance.GetDeviceMemoryUsage();
-        const u64 budget = instance.GetDeviceMemoryBudgetNow();
+        u64 usage = 0, budget = 0;
+        instance.QueryMemory(usage, budget); // one driver query for both
         if (budget) {
             const u64 on_at = budget / 100 * usage_pct;
             const u64 off_at = budget / 100 * (usage_pct - 5);
