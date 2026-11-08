@@ -416,6 +416,15 @@ public:
     /// Runs the garbage collector.
     void RunGarbageCollector();
 
+    /// bbport (BB_VRAM_STATS): the cached images' video memory by kind (GPU thread).
+    struct ImageStats {
+        u64 target_bytes = 0, target_count = 0;   ///< used as a render target or depth buffer
+        u64 texture_bytes = 0, texture_count = 0; ///< the others
+        u64 gpu_written_bytes = 0;                ///< of both: GPU-modified, only in video memory
+        u64 pending_free_bytes = 0;               ///< deleted, not destroyed yet
+    };
+    ImageStats GetImageStats();
+
     template <typename Func>
     void ForEachImageInRegion(VAddr cpu_addr, size_t size, Func&& func) {
         using FuncReturn = typename std::invoke_result<Func, ImageId, Image&>::type;

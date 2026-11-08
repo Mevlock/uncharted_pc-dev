@@ -215,6 +215,14 @@ public:
         return profile;
     }
 
+    /// bbport (BB_VRAM_STATS): objects kept for the whole session (none is evicted), whose driver
+    /// memory is part of the "other" video memory.
+    struct VramCounts {
+        size_t graphics = 0, compute = 0, batched = 0, programs = 0, library_parts = 0;
+        u32 descriptor_pools = 0;
+    };
+    [[nodiscard]] VramCounts GetVramCounts();
+
 private:
     bool RefreshGraphicsKey(PipelineSelection& sel);
     bool RefreshGraphicsStages(PipelineSelection& sel);

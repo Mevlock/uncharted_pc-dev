@@ -1188,6 +1188,42 @@ bool Instance::VramAllows(u64 bytes) const {
     return GetDeviceMemoryUsage() + bytes <= limit / 10 * 9;
 }
 
+Instance::VramTotals Instance::QueryVramTotals(bool with_heaps) const {
+    vk::PhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+    vk::PhysicalDeviceMemoryProperties2 props = {.pNext = &budget};
+    physical_device.getMemoryProperties2(&props);
+    VramTotals t{};
+    for (const size_t heap : valid_heaps) {
+        t.usage += budget.heapUsage[heap];
+        t.budget += budget.heapBudget[heap];
+        t.size += props.memoryProperties.memoryHeaps[heap].size;
+    }
+    t.ballast_bytes = vram_ballast_bytes;
+    t.usage = t.usage > vram_ballast_bytes ? t.usage - vram_ballast_bytes : 0;
+    if (allocator) {
+        VmaBudget vma[VK_MAX_MEMORY_HEAPS]{};
+        vmaGetHeapBudgets(allocator, vma);
+        for (const size_t heap : valid_heaps) {
+            t.vma_block_bytes += vma[heap].statistics.blockBytes;
+            t.vma_alloc_bytes += vma[heap].statistics.allocationBytes;
+            t.vma_blocks += vma[heap].statistics.blockCount;
+            t.vma_allocs += vma[heap].statistics.allocationCount;
+        }
+    }
+    if (with_heaps) {
+        const u32 count = props.memoryProperties.memoryHeapCount;
+        for (u32 heap = 0; heap < count && heap < VK_MAX_MEMORY_HEAPS; ++heap) {
+            const bool local = bool(props.memoryProperties.memoryHeaps[heap].flags &
+                                    vk::MemoryHeapFlagBits::eDeviceLocal);
+            t.heaps += fmt::format("{}h{}{} {}/{}/{}", t.heaps.empty() ? "" : ", ", heap,
+                                   local ? "*" : "", budget.heapUsage[heap] >> 20,
+                                   budget.heapBudget[heap] >> 20,
+                                   props.memoryProperties.memoryHeaps[heap].size >> 20);
+        }
+    }
+    return t;
+}
+
 void Instance::ReportMemory(const char* why) const {
     vk::PhysicalDeviceMemoryBudgetPropertiesEXT budget{};
     vk::PhysicalDeviceMemoryProperties2 props = {.pNext = &budget};

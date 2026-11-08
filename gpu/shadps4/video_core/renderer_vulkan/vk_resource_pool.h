@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -75,6 +76,12 @@ public:
 
     vk::DescriptorSet Commit(vk::DescriptorSetLayout set_layout);
 
+    /// bbport (BB_VRAM_STATS): descriptor pools created so far (none is ever destroyed before
+    /// the end; the full ones are reset and reused once the GPU is done with them).
+    u32 PoolCount() const {
+        return pool_count.load(std::memory_order_relaxed);
+    }
+
 private:
     void CreateDescriptorPool();
 
@@ -87,6 +94,7 @@ private:
     std::deque<std::pair<vk::DescriptorPool, u64>> pending_pools;
     using DescSetBatch = boost::container::static_vector<vk::DescriptorSet, DescriptorSetBatch>;
     tsl::robin_map<u64, DescSetBatch> descriptor_sets;
+    std::atomic<u32> pool_count{0};
 };
 
 } // namespace Vulkan

@@ -521,6 +521,11 @@ std::shared_ptr<LibraryPart> LibraryParts::Insert(u64 key, vk::UniquePipeline pi
     return it->second;
 }
 
+size_t LibraryParts::Count() {
+    std::scoped_lock lock{g_parts_mutex};
+    return g_parts.size();
+}
+
 void GraphicsPipeline::BuildFromLibraries(
     vk::Device device, vk::PipelineCache pipeline_cache, const std::string& debug_str,
     std::span<const vk::DynamicState> dynamic_states,

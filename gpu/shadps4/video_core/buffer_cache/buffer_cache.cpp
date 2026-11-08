@@ -4024,6 +4024,7 @@ u64 BufferCache::ReleaseArenaBlocks(u64 first_block, u64 end_block) {
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
     has_pending_unbinds |= !deferred;
     resident_in_use_blocks -= blocks;
+    released_total_blocks += blocks;
     return blocks;
 }
 
@@ -4035,8 +4036,25 @@ void BufferCache::ReclaimArenaMemory() {
     // BB_ARENA_RECLAIM_AGE_S (default 60) are given back, oldest first, until the arenas hold 3/4
     // of it: only windows without GPU data (GPU-written ranges, shared-write landings in flight,
     // late read-backs) whose last use the GPU has finished; the guest copy is complete there.
-    // BB_ARENA_LIMIT_MB (default a quarter of the video memory budget, at least 768);
-    // BB_ARENA_RECLAIM=0: off.
+    // BB_ARENA_LIMIT_MB (default a quarter of the video memory budget, at least 768; under 8 GiB
+    // of budget an eighth, at least 384); BB_ARENA_RECLAIM=0: off.
+    // bbport: small cards (2026-11-08 soak, U2 with a checkpoint jump every 150 s): the arenas
+    // grew 384 -> 893 MiB in 30 minutes while the limit was 1344 MiB on a 6 GB card, so nothing
+    // was ever given back and the card ran towards its budget. Two triggers now:
+    //  - the arena limit: under 8 GiB of budget (the port's budget, after the system reserve: 4,
+    //    6 and 8 GB cards) max(budget/8, 384 MiB): 448 on 4 GB, 672 on 6 GB, ~800-900 on 8 GB;
+    //    U1 and U3 level off at ~750-770 MiB, so on 4-6 GB cards their long-unused windows go too.
+    //    Big cards keep max(budget/4, 768 MiB) (3.5 GB on a 16 GB card: never reached).
+    //  - the driver's usage (VK_EXT_memory_budget, less the BB_VRAM_SIMULATE_MIB ballast) past
+    //    BB_ARENA_USAGE_PCT (default 80; 0: off) of its current budget, on any card (hysteresis:
+    //    on above 80%, off below 75%). A give-back does not return memory to the driver (the
+    //    chunks stay allocated; the windows go to the free runs, which new ranges use first), so
+    //    near the budget its job is to stop the arenas growing: the limit is the allocated chunks
+    //    less 128 MiB (at least 256 MiB), which keeps that much free for reuse while long-unused
+    //    windows last. 80% leaves room for a level load's burst (+300-400 MiB in the soak) before
+    //    the driver starts paging to system memory at 100%.
+    // Both only pick windows unused for 60 s; the probation, the deferred unbinds and the GPU-data
+    // checks below are the same for either.
     static const bool enabled = [] {
         const char* env = std::getenv("BB_ARENA_RECLAIM");
         return !(env && env[0] == '0');
@@ -4060,7 +4078,9 @@ void BufferCache::ReclaimArenaMemory() {
         if (const char* env = std::getenv("BB_ARENA_LIMIT_MB"); env && env[0]) {
             mib = std::strtoull(env, nullptr, 10);
         } else {
-            mib = std::max<u64>(768, (instance.GetTotalMemoryBudget() >> 20) / 4);
+            const u64 budget_mib = instance.GetTotalMemoryBudget() >> 20;
+            mib = budget_mib < 8192 ? std::max<u64>(384, budget_mib / 8)
+                                    : std::max<u64>(768, budget_mib / 4);
         }
         std::printf("GPU: buffer arenas give back memory unused for a while above %llu MiB "
                     "(BB_ARENA_LIMIT_MB; BB_ARENA_RECLAIM=0: off)\n",
@@ -4068,6 +4088,58 @@ void BufferCache::ReclaimArenaMemory() {
         std::fflush(stdout);
         return std::max<u64>(mib, 16) << 20; // 16..63: stress tests only
     }();
+    static const u64 usage_pct = [this] {
+        const char* env = std::getenv("BB_ARENA_USAGE_PCT");
+        const u64 pct = env && env[0] ? std::strtoull(env, nullptr, 10) : 80;
+        if (instance.IsIntegrated() || !instance.CanReportMemoryUsage()) {
+            return u64(0);
+        }
+        return std::min<u64>(pct, 99);
+    }();
+    // The usage trigger: the driver's usage against its budget now (both without the simulator's
+    // ballast), on above usage_pct, off once below usage_pct - 5.
+    u64 limit_now = limit;
+    u64 target = limit / 4 * 3;
+    if (usage_pct > 5) {
+        const u64 usage = instance.GetDeviceMemoryUsage();
+        const u64 budget = instance.GetDeviceMemoryBudgetNow();
+        if (budget) {
+            const u64 on_at = budget / 100 * usage_pct;
+            const u64 off_at = budget / 100 * (usage_pct - 5);
+            usage_pressure = usage > on_at || (usage_pressure && usage > off_at);
+            if (usage_pressure) {
+                constexpr u64 Floor = 256_MB, Slack = 128_MB;
+                const u64 in_use = resident_in_use_blocks << block_shift;
+                u64 chunks = 0;
+                for (const ArenaChunk& chunk : arena_chunks) {
+                    chunks += chunk.host ? 0 : chunk.size;
+                }
+                const u64 pressure_limit =
+                    std::max<u64>(Floor, chunks > Slack ? chunks - Slack : 0);
+                if (pressure_limit < limit_now) {
+                    limit_now = pressure_limit;
+                    target = std::min(target, pressure_limit);
+                }
+                if (!usage_pressure_logged) {
+                    usage_pressure_logged = true;
+                    std::printf("GPU: video memory usage %llu of %llu MiB is past %llu%% of the "
+                                "budget: buffer arenas (%llu MiB allocated, %llu bound) give back "
+                                "memory unused for a while above %llu MiB, so they reuse it "
+                                "rather than grow, until usage is under %llu%% "
+                                "(BB_ARENA_USAGE_PCT; 0: off)\n",
+                                static_cast<unsigned long long>(usage >> 20),
+                                static_cast<unsigned long long>(budget >> 20),
+                                static_cast<unsigned long long>(usage_pct),
+                                static_cast<unsigned long long>(chunks >> 20),
+                                static_cast<unsigned long long>(in_use >> 20),
+                                static_cast<unsigned long long>(limit_now >> 20),
+                                static_cast<unsigned long long>(usage_pct - 5));
+                    std::fflush(stdout);
+                }
+            }
+        }
+    }
+    reclaim_limit_bytes = limit_now;
     static const u16 age_epochs = [] {
         const char* env = std::getenv("BB_ARENA_RECLAIM_AGE_S");
         const int seconds = env && env[0] ? std::atoi(env) : 60;
@@ -4097,7 +4169,7 @@ void BufferCache::ReclaimArenaMemory() {
         }
         return std::max<u16>(3, age_epochs / 4);
     }();
-    const bool over = (resident_in_use_blocks << block_shift) > limit;
+    const bool over = (resident_in_use_blocks << block_shift) > limit_now;
     u64 released = 0, probation_blocks = 0;
     u32 windows = 0, busy = 0, rescued = 0, watched = 0;
     std::erase_if(probation, [&](const Probation& p) {
@@ -4133,10 +4205,9 @@ void BufferCache::ReclaimArenaMemory() {
     });
     probation_rescued += rescued;
 
-    if ((resident_in_use_blocks << block_shift) <= limit) {
+    if ((resident_in_use_blocks << block_shift) <= limit_now) {
         return;
     }
-    const u64 target = limit / 4 * 3;
 
     // Windows with resident memory, the longest unused first.
     std::vector<std::pair<u16, u64>> candidates;
@@ -4206,12 +4277,90 @@ void BufferCache::ReclaimArenaMemory() {
                     static_cast<unsigned long long>((released << block_shift) >> 20), windows,
                     u32(age_epochs) * 2, busy,
                     static_cast<unsigned long long>((resident_in_use_blocks << block_shift) >> 20),
-                    static_cast<unsigned long long>(limit >> 20),
+                    static_cast<unsigned long long>(limit_now >> 20),
                     static_cast<unsigned long long>(deferred_unbinds_submitted),
                     deferred_unbinds.size(), watched, rescued,
                     static_cast<unsigned long long>(probation_rescued), probation.size());
         std::fflush(stdout);
     }
+}
+
+BufferCache::ArenaStats BufferCache::GetArenaStats(bool ages) {
+    ArenaStats st{};
+    for (const Buffer& arena : arenas) {
+        ++st.arenas;
+        st.reserved_bytes += arena.size_bytes;
+    }
+    for (const ArenaChunk& chunk : arena_chunks) {
+        (chunk.host ? st.chunk_host_bytes : st.chunk_bytes) += chunk.size;
+        st.chunk_carved_bytes += chunk.used;
+    }
+    st.bound_bytes = resident_in_use_blocks << block_shift;
+    for (const FreeRun& run : free_runs) {
+        st.free_run_bytes += run.blocks << block_shift;
+    }
+    for (const FreeRun& run : quarantined_runs) {
+        st.held_bytes += run.blocks << block_shift;
+    }
+    for (const auto& batch : deferred_unbinds) {
+        for (const Backing& piece : batch.pieces) {
+            st.held_bytes += (piece.end - piece.start) << block_shift;
+        }
+    }
+    for (const Probation& p : probation) {
+        st.probation_bytes += p.blocks << block_shift;
+    }
+    st.released_total_bytes = released_total_blocks << block_shift;
+    st.limit_bytes = reclaim_limit_bytes;
+    // The window ages advance in ReclaimArenaMemory (2 s epochs); with BB_ARENA_RECLAIM=0 they
+    // stay unknown.
+    st.ages_known = reclaim_limit_bytes != 0;
+    if (!st.ages_known || !ages) {
+        return st;
+    }
+    constexpr u16 unused_epochs = 30; // 60 s
+    const auto gpu_data = [&](VAddr lo, u64 size) {
+        bool late = false;
+        for (const auto& read_back : late_read_backs) {
+            late = late || (read_back.address < lo + size && read_back.address + read_back.size > lo);
+        }
+        return late || gpu_modified_ranges.Intersects(lo, size) ||
+               memory_tracker->IsRegionGpuModified(lo, size) || shared_gpu_ranges.Intersects(lo, size);
+    };
+    // Bound bytes per 1 MiB window, in address order (resident_ranges is sorted).
+    u64 window = ~u64{0}, window_bytes = 0;
+    const auto flush = [&] {
+        if (window == ~u64{0} || !window_bytes) {
+            return;
+        }
+        const u16 epoch = window_epoch[window].load(std::memory_order_relaxed);
+        if (epoch && static_cast<u16>(reclaim_epoch - epoch) < unused_epochs) {
+            return;
+        }
+        st.unused_bytes += window_bytes;
+        ++st.unused_windows;
+        const VAddr lo = window << ReclaimWindowBits;
+        if (gpu_data(lo, u64(1) << ReclaimWindowBits)) {
+            st.unused_gpu_bytes += window_bytes;
+        }
+    };
+    for (const auto& backing : resident_ranges) {
+        const u64 start = backing.start << block_shift;
+        const u64 end = backing.end << block_shift;
+        for (u64 at = start; at < end;) {
+            const u64 w = at >> ReclaimWindowBits;
+            const u64 w_end = std::min(end, (w + 1) << ReclaimWindowBits);
+            if (w != window) {
+                flush();
+                window = w;
+                window_bytes = 0;
+            }
+            window_bytes += w_end - at;
+            at = w_end;
+        }
+    }
+    flush();
+    return st;
 }
 
 } // namespace VideoCore
