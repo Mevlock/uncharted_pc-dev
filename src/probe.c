@@ -1038,10 +1038,20 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
     size_t count=0;
     const RuntimeGuestCallback *callbacks=runtime_guest_callbacks(&count);
     guest_image_size=image_size;
+    /* A patch in two parts (a stub in a dead path, ", stub)", then the jump or call to it, ", jump)" or ", call)",
+     * the next entry): the jump goes in only after its stub did. */
+    int stub_in=0;
     for (size_t i=0;i<count;++i) {
         const RuntimeGuestCallback *c=&callbacks[i];
+        const int is_stub=strstr(c->name,", stub)")!=NULL;
+        const int needs_stub=strstr(c->name,", jump)")!=NULL || strstr(c->name,", call)")!=NULL;
+        if (is_stub) stub_in=0;
         if (!mapped(segments,ns,c->offset,c->signature_size) ||
             memcmp(image+c->offset,c->signature,c->signature_size)) continue;
+        if (needs_stub && !stub_in) {
+            printf("Callbacks: %s at %#" PRIx64 " left out (its stub did not go in)\n",c->name,c->offset);
+            continue;
+        }
         /* BB_SKIP_CALLBACKS=<text;text>: leave out the callbacks and patches whose name contains one of them (tests) */
         const char *skip=getenv("BB_SKIP_CALLBACKS");
         if (skip && *skip) {
@@ -1051,8 +1061,17 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
             for (char *tok=strtok(list,";"); tok; tok=strtok(NULL,";")) if (*tok && strstr(c->name,tok)) skipped=1;
             if (skipped) { printf("Callbacks: %s at %#" PRIx64 " SKIPPED (BB_SKIP_CALLBACKS)\n",c->name,c->offset); continue; }
         }
+        /* Single fixes with a switch of their own (name contains the text, the variable is 0: left out). */
+        static const struct { const char *text, *env; } switches[]={{"light ortho guard","BB_LIGHT_ORTHO_GUARD"}};
+        const char *off=NULL;
+        for (size_t k=0;k<sizeof(switches)/sizeof(*switches);++k) {
+            const char *e=getenv(switches[k].env);
+            if (strstr(c->name,switches[k].text) && e && e[0]=='0') off=switches[k].env;
+        }
+        if (off) { printf("Callbacks: %s at %#" PRIx64 " off (%s=0)\n",c->name,c->offset,off); continue; }
         if (!c->callback) {
             memcpy(image+c->offset,c->patch,c->moved);
+            if (is_stub) stub_in=1;
             printf("Callbacks: %s at %#" PRIx64 " (patch)\n",c->name,c->offset);
             continue;
         }
