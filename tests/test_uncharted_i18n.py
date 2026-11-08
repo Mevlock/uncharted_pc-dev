@@ -15,7 +15,7 @@ class LauncherTranslationTests(unittest.TestCase):
     def test_each_language_translates_play(self):
         expected = {
             'es': 'Jugar', 'pt': 'Jogar', 'fr': 'Jouer', 'de': 'Spielen',
-            'it': 'Gioca', 'ja': 'プレイ',
+            'it': 'Gioca', 'ja': 'プレイ', 'ru': 'Играть',
         }
         for language, translation in expected.items():
             with self.subTest(language=language):
@@ -29,7 +29,7 @@ class LauncherTranslationTests(unittest.TestCase):
         # LANGIDs as GetUserDefaultUILanguage() returns them; locale.getlocale() on Windows gives
         # names such as 'Spanish_Spain', which must not decide the language.
         langids = {0x0c0a: 'es', 0x0416: 'pt', 0x0816: 'pt', 0x040c: 'fr', 0x0407: 'de', 0x0410: 'it',
-                   0x0411: 'ja', 0x0809: 'en', 0x0412: 'en', 0x0419: 'en'}
+                   0x0411: 'ja', 0x0809: 'en', 0x0412: 'en', 0x0419: 'ru'}
         for langid, language in langids.items():
             windows = SimpleNamespace(windll=SimpleNamespace(kernel32=SimpleNamespace(
                 GetUserDefaultUILanguage=lambda langid=langid: langid)))
@@ -38,7 +38,7 @@ class LauncherTranslationTests(unittest.TestCase):
 
     def test_automatic_language_uses_locale_off_windows(self):
         no_windll = SimpleNamespace()
-        for language in ('es', 'pt', 'fr', 'de', 'it', 'ja'):
+        for language in ('es', 'pt', 'fr', 'de', 'it', 'ja', 'ru'):
             with self.subTest(language=language), patch.object(uncharted_i18n, 'ctypes', no_windll),                     patch.object(uncharted_i18n.locale, 'getlocale', return_value=(f'{language}_XX', 'UTF-8')):
                 self.assertEqual(uncharted_i18n.language_code(''), language)
         with patch.object(uncharted_i18n, 'ctypes', no_windll),                 patch.object(uncharted_i18n.locale, 'getlocale', return_value=('ko_KR', 'UTF-8')):
@@ -47,7 +47,7 @@ class LauncherTranslationTests(unittest.TestCase):
     def test_launcher_offers_selected_languages(self):
         self.assertEqual(
             [code for code, _name in uncharted_i18n.LANGUAGES],
-            ['', 'en', 'es', 'pt', 'fr', 'de', 'it', 'ja'],
+            ['', 'en', 'es', 'pt', 'fr', 'ru', 'de', 'it', 'ja'],
         )
 
     def test_interface_language_help_is_translated(self):
@@ -60,7 +60,7 @@ class LauncherTranslationTests(unittest.TestCase):
                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                  and node.func.id == '_' and node.args
                  and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)}
-        for language in ('es', 'pt', 'fr', 'de', 'it', 'ja'):
+        for language in ('es', 'pt', 'fr', 'de', 'it', 'ja', 'ru'):
             with self.subTest(language=language):
                 self.assertEqual(texts - set(uncharted_i18n.TRANSLATIONS[language]), set())
 
@@ -79,17 +79,18 @@ class LauncherTranslationTests(unittest.TestCase):
                  if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == '_'
                  and node.args and not isinstance(node.args[0], ast.Constant)}
         # A new _(variable) needs its source list added to variable_texts() (and here).
-        self.assertEqual(sites, {'t', 'title', 'subtitle', "subtitle.split(' · ')[0]", 'RESERVED_KEYS[sym]',
+        self.assertEqual(sites, {'t', 'title', 'subtitle', "subtitle.split(' · ')[0]", 'RESERVED_KEYS[sym]', 'SWITCH_CHEAT_TITLES[cheat]',
                                  'trophies.GRADE_NAMES[g]', "trophies.GRADE_NAMES.get(grade, 'Bronze')"})
         texts = variable_texts()
         self.assertIn('Cross ✕', texts)
         self.assertIn('Look left', texts)
         self.assertIn('Platinum', texts)
+        self.assertIn('One-Hit Kills', texts)
         self.assert_translated(texts)
 
     def assert_translated(self, labels):
         texts = {t for t in labels if t not in KEEP_ENGLISH and re.search('[a-z]{2}', t)}
-        for language in ('es', 'pt', 'fr', 'de', 'it', 'ja'):
+        for language in ('es', 'pt', 'fr', 'de', 'it', 'ja', 'ru'):
             table = uncharted_i18n.TRANSLATIONS[language]
             with self.subTest(language=language):
                 self.assertEqual(texts - set(table), set())
@@ -127,6 +128,7 @@ def variable_texts():
     for _game, title, subtitle, _elf in launcher['GAMES']:
         texts |= {title, subtitle, subtitle.split(' · ')[0]}
     texts |= set(launcher['RESERVED_KEYS'].values()) | set(trophies['GRADE_NAMES'].values())
+    texts |= set(launcher['SWITCH_CHEAT_TITLES'].values())
     return texts
 
 
