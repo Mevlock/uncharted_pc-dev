@@ -558,7 +558,7 @@ public:
     void ReportMemory(const char* why = "") const;
 
     /// bbport (BB_VRAM_STATS): the driver's usage and budget of the device-local heaps (less the
-    /// BB_VRAM_SIMULATE_MIB ballast), VMA's blocks and allocations on them, and per heap
+    /// BB_VRAM_SIMULATE_MIB ballast; the budget capped as GetDeviceMemoryBudgetNow), VMA's blocks and allocations on them, and per heap
     /// "h0 usage/budget/size" (every heap, "*": device-local) in MiB.
     struct VramTotals {
         u64 usage = 0, budget = 0, size = 0;

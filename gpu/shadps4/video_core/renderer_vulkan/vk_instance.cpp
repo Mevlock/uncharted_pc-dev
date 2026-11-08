@@ -1097,6 +1097,18 @@ void Instance::CollectToolingInfo() const {
     }
 }
 
+// bbport: the driver's budget as the caches see it: BB_VRAM_SIMULATE_MIB leaves the ballast out and
+// caps it at the simulated size; BB_TEST_VRAM_MB caps it at ~90% of the test card.
+static u64 GameBudget(u64 budget, bool integrated) {
+    if (vram_simulated_bytes) {
+        budget = budget > vram_ballast_bytes ? budget - vram_ballast_bytes : 0;
+        budget = std::min<u64>(budget, vram_simulated_bytes);
+    } else if (const u64 test_limit = Vram::TestLimit(); test_limit && !integrated) {
+        budget = std::min<u64>(budget, test_limit / 10 * 9);
+    }
+    return budget;
+}
+
 u64 Instance::GetDeviceMemoryUsage() const {
     vk::PhysicalDeviceMemoryBudgetPropertiesEXT memory_budget_props{};
     vk::PhysicalDeviceMemoryProperties2 props = {
@@ -1122,13 +1134,7 @@ u64 Instance::GetDeviceMemoryBudgetNow() const {
     for (const size_t heap : valid_heaps) {
         total_budget += memory_budget_props.heapBudget[heap];
     }
-    if (vram_simulated_bytes) {
-        total_budget = total_budget > vram_ballast_bytes ? total_budget - vram_ballast_bytes : 0;
-        total_budget = std::min<u64>(total_budget, vram_simulated_bytes);
-    } else if (const u64 test_limit = Vram::TestLimit(); test_limit && !IsIntegrated()) {
-        total_budget = std::min<u64>(total_budget, test_limit / 10 * 9);
-    }
-    return total_budget;
+    return GameBudget(total_budget, IsIntegrated());
 }
 
 void Instance::QueryMemory(u64& usage, u64& budget) const {
@@ -1141,14 +1147,9 @@ void Instance::QueryMemory(u64& usage, u64& budget) const {
         usage += memory_budget_props.heapUsage[heap];
         budget += memory_budget_props.heapBudget[heap];
     }
-    if (vram_simulated_bytes) {
-        // BB_VRAM_SIMULATE_MIB: the ballast is not the game's (as GetDeviceMemoryUsage/Budget).
-        usage = usage > vram_ballast_bytes ? usage - vram_ballast_bytes : 0;
-        budget = budget > vram_ballast_bytes ? budget - vram_ballast_bytes : 0;
-        budget = std::min<u64>(budget, vram_simulated_bytes);
-    } else if (const u64 test_limit = Vram::TestLimit(); test_limit && !IsIntegrated()) {
-        budget = std::min<u64>(budget, test_limit / 10 * 9);
-    }
+    // BB_VRAM_SIMULATE_MIB: the ballast is not the game's (as GetDeviceMemoryUsage/Budget).
+    usage = usage > vram_ballast_bytes ? usage - vram_ballast_bytes : 0;
+    budget = GameBudget(budget, IsIntegrated());
 }
 
 void Instance::TouchBallast(vk::CommandBuffer cmdbuf) const {
@@ -1200,6 +1201,7 @@ Instance::VramTotals Instance::QueryVramTotals(bool with_heaps) const {
     }
     t.ballast_bytes = vram_ballast_bytes;
     t.usage = t.usage > vram_ballast_bytes ? t.usage - vram_ballast_bytes : 0;
+    t.budget = GameBudget(t.budget, IsIntegrated()); // as GetDeviceMemoryBudgetNow
     if (allocator) {
         VmaBudget vma[VK_MAX_MEMORY_HEAPS]{};
         vmaGetHeapBudgets(allocator, vma);
