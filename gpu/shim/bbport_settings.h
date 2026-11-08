@@ -105,8 +105,10 @@ struct Values {
     /// start from the launcher (BB_HDR_PAPER_WHITE / BB_HDR_PEAK_NITS) when it sets them. Scene
     /// HDR (the tone pass replacement, RenoDX): exposure, saturation, highlight saturation,
     /// contrast, colour restoration (per-channel chrominance correction), blowout restoration,
-    /// hue correction, per-channel tone mapping. The game's SDR picture in HDR10: decode gamma
-    /// and saturation (Oklab chroma).
+    /// hue correction, per-channel tone mapping, highlights start (the SDR brightness above which
+    /// the scene's extended highlights take over; 0 = the earlier ramp, from the file or the
+    /// environment only). The game's SDR picture in HDR10: decode gamma and saturation (Oklab
+    /// chroma).
     std::atomic<float> hdr_paper_white{203.0f};
     std::atomic<float> hdr_peak_nits{1000.0f};
     std::atomic<float> hdr_exposure{1.0f};
@@ -117,6 +119,7 @@ struct Values {
     std::atomic<float> hdr_blowout{0.0f};
     std::atomic<float> hdr_hue_correction{1.0f};
     std::atomic<bool> hdr_per_channel{false};
+    std::atomic<float> hdr_highlight_start{0.6f};
     std::atomic<float> hdr_sdr_gamma{2.2f};
     std::atomic<float> hdr_sdr_saturation{1.1f};
 

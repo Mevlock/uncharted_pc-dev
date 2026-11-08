@@ -28,7 +28,10 @@ struct Tuning {
     float blowout;     ///< RenoDX per-channel blowout restoration
     float hue_correction;
     float per_channel; ///< 1: per-channel tone mapping, 0: luminance
-    float reserved[6];
+    /// Where the extended highlights begin: the SDR luminance (0-1) of the game's tone mapped
+    /// picture above which the scene signal takes over (0: the earlier ramp from mid grey).
+    float highlight_start;
+    float reserved[5];
     // The game's SDR picture in HDR10 (post process pass): decode gamma, Oklab chroma scale.
     float sdr_gamma;
     float sdr_saturation;

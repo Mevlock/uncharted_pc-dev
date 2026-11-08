@@ -698,6 +698,21 @@ TRANSLATIONS = {
         'HDR de la scène (les hautes lumières du jeu)', 'Szenen-HDR (die Spitzlichter des Spiels)',
         'HDR della scena (le alte luci del gioco)', 'シーン HDR (ゲーム本来のハイライト)'),
     'Exposure': L('Exposición', 'Exposição', 'Exposition', 'Belichtung', 'Esposizione', '露出'),
+    'Highlights start': L('Inicio de las luces altas', 'Início dos realces', 'Début des hautes lumières',
+                          'Beginn der Spitzlichter', 'Inizio delle alte luci', 'ハイライトの開始'),
+    'Where HDR brightness begins: higher keeps sunlit surfaces at paper white; only bright highlights go brighter.': L(
+        'Dónde empieza el brillo HDR: más alto mantiene las superficies al sol en el blanco de papel; solo las luces '
+        'altas intensas brillan más.',
+        'Onde começa o brilho HDR: mais alto mantém as superfícies ao sol no branco de papel; só os realces fortes '
+        'ficam mais brilhantes.',
+        'Là où commence la luminosité HDR : plus haut garde les surfaces au soleil au blanc papier ; seules les hautes '
+        'lumières vives deviennent plus lumineuses.',
+        'Wo die HDR-Helligkeit beginnt: höher hält sonnenbeschienene Flächen bei Papierweiß; nur helle Spitzlichter '
+        'werden heller.',
+        "Dove inizia la luminosità HDR: più alto mantiene le superfici al sole al bianco carta; solo le alte luci "
+        "intense diventano più luminose.",
+        'HDR の明るさが始まるところです。高くするとひなたの面はペーパーホワイトのままで、強いハイライトだけがより'
+        '明るくなります。'),
     'Saturation': L('Saturación', 'Saturação', 'Saturation', 'Sättigung', 'Saturazione', 'サチュレーション'),
     'Highlight saturation': L('Saturación de luces altas', 'Saturação dos realces', 'Saturation des hautes lumières',
                               'Sättigung der Spitzlichter', 'Saturazione delle alte luci', 'ハイライトのサチュレーション'),

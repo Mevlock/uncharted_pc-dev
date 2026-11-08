@@ -14,12 +14,20 @@ The replacement keeps the translated shader's interface (bindings 0-9, the 128-b
 constants, the per-vertex input of the NVIDIA barycentric profile) and adds a read-only buffer
 with the live settings (`BbHdr::Tuning`, gpu/shim/bbport_hdr.h: peak and paper-white nits, then
 RenoDX's exposure, saturation, highlight saturation, contrast, per-channel chrominance correction,
-per-channel blowout restoration, hue correction and per-channel tone mapping, read by the
+per-channel blowout restoration, hue correction, per-channel tone mapping and the highlights
+start, read by the
 `RENODX_*` macros at the top of the `.hlsl`; the menu's HDR section changes them, a new slot of a
 small ring per change); its binding (12 in the file) is renumbered at load to the
 pipeline's first free binding. Only built with HDR on at start (BB_HDR=1, an HDR10 display), on
 NVIDIA with VK_KHR_fragment_shader_barycentric; elsewhere the picture is HDR10 output of the SDR
 frame.
+
+Highlights start (`hdr_highlight_start`, default 0.60): below that SDR luminance of the game's
+own filmic output the replacement keeps that output unchanged (sunlit surfaces stay at paper
+white); above it the gain-matched scene signal takes over with a smoothstep from `start` to
+`start + 0.6 * (1 - start)` (0.60 -> full at 0.84). 0 (bbport.ini, BB_HDR_HIGHLIGHT_START or the
+tune file only; the menu's range is 0.10-0.95) is the earlier ramp, `(luminance / 0.18)^2`, full
+from mid grey.
 
 Rebuild from PowerShell with the DirectX Shader Compiler:
 

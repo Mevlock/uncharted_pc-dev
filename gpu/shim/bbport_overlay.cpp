@@ -399,6 +399,9 @@ void HdrSection(BbSettings::Values& s) {
     if (BbHdr::Scene()) {
         ImGui::TextUnformatted(T("Scene HDR (the game's own highlights)"));
         SliderIn(TI("Exposure"), s.hdr_exposure, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        SliderIn(TI("Highlights start"), s.hdr_highlight_start, 0.1f, 0.95f, "%.2f");
+        Hint(T("Where HDR brightness begins: higher keeps sunlit surfaces at paper white; only "
+               "bright highlights go brighter."));
         SliderIn(TI("Saturation"), s.hdr_saturation, 0.0f, 2.0f, "%.2f");
         SliderIn(TI("Highlight saturation"), s.hdr_highlight_saturation, 0.0f, 2.0f, "%.2f");
         SliderIn(TI("Contrast"), s.hdr_contrast, 0.5f, 2.0f, "%.2f");
@@ -425,12 +428,12 @@ void HdrSection(BbSettings::Values& s) {
     }
     const BbHdr::Tuning t = BbHdr::Current();
     const std::string values = fmt::format(
-        "paper {:.0f}, peak {:.0f} | exposure {:.2f}, saturation {:.2f}, highlights {:.2f}, "
-        "contrast {:.2f}, colour {:.2f}, blowout {:.2f}, hue {:.2f}, per-channel {} | gamma "
-        "{:.2f}, picture saturation {:.2f}",
-        t.paper_white, t.peak_nits, t.exposure, t.saturation, t.highlight_saturation, t.contrast,
-        t.chrominance, t.blowout, t.hue_correction, t.per_channel != 0.0f ? "on" : "off",
-        t.sdr_gamma, t.sdr_saturation);
+        "paper {:.0f}, peak {:.0f} | exposure {:.2f}, start {:.2f}, saturation {:.2f}, highlights "
+        "{:.2f}, contrast {:.2f}, colour {:.2f}, blowout {:.2f}, hue {:.2f}, per-channel {} | "
+        "gamma {:.2f}, picture saturation {:.2f}",
+        t.paper_white, t.peak_nits, t.exposure, t.highlight_start, t.saturation,
+        t.highlight_saturation, t.contrast, t.chrominance, t.blowout, t.hue_correction,
+        t.per_channel != 0.0f ? "on" : "off", t.sdr_gamma, t.sdr_saturation);
     TextGrey(values.c_str());
 }
 

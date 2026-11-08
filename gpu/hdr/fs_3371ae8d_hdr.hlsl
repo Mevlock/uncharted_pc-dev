@@ -20,6 +20,7 @@
 #define RENODX_PER_CHANNEL_BLOWOUT_RESTORATION asfloat(HdrSettings.Load(28))
 #define RENODX_TONE_MAP_HUE_CORRECTION asfloat(HdrSettings.Load(32))
 #define RENODX_TONE_MAP_PER_CHANNEL asfloat(HdrSettings.Load(36))
+#define RENODX_HIGHLIGHT_START asfloat(HdrSettings.Load(40))
 #include "draw.hlsl"
 ByteAddressBuffer ssbo_1_1 : register(t0, space0);
 ByteAddressBuffer ssbo_2_1 : register(t1, space0);
@@ -764,11 +765,22 @@ void frag_main()
     frag_color0.z = _RESERVED_IDENTIFIER_FIXUP_634;
     frag_color0.w = 0.0f;
     renodx_pretonemap = float4(renodx_scene, 1.0f);
-    // Below the mid-grey anchor the native filmic output is used as-is, so the toe and grade
-    // stay vanilla; above it the gain-matched scene signal extends the highlights.
+    // Below the highlights start (RENODX_HIGHLIGHT_START, the SDR luminance of the game's own
+    // filmic output) that output is used as-is, so the toe, the grade and sunlit surfaces stay at
+    // their SDR brightness (up to paper white); above it the gain-matched scene signal takes over
+    // smoothly, fully at start + 60% of the way to SDR white (smoothstep, no step). A start of 0
+    // (bbport.ini / BB_HDR_HIGHLIGHT_START / the tune file only) is the earlier ramp:
+    // (luminance / 0.18)^2, full extension from mid grey.
     float3 renodx_anchored = max(renodx_neutral, renodx_scene * renodx_filmic_gain);
-    float renodx_anchor_weight = saturate(renodx::color::y::from::BT709(renodx_neutral) / 0.18f);
-    renodx_anchor_weight *= renodx_anchor_weight;
+    const float renodx_neutral_y = renodx::color::y::from::BT709(renodx_neutral);
+    const float renodx_start = RENODX_HIGHLIGHT_START;
+    float renodx_anchor_weight;
+    if (renodx_start > 0.0f) {
+        renodx_anchor_weight = smoothstep(renodx_start, renodx_start + (1.0f - renodx_start) * 0.6f, renodx_neutral_y);
+    } else {
+        renodx_anchor_weight = saturate(renodx_neutral_y / 0.18f);
+        renodx_anchor_weight *= renodx_anchor_weight;
+    }
     float3 renodx_untonemapped = lerp(renodx_neutral, renodx_anchored, renodx_anchor_weight);
     renodx_hdr = float4(renodx::draw::ToneMapPass(renodx_untonemapped, pow(max(frag_color0.rgb, 0.0f), 2.2f), renodx_neutral), 1.0f);
 }

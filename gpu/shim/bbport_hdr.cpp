@@ -47,6 +47,7 @@ Tuning Current() {
     t.blowout = v.hdr_blowout.load(r);
     t.hue_correction = v.hdr_hue_correction.load(r);
     t.per_channel = v.hdr_per_channel.load(r) ? 1.0f : 0.0f;
+    t.highlight_start = v.hdr_highlight_start.load(r);
     t.sdr_gamma = v.hdr_sdr_gamma.load(r);
     t.sdr_saturation = v.hdr_sdr_saturation.load(r);
     return t;

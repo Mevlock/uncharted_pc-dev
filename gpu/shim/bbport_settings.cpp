@@ -90,6 +90,9 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.hdr_hue_correction = Clamp(f, 0.0f, 1.0f);
     } else if (key == "hdr_per_channel") {
         v.hdr_per_channel = i != 0;
+    } else if (key == "hdr_highlight_start") {
+        // The menu's range is 0.10-0.95; 0 (anything below 0.10) asks for the earlier ramp.
+        v.hdr_highlight_start = f < 0.1f ? 0.0f : Clamp(f, 0.1f, 0.95f);
     } else if (key == "hdr_sdr_gamma") {
         v.hdr_sdr_gamma = Clamp(f, 1.8f, 2.8f);
     } else if (key == "hdr_sdr_saturation") {
@@ -155,6 +158,7 @@ void Load() {
         {"BB_HDR_BLOWOUT", "hdr_blowout"},          {"BB_HDR_HUE_CORRECTION", "hdr_hue_correction"},
         {"BB_HDR_PER_CHANNEL", "hdr_per_channel"},  {"BB_HDR_SDR_GAMMA", "hdr_sdr_gamma"},
         {"BB_HDR_SDR_SATURATION", "hdr_sdr_saturation"},
+        {"BB_HDR_HIGHLIGHT_START", "hdr_highlight_start"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env)) {
@@ -267,11 +271,12 @@ void Save() {
                  "hdr_paper_white=%.0f\nhdr_peak_nits=%.0f\nhdr_exposure=%.2f\nhdr_saturation=%.2f\n"
                  "hdr_highlight_saturation=%.2f\nhdr_contrast=%.2f\nhdr_chrominance=%.2f\n"
                  "hdr_blowout=%.2f\nhdr_hue_correction=%.2f\nhdr_per_channel=%d\nhdr_sdr_gamma=%.2f\n"
-                 "hdr_sdr_saturation=%.2f\n",
+                 "hdr_sdr_saturation=%.2f\nhdr_highlight_start=%.2f\n",
                  v.hdr_paper_white.load(), v.hdr_peak_nits.load(), v.hdr_exposure.load(),
                  v.hdr_saturation.load(), v.hdr_highlight_saturation.load(), v.hdr_contrast.load(),
                  v.hdr_chrominance.load(), v.hdr_blowout.load(), v.hdr_hue_correction.load(),
-                 int(v.hdr_per_channel.load()), v.hdr_sdr_gamma.load(), v.hdr_sdr_saturation.load());
+                 int(v.hdr_per_channel.load()), v.hdr_sdr_gamma.load(), v.hdr_sdr_saturation.load(),
+                 v.hdr_highlight_start.load());
     std::fclose(file);
 }
 
@@ -287,6 +292,7 @@ void ResetHdr() {
                                 {&v.hdr_chrominance, defaults.hdr_chrominance.load()},
                                 {&v.hdr_blowout, defaults.hdr_blowout.load()},
                                 {&v.hdr_hue_correction, defaults.hdr_hue_correction.load()},
+                                {&v.hdr_highlight_start, defaults.hdr_highlight_start.load()},
                                 {&v.hdr_sdr_gamma, defaults.hdr_sdr_gamma.load()},
                                 {&v.hdr_sdr_saturation, defaults.hdr_sdr_saturation.load()}}) {
         field->store(value);
