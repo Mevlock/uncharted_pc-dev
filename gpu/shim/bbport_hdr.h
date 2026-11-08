@@ -50,4 +50,10 @@ void SetOutput(bool on);
 /// BB_HDR_FRAME_GEN=0: frame generation stays off while HDR is on.
 [[nodiscard]] bool FrameGenAllowed();
 
+/// Live tuning from a file (the presenter, each frame, HDR10 output only): BB_HDR_TUNE_FILE, else
+/// <user dir>/hdr_tune.txt (BB_GPU_USER_DIR). Its modification time is checked every 250 ms; a
+/// change after start applies its `key=value` lines (bbport.ini's hdr_* keys) as if the menu's
+/// sliders were moved, logs each changed value and writes bbport.ini.
+void PollTuneFile();
+
 } // namespace BbHdr

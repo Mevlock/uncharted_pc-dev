@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <string>
 
 namespace BbSettings {
 
@@ -154,6 +155,10 @@ bool ResolutionNeedsRestart();
 void Save();
 /// The HDR section's defaults (the menu's Reset); paper white and peak as at start.
 void ResetHdr();
+/// One of the HDR section's bbport.ini keys (hdr_*), set as the menu's slider would (clamped to
+/// its range): the HDR tune file (BbHdr::PollTuneFile). False for any other key; `applied` gets
+/// "key=value" when the value changed, else stays empty.
+bool SetHdrKey(const std::string& key, const std::string& value, std::string& applied);
 
 /// Render resolution divisor of a preset (1.0 native, 1.5 quality, ...).
 float PresetScale(int preset);

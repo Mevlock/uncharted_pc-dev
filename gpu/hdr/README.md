@@ -29,6 +29,15 @@ white); above it the gain-matched scene signal takes over with a smoothstep from
 tune file only; the menu's range is 0.10-0.95) is the earlier ramp, `(luminance / 0.18)^2`, full
 from mid grey.
 
+Live tuning from a file (HDR10 output only): `BB_HDR_TUNE_FILE`, else `hdr_tune.txt` in the user
+folder (`BB_GPU_USER_DIR`). Its modification time is checked every 250 ms; when it changes after
+the start, its `key=value` lines (the bbport.ini keys `hdr_paper_white`, `hdr_peak_nits`,
+`hdr_exposure`, `hdr_saturation`, `hdr_highlight_saturation`, `hdr_contrast`, `hdr_chrominance`,
+`hdr_blowout`, `hdr_hue_correction`, `hdr_per_channel`, `hdr_sdr_gamma`, `hdr_sdr_saturation`,
+`hdr_highlight_start`; `#` comments, other keys ignored) are applied as if the menu's sliders were
+moved (same ranges), each changed value is logged (`HDR tune: hdr_saturation=1.20 (file)`) and
+bbport.ini is written.
+
 Rebuild from PowerShell with the DirectX Shader Compiler:
 
 ```powershell

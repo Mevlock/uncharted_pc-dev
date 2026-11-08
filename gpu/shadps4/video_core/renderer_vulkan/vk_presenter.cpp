@@ -1170,6 +1170,9 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
                          vk::Filter::eLinear);
         // bbport: the settings menu / FPS counter over the frame, at display resolution.
         BbOverlay::NotePresent();
+        if (own_hdr) {
+            BbHdr::PollTuneFile(); // the HDR tune file, at most a stat every 250 ms
+        }
         const bool overlay = BbOverlay::Visible();
         const std::array post_barriers{
             vk::ImageMemoryBarrier{

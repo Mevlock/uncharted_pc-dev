@@ -300,6 +300,54 @@ void ResetHdr() {
     v.hdr_per_channel = defaults.hdr_per_channel.load();
 }
 
+bool SetHdrKey(const std::string& key, const std::string& value, std::string& applied) {
+    auto& v = Get();
+    applied.clear();
+    char* end = nullptr;
+    std::strtof(value.c_str(), &end);
+    if (end == value.c_str()) {
+        return key.rfind("hdr_", 0) == 0; // not a number: left as it is
+    }
+    if (key == "hdr_per_channel") {
+        const bool before = v.hdr_per_channel.load();
+        Set(v, key, value);
+        if (v.hdr_per_channel.load() != before) {
+            applied = key + "=" + (v.hdr_per_channel.load() ? "1" : "0");
+        }
+        return true;
+    }
+    const std::pair<const char*, std::atomic<float>*> keys[] = {
+        {"hdr_paper_white", &v.hdr_paper_white},
+        {"hdr_peak_nits", &v.hdr_peak_nits},
+        {"hdr_exposure", &v.hdr_exposure},
+        {"hdr_saturation", &v.hdr_saturation},
+        {"hdr_highlight_saturation", &v.hdr_highlight_saturation},
+        {"hdr_contrast", &v.hdr_contrast},
+        {"hdr_chrominance", &v.hdr_chrominance},
+        {"hdr_blowout", &v.hdr_blowout},
+        {"hdr_hue_correction", &v.hdr_hue_correction},
+        {"hdr_sdr_gamma", &v.hdr_sdr_gamma},
+        {"hdr_sdr_saturation", &v.hdr_sdr_saturation},
+        {"hdr_highlight_start", &v.hdr_highlight_start},
+    };
+    for (const auto& [name, field] : keys) {
+        if (key != name) {
+            continue;
+        }
+        const float before = field->load();
+        Set(v, key, value);
+        const float after = field->load();
+        if (after != before) {
+            char text[96];
+            const bool nits = key == "hdr_paper_white" || key == "hdr_peak_nits";
+            std::snprintf(text, sizeof(text), nits ? "%s=%.0f" : "%s=%.2f", name, after);
+            applied = text;
+        }
+        return true;
+    }
+    return false;
+}
+
 float PresetScale(int preset) {
     static constexpr float scales[PresetCount] = {1.0f, 1.5f, 1.7f, 2.0f, 3.0f};
     return scales[std::clamp(preset, 0, PresetCount - 1)];

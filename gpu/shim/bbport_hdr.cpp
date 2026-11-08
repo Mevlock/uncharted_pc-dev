@@ -3,8 +3,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <string>
+#include <system_error>
 
 #include "bbport_saves.h"
 #include "bbport_settings.h"
@@ -83,6 +87,90 @@ bool FrameGenAllowed() {
         return !(value && value[0] == '0');
     }();
     return allowed;
+}
+
+void PollTuneFile() {
+    namespace fs = std::filesystem;
+    static const std::string path = [] {
+        if (const char* env = std::getenv("BB_HDR_TUNE_FILE"); env && *env) {
+            return std::string{env};
+        }
+        const char* dir = std::getenv("BB_GPU_USER_DIR");
+        return dir && *dir ? std::string{dir} + "/hdr_tune.txt" : std::string{"hdr_tune.txt"};
+    }();
+    using Clock = std::chrono::steady_clock;
+    static Clock::time_point next{};
+    const Clock::time_point now = Clock::now();
+    if (now < next) {
+        return;
+    }
+    next = now + std::chrono::milliseconds(250);
+
+    // The state at the first check is the baseline: a file left from an earlier session does not
+    // override the launcher's paper white and peak; edit (or touch) it to apply it.
+    static bool started = false;
+    static fs::file_time_type last_time{};
+    static std::uintmax_t last_size = 0;
+    std::error_code error;
+    const fs::file_time_type time = fs::last_write_time(path, error);
+    const std::uintmax_t size = error ? 0 : fs::file_size(path, error);
+    if (error) {
+        if (!started) {
+            started = true;
+            std::printf("HDR tune: watching %s\n", path.c_str());
+        }
+        last_time = {};
+        last_size = 0;
+        return;
+    }
+    const bool changed = time != last_time || size != last_size;
+    last_time = time;
+    last_size = size;
+    if (!started) {
+        started = true;
+        std::printf("HDR tune: watching %s (present; applied when it changes)\n", path.c_str());
+        std::fflush(stdout);
+        return;
+    }
+    if (!changed) {
+        return;
+    }
+    FILE* file = std::fopen(path.c_str(), "r");
+    if (!file) {
+        return;
+    }
+    bool any = false;
+    char line[256];
+    std::string applied;
+    while (std::fgets(line, sizeof(line), file)) {
+        std::string text{line};
+        if (const auto hash = text.find('#'); hash != std::string::npos) {
+            text.erase(hash);
+        }
+        const auto eq = text.find('=');
+        if (eq == std::string::npos) {
+            continue;
+        }
+        auto trim = [](const std::string& s) {
+            const auto first = s.find_first_not_of(" \t\r\n");
+            if (first == std::string::npos) {
+                return std::string{};
+            }
+            return s.substr(first, s.find_last_not_of(" \t\r\n") - first + 1);
+        };
+        const std::string key = trim(text.substr(0, eq));
+        const std::string value = trim(text.substr(eq + 1));
+        if (value.empty() || !BbSettings::SetHdrKey(key, value, applied) || applied.empty()) {
+            continue;
+        }
+        std::printf("HDR tune: %s (file)\n", applied.c_str());
+        any = true;
+    }
+    std::fclose(file);
+    if (any) {
+        BbSettings::Save();
+        std::fflush(stdout);
+    }
 }
 
 } // namespace BbHdr
