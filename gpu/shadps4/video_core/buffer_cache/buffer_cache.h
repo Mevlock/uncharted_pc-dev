@@ -539,6 +539,10 @@ private:
     u64 resident_in_use_blocks = 0;
     u64 released_total_blocks = 0; ///< bbport (BB_VRAM_STATS): given back since the start
     u64 reclaim_limit_bytes = 0;   ///< bbport (BB_VRAM_STATS): ReclaimArenaMemory's limit, once known
+    /// bbport (ReclaimArenaMemory): the driver's usage passed BB_ARENA_USAGE_PCT of its budget
+    /// and has not yet fallen 5 points below it; the arenas then give back down to the excess.
+    bool usage_pressure = false;
+    bool usage_pressure_logged = false;
     bool has_pending_unbinds = false;
     /// Moves deferred unbinds whose tick the GPU has finished into pending_binds.
     void QueueFinishedUnbinds();
