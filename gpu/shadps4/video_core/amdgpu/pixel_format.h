@@ -356,7 +356,10 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
         default:
-            UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
+            // bbport: SNORM_NZ exists for 8- and 16-bit channels only; any other pairing is a garbage V#/T#
+            // (U2, cs 0x8f067540 while a checkpoint loads: random buffer sizes, then data_fmt 4 = 32 bit with
+            // SNORM_NZ stopped the game here). No conversion: the read is clamped away anyway.
+            return NumberConversion::None;
         }
     }
     default:
