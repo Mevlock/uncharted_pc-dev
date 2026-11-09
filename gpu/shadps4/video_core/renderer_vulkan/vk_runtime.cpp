@@ -220,6 +220,11 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                       std::optional<VideoCore::SubresourceRange> subres_range) {
     BeforeImageAccess();
     if (scene_targets) scene_targets->NativeAccess(*image, dst_access);
+    if (GuestSync::On() &&
+        (dst_access & (vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eShaderStorageWrite |
+                       vk::AccessFlagBits2::eTransferWrite))) {
+        GuestSync::NoteWrite();
+    }
     const size_t prev_num_barriers = static_cast<size_t>(image_barriers.size());
     image->GetBarriers(image_barriers, dst_layout, dst_access, dst_stage, subres_range);
     return image_barriers.size() != prev_num_barriers;
@@ -849,6 +854,9 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         memo = {range.resource, range.range_start, range.range_end, access_epoch, u32(access)};
     };
     if (src_access & WRITE_MASK) {
+        if (GuestSync::On()) {
+            GuestSync::NoteWrite();
+        }
         insert(Access::Write);
     }
     if (src_access & READ_MASK) {

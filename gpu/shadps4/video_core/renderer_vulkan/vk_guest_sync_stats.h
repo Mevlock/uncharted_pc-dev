@@ -86,6 +86,11 @@ struct Counters {
     // push descriptors (perf10 idea 3): pushes, ones equal to the last push on the same bind point
     // and layout, writes and descriptors per push
     std::atomic<u64> pushes{0}, same_pushes{0}, push_writes{0}, push_descs{0};
+    // write-filtered guest barriers (Ryujinx/Xenia style): a guest sync point queues a request; the
+    // next draw/dispatch emits one global barrier only if something stored (shader buffer/image
+    // writes, our copies/clears) since the last one emitted. [0] all sync points, [1] strong only.
+    bool wf_pending[2]{}, wf_wrote[2]{};
+    std::atomic<u64> wf_emitted[2]{}, wf_dropped[2]{};
     std::array<std::atomic<u64>, SiteCount> mem_after_sync{}, mem_no_sync{};
     std::atomic<u64> image_only{0}, image_barriers{0}, mem_with_images{0};
     std::atomic<u64> dispatch_after_sync{0}; ///< dispatches that are the first work after a sync
@@ -103,6 +108,12 @@ inline void NoteStageA(u32 ring, Kind kind) {
 
 inline void Report();
 
+/// Stage B: a store is recorded (shader buffer/image write, copy, clear).
+inline void NoteWrite() {
+    auto& c = Get();
+    c.wf_wrote[0] = c.wf_wrote[1] = true;
+}
+
 /// Stage B, in order: a guest sync point.
 inline u32 Bucket(u64 w) {
     return w == 0 ? 0 : w == 1 ? 1 : w <= 4 ? 2 : w <= 16 ? 3 : w <= 64 ? 4 : 5;
@@ -110,6 +121,10 @@ inline u32 Bucket(u64 w) {
 
 inline void NoteSyncB(Kind kind) {
     auto& c = Get();
+    c.wf_pending[0] = true;
+    if (IsStrong(kind)) {
+        c.wf_pending[1] = true;
+    }
     if (IsStrong(kind)) {
         c.strong_epoch.fetch_add(1, std::memory_order_relaxed);
         c.s_syncs.fetch_add(1, std::memory_order_relaxed);
@@ -130,6 +145,17 @@ inline void NoteWork(bool dispatch) {
     auto& c = Get();
     (dispatch ? c.dispatches : c.draws).fetch_add(1, std::memory_order_relaxed);
     c.work_since_strong.fetch_add(1, std::memory_order_relaxed);
+    for (u32 i = 0; i < 2; ++i) {
+        if (c.wf_pending[i]) {
+            c.wf_pending[i] = false;
+            if (c.wf_wrote[i]) {
+                c.wf_wrote[i] = false;
+                c.wf_emitted[i].fetch_add(1, std::memory_order_relaxed);
+            } else {
+                c.wf_dropped[i].fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
     if (c.work_since_sync.fetch_add(1, std::memory_order_relaxed) == 0 && dispatch) {
         c.dispatch_after_sync.fetch_add(1, std::memory_order_relaxed);
     }
@@ -206,6 +232,10 @@ inline void Report() {
                        after + none, after, none, sites, take(c.mem_with_images),
                        take(c.image_only), take(c.image_barriers));
     n -= 1; // drop the newline
+    n += std::snprintf(buf + n, sizeof(buf) - n,
+                       " || write-filtered: all %.0f emitted (%.0f dropped), strong %.0f (%.0f dropped)",
+                       take(c.wf_emitted[0]), take(c.wf_dropped[0]), take(c.wf_emitted[1]),
+                       take(c.wf_dropped[1]));
     const double pushes = take(c.pushes);
     n += std::snprintf(buf + n, sizeof(buf) - n,
                        " || pushes %.0f (same as last %.0f, %.1f writes, %.1f descriptors each)", pushes,
