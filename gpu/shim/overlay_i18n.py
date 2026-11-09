@@ -667,6 +667,12 @@ TRANSLATIONS = {
         'Passo 2 di 2: compilazione per la tua scheda video', '手順 2/2: グラフィックカード向けにコンパイル中'),
     'Finishing...': L('Finalizando...', 'Finalizando...', 'Finalisation...', 'Wird abgeschlossen...',
                       'Completamento...', '完了処理中...'),
+    # "of 3": a full preparation in play also saves under the page (step 3).
+    'Step 1 of 3: finding the shaders in your game files (only this once)': L('Paso 1 de 3: buscando los shaders en los archivos del juego (solo esta vez)', 'Etapa 1 de 3: procurando os shaders nos arquivos do jogo (só desta vez)', 'Étape 1 sur 3 : recherche des shaders dans les fichiers du jeu (cette fois seulement)', 'Schritt 1 von 3: Shader in deinen Spieldateien suchen (nur dieses eine Mal)', 'Passo 1 di 3: ricerca degli shader nei file del gioco (solo questa volta)', '手順 1/3: ゲームファイルからシェーダーを検索中(初回のみ)'),
+    'Step 1 of 3: loading shaders': L('Paso 1 de 3: cargando los shaders', 'Etapa 1 de 3: carregando os shaders', 'Étape 1 sur 3 : chargement des shaders', 'Schritt 1 von 3: Shader werden geladen', 'Passo 1 di 3: caricamento degli shader', '手順 1/3: シェーダーを読み込み中'),
+    'Step 1 of 3: building shaders from your game files': L('Paso 1 de 3: creando los shaders a partir de los archivos del juego', 'Etapa 1 de 3: criando os shaders a partir dos arquivos do jogo', 'Étape 1 sur 3 : création des shaders à partir des fichiers du jeu', 'Schritt 1 von 3: Shader aus deinen Spieldateien erstellen', 'Passo 1 di 3: creazione degli shader dai file del gioco', '手順 1/3: ゲームファイルからシェーダーを作成中'),
+    'Step 2 of 3: compiling them for your graphics card': L('Paso 2 de 3: compilándolos para tu tarjeta gráfica', 'Etapa 2 de 3: compilando-os para sua placa de vídeo', 'Étape 2 sur 3 : compilation pour votre carte graphique', 'Schritt 2 von 3: Kompilieren für deine Grafikkarte', 'Passo 2 di 3: compilazione per la tua scheda video', '手順 2/3: グラフィックカード向けにコンパイル中'),
+    'Step 3 of 3: saving the prepared shaders': L('Paso 3 de 3: guardando los shaders preparados', 'Etapa 3 de 3: salvando os shaders preparados', 'Étape 3 sur 3 : enregistrement des shaders préparés', 'Schritt 3 von 3: Vorbereitete Shader werden gespeichert', 'Passo 3 di 3: salvataggio degli shader preparati', '手順 3/3: 準備したシェーダーを保存中'),
     'Starting...': L('Iniciando...', 'Iniciando...', 'Démarrage...', 'Wird gestartet...', 'Avvio...', '開始中...'),
     # The next two are one sentence over two centred lines.
     'If a large shader cache causes problems: in the launcher, clear the shader cache and turn off': L(

@@ -1434,6 +1434,7 @@ static std::string ScanEta(u32 done, u32 total) {
 }
 
 static const char* const ScanStep = N_("Step 1 of 2: finding the shaders in your game files (only this once)");
+static const char* const ScanStep3 = N_("Step 1 of 3: finding the shaders in your game files (only this once)");
 
 static std::atomic<bool> prep_rebuild{false};
 
@@ -1463,13 +1464,26 @@ bool PreparationFinished() {
 // One bar for the whole preparation: step 1 (loading or building shaders) fills the first 15 %, step 2 (the driver
 // compiling pipelines, most of the time) the rest; between the steps it holds at 15 %.
 // Without a window (BB_PREPARE_ONLY) the cache is written before the process ends: saving (phase 4) is the last 15 %.
-static float PreparationFraction(int phase, u32 done, u32 total, bool finishing, bool between) {
-    static const bool saving = [] {
+// The page saves too on a full preparation in play (SetPreparationSaves): the same last 15 %.
+static std::atomic<bool> page_saves{false};
+
+void SetPreparationSaves(bool on) {
+    page_saves.store(on, std::memory_order_relaxed);
+}
+
+/// Preparation in 3 steps (the third saves what was prepared): without a window, or a full preparation on the page.
+/// The driver-rebuild page of a later launch saves nothing: 2 steps.
+static bool PreparationSavesStep() {
+    static const bool prepare_only = [] {
         const char* env = std::getenv("BB_PREPARE_ONLY");
         return env && env[0] == '1';
     }();
+    return prepare_only || page_saves.load(std::memory_order_relaxed);
+}
+
+static float PreparationFraction(int phase, u32 done, u32 total, bool finishing, bool between) {
     const float step_part = total ? float(done) / float(total) : 0.0f;
-    const float compiled = saving ? 0.85f : 1.0f;
+    const float compiled = PreparationSavesStep() ? 0.85f : 1.0f;
     return phase == 4                 ? 0.85f + 0.15f * step_part
            : finishing                ? 1.0f
            : phase == 2               ? 0.15f + (compiled - 0.15f) * step_part
@@ -1581,14 +1595,18 @@ void FullScreenPreparation() {
              1.15f, grey);
     ImGui::Dummy(ImVec2(0.0f, 28.0f * base_scale));
 
-    const char* step = phase == 3   ? T("Step 1 of 2: loading shaders")
-                       : phase == 1 ? T("Step 1 of 2: building shaders from your game files")
-                       : phase == 2 || between ? T("Step 2 of 2: compiling them for your graphics card")
-                       : finishing  ? T("Finishing...")
-                                    : T("Starting...");
+    const bool three = PreparationSavesStep();
+    const char* step = phase == 4 ? T("Step 3 of 3: saving the prepared shaders")
+                       : phase == 3 ? (three ? T("Step 1 of 3: loading shaders") : T("Step 1 of 2: loading shaders"))
+                       : phase == 1 ? (three ? T("Step 1 of 3: building shaders from your game files")
+                                             : T("Step 1 of 2: building shaders from your game files"))
+                       : phase == 2 || between ? (three ? T("Step 2 of 3: compiling them for your graphics card")
+                                                        : T("Step 2 of 2: compiling them for your graphics card"))
+                       : finishing ? T("Finishing...")
+                                   : T("Starting...");
     const u32 scan_of = scan_total.load(std::memory_order_acquire);
     const u32 scan_at = std::min(scan_done.load(std::memory_order_relaxed), scan_of);
-    centered(scan_of ? T(ScanStep) : step, 1.2f, white);
+    centered(scan_of ? (three ? T(ScanStep3) : T(ScanStep)) : step, 1.2f, white);
     ImGui::Dummy(ImVec2(0.0f, 10.0f * base_scale));
     const float bar_w = std::min(w * 0.55f, 900.0f * base_scale);
     ImGui::SetCursorPosX((w - bar_w) * 0.5f);
@@ -1619,8 +1637,9 @@ void FullScreenPreparation() {
 void PrintPreparationProgress() {
     if (const u32 total = scan_total.load(std::memory_order_acquire)) {
         const u32 done = std::min(scan_done.load(std::memory_order_relaxed), total);
-        std::printf("PREP %d %u %u 5|%s\n", int(100.0f * float(done) / float(total)), done, total,
-                    ScanEta(done, total).c_str());
+        // The 6th number: how many steps this preparation has (3 when it saves at the end, 2 when not).
+        std::printf("PREP %d %u %u 5 %d|%s\n", int(100.0f * float(done) / float(total)), done, total,
+                    PreparationSavesStep() ? 3 : 2, ScanEta(done, total).c_str());
         std::fflush(stdout);
         return;
     }
@@ -1634,9 +1653,9 @@ void PrintPreparationProgress() {
     const bool between = phase == 0 && had_step && !seen_step2;
     const int step = phase == 4 ? 4 : finishing ? 3 : phase == 2 || between ? 2 : had_step ? 1 : 0;
     const std::string eta = phase == 2 && total ? PreparationEta(done, total) : std::string{};
-    std::printf("PREP %d %u %u %d|%s\n",
+    std::printf("PREP %d %u %u %d %d|%s\n",
                 int(100.0f * PreparationFraction(phase, done, total, finishing, between)), done, total, step,
-                eta.c_str());
+                PreparationSavesStep() ? 3 : 2, eta.c_str());
     std::fflush(stdout);
 }
 

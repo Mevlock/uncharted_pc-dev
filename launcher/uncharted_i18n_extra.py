@@ -241,6 +241,10 @@ EXTRA_TRANSLATIONS = {
         'Step 2 of 2: compiling them for your graphics card':
         'Schritt 2 von 2: Kompilieren für deine Grafikkarte',
         'Saving the prepared shaders': 'Vorbereitete Shader werden gespeichert',
+        'Step 1 of 3: reading the shaders': 'Schritt 1 von 3: Shader werden gelesen',
+        'Step 2 of 3: compiling them for your graphics card': 'Schritt 2 von 3: Kompilieren für deine Grafikkarte',
+        'Step 1 of 3: finding the shaders in your game files (only this once)': 'Schritt 1 von 3: Shader in deinen Spieldateien suchen (nur dieses eine Mal)',
+        'Step 3 of 3: saving the prepared shaders': 'Schritt 3 von 3: Vorbereitete Shader werden gespeichert',
         'Step 1 of 2: finding the shaders in your game files (only this once)':
         'Schritt 1 von 2: Shader in deinen Spieldateien suchen (nur dieses eine Mal)',
         'Preparing shaders: {} %': 'Shader werden vorbereitet: {} %',
@@ -649,6 +653,10 @@ EXTRA_TRANSLATIONS = {
         'Step 2 of 2: compiling them for your graphics card':
         'Passo 2 di 2: compilazione per la tua scheda video',
         'Saving the prepared shaders': 'Salvataggio degli shader preparati',
+        'Step 1 of 3: reading the shaders': 'Passo 1 di 3: lettura degli shader',
+        'Step 2 of 3: compiling them for your graphics card': 'Passo 2 di 3: compilazione per la tua scheda video',
+        'Step 1 of 3: finding the shaders in your game files (only this once)': 'Passo 1 di 3: ricerca degli shader nei file del gioco (solo questa volta)',
+        'Step 3 of 3: saving the prepared shaders': 'Passo 3 di 3: salvataggio degli shader preparati',
         'Step 1 of 2: finding the shaders in your game files (only this once)':
         'Passo 1 di 2: ricerca degli shader nei file del gioco (solo questa volta)',
         'Preparing shaders: {} %': 'Preparazione degli shader: {} %',
@@ -1050,6 +1058,10 @@ EXTRA_TRANSLATIONS = {
         'Finishing…': '完了処理中…',
         'Step 2 of 2: compiling them for your graphics card': '手順 2/2: グラフィックカード向けにコンパイル中',
         'Saving the prepared shaders': '準備したシェーダーを保存中',
+        'Step 1 of 3: reading the shaders': '手順 1/3: シェーダーを読み込み中',
+        'Step 2 of 3: compiling them for your graphics card': '手順 2/3: グラフィックカード向けにコンパイル中',
+        'Step 1 of 3: finding the shaders in your game files (only this once)': '手順 1/3: ゲームファイルからシェーダーを検索中(初回のみ)',
+        'Step 3 of 3: saving the prepared shaders': '手順 3/3: 準備したシェーダーを保存中',
         'Step 1 of 2: finding the shaders in your game files (only this once)':
         '手順 1/2: ゲームファイルからシェーダーを検索中(初回のみ)',
         'Preparing shaders: {} %': 'シェーダーを準備中: {} %',
@@ -1354,6 +1366,10 @@ EXTRA_TRANSLATIONS = {
         'Step 2 of 2: compiling them for your graphics card':
         'Paso 2 de 2: compilándolos para tu tarjeta gráfica',
         'Saving the prepared shaders': 'Guardando los shaders preparados',
+        'Step 1 of 3: reading the shaders': 'Paso 1 de 3: leyendo los shaders',
+        'Step 2 of 3: compiling them for your graphics card': 'Paso 2 de 3: compilándolos para tu tarjeta gráfica',
+        'Step 1 of 3: finding the shaders in your game files (only this once)': 'Paso 1 de 3: buscando los shaders en los archivos del juego (solo esta vez)',
+        'Step 3 of 3: saving the prepared shaders': 'Paso 3 de 3: guardando los shaders preparados',
         'Step 1 of 2: finding the shaders in your game files (only this once)':
         'Paso 1 de 2: buscando los shaders en los archivos del juego (solo esta vez)',
         'Preparing shaders: {} %': 'Preparando shaders: {} %',
@@ -1660,6 +1676,10 @@ EXTRA_TRANSLATIONS = {
         'Step 2 of 2: compiling them for your graphics card':
         'Etapa 2 de 2: compilando-os para sua placa de vídeo',
         'Saving the prepared shaders': 'Salvando os shaders preparados',
+        'Step 1 of 3: reading the shaders': 'Etapa 1 de 3: lendo os shaders',
+        'Step 2 of 3: compiling them for your graphics card': 'Etapa 2 de 3: compilando-os para sua placa de vídeo',
+        'Step 1 of 3: finding the shaders in your game files (only this once)': 'Etapa 1 de 3: procurando os shaders nos arquivos do jogo (só desta vez)',
+        'Step 3 of 3: saving the prepared shaders': 'Etapa 3 de 3: salvando os shaders preparados',
         'Step 1 of 2: finding the shaders in your game files (only this once)':
         'Etapa 1 de 2: procurando os shaders nos arquivos do jogo (só desta vez)',
         'Preparing shaders: {} %': 'Preparando shaders: {} %',
@@ -1967,6 +1987,10 @@ EXTRA_TRANSLATIONS = {
         'Step 2 of 2: compiling them for your graphics card':
         'Étape 2 sur 2 : compilation pour votre carte graphique',
         'Saving the prepared shaders': 'Enregistrement des shaders préparés',
+        'Step 1 of 3: reading the shaders': 'Étape 1 sur 3 : lecture des shaders',
+        'Step 2 of 3: compiling them for your graphics card': 'Étape 2 sur 3 : compilation pour votre carte graphique',
+        'Step 1 of 3: finding the shaders in your game files (only this once)': 'Étape 1 sur 3 : recherche des shaders dans les fichiers du jeu (cette fois seulement)',
+        'Step 3 of 3: saving the prepared shaders': 'Étape 3 sur 3 : enregistrement des shaders préparés',
         'Step 1 of 2: finding the shaders in your game files (only this once)':
         'Étape 1 sur 2 : recherche des shaders dans les fichiers du jeu (cette fois seulement)',
         'Preparing shaders: {} %': 'Préparation des shaders : {} %',
@@ -2469,6 +2493,10 @@ EXTRA_TRANSLATIONS = {
         'Reset all settings': 'Сбросить все настройки',
         'Reset every setting to its default?': 'Вернуть все настройки к значениям по умолчанию?',
         'Saving the prepared shaders': 'Сохранение подготовленных шейдеров',
+        'Step 1 of 3: reading the shaders': 'Шаг 1 из 3: чтение шейдеров',
+        'Step 2 of 3: compiling them for your graphics card': 'Шаг 2 из 3: компиляция под вашу видеокарту',
+        'Step 1 of 3: finding the shaders in your game files (only this once)': 'Шаг 1 из 3: поиск шейдеров в файлах игры (только один раз)',
+        'Step 3 of 3: saving the prepared shaders': 'Шаг 3 из 3: сохранение подготовленных шейдеров',
         'Shader preparation': 'Подготовка шейдеров',
         'Shader preparation is not available for this copy of the game (version {}).': 'Подготовка шейдеров недоступна для этой копии игры (версия {}).',
         'Shader preparation is off for this copy of the game (version {}): the port does not know where its shaders are yet.': 'Подготовка шейдеров выключена для этой копии игры (версия {}): порт пока не знает, где её шейдеры.',

@@ -214,6 +214,15 @@ void RegisterShaderMeta(const Shader::Info& info,
                                        fmt::format("{:#018x}", perm_hash), ar.TakeOff());
 }
 
+/// bbport: a full preparation in play saves what it prepared under the page (BB_PREP_PAGE_SAVE=0: behind the game).
+static bool PageSavesShaders() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_PREP_PAGE_SAVE");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
 /// The shader cache name of a translated variant. Shaders whose translation depends on a switch
 /// without a cache version bit (BB_EFFECT_LOOP_CLAMP) get a suffix: binaries saved before it (or
 /// with it off) are not taken for it, and the rest of the cache is kept.
@@ -1655,6 +1664,7 @@ void PipelineCache::WarmUpThread() {
     } prep_screen_off;
     if (prep_screen) {
         BbOverlay::SetPreparationScreen(true);
+        BbOverlay::SetPreparationSaves(ship_list != nullptr && PageSavesShaders());
     }
 
     if (const char* dump = std::getenv("BB_SPEC_DUMP")) {
@@ -2928,8 +2938,26 @@ void PipelineCache::WarmUpThread() {
                 t_ready);
     // bbport: preparation is done: the game's frames may go out; a variant list's first launch leaves the
     // "prepared" marker, so later launches load in the background with the corner box only.
+    // bbport: a full preparation in play (the page) also saves what it prepared before the game goes on: the ~13,000
+    // shader files of a first U3 launch were written behind the game, which ran slowly for a minute or two on an
+    // Intel laptop until they were on disk (and every time after clearing the shaders; a restart was smooth).
+    // BB_PREP_PAGE_SAVE=0: they are written behind the game, as before.
+    if (prep_screen && ship_list && PageSavesShaders()) {
+        const double t_save = elapsed_ms();
+        const u32 total = db.PendingWrites();
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(180);
+        while (db.PendingWrites() != 0 && std::chrono::steady_clock::now() < end) {
+            const u32 left = db.PendingWrites();
+            BbOverlay::SetShaderPreparation(4, total > left ? total - left : 0, total);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        BbOverlay::SetShaderPreparation(0, 0, 0);
+        std::printf("Preparation: %u shader files saved under the page in %.0f ms%s\n", total, elapsed_ms() - t_save,
+                    db.PendingWrites() ? " (not all: the rest behind the game)" : "");
+    }
     if (prep_screen) {
         BbOverlay::SetPreparationScreen(false);
+        BbOverlay::SetPreparationSaves(false);
         std::printf("Preparation screen: shown for %.0f ms\n", elapsed_ms());
     }
     if (ship_list) {

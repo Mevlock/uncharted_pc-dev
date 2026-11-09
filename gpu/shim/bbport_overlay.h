@@ -55,6 +55,9 @@ void SetPreparationScreen(bool on);
 /// The page shown on a later launch: the graphics driver compiles the shaders again (its own cache was reset, e.g.
 /// after a driver update), so the page says why instead of "this happens once".
 void SetPreparationRebuild(bool on);
+/// The page also saves the prepared shaders before the game goes on (a full preparation in play): the bar keeps its
+/// last 15 % for that step (phase 4), as without a window.
+void SetPreparationSaves(bool on);
 bool PreparationScreenActive();
 
 /// Preparation without a window (BB_PREPARE_ONLY, the launcher's Prepare shaders button): the warm-up thread marks

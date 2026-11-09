@@ -2741,17 +2741,26 @@ class Launcher:
             pass
 
     def show_preparation(self, line):
-        """A 'PREP <percent> <done> <total> <step>|<time left>' line from the game into the bar and status."""
+        """A 'PREP <percent> <done> <total> <step> [<steps>]|<time left>' line from the game into the bar and status
+        (<steps>: 3 when the preparation saves at the end, 2 when not; older builds send none: 2)."""
         head, _bar, left = line.rstrip('\r\n').partition('|')
+        fields = head.split()[1:]
         try:
-            percent, done, total, step = (int(v) for v in head.split()[1:5])
+            percent, done, total, step = (int(v) for v in fields[:4])
+            three = len(fields) > 4 and int(fields[4]) == 3
         except ValueError:
             return
         self.prep_bar['value'] = percent
-        steps = {0: _('Starting…'), 1: _('Step 1 of 2: reading the shaders'),
-                 2: _('Step 2 of 2: compiling them for your graphics card'), 3: _('Finishing…'),
-                 4: _('Saving the prepared shaders'),
-                 5: _('Step 1 of 2: finding the shaders in your game files (only this once)')}
+        if three:
+            steps = {0: _('Starting…'), 1: _('Step 1 of 3: reading the shaders'),
+                     2: _('Step 2 of 3: compiling them for your graphics card'), 3: _('Finishing…'),
+                     4: _('Step 3 of 3: saving the prepared shaders'),
+                     5: _('Step 1 of 3: finding the shaders in your game files (only this once)')}
+        else:
+            steps = {0: _('Starting…'), 1: _('Step 1 of 2: reading the shaders'),
+                     2: _('Step 2 of 2: compiling them for your graphics card'), 3: _('Finishing…'),
+                     4: _('Saving the prepared shaders'),
+                     5: _('Step 1 of 2: finding the shaders in your game files (only this once)')}
         text = f'{steps.get(step, "")}   {percent} %'
         if step == 5 and total:
             text += f'   ({done / 1024:.1f} / {total / 1024:.1f} GB)'  # the scan counts MiB
