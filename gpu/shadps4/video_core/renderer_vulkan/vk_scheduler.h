@@ -853,6 +853,18 @@ public:
         return {dst, data.size()};
     }
 
+    /// bbport (perf10): like RecordData() without a source: `bytes` of uninitialised storage that
+    /// lives until the command recorded next has run. Only while recording is deferred.
+    void* AllocateRecordData(size_t bytes, size_t align) {
+        ReserveRecordData(bytes + align);
+        if (RecordChunk::Capacity - record_chunk->Size() >= bytes + align + 1024) {
+            if (void* storage = record_chunk->Allocate(bytes, align)) {
+                return storage;
+            }
+        }
+        return record_chunk->AllocateOverflow(bytes);
+    }
+
     /// Hands recorded commands to the recording thread. Called at points where no caller holds
     /// the raw command buffer (end of draws and dispatches); small batches are kept.
     void KickRecording(bool force = false);
