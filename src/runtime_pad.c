@@ -2337,6 +2337,18 @@ static void sample(PadData *d) {
     replay_sample(d);
     d->buttons|=injected.buttons;
     {
+        /* BB_PAUSE_ON_FOCUS_LOST=1 (from El Dorado 2bc14455): back from the background while it was in gameplay
+         * (window.cpp; the game stood still meanwhile), Options is held 150 ms so the game's pause menu is up. */
+        static uint64_t options_until_us;
+        const uint64_t t=now_us();
+        if (bbgpu_take_back_request()) {
+            options_until_us=t+150000u;
+            printf("Pause: back from the background: the game's pause menu\n");
+            fflush(stdout);
+        }
+        if (t<options_until_us) d->buttons|=BTN_OPTIONS;
+    }
+    {
         const int held=(d->buttons & BTN_L2)!=0;
         if (mouse_debug() && held!=aim_held) printf("Mouse: L2 %s (t=%.4f)\n",held ? "held" : "released",now_us()*1e-6);
         if (held && !aim_held) aim_press_us=now_us();

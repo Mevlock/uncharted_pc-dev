@@ -122,6 +122,40 @@ extern "C" int bbgpu_window_enter_swallowed(void) {
     return enter_swallowed.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
+// bbport (from El Dorado 2bc14455; an option, off by default: BB_PAUSE_ON_FOCUS_LOST=1, launcher "Pause in the
+// background"): the window minimized or out of focus stops the game where it is (its threads and clocks, as the
+// shader preparation page does: runtime_freeze_reason). Back, it goes on from the same moment and, when it was in
+// gameplay as it went (the renderer's scene detection: not a menu, movie or loading screen), the game's pause menu
+// opens (runtime_pad.c holds Options once: bbgpu_take_back_request).
+extern "C" void runtime_freeze_reason(unsigned reason, int on, const char* why);
+namespace Vulkan {
+extern std::atomic<bool> g_last_frame_scene; // vk_rasterizer.cpp TakeSceneFrame
+}
+static std::atomic<int> back_request{0};
+
+extern "C" int bbgpu_take_back_request(void) {
+    return back_request.exchange(0, std::memory_order_acq_rel);
+}
+
+static void BackgroundPause(bool away) {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_PAUSE_ON_FOCUS_LOST");
+        return env && env[0] == '1';
+    }();
+    static bool frozen = false, was_gameplay = false;
+    if (!on || away == frozen) {
+        return;
+    }
+    if (away) {
+        was_gameplay = Vulkan::g_last_frame_scene.load(std::memory_order_relaxed);
+    }
+    frozen = away;
+    runtime_freeze_reason(2, away ? 1 : 0, "the game's window is in the background");
+    if (!away && was_gameplay) {
+        back_request.store(1, std::memory_order_release);
+    }
+}
+
 namespace Frontend {
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
@@ -371,15 +405,21 @@ bool WindowSDL::PollEvents() {
             break;
         }
         case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        case SDL_EVENT_WINDOW_RESTORED:
             window_focused = true;
+            BackgroundPause(false);
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST: {
             window_focused = false;
             enter_swallowed = false; // its key-up may go to another window
+            BackgroundPause(true);
             std::scoped_lock lock{mouse_mutex};
             mouse_buttons = 0;
             break;
         }
+        case SDL_EVENT_WINDOW_MINIMIZED:
+            BackgroundPause(true);
+            break;
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
         case SDL_EVENT_WINDOW_RESIZED: {
             int w = 0, h = 0;

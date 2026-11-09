@@ -37,6 +37,9 @@ int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 int bbgpu_overlay_captures_input(void);
 /* 1 while the full-screen shader preparation page shows (the game runs behind it). */
 int bbgpu_preparation_screen(void);
+/* 1 once after the game's window came back from the background while it was in gameplay (BB_PAUSE_ON_FOCUS_LOST=1;
+ * the game stood still meanwhile): runtime_pad.c opens the game's pause menu then. */
+int bbgpu_take_back_request(void);
 /* The game reads the controller: the frame start of the low latency mode (NVIDIA Reflex / AMD
  * Anti-Lag 2, BB_LOW_LATENCY), which may sleep there until the GPU is ready for the next frame. */
 void bbgpu_input_sample(void);

@@ -72,20 +72,34 @@ void runtime_freeze_wait(void) {
     pthread_mutex_unlock(&freeze_lock);
 }
 void runtime_guest_clock_pause(int on); /* runtime_kernel.c */
+/* The reasons the game stands still (bits: 1 the shader preparation page or hold, 2 its window in the background,
+ * BB_PAUSE_ON_FOCUS_LOST=1); it runs again when none is left, so one ending never releases another (from El Dorado
+ * 2bc14455). */
+static unsigned freeze_reasons;
+void runtime_freeze_reason(unsigned reason,int on,const char *why) {
+    pthread_mutex_lock(&freeze_lock);
+    const unsigned before=freeze_reasons;
+    freeze_reasons=on ? (before|reason) : (before&~reason);
+    const int was=before!=0, now=freeze_reasons!=0;
+    if (was!=now) {
+        /* The game's clocks stop with its threads, so it resumes as if no time passed (the hold freezes a running
+         * game). They start again before the threads are released, so a woken thread never reads a stopped clock. */
+        if (!now) runtime_guest_clock_pause(0);
+        runtime_freeze_flag=now;
+        if (now) runtime_guest_clock_pause(1);
+        if (!now) pthread_cond_broadcast(&freeze_cv);
+    }
+    pthread_mutex_unlock(&freeze_lock);
+    if (was!=now) {
+        printf("Runtime: game threads %s (%s)\n",now ? "frozen" : "resumed",why);
+        fflush(stdout);
+    }
+}
 void runtime_freeze_guest(int on) {
     static int enabled=-1;
     if (enabled<0) { const char *e=getenv("BB_PREP_FREEZE"); enabled=!(e && e[0]=='0'); }
     if (!enabled) return;
-    pthread_mutex_lock(&freeze_lock);
-    /* The game's clocks stop with its threads, so it resumes as if no time passed (the hold freezes a running game).
-     * They start again before the threads are released, so a woken thread never reads a stopped clock. */
-    if (!on) runtime_guest_clock_pause(0);
-    runtime_freeze_flag=on;
-    if (on) runtime_guest_clock_pause(1);
-    if (!on) pthread_cond_broadcast(&freeze_cv);
-    pthread_mutex_unlock(&freeze_lock);
-    printf("Runtime: game threads %s (shader preparation page)\n",on ? "frozen" : "resumed");
-    fflush(stdout);
+    runtime_freeze_reason(1,on,"shader preparation page");
 }
 static void apply_affinity(GuestThread *t,int current_thread);
 static const unsigned char *tls_template;
