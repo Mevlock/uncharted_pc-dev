@@ -195,7 +195,11 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 TextureCache::~TextureCache() = default;
 
 void TextureCache::ProcessDownloadImages() {
+    if (!downloads_queued.load(std::memory_order_acquire)) {
+        return;
+    }
     std::unique_lock lk{download_images_mutex};
+    downloads_queued.store(false, std::memory_order_relaxed);
     for (const ImageId image_id : download_images) {
         DownloadImageMemory(image_id, true);
     }
@@ -1297,12 +1301,14 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
             image.info.guest_address != 0) {
             std::unique_lock lk{download_images_mutex};
             download_images.emplace(image_id);
+            downloads_queued.store(true, std::memory_order_release);
         } else if (ReadbackSmallTargets() && image.info.size.width <= 8 &&
                    image.info.size.height <= 8 && image.info.guest_address != 0) {
             // Written by a compute shader rather than rendered (after Umar-Qayyum-dev's tiny
             // read-back): the CPU reads such results the same way.
             std::unique_lock lk{download_images_mutex};
             small_download_images.emplace(image_id);
+            downloads_queued.store(true, std::memory_order_release);
         }
     }
     if (refresh) {
@@ -1361,10 +1367,12 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
         std::unique_lock lk{download_images_mutex};
         download_images.emplace(image_id);
+        downloads_queued.store(true, std::memory_order_release);
     } else if (ReadbackSmallTargets() && image.info.size.width <= 8 &&
                image.info.size.height <= 8 && image.info.guest_address != 0) {
         std::unique_lock lk{download_images_mutex};
         small_download_images.emplace(image_id);
+        downloads_queued.store(true, std::memory_order_release);
     }
     image.usage.render_target = 1u;
     UpdateImage(image_id);

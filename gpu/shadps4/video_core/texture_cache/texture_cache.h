@@ -128,6 +128,9 @@ public:
     void ProcessDownloadImages();
     /// bbport diagnosis: images queued for download at the next end-of-pipe event.
     bool HasQueuedDownloads() {
+        if (!downloads_queued.load(std::memory_order_acquire)) {
+            return false;
+        }
         std::unique_lock lk{download_images_mutex};
         return !download_images.empty() || !small_download_images.empty();
     }
@@ -591,6 +594,9 @@ private:
     u32 button_prompt_switches = 0;
     std::mutex samplers_mutex;
     std::mutex download_images_mutex;
+    /// perf10: set with the mutex held when an image is queued for download; lets every
+    /// fence (ProcessDownloadImages, ~300k/s in U3's crowd) skip the mutex when none is.
+    std::atomic<bool> downloads_queued{false};
     /// bbport: small-target read-backs queued to land after the GPU (DownloadImageMemory without
     /// sync). UnmapMemory cancels those in its range, and a landing writes under the mutex, so a
     /// VA mapped again never gets the old target's bytes (code review A4).
