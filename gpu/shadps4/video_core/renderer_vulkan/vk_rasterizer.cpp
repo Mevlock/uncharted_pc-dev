@@ -31,6 +31,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_guest_sync_stats.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "bbport_threads.h"
 #include <vulkan/vulkan_format_traits.hpp>
@@ -755,7 +756,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // bbport: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
-        runtime.FlushBarriers();
+        runtime.FlushBarriers(GuestSync::SiteSubmit);
         buffer_cache.SubmitPendingArenaBinds(info);
     });
     static Rasterizer* busy_check;
@@ -4144,6 +4145,9 @@ static bool SkipShader(u64 hash) {
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
+    if (GuestSync::On()) {
+        GuestSync::NoteWork(false);
+    }
     // bbport diagnosis (BB_FRAME_STATS): stage B draws by class (depth-only / colour), cycles.
     struct DrawClassTimer {
         u32 cls;
@@ -4503,7 +4507,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
 
     if (needs_barrier) {
-        runtime.FlushBarriers();
+        runtime.FlushBarriers(GuestSync::SiteDraw);
     }
 
     // bbport: screen-space (clip disabled) draws into the upscaler's output-size images.
@@ -5041,7 +5045,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     }
 
     if (needs_barrier) {
-        runtime.FlushBarriers();
+        runtime.FlushBarriers(GuestSync::SiteDraw);
     }
 
     // bbport: screen-space (clip disabled) draws into the upscaler's output-size images.
@@ -5336,6 +5340,9 @@ void Rasterizer::WaitHleCopies(u32 where) {
 }
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
+    if (GuestSync::On()) {
+        GuestSync::NoteWork(true);
+    }
     // bbport diagnosis (BB_DISPATCH_STATS=1): stage B time per dispatch by section.
     struct DispatchTimer {
         u64 last = __rdtsc();
@@ -5571,7 +5578,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     }
     dispatch_timer.Section(1);
     if (needs_barrier) {
-        runtime.FlushBarriers();
+        runtime.FlushBarriers(GuestSync::SiteDispatch);
     }
 
     scheduler.EndRendering();
@@ -9725,7 +9732,7 @@ void Rasterizer::FlushNativeBatch(u32 reason) {
         write.pBufferInfo = &buffer_infos.back();
     }
     if (needs_barrier) {
-        runtime.FlushBarriers();
+        runtime.FlushBarriers(GuestSync::SiteBatch);
     }
     scheduler.EndRendering();
     b.batched->BindResources(set_writes, push_data);

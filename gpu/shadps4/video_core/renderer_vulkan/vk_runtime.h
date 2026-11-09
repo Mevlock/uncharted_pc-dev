@@ -95,7 +95,8 @@ public:
     bool IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
                           bool check_read_access = false);
 
-    void FlushBarriers();
+    /// site: what asked for the barrier (diagnosis only, GuestSync::Site).
+    void FlushBarriers(u32 site = 0);
 
     /// bbport: runs before this thread changes image state (layouts, pending image
     /// barriers): the rasterizer joins its texture binding helper there (BindHelper).

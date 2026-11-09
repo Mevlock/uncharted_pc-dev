@@ -9,6 +9,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
+#include "video_core/renderer_vulkan/vk_guest_sync_stats.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
@@ -865,11 +866,11 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         return env ? u32(std::strtoul(env, nullptr, 10)) : 4096u;
     }();
     if (cap && tracked_inserts >= cap) {
-        FlushBarriers();
+        FlushBarriers(GuestSync::SiteCap);
     }
 }
 
-void Runtime::FlushBarriers() {
+void Runtime::FlushBarriers(u32 site) {
     BeforeImageAccess();
     vk::DependencyInfo dep_info{};
 
@@ -884,6 +885,10 @@ void Runtime::FlushBarriers() {
 
     if (!dep_info.memoryBarrierCount && !dep_info.imageMemoryBarrierCount) {
         return;
+    }
+    if (GuestSync::On()) {
+        GuestSync::NoteFlush(site, dep_info.memoryBarrierCount != 0,
+                             dep_info.imageMemoryBarrierCount);
     }
 
     scheduler.EndRendering();
