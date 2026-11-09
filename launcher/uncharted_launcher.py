@@ -213,8 +213,8 @@ TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab
            'Control_R': 'Right Ctrl', 'Alt_R': 'Right Alt', 'Caps_Lock': 'CapsLock', 'Up': 'Up',
            'Down': 'Down', 'Left': 'Left', 'Right': 'Right', 'Delete': 'Delete', 'Home': 'Home',
            'End': 'End', 'Prior': 'PageUp', 'Next': 'PageDown', 'minus': '-', 'equal': '=',
-           'bracketleft': '[', 'bracketright': ']', 'semicolon': ';', 'apostrophe': "'", 'comma': ',',
-           'period': '.', 'slash': '/', 'backslash': '\\', 'grave': '`', 'KP_Enter': 'Keypad Enter',
+           'Menu': 'Application', '[': '[', ']': ']', 'bracketleft': '[', 'bracketright': ']',
+           'semicolon': ';', 'apostrophe': "'", 'comma': ',', 'period': '.', 'slash': '/', 'backslash': '\\', 'grave': '`', 'KP_Enter': 'Keypad Enter',
            'KP_Add': 'Keypad +', 'KP_Subtract': 'Keypad -', 'KP_Multiply': 'Keypad *',
            'KP_Divide': 'Keypad /', 'KP_Decimal': 'Keypad .', 'KP_Delete': 'Keypad .',
            'KP_Insert': 'Keypad 0', 'KP_End': 'Keypad 1', 'KP_Down': 'Keypad 2', 'KP_Next': 'Keypad 3',
@@ -325,6 +325,25 @@ def ini_path():
     return Path(os.environ.get('BB_CONFIG', DATA_DIR / 'bbport.ini'))
 
 
+def write_atomic(path, text):
+    """Writes a whole file through a temporary file and a rename, so a crash or power loss mid-write leaves
+    the old file, never an empty or half-written one (poncho-ajmv's #605)."""
+    path = Path(path)
+    tmp = path.with_name(path.name + '.tmp')
+    with open(tmp, 'w', encoding='utf-8') as f:  # same newlines as the write_text it replaces
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    for attempt in range(5):  # another program reading the file can briefly block the rename on Windows
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05)
+
+
 def set_ini(key, value):
     """bbport.ini (read by the game; the in-game menu edits it): one key rewritten in place."""
     path = ini_path()
@@ -341,7 +360,7 @@ def set_ini(key, value):
             out.append(line)
     if not found:
         out.append(f'{key}={value}')
-    path.write_text('\n'.join(out) + '\n', encoding='utf-8')
+    write_atomic(path, '\n'.join(out) + '\n')
 
 
 def game_info(folder):
@@ -767,7 +786,7 @@ def write_input_ini(s):
     lines += [f'pad.{action}={pad.get(action, "none")}' for action in DEFAULT_PAD]
     path = input_ini_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    write_atomic(path, '\n'.join(lines) + '\n')
     return path
 
 
@@ -2468,7 +2487,7 @@ class Launcher:
         if getattr(self, 'pad_vars', None):
             self.app['pad_bindings'] = {a: v.get() for a, v in self.pad_vars.items()}
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_FILE.write_text(json.dumps(self.app, indent=2) + '\n', encoding='utf-8')
+        write_atomic(CONFIG_FILE, json.dumps(self.app, indent=2) + '\n')
         try:
             set_ini('show_fps', '1' if self.app['show_fps'] else '0')
         except OSError:
