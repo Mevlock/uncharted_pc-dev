@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cfloat>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -285,6 +286,25 @@ const char* UpscalerShortName(int upscaler) {
            : upscaler == BbSettings::UpscalerDlss   ? "DLSS"
            : upscaler == BbSettings::UpscalerXess   ? "XeSS"
                                                     : "NoAA";
+}
+
+/// The counter's anti-aliasing name: DLSS at the output size is "DLAA", with the DLSS model after it: the letter
+/// BB_DLSS_PRESET asks for (J, K, L, M), or "auto" when the driver chooses (vk_dlss.cpp DlssPreset; an override in
+/// the NVIDIA app is not reported to the game). "DLAA K", "DLSS auto", "FSR4".
+static const char* CounterUpscalerName(int upscaler) {
+    if (upscaler != BbSettings::UpscalerDlss) {
+        return UpscalerShortName(upscaler);
+    }
+    static const std::string dlaa = std::string("DLAA ") + [] {
+        const char* env = std::getenv("BB_DLSS_PRESET");
+        return std::string(env && env[0] ? std::string(1, char(std::toupper(static_cast<unsigned char>(env[0]))))
+                                         : std::string("auto"));
+    }();
+    static const std::string dlss = "DLSS" + dlaa.substr(4);
+    const char* render = std::getenv("BB_RENDER_RES");
+    const char* output = std::getenv("BB_OUTPUT_RES");
+    const bool native = !render || !render[0] || !output || !output[0] || std::strcmp(render, output) == 0;
+    return native ? dlaa.c_str() : dlss.c_str();
 }
 
 void SetOpen(bool value) {
@@ -949,13 +969,13 @@ void FpsCounter() {
     const char* latency = Vulkan::LowLatency::Name();
     const float shown_fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
     if (s.frame_gen != BbSettings::FrameGenOff && shown_fps > game_fps * 1.2f) {
-        ImGui::TextColored(second_line, "%s %s  FG %dx %.0f%s%s", UpscalerShortName(s.upscaler),
+        ImGui::TextColored(second_line, "%s %s  FG %dx %.0f%s%s", CounterUpscalerName(s.upscaler),
                             ShortRenderText(),
                             s.frame_gen == BbSettings::FrameGenDlss ? s.frame_gen_multiplier.load()
                                                                     : 2,
                             shown_fps, latency ? "  " : "", latency ? latency : "");
     } else {
-        ImGui::TextColored(second_line, "%s %s%s%s", UpscalerShortName(s.upscaler), ShortRenderText(),
+        ImGui::TextColored(second_line, "%s %s%s%s", CounterUpscalerName(s.upscaler), ShortRenderText(),
                            latency ? "  " : "", latency ? latency : "");
     }
     // "RAM 6.1/32 GB  VRAM 7.4/16 GB": the game's memory and video memory, once a second.
