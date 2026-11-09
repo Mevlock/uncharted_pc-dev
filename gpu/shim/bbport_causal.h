@@ -31,7 +31,11 @@ inline std::uint64_t Ticks(const char* name) {
 /// Items that reached each site (0 compute dispatch, 1 graphics draw, 2 stage B packet, 3 recorded command), with or
 /// without a delay;
 /// printed (and reset) with BB_FRAME_STATS.
-inline std::atomic<std::uint64_t> g_hits[4];
+/// perf11: one cache line per site. The four counters shared one line, and BB_FRAME_STATS is on in the launcher's
+/// runs: stage A, stage B and the Vulkan recorder (~3M commands/s in U3's crowd) took that line from each other with
+/// every draw, packet and command.
+struct alignas(64) Hits : std::atomic<std::uint64_t> {};
+inline Hits g_hits[4];
 
 /// Only with BB_FRAME_STATS (review 2026-11-01): otherwise three busy threads did a locked add on one shared cache
 /// line for every draw, packet and recorded command, for counts nobody printed.

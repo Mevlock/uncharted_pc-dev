@@ -159,8 +159,12 @@ public:
 
     /// Statistics (stage A): packets, drains that had to wait, cycles waited, cycles stage B
     /// spent running packets.
-    u64 packets = 0, drains = 0, drain_cycles = 0;
-    std::atomic<u64> busy_cycles{0};
+    /// perf11: what stage A writes per packet, what stage B writes per packet and what both only
+    /// read are on separate cache lines (before, stage A's packet count shared a line with
+    /// stage B's busy cycles, and stage A's write position one with the ring pointer and handler
+    /// stage B reads for every packet: each packet moved those lines between the cores).
+    alignas(64) u64 packets = 0, drains = 0, drain_cycles = 0;
+    alignas(64) std::atomic<u64> busy_cycles{0};
 
 private:
     struct Header {
@@ -173,8 +177,15 @@ private:
         return (size + 63) & ~63u;
     }
 
+    /// perf11: stage A checks the space against the last position of stage B it saw, and reads
+    /// `consumed` (a cache line stage B writes after every packet) only when that is not enough:
+    /// the 16 MiB ring is almost never full, so the line no longer moves between the two cores
+    /// for every packet.
     void WaitForSpace(u64 at, u64 size) {
-        while (at + size - consumed.load(std::memory_order_acquire) > Capacity) {
+        if (at + size - consumed_seen <= Capacity) {
+            return;
+        }
+        while (at + size - (consumed_seen = consumed.load(std::memory_order_acquire)) > Capacity) {
             __builtin_ia32_pause();
         }
     }
@@ -185,11 +196,16 @@ private:
         on_stage_b = true;
         stage_b_tid.store(static_cast<u32>(gettid()), std::memory_order_release);
         u64 at = 0;
+        // perf11: the last position of stage A seen here. While packets are known to be ahead,
+        // `published` (a cache line stage A writes after every packet) is not read again.
+        u64 available = 0;
         while (true) {
             RunPriority();
             // Packets follow each other within microseconds while a frame is decoded: spin,
             // and sleep only after a longer pause (between frames).
-            u64 available = published.load(std::memory_order_acquire);
+            if (available == at || !CachePositions()) {
+                available = published.load(std::memory_order_acquire);
+            }
             if (available == at) {
                 // With few hardware threads (Steam Deck: 8) a long spin takes time from the
                 // game's own threads. BB_PIPE_SPIN_US overrides.
@@ -237,10 +253,15 @@ private:
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
             // The last packet so far: work owed to other threads is paid before stage A can see
             // the ring drained (it may record on this state right after).
-            if (on_idle && published.load(std::memory_order_acquire) == at + header->size) {
+            if (at + header->size == available) {
+                available = published.load(std::memory_order_acquire);
+            }
+            if (on_idle && available == at + header->size) {
                 on_idle(idle_context);
             }
-            busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
+            // Only this thread writes it (stage A reads it for the statistics): no locked add.
+            busy_cycles.store(busy_cycles.load(std::memory_order_relaxed) + (__rdtsc() - start),
+                              std::memory_order_relaxed);
             at += header->size;
             consumed.store(at, std::memory_order_release);
         }
@@ -261,9 +282,18 @@ private:
         }
     }
 
+    /// BB_PIPE_CACHED_POSITIONS=0: stage B reads stage A's position after every packet, as before.
+    static bool CachePositions() {
+        static const bool on = [] {
+            const char* env = std::getenv("BB_PIPE_CACHED_POSITIONS");
+            return !(env && env[0] == '0');
+        }();
+        return on;
+    }
+
 public:
     /// Stage B, when it runs out of packets (set before packets flow).
-    void (*on_idle)(void*) = nullptr;
+    alignas(64) void (*on_idle)(void*) = nullptr;
     void* idle_context = nullptr;
 
 private:
@@ -271,11 +301,12 @@ private:
     std::mutex priority_mutex;
     std::vector<Common::UniqueFunction<void>> priority;
     alignas(64) std::atomic<bool> has_priority{false};
-    Handler handler;
+    alignas(64) Handler handler;
     void* context;
     std::unique_ptr<u8[]> ring;
-    u64 head = 0; ///< stage A's write position
+    alignas(64) u64 head = 0; ///< stage A's write position
     u32 pending_size = 0;
+    u64 consumed_seen = 0; ///< stage A: the last `consumed` it read
     alignas(64) std::atomic<u64> published{0};
     alignas(64) std::atomic<u64> consumed{0};
     alignas(64) std::atomic<u32> wake{0};

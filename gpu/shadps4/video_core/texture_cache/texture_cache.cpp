@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <mutex>
 #include <unordered_map>
@@ -1686,6 +1687,40 @@ void TextureCache::RefreshImage(Image& image) {
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
                                      AmdGpu::BorderColorBuffer border_color_base,
                                      const bool is_depth, float extra_lod_bias) {
+    // perf11: a small per-thread memo in front of the map: every sampler binding of every draw
+    // came here (U3's crowd: ~1 a packet), each with a hash, the mutex, a map lookup and an LRU
+    // touch. A hit skips all of that; the LRU touch still happens once per GC tick. Entries die
+    // with any sampler the GC destroys (sampler_generation). BB_SAMPLER_MEMO=0: off.
+    static const bool use_memo = [] {
+        const char* env = std::getenv("BB_SAMPLER_MEMO");
+        return !(env && env[0] == '0');
+    }();
+    static_assert(sizeof(AmdGpu::Sampler) == 16);
+    u64 words[2];
+    std::memcpy(words, &sampler, sizeof(words));
+    const u64 border = border_color_base.base_addr;
+    const u64 extra = u64(is_depth) | u64(std::bit_cast<u32>(extra_lod_bias)) << 32;
+    struct MemoEntry {
+        u64 raw0 = 0, raw1 = 0, border = 0, extra = 0;
+        u64 generation = 0; ///< 0: empty
+        u64 tick = 0;       ///< gc_tick of the last LRU touch
+        size_t lru_id = 0;
+        vk::Sampler handle{};
+    };
+    static thread_local std::array<MemoEntry, 64> memo{};
+    const u64 generation = sampler_generation.load(std::memory_order_acquire);
+    MemoEntry& entry =
+        memo[(words[0] ^ (words[0] >> 29) ^ words[1] ^ (words[1] >> 31) ^ border ^ extra) & 63];
+    if (use_memo && entry.generation == generation && entry.raw0 == words[0] &&
+        entry.raw1 == words[1] && entry.border == border && entry.extra == extra) {
+        if (entry.tick != gc_tick) {
+            std::scoped_lock lock{samplers_mutex};
+            sampler_lru_cache.Touch(entry.lru_id, gc_tick);
+            entry.tick = gc_tick;
+        }
+        return entry.handle;
+    }
+
     // Compare and plain uses of one S# need separate samplers; so do extra LOD biases.
     const u64 hash = HashCombine(HashCombine(XXH3_64bits(&sampler, sizeof(sampler)), is_depth),
                                  u64(std::bit_cast<u32>(extra_lod_bias)));
@@ -1697,6 +1732,10 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
         samplers.at(hash).lru_id = sampler_lru_cache.Insert(hash, gc_tick);
     } else {
         sampler_lru_cache.Touch(it->second.lru_id, gc_tick);
+    }
+    if (use_memo) {
+        entry = {words[0], words[1], border, extra, sampler_generation.load(std::memory_order_relaxed),
+                 gc_tick, it->second.lru_id, it->second.Handle()};
     }
 
     return it->second.Handle();
@@ -2163,6 +2202,8 @@ void TextureCache::GarbageCollectSamplers() {
         }
         --num_deletions;
         const size_t lru_id = samplers.at(hash).lru_id;
+        // perf11: every thread's sampler memo forgets its entries (GetSampler).
+        sampler_generation.fetch_add(1, std::memory_order_release);
         samplers.erase(hash);
         sampler_lru_cache.Free(lru_id);
         return false;

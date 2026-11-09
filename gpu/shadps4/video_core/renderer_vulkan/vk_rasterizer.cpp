@@ -2823,16 +2823,17 @@ static bool DrawBatchEnabled() {
     return enabled;
 }
 
-/// bbport diagnosis (causal profiling): BB_SLOW_A_NS / BB_SLOW_B_NS=<ns> spin that long per draw
-/// or dispatch on stage A (PostDraw) / stage B (each draw or dispatch packet). How much the frame
-/// rate drops shows how much that stage limits it.
+/// bbport diagnosis (causal profiling): BB_SLOW_A_NS / BB_SLOW_B_DRAW_NS=<ns> spin that long per draw
+/// or dispatch on stage A (PostDraw) / stage B (each draw or dispatch packet only). How much the frame
+/// rate drops shows how much that stage limits it. BB_SLOW_B_NS (bbport_causal.h) is every stage B
+/// packet in the draw pipe; until perf11 both read BB_SLOW_B_NS, so draws and dispatches got it twice.
 static void SlowStage(const char* name) {
     static const u64 a_ns = [] {
         const char* env = std::getenv("BB_SLOW_A_NS");
         return env ? std::strtoull(env, nullptr, 10) : 0ull;
     }();
     static const u64 b_ns = [] {
-        const char* env = std::getenv("BB_SLOW_B_NS");
+        const char* env = std::getenv("BB_SLOW_B_DRAW_NS");
         return env ? std::strtoull(env, nullptr, 10) : 0ull;
     }();
     const u64 ns = name[0] == 'A' ? a_ns : b_ns;

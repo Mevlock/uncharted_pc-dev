@@ -105,7 +105,7 @@ inline std::atomic<std::uint64_t> view_searches{0}, view_entries_searched{0}, vi
 inline std::atomic<std::uint32_t> view_list_max{0};
 inline std::atomic<std::uint64_t> view_list_max_address{0};
 /// Guest writes caught by page protection, and pages currently left unprotected as hot.
-inline std::atomic<std::uint64_t> tracker_faults{0};
+alignas(64) inline std::atomic<std::uint64_t> tracker_faults{0}; ///< perf11: own line (guest threads)
 /// Guest writes to pages holding GPU data: the data dropped as dead (BB_DEAD_GPU_FRAMES) or read
 /// back first (waits for the GPU).
 inline std::atomic<std::uint64_t> dead_gpu_drops{0}, gpu_read_backs{0};
@@ -120,9 +120,10 @@ inline std::atomic<std::uint64_t> images_registered{0};
 inline std::atomic<std::uint64_t> image_upload_bytes{0};
 inline std::atomic<std::uint64_t> buffer_upload_bytes{0};
 inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command thread
-inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
+/// perf11: one cache line each (stage B counts every draw and dispatch, stage A submissions).
+alignas(64) inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
-inline std::atomic<std::uint64_t> gpu_frames{0};
+alignas(64) inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).
 inline std::atomic<std::uint64_t> t_resident{0}, t_protect{0}, t_image_create{0}, t_refresh{0},
     t_staging{0}, t_host_wait{0}, t_copy{0}, copy_bytes{0}, t_read_faults{0}, read_faults{0},
@@ -159,7 +160,7 @@ inline std::atomic<std::uint64_t> submit_dones{0}, submit_done_wait_ns{0}, marke
 inline std::atomic<std::uint64_t> ordered_faults{0}, ordered_pickup_ns{0}, ordered_behind_ns{0},
     ordered_run_ns{0};
 /// Draws recorded into the reduced scene targets, and draws after the scene started.
-inline std::atomic<std::uint64_t> reduced_draws{0}, scene_draws{0};
+alignas(64) inline std::atomic<std::uint64_t> reduced_draws{0}, scene_draws{0};
 /// Wall time spent blocked in the scheduler (ns): waiting for the recording thread to drain,
 /// for host copies before a submission or fence, and for GPU ticks.
 inline std::atomic<std::uint64_t> sync_recording_ns{0}, host_copies_wait_ns{0}, tick_wait_ns{0},

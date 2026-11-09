@@ -593,6 +593,9 @@ private:
     std::atomic<u64> registry_generation{0};
     u32 button_prompt_switches = 0;
     std::mutex samplers_mutex;
+    /// perf11: raised whenever the GC destroys a sampler (GetSampler's memo; starts at 1, an
+    /// empty memo entry has 0).
+    std::atomic<u64> sampler_generation{1};
     std::mutex download_images_mutex;
     /// perf10: set with the mutex held when an image is queued for download; lets every
     /// fence (ProcessDownloadImages, ~300k/s in U3's crowd) skip the mutex when none is.

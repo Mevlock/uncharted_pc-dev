@@ -707,7 +707,9 @@ private:
         VAddr end;
         u64 position;
     };
-    std::vector<PendingWrite> pending_writes;
+    /// perf11: the pending-write list is stage A's (~1.4M notes/s in U3's crowd): on its own cache
+    /// lines, apart from the stage B register copy above and stage B's per-draw fields below.
+    alignas(64) std::vector<PendingWrite> pending_writes;
     VAddr pending_min = ~VAddr{0}, pending_max = 0; ///< bounds of pending_writes
     /// Diagnosis (BB_FRAME_STATS line): calls and entries scanned (note, overlap check).
     u64 pending_stats[4]{};
@@ -727,7 +729,7 @@ private:
     /// list (U3 market: ~1M checks a second scanning 50-70 entries each).
     std::vector<PendingWrite> pending_big_writes;
     void PrunePendingWrites();
-    u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
+    alignas(64) u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< bbport: extra bias of this draw's samplers
     bool material_draw = false;    ///< bbport: writes 5+ targets (G-buffer: scene materials)
     bool scene_debug_frame = false; ///< BB_SCENE_DEBUG: this frame's passes are printed
@@ -753,11 +755,13 @@ private:
         }
         return nullptr;
     }
-    std::unique_ptr<ConstantRing> constant_ring;
+    /// perf11: the pointers both stages read for every packet (written once) are on cache lines
+    /// apart from stage A's deque. The order is kept: draw_pipe is destroyed first (it drains).
+    alignas(64) std::unique_ptr<ConstantRing> constant_ring;
     std::unique_ptr<RingCollector> ring_collector; ///< BB_RING_COLLECTOR=1
-    /// Submissions (prepared draws) kept alive until stage B reaches the position.
-    std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
-    std::unique_ptr<DrawPipe> draw_pipe;
+    /// Submissions (prepared draws) kept alive until stage B reaches the position (stage A).
+    alignas(64) std::deque<std::pair<u64, std::shared_ptr<const void>>> pipe_keepalive;
+    alignas(64) std::unique_ptr<DrawPipe> draw_pipe;
 };
 
 } // namespace Vulkan
