@@ -1402,9 +1402,22 @@ s64 NowMs() {
         .count();
 }
 
+// Step 1 has two parts on a full preparation: loading what the cache holds (phase 3), then building the listed
+// shaders from the game files (phase 1). The bar gives them 0-5 % and 5-15 % (PreparationFraction).
+static std::atomic<bool> prep_built{false};
+// Between compiling and saving the phase is 0 for a moment: that is not the end (the bar would show 100 % and, as it
+// never goes back, stay there while saving).
+static std::atomic<bool> prep_saving_seen{false};
+
 void SetShaderPreparation(int phase, u32 done, u32 total) {
     if (prep_phase.load(std::memory_order_relaxed) != phase) {
         prep_phase_start_ms.store(NowMs(), std::memory_order_relaxed);
+    }
+    if (phase == 1) {
+        prep_built.store(true, std::memory_order_relaxed);
+    }
+    if (phase == 4) {
+        prep_saving_seen.store(true, std::memory_order_relaxed);
     }
     prep_done.store(done, std::memory_order_relaxed);
     prep_total.store(total, std::memory_order_relaxed);
@@ -1442,7 +1455,12 @@ void SetPreparationRebuild(bool on) {
     prep_rebuild.store(on, std::memory_order_release);
 }
 
+static std::atomic<float> prep_shown_fraction{0.0f}; // the bar's highest point on this page (PreparationFraction)
+
 void SetPreparationScreen(bool on) {
+    if (on) {
+        prep_shown_fraction.store(0.0f, std::memory_order_relaxed); // a new page starts its bar empty
+    }
     prep_screen.store(on, std::memory_order_release);
     runtime_freeze_guest(on ? 1 : 0); // the game's threads wait for the page (runtime.h; BB_PREP_FREEZE=0: they run)
 }
@@ -1481,15 +1499,27 @@ static bool PreparationSavesStep() {
     return prepare_only || page_saves.load(std::memory_order_relaxed);
 }
 
+// The bar never goes back while the page is up (a phase starting over would empty it: on an empty cache, step 1's
+// loading part filled 0-15 % in a moment and its building part began again at 0). prep_shown_fraction (declared
+// above SetPreparationScreen) is reset when the page opens.
+
 static float PreparationFraction(int phase, u32 done, u32 total, bool finishing, bool between) {
     const float step_part = total ? float(done) / float(total) : 0.0f;
-    const float compiled = PreparationSavesStep() ? 0.85f : 1.0f;
-    return phase == 4                 ? 0.85f + 0.15f * step_part
-           : finishing                ? 1.0f
-           : phase == 2               ? 0.15f + (compiled - 0.15f) * step_part
-           : phase == 1 || phase == 3 ? 0.15f * step_part
-           : between                  ? 0.15f
-                                      : 0.0f;
+    const bool full = PreparationSavesStep();
+    const float compiled = full ? 0.85f : 1.0f;
+    const float loaded = full ? 0.05f : 0.15f; // a full preparation builds after loading: 5-15 % for that
+    const bool saving_ahead = full && !prep_saving_seen.load(std::memory_order_relaxed);
+    const float fraction = phase == 4   ? 0.85f + 0.15f * step_part
+                           : finishing  ? (saving_ahead ? compiled : 1.0f)
+                           : phase == 2 ? 0.15f + (compiled - 0.15f) * step_part
+                           : phase == 3 ? loaded * step_part
+                           : phase == 1 ? (full ? 0.05f + 0.10f * step_part : 0.15f * step_part)
+                           : between    ? (full && !prep_built.load(std::memory_order_relaxed) ? loaded : 0.15f)
+                                        : 0.0f;
+    float shown = prep_shown_fraction.load(std::memory_order_relaxed);
+    while (fraction > shown && !prep_shown_fraction.compare_exchange_weak(shown, fraction)) {
+    }
+    return std::max(fraction, shown);
 }
 
 // "about 25 s left". Pipelines differ a lot in cost and finish in bursts on several threads, so the rate is taken over
