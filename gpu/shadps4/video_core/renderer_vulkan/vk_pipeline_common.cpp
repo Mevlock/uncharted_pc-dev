@@ -32,12 +32,14 @@ Pipeline::~Pipeline() {
 }
 
 namespace {
-/// bbport (perf10 idea 3), BB_PUSH_TEMPLATES=0 turns it off: push descriptors through update
-/// templates instead of copying WriteDescriptorSet arrays and their info arrays into the chunk.
+/// bbport (perf10 idea 3, experiment, OFF by default; BB_PUSH_TEMPLATES=1 turns it on): push
+/// descriptors through update templates instead of copying WriteDescriptorSet arrays and their
+/// info arrays into the chunk. U3 market, 2026-11-09: usual settings -0.5..-0.8% in three ABBA
+/// rounds (lower crowd minimum each time), slow CPU +1.9 / -1.8% (noise): no gain, kept off.
 bool PushTemplatesOn() {
     static const bool on = [] {
         const char* env = std::getenv("BB_PUSH_TEMPLATES");
-        return !(env && env[0] == '0');
+        return env && env[0] == '1';
     }();
     return on;
 }
