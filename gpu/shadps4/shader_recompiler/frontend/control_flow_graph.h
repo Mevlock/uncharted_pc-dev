@@ -74,6 +74,7 @@ public:
     [[nodiscard]] std::string Dot() const;
 
 private:
+    void DropBarrierExeczSkips();
     void EmitLabels();
     void EmitBlocks();
     void LinkBlocks();
