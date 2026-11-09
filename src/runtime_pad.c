@@ -1750,6 +1750,28 @@ static const unsigned char u1_menu_handler_us_code[]={0x55,0x48,0x89,0xe5,0x41,0
  * [rbx+0x20]). */
 static const unsigned char u3_platdelta_code[]={0x4c,0x8d,0x73,0x10,0x4c,0x8d,0x6b,0x20};
 static const unsigned char u3_platdelta_code_100[]={0x4c,0x8d,0x63,0x10,0x4c,0x8d,0x6b,0x20};
+/* U3, London Underground (spacepepperoni's 22edca79, their #63/#81; 1.00 code only, the 1.02 code differs): after Continue
+ * at the chapter's low-intensity checkpoint the title-screen music plays on into the level. The menu playlist survives
+ * level loads, loops and has no tempo; the level queues its playlist 0x0c3dd4f5 to switch at the playing track's next
+ * musical boundary, which the music manager's update finds with fmodf(position, beat length): with no tempo that is NaN,
+ * so the switch never comes. Only for that pending playlist, and only while the playing track has no tempo, the manager's
+ * wait-for-boundary flag is cleared (it switches at once, as a chapter start's music does). rbx (regs[0]) is the manager:
+ * +0x2f5 a playlist is pending, +0x224 its id, +0x22f its flags (4: wait for a boundary), +0x180 the playing track's beat
+ * length. Hooked at "cmp byte [rbx+0x2f5],0" (7 bytes moved), before the flag is read. BB_SKIP_CALLBACKS=menu music: off. */
+static const unsigned char u3_menu_music_code_100[]={0x80,0xbb,0xf5,0x02,0x00,0x00,0x00,0x74,0x61,0xf6,0x83,0x2f,
+                                                     0x02,0x00,0x00,0x04,0x0f,0x94,0xc0,0x44,0x08,0xf8,0x75,0x0a};
+static void __attribute__((ms_abi)) u3_menu_music_into_level(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                             const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)image; (void)r14;
+    unsigned char *manager=(unsigned char *)(uintptr_t)regs[0];
+    if ((uintptr_t)manager<0x10000 || !manager[0x2f5] || !(manager[0x22f] & 4)) return;
+    uint32_t pending; float beat;
+    memcpy(&pending,manager+0x224,4); memcpy(&beat,manager+0x180,4);
+    if (pending!=0x0c3dd4f5u || beat!=0.0f) return;
+    manager[0x22f]&=(unsigned char)~4;
+    static int told;
+    if (!told) { told=1; printf("U3 music: the London Underground music replaces the title music\n"); }
+}
 static void __attribute__((ms_abi)) u3_platdelta(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs) {
     (void)rdi; (void)rsi; (void)r14; (void)image;
     static int on=-1;
@@ -1906,6 +1928,8 @@ static const RuntimeGuestCallback guest_callbacks[]={
      sizeof(u3_light_ortho_call_100),NULL,u3_light_ortho_call_100},
     {"U3 platform change is not platform motion (1.02)",0x1195038,u3_platdelta_code,8,8,u3_platdelta,NULL},
     {"U3 platform change is not platform motion (1.00)",0x7e0df8,u3_platdelta_code_100,8,8,u3_platdelta,NULL},
+    {"U3 menu music into the London Underground (1.00)",0x69b13d,u3_menu_music_code_100,sizeof(u3_menu_music_code_100),7,
+     u3_menu_music_into_level,NULL},
 };
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     *count=sizeof(guest_callbacks)/sizeof(*guest_callbacks);
