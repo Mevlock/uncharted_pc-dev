@@ -189,6 +189,7 @@ void DescriptorHeap::CreateDescriptorPool() {
     ASSERT_MSG(pool_result == vk::Result::eSuccess, "Failed to create descriptor pool: {}",
                vk::to_string(pool_result));
     curr_pool = pool;
+    pool_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace Vulkan

@@ -87,6 +87,8 @@ public:
     /// Keeps the first part inserted under a key (two threads may build the same part at once).
     static std::shared_ptr<LibraryPart> Insert(u64 key, vk::UniquePipeline pipeline,
                                                vk::UniquePipelineLayout layout);
+    /// bbport (BB_VRAM_STATS): the parts kept (they live until the end).
+    static size_t Count();
 };
 
 /// bbport (BB_GPL): the key of a part, hashed from the values it is built from.

@@ -71,6 +71,9 @@ struct UniqueImage {
     /// info inside a ReuseScope (call once the GPU is done with it), else destroys it.
     void Recycle();
 
+    /// bbport (BB_VRAM_STATS): bytes of the images kept for recycling.
+    static u64 RecycledBytes();
+
     /// bbport: Create() calls on this thread may take a recycled image. Only for images whose
     /// contents are overwritten before use: a recycled one holds its old contents.
     struct ReuseScope {

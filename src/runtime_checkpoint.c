@@ -51,6 +51,7 @@ typedef void *(__attribute__((sysv_abi)) *FindTaskById)(void *mgr, uint32_t id);
 typedef void (__attribute__((sysv_abi)) *PlayTask)(void *task, int mode, int *fade_frames, int flag);
 
 int bbport_saves_start_practice(void); /* gpu/shim/bbport_saves.cpp: the practice copy, then practice mode on */
+void bbport_saves_test_jump_tick(void); /* gpu/shim/bbport_saves.cpp: BB_TEST_JUMP_EVERY soak jumps */
 
 /* BB_CHECKPOINT_TEST=<task id hex>@<seconds> (tests): one jump that many seconds after the first frame
  * this hook saw, as if picked in the overlay (practice mode too: the campaign save is not touched). */
@@ -78,6 +79,7 @@ static void test_request(void) {
 static void frame(const Build *b, uint64_t image) {
     atomic_store(&hooked,1);
     test_request();
+    bbport_saves_test_jump_tick();
     const uint32_t task=atomic_exchange(&requested,0);
     if (!task) return;
     unsigned char *base=(unsigned char *)(uintptr_t)image;
@@ -191,6 +193,7 @@ static void *walk_task_map(unsigned char *base, const OldBuild *b, uint32_t hash
 static void old_frame(const OldBuild *b, uint64_t image) {
     atomic_store(&hooked,1);
     test_request();
+    bbport_saves_test_jump_tick();
     const uint32_t task=atomic_exchange(&requested,0);
     if (!task) return;
     unsigned char *base=(unsigned char *)(uintptr_t)image;

@@ -38,6 +38,8 @@
 #include "video_core/landing_gate.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_guest_sync_stats.h"
+#include "video_core/renderer_vulkan/vk_runtime.h"
 
 namespace VideoCore {
 extern std::atomic<u32> g_async_stalled; // buffer_cache.cpp
@@ -1294,6 +1296,64 @@ void ScanDcb(std::span<const u32> dcb, int depth) {
 }
 } // namespace
 
+namespace {
+/// bbport diagnosis (BB_GUEST_SYNC_STATS=1, perf10 step 0): counts the guest's sync packets and
+/// hands each sync point to the recording thread in order (vk_guest_sync_stats.h).
+void RunGuestSyncPoint(Vulkan::Rasterizer& rasterizer, const u8* data) {
+    Vulkan::GuestSync::Kind kind;
+    std::memcpy(&kind, data, sizeof(kind));
+    if (Vulkan::GuestSync::On()) {
+        Vulkan::GuestSync::NoteSyncB(kind);
+    }
+    if (Vulkan::GuestSync::GuestBarriers() && Vulkan::GuestSync::IsStrong(kind)) {
+        rasterizer.GetRuntime().guest_barrier_pending = true;
+    }
+}
+
+void NoteGuestSyncPacket(Vulkan::Rasterizer* rasterizer, PM4ItOpcode opcode, const PM4Header* header,
+                         u32 ring) {
+    using namespace Vulkan::GuestSync;
+    Kind kind;
+    switch (opcode) {
+    case PM4ItOpcode::EventWrite: {
+        const auto type = reinterpret_cast<const PM4CmdEventWrite*>(header)->event_type.Value();
+        switch (type) {
+        case EventType::CsPartialFlush: kind = EwCsPartial; break;
+        case EventType::PsPartialFlush: kind = EwPsPartial; break;
+        case EventType::VsPartialFlush: kind = EwVsPartial; break;
+        case EventType::CacheFlush:
+        case EventType::CacheFlushTs:
+        case EventType::CacheFlushAndInvEvent:
+        case EventType::CacheFlushAndInvTsEvent:
+        case EventType::DbCacheFlushAndInv:
+        case EventType::FlushAndInvDbDataTs:
+        case EventType::FlushAndInvDbMeta:
+        case EventType::FlushAndInvCbDataTs:
+        case EventType::FlushAndInvCbMeta:
+        case EventType::FlushAndInvCbPixelData:
+            kind = EwCacheFlush;
+            break;
+        default: kind = EwOther; break;
+        }
+        break;
+    }
+    case PM4ItOpcode::EventWriteEop: kind = Eop; break;
+    case PM4ItOpcode::EventWriteEos: kind = Eos; break;
+    case PM4ItOpcode::AcquireMem: kind = AcquireMem; break;
+    case PM4ItOpcode::ReleaseMem: kind = ReleaseMem; break;
+    case PM4ItOpcode::WaitRegMem: kind = WaitRegMem; break;
+    case PM4ItOpcode::DmaData: kind = DmaData; break;
+    default: return;
+    }
+    if (On()) {
+        NoteStageA(ring, kind);
+    }
+    if (rasterizer && (On() ? IsSyncPoint(kind) : IsStrong(kind))) {
+        rasterizer->RunInOrder(&RunGuestSyncPoint, &kind, sizeof(kind));
+    }
+}
+} // namespace
+
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
                                            u64 seq) {
     FIBER_ENTER(dcb_task_name);
@@ -1411,6 +1471,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                 // They may write guest memory: not before fences deferred earlier.
                 rasterizer->WaitDeferredSignals();
+            }
+            if (Vulkan::GuestSync::On() || Vulkan::GuestSync::GuestBarriers()) {
+                NoteGuestSyncPacket(rasterizer, opcode, header, 0);
             }
             switch (opcode) {
             case PM4ItOpcode::Nop: {
@@ -2374,6 +2437,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         if (rasterizer && (drain_all || !no_drain)) {
             rasterizer->DrainDrawPipe(by_opcode ? static_cast<u32>(opcode)
                                                 : Vulkan::DrawPipe::ReasonCompute);
+        }
+        if (Vulkan::GuestSync::On() || Vulkan::GuestSync::GuestBarriers()) {
+            NoteGuestSyncPacket(rasterizer, opcode, header, 1);
         }
 
         const auto* it_body = reinterpret_cast<const u32*>(header) + 1;

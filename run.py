@@ -245,8 +245,11 @@ def main():
         this = ['--run'] if getattr(sys, 'frozen', False) else [str(Path(__file__).resolve())]
         env['BB_EXE'] = exe
         env['BB_CHEATS'] = game_cheats(all_cheats, exe)
-        patches = cheats.build(game / exe, out, [c for c in env['BB_CHEATS'].split(',') if c])
-        env['BB_KEEP_BYTES'] = cheats.keep_bytes(game / exe, [c for c in env['BB_CHEATS'].split(',') if c])
+        # Unlock all rewards (launcher Game page, BB_UNLOCK_REWARDS=1): every game, code patches + kept switches.
+        enabled = [c for c in env['BB_CHEATS'].split(',') if c] + (['rewards'] if env.get('BB_UNLOCK_REWARDS') == '1'
+                                                                     else [])
+        patches = cheats.build(game / exe, out, enabled)
+        env['BB_KEEP_BYTES'] = cheats.keep_bytes(game / exe, enabled)
         env['BB_RESTART_COMMAND'] = subprocess.list2cmdline([sys.executable, *this, '--after', str(os.getpid()), *args])
         command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                    '--app0', str(game), '--user', str(user_dir), '--timeout', env.get('BB_TIMEOUT', '0')]

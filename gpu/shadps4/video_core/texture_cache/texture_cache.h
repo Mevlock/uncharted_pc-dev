@@ -128,6 +128,9 @@ public:
     void ProcessDownloadImages();
     /// bbport diagnosis: images queued for download at the next end-of-pipe event.
     bool HasQueuedDownloads() {
+        if (!downloads_queued.load(std::memory_order_acquire)) {
+            return false;
+        }
         std::unique_lock lk{download_images_mutex};
         return !download_images.empty() || !small_download_images.empty();
     }
@@ -416,6 +419,15 @@ public:
     /// Runs the garbage collector.
     void RunGarbageCollector();
 
+    /// bbport (BB_VRAM_STATS): the cached images' video memory by kind (GPU thread).
+    struct ImageStats {
+        u64 target_bytes = 0, target_count = 0;   ///< used as a render target or depth buffer
+        u64 texture_bytes = 0, texture_count = 0; ///< the others
+        u64 gpu_written_bytes = 0;                ///< of both: GPU-modified, only in video memory
+        u64 pending_free_bytes = 0;               ///< deleted, not destroyed yet
+    };
+    ImageStats GetImageStats();
+
     template <typename Func>
     void ForEachImageInRegion(VAddr cpu_addr, size_t size, Func&& func) {
         using FuncReturn = typename std::invoke_result<Func, ImageId, Image&>::type;
@@ -582,6 +594,9 @@ private:
     u32 button_prompt_switches = 0;
     std::mutex samplers_mutex;
     std::mutex download_images_mutex;
+    /// perf10: set with the mutex held when an image is queued for download; lets every
+    /// fence (ProcessDownloadImages, ~300k/s in U3's crowd) skip the mutex when none is.
+    std::atomic<bool> downloads_queued{false};
     /// bbport: small-target read-backs queued to land after the GPU (DownloadImageMemory without
     /// sync). UnmapMemory cancels those in its range, and a landing writes under the mutex, so a
     /// VA mapped again never gets the old target's bytes (code review A4).

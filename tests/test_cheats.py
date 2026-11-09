@@ -52,6 +52,11 @@ class CheatTests(unittest.TestCase):
         env = self.launcher.game_environment(self.settings(u2_noreload=True, u3_onehit=True))
         self.assertEqual(env['BB_CHEATS'], 'u2:noreload,u3:onehit')
 
+    def test_rewards_reach_the_environment_only_when_on(self):
+        self.assertNotIn('BB_UNLOCK_REWARDS', self.launcher.game_environment(self.settings()))
+        self.assertFalse(self.launcher.APP_DEFAULTS['unlock_rewards'])
+        self.assertEqual(self.launcher.game_environment(self.settings(unlock_rewards=True))['BB_UNLOCK_REWARDS'], '1')
+
     def test_run_keeps_only_the_running_games_cheats(self):
         cheats = 'u1:health,u2:ammo,u3:health,u3:ammo'
         self.assertEqual(self.runner.game_cheats(cheats, 'eboot.bin'), 'health')
@@ -155,6 +160,30 @@ class PatchFileTests(unittest.TestCase):
             # Uncharted 3's cheat block: One Hit Kills sits 0x101 bytes after No Reload in both builds.
             table = self.cheats.KEEP[codes[u3]]
             self.assertEqual(table['onehit'][0] - table['noreload'][0], 0x101)
+
+    def test_reward_tables_cover_both_builds(self):
+        for codes in (self.cheats.EU, self.cheats.US):
+            for exe in ('eboot.bin', 'big2-ps4_Shipping.elf', 'big3-ps4_Shipping.elf'):
+                patches = self.cheats.REWARD_PATCHES[codes[exe]]
+                self.assertEqual(len(patches), 7 if exe == 'eboot.bin' else 1)
+                for _label, _address, original, replacement in patches:
+                    a, b = bytes.fromhex(original), bytes.fromhex(replacement)
+                    self.assertEqual(len(a), len(b))
+                    self.assertEqual(sum(x != y for x, y in zip(a, b)), 1)
+            for exe in ('big2-ps4_Shipping.elf', 'big3-ps4_Shipping.elf'):
+                switches = self.cheats.REWARD_SWITCHES[codes[exe]]
+                # "Give all Store Items", then "Give All Movies" in the next byte; each lea points at its switch.
+                self.assertEqual(switches[1][0] - switches[0][0], 1)
+                for offset, lea, encoding in switches:
+                    data = bytes.fromhex(encoding)
+                    self.assertEqual(lea + len(data) + struct.unpack_from('<i', data, 3)[0], offset)
+
+    def test_rewards_on_an_unknown_executable_write_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            exe = Path(directory) / 'game.elf'
+            exe.write_bytes(tiny_self(bytes(0x40)))
+            self.assertIsNone(self.cheats.build(exe, directory, ['rewards']))
+            self.assertEqual(self.cheats.keep_bytes(exe, ['rewards']), '')
 
     def test_keep_bytes_needs_a_known_executable(self):
         with tempfile.TemporaryDirectory() as directory:

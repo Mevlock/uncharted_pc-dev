@@ -153,6 +153,27 @@ TRANSLATIONS = {
         "generati.",
         'ゲーム本来のフレームの間にフレームを生成します。画面上の 60 FPS が 120 になります。入力遅延が少し増えます。'
         'メニューとカットシーンの動画は生成されません。ランチャーのフレームレート上限は生成フレームも数えます。'),
+    'Mouse': L('Ratón', 'Mouse', 'Souris', 'Maus', 'Mouse', 'マウス'),
+    'Mouse sensitivity': L('Sensibilidad del ratón', 'Sensibilidade do mouse', 'Sensibilité de la souris',
+                           'Mausempfindlichkeit', 'Sensibilità del mouse', 'マウス感度'),
+    'Aiming sensitivity': L('Sensibilidad al apuntar', 'Sensibilidade ao mirar', 'Sensibilité en visée',
+                            'Empfindlichkeit beim Zielen', 'Sensibilità in mira', '照準時の感度'),
+    'Vertical sensitivity': L('Sensibilidad vertical', 'Sensibilidade vertical', 'Sensibilité verticale',
+                              'Vertikale Empfindlichkeit', 'Sensibilità verticale', '縦方向の感度'),
+    'Aiming: times the mouse sensitivity while aiming (1.00 the same as looking around). Vertical: times it for '
+    'up and down. Ctrl+click to type a value.': L(
+        'Al apuntar: multiplica la sensibilidad del ratón mientras apuntas (1.00 igual que al mirar alrededor). '
+        'Vertical: la multiplica para arriba y abajo. Ctrl+clic para escribir un valor.',
+        'Ao mirar: multiplica a sensibilidade do mouse enquanto você mira (1.00 igual a olhar ao redor). Vertical: '
+        'multiplica para cima e para baixo. Ctrl+clique para digitar um valor.',
+        'En visée : multiplie la sensibilité de la souris pendant la visée (1.00 = comme pour regarder autour). '
+        'Verticale : la multiplie pour le haut et le bas. Ctrl+clic pour saisir une valeur.',
+        'Beim Zielen: Faktor auf die Mausempfindlichkeit beim Zielen (1.00 wie beim Umsehen). Vertikal: Faktor für '
+        'oben und unten. Strg+Klick, um einen Wert einzugeben.',
+        'In mira: moltiplica la sensibilità del mouse mentre miri (1.00 come quando ti guardi intorno). Verticale: '
+        'la moltiplica per su e giù. Ctrl+clic per digitare un valore.',
+        '照準時：照準中のマウス感度の倍率です(1.00 で見回すときと同じ)。縦方向：上下の動きの倍率です。'
+        'Ctrl+クリックで値を入力できます。'),
     'Other': L('Otros', 'Outros', 'Autres', 'Sonstiges', 'Altro', 'その他'),
     'FPS counter in the corner': L('Contador de FPS en la esquina', 'Contador de FPS no canto',
                                    'Compteur de FPS dans le coin', 'FPS-Zähler in der Ecke',
@@ -367,6 +388,10 @@ TRANSLATIONS = {
     'Chapter': L('Capítulo', 'Capítulo', 'Chapitre', 'Kapitel', 'Capitolo', 'チャプター'),
     '(now)': L('(ahora)', '(agora)', '(actuel)', '(jetzt)', '(ora)', '(現在)'),
     'Go there': L('Ir allí', 'Ir para lá', 'Y aller', 'Dorthin springen', 'Vai lì', 'ジャンプ'),
+    'Or double-click a checkpoint in the list.': L(
+        'O haz doble clic en un punto de control de la lista.', 'Ou clique duas vezes em um checkpoint da lista.',
+        'Ou double-cliquez sur un point de contrôle de la liste.', 'Oder doppelklicke auf einen Checkpoint in der Liste.',
+        'Oppure fai doppio clic su un checkpoint nella lista.', 'またはリストのチェックポイントをダブルクリックします。'),
 
     # ---- Save slots page -----------------------------------------------------------------------------------------
     'Story save': L('Partida de la historia', 'Jogo salvo da história', 'Sauvegarde de l’histoire',

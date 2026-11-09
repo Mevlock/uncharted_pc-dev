@@ -9,6 +9,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
+#include "video_core/renderer_vulkan/vk_guest_sync_stats.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
@@ -219,6 +220,11 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                       std::optional<VideoCore::SubresourceRange> subres_range) {
     BeforeImageAccess();
     if (scene_targets) scene_targets->NativeAccess(*image, dst_access);
+    if (GuestSync::On() &&
+        (dst_access & (vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eShaderStorageWrite |
+                       vk::AccessFlagBits2::eTransferWrite))) {
+        GuestSync::NoteWrite();
+    }
     const size_t prev_num_barriers = static_cast<size_t>(image_barriers.size());
     image->GetBarriers(image_barriers, dst_layout, dst_access, dst_stage, subres_range);
     return image_barriers.size() != prev_num_barriers;
@@ -794,6 +800,9 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
         .range_start = offset,
         .range_end = offset + size - 1,
     };
+    if (guest_dirty) {
+        return true; // BB_GUEST_BARRIERS: guest stores are not tracked by range
+    }
     bool has_access = barrier_tracker.FindRange(range, Access::Write);
     if (check_read_access && !has_access) {
         has_access |= barrier_tracker.FindRange(range, Access::Read);
@@ -848,6 +857,9 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         memo = {range.resource, range.range_start, range.range_end, access_epoch, u32(access)};
     };
     if (src_access & WRITE_MASK) {
+        if (GuestSync::On()) {
+            GuestSync::NoteWrite();
+        }
         insert(Access::Write);
     }
     if (src_access & READ_MASK) {
@@ -865,11 +877,11 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         return env ? u32(std::strtoul(env, nullptr, 10)) : 4096u;
     }();
     if (cap && tracked_inserts >= cap) {
-        FlushBarriers();
+        FlushBarriers(GuestSync::SiteCap);
     }
 }
 
-void Runtime::FlushBarriers() {
+void Runtime::FlushBarriers(u32 site) {
     BeforeImageAccess();
     vk::DependencyInfo dep_info{};
 
@@ -884,6 +896,10 @@ void Runtime::FlushBarriers() {
 
     if (!dep_info.memoryBarrierCount && !dep_info.imageMemoryBarrierCount) {
         return;
+    }
+    if (GuestSync::On()) {
+        GuestSync::NoteFlush(site, dep_info.memoryBarrierCount != 0,
+                             dep_info.imageMemoryBarrierCount);
     }
 
     scheduler.EndRendering();
@@ -903,6 +919,8 @@ void Runtime::FlushBarriers() {
     memory_barrier.srcAccessMask = vk::AccessFlagBits2::eNone;
 
     image_barriers.clear();
+    guest_dirty = false;
+    guest_barrier_pending = false;
     barrier_tracker.Clear();
     tracked_inserts = 0;
     ++access_epoch;

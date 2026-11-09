@@ -31,6 +31,7 @@
 #include <openssl/blowfish.h>
 
 #include "bbport_i18n.h"
+#include "video_core/renderer_vulkan/vk_vram.h"
 
 extern "C" {
 int runtime_savedata_dir(char* out, size_t size);
@@ -397,10 +398,28 @@ bool Load(int index, std::string& message) {
     return true;
 }
 
+// Entries the game's task list marks playable that are no place to start from: Naughty Dog's test entries
+// (U1 ricks-test-1/2, U2 playtest, destructible-test-1, treasure-test-1) and a bookkeeping step (U3
+// ldn-buddy-remove-combat-skills, between London and the Chateau). Left out of the Checkpoints page; their
+// numbers stay, so the list keeps the game's numbering.
+static bool HiddenTask(int game, uint32_t task) {
+    static const struct { int game; uint32_t task; } hidden[] = {
+        {1, 0x626acf3c}, {1, 0x6f29e9e5},
+        {2, 0x5d5e2861}, {2, 0xcdfaf8f7}, {2, 0x74d7c0f9},
+        {3, 0x490efeff},
+    };
+    for (const auto& h : hidden) {
+        if (h.game == game && h.task == task) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<Checkpoint> Checkpoints() {
     std::vector<Checkpoint> list;
     for (const TaskRow& t : tasks) {
-        if (t.game == Game() && t.number) {
+        if (t.game == Game() && t.number && !HiddenTask(t.game, t.task)) {
             list.push_back(Lookup(t.game, t.task));
         }
     }
@@ -754,6 +773,119 @@ static void ClosedImpl(const char* host_dir) {
                 BbSaves::Describe(now, false).c_str());
 }
 
+// BB_TEST_JUMP_EVERY=<seconds> (tests only; off unless set): a soak across many areas and chapters. Every that
+// many seconds of play the game jumps on BB_TEST_JUMP_STEP (default 5) checkpoints in its list, from the
+// checkpoint it is at, with the overlay's jump (BbSaves::Jump: the first one turns practice mode on, so the
+// player's own save is never written), and wraps at the end. Dev and test entries (Naughty Dog's test levels at
+// the end of the U1 and U2 lists, kiosk demos, the end credits) are left out. Play time is the time between the
+// game's frames (runtime_checkpoint.c calls this once a frame); a gap over half a second (a load) does not count.
+// BB_TEST_JUMP_FIRST=<seconds>: the first jump after that many (default BB_TEST_JUMP_EVERY).
+// Each jump logs "Test jump: #N name (chapter C title)" and starts a "VRAM load:" line (BB_VRAM_STATS).
+namespace {
+bool SoakSkipped(const BbSaves::Checkpoint& c) {
+    const std::string& n = c.name;
+    return n.empty() || n == "?" || n == "end" || n.find("kiosk") != std::string::npos;
+}
+bool DevTail(const BbSaves::Checkpoint& c) {
+    for (const char* word : {"test", "mocap", "tech-dive", "unused", "empty-level"}) {
+        if (c.name.find(word) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+std::vector<BbSaves::Checkpoint> SoakList() {
+    std::vector<BbSaves::Checkpoint> list;
+    for (const BbSaves::Checkpoint& c : BbSaves::Checkpoints()) {
+        if (DevTail(c)) {
+            break;  // everything after the first dev entry is Naughty Dog's (U1 ch22 "start" x3 too)
+        }
+        if (!SoakSkipped(c)) {
+            list.push_back(c);
+        }
+    }
+    return list;
+}
+} // namespace
+
+static void TestJumpImpl() {
+    static const double every = [] {
+        const char* env = std::getenv("BB_TEST_JUMP_EVERY");
+        return env && env[0] ? std::atof(env) : 0.0;
+    }();
+    if (every <= 0.0) {
+        return;
+    }
+    static const int step = [] {
+        const char* env = std::getenv("BB_TEST_JUMP_STEP");
+        const int value = env && env[0] ? std::atoi(env) : 5;
+        return value != 0 ? value : 5;
+    }();
+    static const double first = [] {
+        const char* env = std::getenv("BB_TEST_JUMP_FIRST");
+        return env && env[0] ? std::atof(env) : every;
+    }();
+    static std::vector<BbSaves::Checkpoint> list;
+    static bool started = false, reported = false;
+    static int index = -1, jumps = 0;
+    static double played = 0.0, due = 0.0;
+    static std::chrono::steady_clock::time_point last{};
+    const auto now = std::chrono::steady_clock::now();
+    if (!started) {
+        started = true;
+        last = now;
+        due = first;
+        list = SoakList();
+        std::printf("Test jump: every %.0f s of play (first after %.0f s), %d checkpoints a step, %zu checkpoints "
+                    "in the list (BB_TEST_JUMP_EVERY)\n",
+                    every, first, step, list.size());
+        std::fflush(stdout);
+        return;
+    }
+    const double gap = std::chrono::duration<double>(now - last).count();
+    last = now;
+    if (gap < 0.5) {
+        played += gap;
+    }
+    if (played < due || list.empty()) {
+        return;
+    }
+    if (!BbSaves::JumpsAvailable()) {
+        if (!reported) {
+            reported = true;
+            std::printf("Test jump: checkpoint jumps are not available for this release; no jumps\n");
+        }
+        due = played + every;
+        return;
+    }
+    if (index < 0) {
+        // From the checkpoint the game is at (its campaign save), or the start of the list.
+        const BbSaves::Checkpoint now_at = BbSaves::Current();
+        index = 0;
+        for (size_t i = 0; i < list.size(); ++i) {
+            if (now_at.known && list[i].task == now_at.task) {
+                index = static_cast<int>(i);
+                break;
+            }
+        }
+        std::printf("Test jump: starting from %s\n", BbSaves::Describe(now_at, false).c_str());
+    }
+    const int count = static_cast<int>(list.size());
+    index = ((index + step) % count + count) % count;
+    const BbSaves::Checkpoint& target = list[index];
+    std::string message;
+    ++jumps;
+    if (BbSaves::Jump(target, message)) {
+        Vulkan::Vram::test_jump_seq.fetch_add(1, std::memory_order_relaxed);
+        std::printf("Test jump: #%d %s (chapter %d %s) [jump %d at %.0f s of play]\n", target.number,
+                    target.name.c_str(), target.chapter, target.chapter_title.c_str(), jumps, played);
+    } else {
+        std::printf("Test jump: #%d %s not made: %s\n", target.number, target.name.c_str(), message.c_str());
+    }
+    std::fflush(stdout);
+    due = played + every;
+}
+
 // The game's threads call these (runtime_checkpoint.c, runtime_savedata.c). A C++ exception escaping into that C code
 // ended the game with a fail-fast (0xC0000409) and no crash report; here it is logged, and the save in question is
 // left as it was (every step above copies first and replaces last).
@@ -777,6 +909,16 @@ extern "C" int bbport_saves_start_practice(void) {
     int ok = 0;
     Guarded("practice start", [&] { ok = StartPracticeImpl(); });
     return ok;
+}
+
+extern "C" void bbport_saves_test_jump_tick(void) {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_TEST_JUMP_EVERY");
+        return env && env[0] && std::atof(env) > 0.0;
+    }();
+    if (on) {
+        Guarded("test jump", [] { TestJumpImpl(); });
+    }
 }
 
 extern "C" void bbport_saves_apply_pending(void) {

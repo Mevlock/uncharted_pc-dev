@@ -5,16 +5,22 @@
  *   key.<action>=<key or mouse name>[|<second>]   SDL key names ("Space", "Left Shift", "W"),
  *       "Mouse Left", "Mouse Right", "Mouse Middle", "Mouse 4", "Mouse 5", "Wheel Up",
  *       "Wheel Down"; actions: cross circle square triangle l1 r1 l2 r2 l3 r3 options touchpad
- *       up down left right, ls_up ls_down ls_left ls_right, rs_up rs_down rs_left rs_right.
+ *       up down left right, ls_up ls_down ls_left ls_right, rs_up rs_down rs_left rs_right,
+ *       rotate_ccw rotate_cw (held: the left stick circles counter-clockwise / clockwise, for
+ *       the valves and wheels that ask for the stick turned in circles), walk (held: the
+ *       movement keys push the left stick only part of the way, so the character walks).
  *   pad.<action>=<controller button>   SDL names (a b x y leftshoulder rightshoulder
  *       lefttrigger righttrigger leftstick rightstick back start dpup dpdown dpleft dpright
  *       touchpad misc1 paddle1..paddle4) or "none", for the button actions above.
  *   mouse_look=1  mouse_sensitivity=1.0  mouse_invert_y=0  pad_invert_y=0
- *   pad_vibration=1  pad_vibration_strength=100
+ *   mouse_aim_sensitivity=1.0 (times the sensitivity while aiming)  mouse_vertical=1.0 (times it for up/down)
+ *   pad_vibration=1  pad_vibration_strength=100  walk_speed=65 (walk key deflection, percent, 50-100)
  *
  * Defaults (no file): WASD move, mouse look, left button R2 (fire), right button L2 (aim),
  * Space Cross, C Circle, F Square, E Triangle, Q L1, G R1, Left Shift L3, V R3, Escape/Enter
- * Options, Tab touchpad, arrow keys and the wheel the d-pad, IJKL the right stick. */
+ * Options, Tab touchpad, arrow keys and the wheel the d-pad, IJKL the right stick, R and T
+ * turn the left stick round counter-clockwise and clockwise, Left Ctrl walks (the rotate and
+ * walk keys by drakolordx7, from his fork: 46aec0d3, 6455d6bb). */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "gpu/bbgpu.h"
@@ -84,7 +90,6 @@ static void touch_click(PadData *d, int right) {
     d->touches[0]=(PadTouch){.x=right ? 1440 : 480,.y=471,.id=0};
 }
 
-/* Opens the first gamepad SDL knows about; called under lock. */
 /* The keyboard and mouse were used last (the prompts' device 0): the controller doesn't rumble
  * (antikmewzik's controls fork). */
 static int keyboard_in_use;
@@ -95,8 +100,8 @@ static int keyboard_in_use;
 static unsigned long long pad_taps; /* bit = SDL_GamepadButton, set on BUTTON_DOWN */
 static bool SDLCALL pad_tap_watch(void *userdata, SDL_Event *event) {
     (void)userdata;
-    if (event->type==SDL_EVENT_GAMEPAD_BUTTON_DOWN && event->gbutton.button<64 &&
-        (!gamepad || event->gbutton.which==SDL_GetGamepadID(gamepad)))
+    /* (any open pad: a press on another one makes it the pad in use, pad_pressed) */
+    if (event->type==SDL_EVENT_GAMEPAD_BUTTON_DOWN && event->gbutton.button<64)
         __atomic_or_fetch(&pad_taps,1ull<<event->gbutton.button,__ATOMIC_RELAXED);
     return true;
 }
@@ -111,11 +116,13 @@ static int pad_latch_enabled(void) {
  * second; a removed one is closed at once; rumble and the light bar back off for 2 s after a slow write. Calls
  * slower than 2 ms are logged ("Runtime: pad ... took"). */
 static volatile int pad_added=1, pad_removed;
+static volatile SDL_JoystickID pad_pressed; /* the pad that had the last button press */
 static uint64_t next_pad_scan_us, pad_writes_after_us;
 static bool SDLCALL pad_device_watch(void *userdata, SDL_Event *event) {
     (void)userdata;
     if (event->type==SDL_EVENT_GAMEPAD_ADDED) __atomic_store_n(&pad_added,1,__ATOMIC_RELEASE);
     else if (event->type==SDL_EVENT_GAMEPAD_REMOVED) __atomic_store_n(&pad_removed,1,__ATOMIC_RELEASE);
+    else if (event->type==SDL_EVENT_GAMEPAD_BUTTON_DOWN) __atomic_store_n(&pad_pressed,event->gbutton.which,__ATOMIC_RELEASE);
     return true;
 }
 static void pad_slow(const char *what, uint64_t start) {
@@ -126,6 +133,92 @@ static void pad_slow(const char *what, uint64_t start) {
         if (took>8000 && (what[0]=='r' || what[0]=='l')) pad_writes_after_us=now_us()+2000000; /* rumble, light */
     }
 }
+/* Every connected controller stays open and the game reads the one in use: the last that had a button pressed or a
+ * stick or trigger pushed past half way (from spacepepperoni's Linux port, 3329bf97). Only the first one SDL listed
+ * was read before, so a virtual or hidden pad listed first (Steam Input, DS4Windows, a handheld's built-in
+ * controller) won and the controller in the player's hands gave no input (upstream #629, #682, #653, #765, #762).
+ * A pad becomes the one in use on a press or a push (an edge), so a pad that reports a stick held all the time cannot
+ * keep taking over. With one controller nothing changes. Rumble and the light bar go to the pad in use.
+ * A virtual mirror of the pad in the player's hands (Steam Input, DS4Windows) gets the same presses a few ms apart:
+ * another pad takes over only when the one in use has had no press or push for PAD_QUIET_US, and none in the
+ * PAD_CONFIRM_US after the other pad's (so the same input on both keeps the pad in use; before, every press could
+ * swap them, each swap stopping the old pad's rumble and moving the light bar). */
+#define MAX_GAMEPADS 8
+#define PAD_QUIET_US 400000u
+#define PAD_CONFIRM_US 60000u
+static SDL_Gamepad *gamepads[MAX_GAMEPADS];
+static int gamepad_count;
+static unsigned gamepad_pushed[MAX_GAMEPADS]; /* bit = axis past half way at the last look */
+static unsigned long long gamepad_held[MAX_GAMEPADS]; /* bit = SDL_GamepadButton held at the last look */
+static uint64_t gamepad_edge_us[MAX_GAMEPADS]; /* the last press or push (an edge) */
+static SDL_Gamepad *rumbled_pad;  /* the pad last given a rumble that may still run, until rumbled_until_us */
+static uint64_t rumbled_until_us;
+static unsigned long long pad_buttons_held(SDL_Gamepad *g) {
+    unsigned long long mask=0;
+    for (int b=0;b<SDL_GAMEPAD_BUTTON_COUNT && b<64;++b)
+        if (SDL_GetGamepadButton(g,(SDL_GamepadButton)b)) mask|=1ull<<b;
+    return mask;
+}
+static unsigned pad_axes_pushed(SDL_Gamepad *g) {
+    unsigned mask=0;
+    for (int a=0;a<SDL_GAMEPAD_AXIS_COUNT;++a) {
+        const int v=SDL_GetGamepadAxis(g,(SDL_GamepadAxis)a);
+        if (v>16384 || v<-16384) mask|=1u<<a;
+    }
+    return mask;
+}
+/* Closes pads that went away and (open_new) opens new ones. */
+static void list_gamepads(int open_new) {
+    for (int i=0;i<gamepad_count;) {
+        if (SDL_GamepadConnected(gamepads[i])) { ++i; continue; }
+        printf("Runtime: gamepad disconnected\n");
+        if (gamepads[i]==gamepad) gamepad=NULL;
+        if (gamepads[i]==rumbled_pad) rumbled_pad=NULL;
+        SDL_CloseGamepad(gamepads[i]);
+        --gamepad_count;
+        gamepads[i]=gamepads[gamepad_count];
+        gamepad_pushed[i]=gamepad_pushed[gamepad_count];
+        gamepad_held[i]=gamepad_held[gamepad_count];
+        gamepad_edge_us[i]=gamepad_edge_us[gamepad_count];
+    }
+    if (!open_new) return;
+    int count=0;
+    SDL_JoystickID *ids=SDL_GetGamepads(&count);
+    for (int k=0;ids && k<count && gamepad_count<MAX_GAMEPADS;++k) {
+        int known=0;
+        for (int i=0;i<gamepad_count && !known;++i) known=SDL_GetGamepadID(gamepads[i])==ids[k];
+        if (known) continue;
+        SDL_Gamepad *g=SDL_OpenGamepad(ids[k]);
+        if (!g) continue;
+        gamepad_pushed[gamepad_count]=pad_axes_pushed(g);
+        gamepad_held[gamepad_count]=pad_buttons_held(g);
+        gamepad_edge_us[gamepad_count]=0;
+        gamepads[gamepad_count++]=g;
+        ++connected_count;
+        printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(g));
+    }
+    SDL_free(ids);
+}
+static void use_gamepad(SDL_Gamepad *g) {
+    if (g==gamepad) return;
+    const uint64_t now=now_us();
+    /* the old one stops, if it may still be rumbling */
+    if (gamepad && gamepad==rumbled_pad && now<rumbled_until_us && now>=pad_writes_after_us) {
+        SDL_RumbleGamepad(gamepad,0,0,0);
+        rumbled_pad=NULL;
+    }
+    gamepad=g;
+    /* at most one line every 10 s, with the switches not logged in between */
+    static uint64_t logged_us;
+    static unsigned noted, unlogged;
+    if (noted<50 && (!logged_us || now-logged_us>=10000000u)) {
+        ++noted;
+        logged_us=now;
+        if (unlogged) printf("Runtime: gamepad in use: %s (%u switches not logged)\n",SDL_GetGamepadName(g),unlogged);
+        else printf("Runtime: gamepad in use: %s\n",SDL_GetGamepadName(g));
+        unlogged=0;
+    } else ++unlogged;
+}
 static SDL_Gamepad *current_gamepad(void) {
     if (!sdl_ready) {
         sdl_ready = SDL_WasInit(SDL_INIT_GAMEPAD) ? 1 : SDL_InitSubSystem(SDL_INIT_GAMEPAD) ? 1 : -1;
@@ -133,24 +226,51 @@ static SDL_Gamepad *current_gamepad(void) {
         if (sdl_ready>0) SDL_AddEventWatch(pad_device_watch,NULL);
     }
     if (sdl_ready<0) return NULL;
-    if (gamepad && (__atomic_exchange_n(&pad_removed,0,__ATOMIC_ACQ_REL) || !SDL_GamepadConnected(gamepad))) {
-        printf("Runtime: gamepad disconnected\n");
-        SDL_CloseGamepad(gamepad);
-        gamepad=NULL;
-        next_pad_scan_us=now_us()+1000000;
-    }
-    if (!gamepad) {
-        const uint64_t now=now_us();
-        if (!__atomic_exchange_n(&pad_added,0,__ATOMIC_ACQ_REL) && now<next_pad_scan_us) return NULL;
+    const uint64_t now=now_us();
+    const int removed=__atomic_exchange_n(&pad_removed,0,__ATOMIC_ACQ_REL);
+    const int added=__atomic_exchange_n(&pad_added,0,__ATOMIC_ACQ_REL);
+    if (removed || (gamepad && !SDL_GamepadConnected(gamepad))) {
+        /* (a pad going away can still be listed for a while: new ones are looked for on an added event or a second later) */
+        list_gamepads(0);
         next_pad_scan_us=now+1000000;
-        int count=0;
-        SDL_JoystickID *ids=SDL_GetGamepads(&count);
-        if (ids && count>0) {
-            gamepad=SDL_OpenGamepad(ids[0]);
-            if (gamepad) { ++connected_count; printf("Runtime: gamepad connected: %s\n",SDL_GetGamepadName(gamepad)); }
-        }
-        SDL_free(ids);
+    }
+    if (added || (!gamepad_count && now>=next_pad_scan_us)) {
+        next_pad_scan_us=now+1000000;
+        list_gamepads(1);
         pad_slow("open",now);
+    }
+    if (!gamepad && gamepad_count) use_gamepad(gamepads[0]);
+    if (gamepad_count>1) {
+        /* candidate: another pad that had an edge while the one in use was quiet; it takes over once the one in use
+         * stays quiet for PAD_CONFIRM_US more (a mirror's copy of the same press arrives in that time) */
+        static SDL_Gamepad *candidate;
+        static uint64_t candidate_us;
+        const SDL_JoystickID pressed=__atomic_exchange_n(&pad_pressed,0,__ATOMIC_ACQ_REL);
+        uint64_t current_edge=0;
+        int candidate_open=0;
+        SDL_Gamepad *next=NULL;
+        for (int i=0;i<gamepad_count;++i) {
+            const unsigned pushed=pad_axes_pushed(gamepads[i]);
+            const unsigned long long held=pad_buttons_held(gamepads[i]);
+            if ((pushed & ~gamepad_pushed[i]) || (held & ~gamepad_held[i]) ||
+                (pressed && SDL_GetGamepadID(gamepads[i])==pressed))
+                gamepad_edge_us[i]=now;
+            gamepad_pushed[i]=pushed;
+            gamepad_held[i]=held;
+            if (gamepads[i]==gamepad) current_edge=gamepad_edge_us[i];
+            if (gamepads[i]==candidate) candidate_open=1;
+        }
+        if (!candidate_open) candidate=NULL;
+        for (int i=0;i<gamepad_count && !candidate;++i)
+            if (gamepads[i]!=gamepad && gamepad_edge_us[i]==now && (!current_edge || now-current_edge>=PAD_QUIET_US)) {
+                candidate=gamepads[i];
+                candidate_us=now;
+            }
+        if (candidate) {
+            if (candidate==gamepad || (current_edge && current_edge+PAD_QUIET_US>candidate_us)) candidate=NULL; /* the one in use had the same input */
+            else if (now-candidate_us>=PAD_CONFIRM_US) { next=candidate; candidate=NULL; }
+        }
+        if (next) use_gamepad(next);
     }
     return gamepad;
 }
@@ -160,6 +280,8 @@ static void pad_rumble(SDL_Gamepad *g, uint16_t low, uint16_t high, uint32_t ms)
     const uint64_t start=now_us();
     SDL_RumbleGamepad(g,low,high,ms);
     pad_slow("rumble",start);
+    if (low || high) { rumbled_pad=g; rumbled_until_us=start+(uint64_t)ms*1000u; }
+    else if (g==rumbled_pad) rumbled_pad=NULL;
 }
 /* ---- the pad thread (BB_PAD_THREAD=0: off) ------------------------------------------------------------------------
  * Switching a controller off or on makes SDL rescan the input devices for 100-300 ms with its joystick lock held.
@@ -215,6 +337,7 @@ static uint8_t led_rgb[3];
 static void *pad_thread_main(void *arg) {
     (void)arg;
     unsigned rumble_done=0, led_done=0;
+    SDL_Gamepad *led_pad=NULL; /* the light bar's colour goes to a pad that becomes the one in use too */
     for (;;) {
         const uint64_t start=now_us();
         SDL_UpdateJoysticks();
@@ -238,6 +361,7 @@ static void *pad_thread_main(void *arg) {
         const uint8_t r=led_rgb[0], gg=led_rgb[1], b=led_rgb[2];
         pthread_mutex_unlock(&request_lock);
         if (rs!=rumble_done) { rumble_done=rs; pad_rumble(g,low,high,ms); }
+        if (g!=led_pad) { led_pad=g; if (g && ls) led_done=ls-1; }
         if (ls!=led_done && g && now_us()>=pad_writes_after_us) {
             led_done=ls;
             const uint64_t led_start=now_us();
@@ -317,7 +441,8 @@ static void pad_request_led(uint8_t r, uint8_t g, uint8_t b) {
 enum { BIND_KEY=1, BIND_MOUSE, BIND_WHEEL, BIND_LAYOUT };
 typedef struct { uint8_t kind; int32_t code; } Bind;
 typedef struct { const char *name; uint32_t ps; const char *keys; const char *pad; } Action;
-enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT, ACTIONS };
+enum { A_LS_UP=16, A_LS_DOWN, A_LS_LEFT, A_LS_RIGHT, A_RS_UP, A_RS_DOWN, A_RS_LEFT, A_RS_RIGHT,
+       A_ROT_CCW, A_ROT_CW, A_WALK, ACTIONS };
 static const Action actions[ACTIONS]={
     {"cross",BTN_CROSS,"Space","a"}, {"circle",BTN_CIRCLE,"C","b"}, {"square",BTN_SQUARE,"F","x"},
     {"triangle",BTN_TRIANGLE,"E","y"}, {"l1",BTN_L1,"Q","leftshoulder"}, {"r1",BTN_R1,"G","rightshoulder"},
@@ -328,14 +453,18 @@ static const Action actions[ACTIONS]={
     {"left",BTN_LEFT,"Left|Wheel Up","dpleft"}, {"right",BTN_RIGHT,"Right|Wheel Down","dpright"},
     {"ls_up",0,"W",NULL}, {"ls_down",0,"S",NULL}, {"ls_left",0,"A",NULL}, {"ls_right",0,"D",NULL},
     {"rs_up",0,"I",NULL}, {"rs_down",0,"K",NULL}, {"rs_left",0,"J",NULL}, {"rs_right",0,"L",NULL},
+    {"rotate_ccw",0,"R",NULL}, {"rotate_cw",0,"T",NULL}, {"walk",0,"Left Ctrl",NULL},
 };
 #define PAD_TRIGGER_LEFT (-2)
 #define PAD_TRIGGER_RIGHT (-3)
 static struct {
     Bind keys[ACTIONS][2];
     int pad[16];               /* SDL_GamepadButton, PAD_TRIGGER_*, or -1 */
-    int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength;
-    float mouse_sensitivity;
+    int mouse_look, mouse_invert_y, pad_invert_y, pad_vibration, pad_vibration_strength, walk_speed;
+    volatile float mouse_sensitivity;
+    /* Times the sensitivity while aiming (L2), and for up and down (looking and aiming). The in-game
+     * menu changes all three while the game runs (runtime_mouse_set, another thread: plain floats). */
+    volatile float mouse_aim_sensitivity, mouse_vertical;
 } input;
 
 /* Whether `name` is one of the keys in `defaults` ("Escape|Return"). */
@@ -384,7 +513,8 @@ static void load_input(void) {
         if (a<16) input.pad[a]=parse_pad(actions[a].pad);
     }
     input.mouse_look=1; input.mouse_sensitivity=1.0f;
-    input.pad_vibration=1; input.pad_vibration_strength=100;
+    input.mouse_aim_sensitivity=1.0f; input.mouse_vertical=1.0f;
+    input.pad_vibration=1; input.pad_vibration_strength=100; input.walk_speed=65;
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
     if (f) {
@@ -397,20 +527,28 @@ static void load_input(void) {
             const char *key=line, *value=eq+1;
             if (!strcmp(key,"mouse_look")) input.mouse_look=atoi(value)!=0;
             else if (!strcmp(key,"mouse_sensitivity")) input.mouse_sensitivity=(float)atof(value);
+            else if (!strcmp(key,"mouse_aim_sensitivity")) input.mouse_aim_sensitivity=(float)atof(value);
+            else if (!strcmp(key,"mouse_vertical")) input.mouse_vertical=(float)atof(value);
             else if (!strcmp(key,"mouse_invert_y")) input.mouse_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"pad_invert_y")) input.pad_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"pad_vibration")) input.pad_vibration=atoi(value)!=0;
             else if (!strcmp(key,"pad_vibration_strength")) input.pad_vibration_strength=atoi(value);
+            else if (!strcmp(key,"walk_speed")) {
+                const int v=atoi(value);
+                input.walk_speed=v<50 ? 50 : v>100 ? 100 : v; /* below about 55% the games' dead zone keeps the character still */
+            }
             else for (int a=0;a<ACTIONS;++a) {
                 if (!strncmp(key,"key.",4) && !strcmp(key+4,actions[a].name)) set_keys(a,value);
                 else if (a<16 && !strncmp(key,"pad.",4) && !strcmp(key+4,actions[a].name)) input.pad[a]=parse_pad(value);
             }
         }
         fclose(f);
-        printf("Runtime: controls from %s (mouse look %s, sensitivity %.2f)\n",path,
-               input.mouse_look ? "on" : "off",input.mouse_sensitivity);
+        printf("Runtime: controls from %s (mouse look %s, sensitivity %.2f, aiming x%.2f, vertical x%.2f)\n",path,
+               input.mouse_look ? "on" : "off",input.mouse_sensitivity,input.mouse_aim_sensitivity,input.mouse_vertical);
     }
     if (input.mouse_sensitivity<=0.0f) input.mouse_sensitivity=1.0f;
+    if (input.mouse_aim_sensitivity<=0.0f) input.mouse_aim_sensitivity=1.0f;
+    if (input.mouse_vertical<=0.0f) input.mouse_vertical=1.0f;
     if (input.pad_vibration_strength<0) input.pad_vibration_strength=0;
     if (input.pad_vibration_strength>100) input.pad_vibration_strength=100;
     bbgpu_mouse_configure(input.mouse_look);
@@ -433,7 +571,11 @@ static uint8_t mouse_axis(float rate) {
 }
 static int bind_down(const Bind *b, const bool *k, uint32_t mouse, uint64_t now) {
     switch (b->kind) {
-    case BIND_KEY: return k && k[b->code];
+    case BIND_KEY:
+        /* Alt+Enter switches window <-> fullscreen (window.cpp): that Enter is not a game key. */
+        if (k && (b->code==SDL_SCANCODE_RETURN || b->code==SDL_SCANCODE_KP_ENTER) &&
+            (k[SDL_SCANCODE_LALT] || k[SDL_SCANCODE_RALT] || bbgpu_window_enter_swallowed())) return 0;
+        return k && k[b->code];
     case BIND_LAYOUT: {
         const SDL_Scancode code=k ? SDL_GetScancodeFromKey((SDL_Keycode)b->code,NULL) : SDL_SCANCODE_UNKNOWN;
         return code!=SDL_SCANCODE_UNKNOWN && k[code];
@@ -563,6 +705,26 @@ static volatile int follow_direct=1;
 static float follow_kept=1.0f;            /* average fraction of a turn still there the next frame */
 static volatile int aim_held;             /* L2 is held: the aiming camera (also while it blends in) */
 static volatile int aim_stick_fallback; /* raw aim: the aiming camera puts its direction back (U1): the stick turns it */
+/* Degrees of turn per mouse pixel: the sensitivity, times the aiming one while aim is held (also
+ * while aiming blends in, and on the stick paths), times the vertical one for up and down. */
+static float mouse_scale(int vertical) {
+    float k=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+    if (aim_held) k*=input.mouse_aim_sensitivity;
+    if (vertical) k*=input.mouse_vertical;
+    return k;
+}
+/* The in-game menu: the current values (any pointer may be NULL) and changes (applied at once, for
+ * this session; values <= 0 are left as they are). */
+void runtime_mouse_get(float *look, float *aim, float *vertical) {
+    if (look) *look=input.mouse_sensitivity;
+    if (aim) *aim=input.mouse_aim_sensitivity;
+    if (vertical) *vertical=input.mouse_vertical;
+}
+void runtime_mouse_set(float look, float aim, float vertical) {
+    if (look>0.0f) input.mouse_sensitivity=look;
+    if (aim>0.0f) input.mouse_aim_sensitivity=aim;
+    if (vertical>0.0f) input.mouse_vertical=vertical;
+}
 static int raw_aim_armed(uint64_t now) {
     return aim_held && aim_direct_us && (now-aim_direct_us<1000000 || now-aim_press_us<1500000);
 }
@@ -648,7 +810,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
     float shown=heading; /* the shown camera's yaw (debug output) */
     double age=0.0;
     if (mouse_debug() && (!bbgpu_camera_yaw(&shown,&age) || age>0.25)) shown=heading;
-    const float turn=camera_test_rate>0.0f ? camera_test_rate : dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+    const float turn=camera_test_rate>0.0f ? camera_test_rate : dx*mouse_scale(0);
     /* the wanted heading and how far the direction is short of it (degrees still to turn). The
      * camera rests 0.15 s after the mouse stopped, once the direction has reached the wanted heading
      * (fast turns go beyond what the game keeps in a frame) or at the latest after 0.5 s. */
@@ -722,7 +884,7 @@ static void follow_camera(uint64_t camera, uint32_t dir_offset, uint32_t arc_off
         const float top_limit=arc_env>=0.0f ? arc_env : arc_max;
         float *arc=(float *)(uintptr_t)(camera+arc_offset);
         const float cur=*arc, top=cur>top_limit ? cur : top_limit;
-        float v=cur+(input.mouse_invert_y ? -dy : dy)*(MOUSE_DEGREES_PER_PIXEL/arc_degrees)*input.mouse_sensitivity;
+        float v=cur+(input.mouse_invert_y ? -dy : dy)*mouse_scale(1)/arc_degrees;
         *arc=v<0.0f ? 0.0f : v>top ? top : v;
     }
 }
@@ -743,7 +905,7 @@ static void cover_camera(float *dir, float *pitch, const float *limits) {
     if (aim_held) return; /* the aiming camera takes the mouse */
     if (mouse_debug()) printf("Mouse: cover t=%.4f dx=%.1f dy=%.1f heading=%.2f pitch=%.2f limits=%.1f..%.1f\n",
                               now*1e-6,dx,dy,heading_of(dir),*pitch,limits ? -limits[1] : 0.0f,limits ? limits[0] : 0.0f);
-    const float turn=dx*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+    const float turn=dx*mouse_scale(0);
     if (turn!=0.0f) {
         const float a=turn*0.017453293f, c=SDL_cosf(a), s=SDL_sinf(a);
         const float x=dir[0], z=dir[2];
@@ -751,7 +913,7 @@ static void cover_camera(float *dir, float *pitch, const float *limits) {
         dir[2]=x*s+z*c;
     }
     if (dy!=0.0f && limits) {
-        float v=*pitch-(input.mouse_invert_y ? -dy : dy)*MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+        float v=*pitch-(input.mouse_invert_y ? -dy : dy)*mouse_scale(1);
         if (v>limits[0]) v=limits[0];
         if (v<-limits[1]) v=-limits[1];
         *pitch=v;
@@ -809,7 +971,7 @@ static void raw_aim(const char *game, uint64_t controller, const uint64_t *regs,
     aim_dx=aim_dy=0.0f;
     pthread_mutex_unlock(&camera_lock);
     aim_direct_us=now;
-    const float k=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity*aim_scale;
+    const float k=mouse_scale(0)*aim_scale, k_vertical=mouse_scale(1)*aim_scale;
     if (mouse_debug()) printf("Mouse: aim t=%.4f ctl=%#llx yaw=%.3f pitch=%.3f dx=%.1f dy=%.1f\n",now*1e-6,(unsigned long long)controller,
                               SDL_atan2f(-dir[0],-dir[2])*57.29578f,SDL_atan2f(dir[1],SDL_sqrtf(dir[0]*dir[0]+dir[2]*dir[2]))*57.29578f,dx,dy);
     /* While aim is held the game may swap in new aiming cameras (after a roll: a new one about
@@ -908,7 +1070,7 @@ static void raw_aim(const char *game, uint64_t controller, const uint64_t *regs,
     }
     if (dx!=0.0f || dy!=0.0f) {
         turned_yaw+=dx*k;
-        turned_pitch+=-(input.mouse_invert_y ? -dy : dy)*k;
+        turned_pitch+=-(input.mouse_invert_y ? -dy : dy)*k_vertical;
     }
     const float yaw=turned_yaw-g->yaw, pitch=turned_pitch-g->pitch;
     g->sent_yaw=yaw; g->sent_pitch=pitch;
@@ -1172,7 +1334,7 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
     else {
         /* the turn rate (degrees/s) the mouse asks for, through the inverse of the aiming curve
          * measured in U1: 45 x^2 degrees/s up to x = 1, then about 54 x - 9 (x = 3: 152, x = 6: 324) */
-        const float scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity/dt;
+        const float scale=mouse_scale(0)/dt, scale_y=mouse_scale(1)/dt;
         const int following=camera_hook_us && now-camera_hook_us<50000;
         if (raw_aim_armed(now) && !aim_stick_fallback) dx=dy=0.0f; /* raw aim turns it */
         float push=0.0f;
@@ -1186,10 +1348,10 @@ static void __attribute__((ms_abi)) u1_joypad_sticks(uint64_t unused0, uint64_t 
         const float extra=!aim_held && following && !follow_direct ? follow_correction*4.0f : 0.0f;
         x=curve(dx*scale+extra)+push;
         /* aiming turns vertically at about 0.45 times the horizontal rate for the same stick value */
-        y=curve((input.mouse_invert_y ? -dy : dy)*scale/(aim_held ? 0.45f : 1.0f));
+        y=curve((input.mouse_invert_y ? -dy : dy)*scale_y/(aim_held ? 0.45f : 1.0f));
         /* US 1.02: past full deflection the aiming camera turns at 45 * x^0.65 (as U2's) */
         if (aim_held && u1_us_curve) {
-            const float rx=dx*scale, ry=(input.mouse_invert_y ? -dy : dy)*scale/0.45f;
+            const float rx=dx*scale, ry=(input.mouse_invert_y ? -dy : dy)*scale_y/0.45f;
             if (rx>45.0f || rx<-45.0f) x=rx>0.0f ? SDL_powf(rx/45.0f,1.0f/0.65f) : -SDL_powf(-rx/45.0f,1.0f/0.65f);
             if (ry>45.0f || ry<-45.0f) y=ry>0.0f ? SDL_powf(ry/45.0f,1.0f/0.65f) : -SDL_powf(-ry/45.0f,1.0f/0.65f);
         }
@@ -1515,6 +1677,45 @@ static const unsigned char u3_job_loads_code[]={0x49,0xc7,0x42,0x48,0x00,0x00,0x
 static const unsigned char u3_job_loads_jump[]={0x49,0xc7,0x42,0x48,0x00,0x00,0x00,0x00,0x48,0x8b,0x05,0xc4,0xc3,0xd6,0x00,0x49,0x89,0x42,0x10,0xe9,0xfd,0x0a,0x00,0x00,0x90,0x90,0x90};
 static const unsigned char u3_job_cave_code[]={0x48,0x8b,0x05,0x41,0x8d,0xc6,0x00,0x48,0x85,0xc0,0x74,0x27,0x48,0x8d,0x3d,0x08,0x41,0x4f,0x00,0x48,0x8d,0x35,0xfd,0x3e};
 static const unsigned char u3_job_cave_stub[]={0xcd,0x41,0x49,0x8b,0x42,0x08,0x48,0x85,0xc0,0x0f,0x84,0x9a,0xff,0xff,0xff,0x48,0x8b,0x48,0x20,0xe9,0xf0,0xf4,0xff,0xff};
+/* 1.00 code (EU CUSA02343 and US CUSA02320 1.00, the same bytes): the job function is not inlined there (U1 0x4ed260,
+ * U2 0x67b570, U3 0x629fd0: it opens the profiler scope, copies the descriptor with rbx = the record, then calls the
+ * job's work) and has the same two loads (mov rax, [rbx+8]; mov rcx, [rax+0x20]). They jump to a stub in the dead
+ * assert path of a nearby job type check ("cmp dword [rsi], 0x610ba10"; U1 0x4ed843, U2 0x67bb63, U3 0x62a5b3, kept
+ * int 0x41 first): a null pointer goes to the function's profiler scope pop and exit (U1 0x4ed41a, U2 0x67b72a,
+ * U3 0x62a18a), skipping the copy and the work as on 1.02. (Each 1.00 executable has a second, unreferenced copy of
+ * the descriptor copy, U3 0x629950: no call, jump, lea or pointer reaches it, so it is left alone.) */
+static const unsigned char u1_job_loads_code_100[]={0x48,0x89,0x53,0x48,0xe8,0x70,0xdc,0xf0,0xff,0x48,0x89,0x43,0x10,0x48,0x8b,0x43,0x08,0x48,0x8b,0x48,0x20};
+static const unsigned char u1_job_loads_jump_100[]={0x48,0x89,0x53,0x48,0xe8,0x70,0xdc,0xf0,0xff,0x48,0x89,0x43,0x10,0xe9,0x8c,0x05,0x00,0x00,0x90,0x90,0x90};
+static const unsigned char u1_job_cave_code_100[]={0xe8,0x58,0x66,0xe7,0xff,0x48,0x85,0xc0,0x74,0x27,0x48,0x8d,0x3d,0xd8,0xd0,0x32,0x00,0x48,0x8d,0x35,0xfa,0xd0,0x32,0x00};
+static const unsigned char u1_job_cave_stub_100[]={0xcd,0x41,0x48,0x8b,0x43,0x08,0x48,0x85,0xc0,0x0f,0x84,0xc8,0xfb,0xff,0xff,0x48,0x8b,0x48,0x20,0xe9,0x61,0xfa,0xff,0xff};
+static const unsigned char u2_job_loads_code_100[]={0x48,0x89,0x53,0x48,0xe8,0x10,0x9e,0xf0,0xff,0x48,0x89,0x43,0x10,0x48,0x8b,0x43,0x08,0x48,0x8b,0x48,0x20};
+static const unsigned char u2_job_loads_jump_100[]={0x48,0x89,0x53,0x48,0xe8,0x10,0x9e,0xf0,0xff,0x48,0x89,0x43,0x10,0xe9,0x9c,0x05,0x00,0x00,0x90,0x90,0x90};
+static const unsigned char u2_job_cave_code_100[]={0xe8,0x58,0xd6,0xe6,0xff,0x48,0x85,0xc0,0x74,0x27,0x48,0x8d,0x3d,0xf8,0xfd,0x56,0x00,0x48,0x8d,0x35,0x1a,0xfe,0x56,0x00};
+static const unsigned char u2_job_cave_stub_100[]={0xcd,0x41,0x48,0x8b,0x43,0x08,0x48,0x85,0xc0,0x0f,0x84,0xb8,0xfb,0xff,0xff,0x48,0x8b,0x48,0x20,0xe9,0x51,0xfa,0xff,0xff};
+static const unsigned char u3_job_loads_code_100[]={0x48,0x89,0x53,0x48,0xe8,0x30,0x6c,0xf0,0xff,0x48,0x89,0x43,0x10,0x48,0x8b,0x43,0x08,0x48,0x8b,0x48,0x20};
+static const unsigned char u3_job_loads_jump_100[]={0x48,0x89,0x53,0x48,0xe8,0x30,0x6c,0xf0,0xff,0x48,0x89,0x43,0x10,0xe9,0x8c,0x05,0x00,0x00,0x90,0x90,0x90};
+static const unsigned char u3_job_cave_code_100[]={0xe8,0xc8,0x24,0xe7,0xff,0x48,0x85,0xc0,0x74,0x27,0x48,0x8d,0x3d,0xd8,0xdf,0x9c,0x00,0x48,0x8d,0x35,0xfa,0xdf,0x9c,0x00};
+static const unsigned char u3_job_cave_stub_100[]={0xcd,0x41,0x48,0x8b,0x43,0x08,0x48,0x85,0xc0,0x0f,0x84,0xc8,0xfb,0xff,0xff,0x48,0x8b,0x48,0x20,0xe9,0x61,0xfa,0xff,0xff};
+/* U3 light camera NaN (BB_LIGHT_ORTHO_GUARD=0: off; from BilalReloaded's port 0.7.2, his #284: "Stay in the Light",
+ * the game stopped on "zscale*n+zoffset" in CreateOrthographicProjection, render-camera.h:441). The scene view's light
+ * camera (1.02 0xf3c7e0, 1.00 0x5dcc70) normalises the light direction and builds a light basis against (1,0,0) with
+ * rsqrt and no guard: a zero direction, or one exactly along +-X, makes both light matrices NaN (rbp-0x1b0 and
+ * rbp-0x170, 8 rows; a NaN or infinite far, xmm1, does the same to the box), and the ortho builder (1.02 0xf768d0,
+ * 1.00 0x618650) asserts. Its call (1.02 0xf3cad8, 1.00 0x5dcf24) now goes to a stub that checks the rows and the far
+ * value: finite -> on to the builder as before; not -> it returns past the follow-up call too (mov rdi, ...; call the
+ * camera update, 1.02 0x11c0d30, 1.00 0x80a2f0), so that light camera keeps the last good frame's matrices. The stub
+ * sits in the builder's dead far-plane assert path (1.02 0xf770b7, 171 bytes; 1.00 0x618e2e, 147 bytes), which still
+ * starts with int 0x41; the near-plane assert is unchanged. 1.02 is his stub; 1.00 has the same call site, frame
+ * offsets and follow-up (another compiler layout of the builder: a shorter path, so the rows are read through
+ * lea rax, [rbp-0x1b0]). */
+static const unsigned char u3_light_ortho_site_102[]={0xc5,0xfa,0x10,0x05,0x24,0xed,0x50,0x00,0xc5,0xfa,0x10,0x8d,0x0c,0xfe,0xff,0xff,0xe8,0xf3,0x9d,0x03,0x00,0x4c,0x89,0xe7,0xe8,0x4b,0x42,0x28,0x00};
+static const unsigned char u3_light_ortho_call_102[]={0xc5,0xfa,0x10,0x05,0x24,0xed,0x50,0x00,0xc5,0xfa,0x10,0x8d,0x0c,0xfe,0xff,0xff,0xe8,0xdc,0xa5,0x03,0x00};
+static const unsigned char u3_light_ortho_cave_102[]={0x48,0x8b,0x05,0xfa,0xb6,0xc7,0x00,0x48,0x85,0xc0,0x0f,0x84,0x99,0x00,0x00,0x00,0x48,0x8d,0x3d,0xcf,0x4c,0x53,0x00,0x48,0x8d,0x35,0x2a,0x22,0x52,0x00,0x49,0x89,0xd6,0x48,0x8d,0x15,0xa1,0x4c,0x53,0x00,0x49,0x89,0xdc,0x48,0x89,0xcb,0x48,0x8d,0x0d,0x64,0x51,0x43,0x00,0x41,0xb8,0xba,0x01,0x00,0x00,0x45,0x31,0xc9,0xc5,0x78,0x29,0xad,0xf0,0xfe,0xff,0xff,0xc5,0x78,0x29,0xb5,0xe0,0xfe,0xff,0xff,0xc5,0x78,0x29,0xbd,0xd0,0xfe,0xff,0xff,0xc5,0xf8,0x29,0x95,0xc0,0xfe,0xff,0xff,0xc5,0xf8,0x29,0xa5,0xb0,0xfe,0xff,0xff,0xc5,0xf8,0x29,0xad,0xa0,0xfe,0xff,0xff,0xff,0xd0,0xc5,0xf8,0x28,0xad,0xa0,0xfe,0xff,0xff,0xc5,0xf8,0x28,0xa5,0xb0,0xfe,0xff,0xff,0xc5,0xf8,0x28,0x95,0xc0,0xfe,0xff,0xff,0xc5,0x78,0x28,0xbd,0xd0,0xfe,0xff,0xff,0xc5,0x78,0x28,0xb5,0xe0,0xfe,0xff,0xff,0xc5,0x78,0x28,0xad,0xf0,0xfe,0xff,0xff,0x48,0x89,0xd9,0x4c,0x89,0xe3,0x4c,0x89,0xf2,0xcd,0x41};
+static const unsigned char u3_light_ortho_stub_102[]={0xcd,0x41,0xc5,0xf8,0x28,0x9d,0x50,0xfe,0xff,0xff,0xc5,0xe0,0x5c,0xdb,0xc5,0xf8,0x28,0xa5,0x60,0xfe,0xff,0xff,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0xa5,0x70,0xfe,0xff,0xff,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0xa5,0x80,0xfe,0xff,0xff,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0xa5,0x90,0xfe,0xff,0xff,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0xa5,0xa0,0xfe,0xff,0xff,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0xa5,0xb0,0xfe,0xff,0xff,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0xa5,0xc0,0xfe,0xff,0xff,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf2,0x5c,0xe1,0xc5,0xe2,0x58,0xdc,0xc5,0xe0,0xc2,0xdb,0x03,0xc5,0xf8,0x50,0xc3,0x85,0xc0,0x75,0x05,0xe9,0x81,0xf7,0xff,0xff,0x48,0x83,0x04,0x24,0x08,0xc3,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc};
+static const unsigned char u3_light_ortho_site_100[]={0xc5,0xfa,0x10,0x05,0x28,0x49,0xa1,0x00,0xc5,0xfa,0x10,0x8d,0x04,0xfe,0xff,0xff,0xe8,0x27,0xb7,0x03,0x00,0x48,0x89,0xdf,0xe8,0xbf,0xd3,0x22,0x00};
+static const unsigned char u3_light_ortho_call_100[]={0xc5,0xfa,0x10,0x05,0x28,0x49,0xa1,0x00,0xc5,0xfa,0x10,0x8d,0x04,0xfe,0xff,0xff,0xe8,0x07,0xbf,0x03,0x00};
+static const unsigned char u3_light_ortho_cave_100[]={0xc5,0xf8,0x29,0xad,0xa0,0xfe,0xff,0xff,0xc5,0xf8,0x29,0xa5,0xb0,0xfe,0xff,0xff,0xc5,0xf8,0x29,0x95,0xc0,0xfe,0xff,0xff,0xc5,0x78,0x29,0xbd,0xd0,0xfe,0xff,0xff,0xc5,0x78,0x29,0xb5,0xe0,0xfe,0xff,0xff,0xc5,0x78,0x29,0xad,0xf0,0xfe,0xff,0xff,0xe8,0x1d,0x3c,0xe8,0xff,0x48,0x85,0xc0,0x74,0x27,0x48,0x8d,0x3d,0x5f,0xd1,0x9d,0x00,0x48,0x8d,0x35,0xf0,0xd0,0x9d,0x00,0x48,0x8d,0x15,0x34,0xd1,0x9d,0x00,0x48,0x8d,0x0d,0xed,0xcf,0x9d,0x00,0x41,0xb8,0xba,0x01,0x00,0x00,0x45,0x31,0xc9,0xff,0xd0,0xcd,0x41,0xc5,0x78,0x28,0xad,0xf0,0xfe,0xff,0xff,0xc5,0x78,0x28,0xb5,0xe0,0xfe,0xff,0xff,0xc5,0x78,0x28,0xbd,0xd0,0xfe,0xff,0xff,0xc5,0xf8,0x28,0x95,0xc0,0xfe,0xff,0xff,0xc5,0xf8,0x28,0xa5,0xb0,0xfe,0xff,0xff,0xc5,0xf8,0x28,0xad,0xa0,0xfe,0xff,0xff};
+static const unsigned char u3_light_ortho_stub_100[]={0xcd,0x41,0x48,0x8d,0x85,0x50,0xfe,0xff,0xff,0xc5,0xf8,0x28,0x18,0xc5,0xe0,0x5c,0xdb,0xc5,0xf8,0x28,0x60,0x10,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0x60,0x20,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0x60,0x30,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0x60,0x40,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0x60,0x50,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0x60,0x60,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf8,0x28,0x60,0x70,0xc5,0xd8,0x5c,0xe4,0xc5,0xe0,0x58,0xdc,0xc5,0xf2,0x5c,0xe1,0xc5,0xe2,0x58,0xdc,0xc5,0xe0,0xc2,0xdb,0x03,0xc5,0xf8,0x50,0xc3,0x85,0xc0,0x75,0x05,0xe9,0x9c,0xf7,0xff,0xff,0x48,0x83,0x04,0x24,0x08,0xc3,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc,0xcc};
 /* U3 menu manager update (the Dev Menu's per-frame update, where its Tasks jump runs): the checkpoint jump's
  * frame point (runtime_checkpoint.c). The moved bytes are the push/sub/mov prologue before the first
  * rip-relative lea. */
@@ -1549,6 +1750,28 @@ static const unsigned char u1_menu_handler_us_code[]={0x55,0x48,0x89,0xe5,0x41,0
  * [rbx+0x20]). */
 static const unsigned char u3_platdelta_code[]={0x4c,0x8d,0x73,0x10,0x4c,0x8d,0x6b,0x20};
 static const unsigned char u3_platdelta_code_100[]={0x4c,0x8d,0x63,0x10,0x4c,0x8d,0x6b,0x20};
+/* U3, London Underground (spacepepperoni's 22edca79, their #63/#81; 1.00 code only, the 1.02 code differs): after Continue
+ * at the chapter's low-intensity checkpoint the title-screen music plays on into the level. The menu playlist survives
+ * level loads, loops and has no tempo; the level queues its playlist 0x0c3dd4f5 to switch at the playing track's next
+ * musical boundary, which the music manager's update finds with fmodf(position, beat length): with no tempo that is NaN,
+ * so the switch never comes. Only for that pending playlist, and only while the playing track has no tempo, the manager's
+ * wait-for-boundary flag is cleared (it switches at once, as a chapter start's music does). rbx (regs[0]) is the manager:
+ * +0x2f5 a playlist is pending, +0x224 its id, +0x22f its flags (4: wait for a boundary), +0x180 the playing track's beat
+ * length. Hooked at "cmp byte [rbx+0x2f5],0" (7 bytes moved), before the flag is read. BB_SKIP_CALLBACKS=menu music: off. */
+static const unsigned char u3_menu_music_code_100[]={0x80,0xbb,0xf5,0x02,0x00,0x00,0x00,0x74,0x61,0xf6,0x83,0x2f,
+                                                     0x02,0x00,0x00,0x04,0x0f,0x94,0xc0,0x44,0x08,0xf8,0x75,0x0a};
+static void __attribute__((ms_abi)) u3_menu_music_into_level(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                             const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)image; (void)r14;
+    unsigned char *manager=(unsigned char *)(uintptr_t)regs[0];
+    if ((uintptr_t)manager<0x10000 || !manager[0x2f5] || !(manager[0x22f] & 4)) return;
+    uint32_t pending; float beat;
+    memcpy(&pending,manager+0x224,4); memcpy(&beat,manager+0x180,4);
+    if (pending!=0x0c3dd4f5u || beat!=0.0f) return;
+    manager[0x22f]&=(unsigned char)~4;
+    static int told;
+    if (!told) { told=1; printf("U3 music: the London Underground music replaces the title music\n"); }
+}
 static void __attribute__((ms_abi)) u3_platdelta(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs) {
     (void)rdi; (void)rsi; (void)r14; (void)image;
     static int on=-1;
@@ -1683,8 +1906,30 @@ static const RuntimeGuestCallback guest_callbacks[]={
      sizeof(u3_job_cave_stub),NULL,u3_job_cave_stub},
     {"U3 job descriptor guard (1.02, jump)",0xf88f5d,u3_job_loads_code,sizeof(u3_job_loads_code),
      sizeof(u3_job_loads_jump),NULL,u3_job_loads_jump},
+    {"U1 job descriptor guard (1.00, stub)",0x4ed843,u1_job_cave_code_100,sizeof(u1_job_cave_code_100),
+     sizeof(u1_job_cave_stub_100),NULL,u1_job_cave_stub_100},
+    {"U1 job descriptor guard (1.00, jump)",0x4ed2a7,u1_job_loads_code_100,sizeof(u1_job_loads_code_100),
+     sizeof(u1_job_loads_jump_100),NULL,u1_job_loads_jump_100},
+    {"U2 job descriptor guard (1.00, stub)",0x67bb63,u2_job_cave_code_100,sizeof(u2_job_cave_code_100),
+     sizeof(u2_job_cave_stub_100),NULL,u2_job_cave_stub_100},
+    {"U2 job descriptor guard (1.00, jump)",0x67b5b7,u2_job_loads_code_100,sizeof(u2_job_loads_code_100),
+     sizeof(u2_job_loads_jump_100),NULL,u2_job_loads_jump_100},
+    {"U3 job descriptor guard (1.00, stub)",0x62a5b3,u3_job_cave_code_100,sizeof(u3_job_cave_code_100),
+     sizeof(u3_job_cave_stub_100),NULL,u3_job_cave_stub_100},
+    {"U3 job descriptor guard (1.00, jump)",0x62a017,u3_job_loads_code_100,sizeof(u3_job_loads_code_100),
+     sizeof(u3_job_loads_jump_100),NULL,u3_job_loads_jump_100},
+    {"U3 light ortho guard (1.02, stub)",0xf770b7,u3_light_ortho_cave_102,sizeof(u3_light_ortho_cave_102),
+     sizeof(u3_light_ortho_stub_102),NULL,u3_light_ortho_stub_102},
+    {"U3 light ortho guard (1.02, call)",0xf3cac8,u3_light_ortho_site_102,sizeof(u3_light_ortho_site_102),
+     sizeof(u3_light_ortho_call_102),NULL,u3_light_ortho_call_102},
+    {"U3 light ortho guard (1.00, stub)",0x618e2e,u3_light_ortho_cave_100,sizeof(u3_light_ortho_cave_100),
+     sizeof(u3_light_ortho_stub_100),NULL,u3_light_ortho_stub_100},
+    {"U3 light ortho guard (1.00, call)",0x5dcf14,u3_light_ortho_site_100,sizeof(u3_light_ortho_site_100),
+     sizeof(u3_light_ortho_call_100),NULL,u3_light_ortho_call_100},
     {"U3 platform change is not platform motion (1.02)",0x1195038,u3_platdelta_code,8,8,u3_platdelta,NULL},
     {"U3 platform change is not platform motion (1.00)",0x7e0df8,u3_platdelta_code_100,8,8,u3_platdelta,NULL},
+    {"U3 menu music into the London Underground (1.00)",0x69b13d,u3_menu_music_code_100,sizeof(u3_menu_music_code_100),7,
+     u3_menu_music_into_level,NULL},
 };
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count) {
     *count=sizeof(guest_callbacks)/sizeof(*guest_callbacks);
@@ -1703,8 +1948,37 @@ static int prompts_pad_device(SDL_Gamepad *g) {
     return south==SDL_GAMEPAD_BUTTON_LABEL_CROSS ? 1 : south==SDL_GAMEPAD_BUTTON_LABEL_B ? 3 : 2;
 }
 
+/* Turning the left stick in circles (valves, wheels, cranks: the games detect the turn from the
+ * stick passing the four directions up, left, down, right in order, each at most 0.31 s after the
+ * last, and rolling the eight movement-key directions never does). While a rotate key is held the
+ * left stick circles at full deflection, 1.25 turns a second, a smooth sweep that starts where the
+ * stick points (the movement keys held, or up). `rotate_dir`: -1 counter-clockwise, 1 clockwise.
+ * (By drakolordx7, from his fork, 46aec0d3.) */
+#define ROTATE_TURNS_PER_SECOND 1.25f
+static int host_rotate;               /* the rotate keys held right now (set in sample_host) */
+static float rotate_angle;            /* radians clockwise from up */
+static uint64_t rotate_last_us;
+static void rotate_stick(PadData *d, int rotate_dir, uint64_t now) {
+    if (!rotate_dir) { rotate_last_us=0; return; }
+    if (!rotate_last_us || now-rotate_last_us>100000) {
+        const float x=((float)d->left_x-127.5f)/127.5f, y=((float)d->left_y-127.5f)/127.5f;
+        rotate_angle=x*x+y*y>0.25f ? SDL_atan2f(x,-y) : 0.0f;
+    } else {
+        float dt=(float)(now-rotate_last_us)*1e-6f;
+        if (dt>0.05f) dt=0.05f;
+        rotate_angle+=(float)rotate_dir*dt*ROTATE_TURNS_PER_SECOND*6.2831853f;
+        if (rotate_angle>6.2831853f) rotate_angle-=6.2831853f;
+        if (rotate_angle<0.0f) rotate_angle+=6.2831853f;
+    }
+    rotate_last_us=now;
+    const float x=127.5f+127.5f*SDL_sinf(rotate_angle), y=127.5f-127.5f*SDL_cosf(rotate_angle);
+    d->left_x=(uint8_t)(x<0.0f ? 0 : x>255.0f ? 255 : (int)(x+0.5f));
+    d->left_y=(uint8_t)(y<0.0f ? 0 : y>255.0f ? 255 : (int)(y+0.5f));
+}
+
 static void injected_mouse(float *dx, float *dy);
 static void sample_host(PadData *d) {
+    host_rotate=0;
     memset(d,0,sizeof(*d));
     d->left_x=d->left_y=d->right_x=d->right_y=128;
     d->orientation[3]=1.0f;
@@ -1736,9 +2010,20 @@ static void sample_host(PadData *d) {
     static int layout_logged;
     if (k && !layout_logged) { layout_logged=1; log_layout_keys(); }
         /* SDL delivers gamepad events in the background too (window.cpp): the game takes them
-         * only while its window is in front. */
+         * only while its window is in front, unless the player chose the controller to keep working
+         * in the background (BB_PAD_BACKGROUND=1, launcher Controls page; the game on one screen,
+         * other programs on the other). The keyboard and mouse are only ever read in front. */
         const unsigned long long taps=__atomic_exchange_n(&pad_taps,0ull,__ATOMIC_RELAXED);
-        if (g && !bbgpu_window_foreground()) g=0;
+        static int pad_background=-1;
+        if (pad_background<0) {
+            const char *e=getenv("BB_PAD_BACKGROUND");
+            pad_background=e && e[0]=='1';
+            if (pad_background) printf("Runtime: the controller keeps working while the game window is in the background\n");
+        }
+        if (!bbgpu_window_foreground()) {
+            if (!pad_background) g=0;
+            k=NULL; mouse=0; wheel=0; captured=0; wheel_until_us[0]=wheel_until_us[1]=0;
+        }
         if (g) {
             for (int a=0;a<16;++a) {
                 const int b=input.pad[a];
@@ -1788,8 +2073,17 @@ static void sample_host(PadData *d) {
         if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
         const int lx=action_down(A_LS_RIGHT,k,mouse,now)-action_down(A_LS_LEFT,k,mouse,now);
         const int ly=action_down(A_LS_DOWN,k,mouse,now)-action_down(A_LS_UP,k,mouse,now);
-        if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
-        if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
+        if ((lx || ly) && action_down(A_WALK,k,mouse,now)) {
+            /* Walk: the key direction at walk_speed percent of full deflection (diagonals too; by
+             * drakolordx7, from his fork, 6455d6bb). */
+            const float scale=127.5f*(float)input.walk_speed/100.0f/((lx && ly) ? 1.41421356f : 1.0f);
+            if (lx) d->left_x=(uint8_t)(int)(127.5f+(float)lx*scale+0.5f);
+            if (ly) d->left_y=(uint8_t)(int)(127.5f+(float)ly*scale+0.5f);
+        } else {
+            if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
+            if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
+        }
+        host_rotate=action_down(A_ROT_CW,k,mouse,now)-action_down(A_ROT_CCW,k,mouse,now);
         rx=action_down(A_RS_RIGHT,k,mouse,now)-action_down(A_RS_LEFT,k,mouse,now);
         ry=action_down(A_RS_DOWN,k,mouse,now)-action_down(A_RS_UP,k,mouse,now);
         if (rx) d->right_x=(uint8_t)(rx<0 ? 0 : 255);
@@ -1827,9 +2121,9 @@ static void sample_host(PadData *d) {
         if (dt>0.0f) {
             if (dt>0.1f) dt=0.1f;
             /* turn rate in degrees/s, smoothed over 12 ms (mouse reports arrive in bursts) */
-            const float alpha=1.0f-SDL_expf(-dt/0.012f), scale=MOUSE_DEGREES_PER_PIXEL*input.mouse_sensitivity;
+            const float alpha=1.0f-SDL_expf(-dt/0.012f), scale=mouse_scale(0), scale_y=mouse_scale(1);
             mouse_vx+=alpha*(mdx/dt*scale-mouse_vx);
-            mouse_vy+=alpha*((input.mouse_invert_y ? -mdy : mdy)/dt*scale-mouse_vy);
+            mouse_vy+=alpha*((input.mouse_invert_y ? -mdy : mdy)/dt*scale_y-mouse_vy);
             if (mdx==0 && mouse_vx>-1.0f && mouse_vx<1.0f) mouse_vx=0;
             if (mdy==0 && mouse_vy>-1.0f && mouse_vy<1.0f) mouse_vy=0;
         }
@@ -1844,8 +2138,8 @@ static void sample_host(PadData *d) {
  * tokens, re-read when it changes: button names (cross circle square triangle l1 r1 l2 r2 l3 r3
  * options touchpad touchpad_left touchpad_right up down left right) are held while listed;
  * touchpad defaults to a left-side click; lx= ly= rx= ry= (0..255) override
- * the sticks. An empty file releases everything. */
-static struct { uint32_t buttons; int stick[4]; int touch_side; float mouse[2]; } injected={0,{-1,-1,-1,-1},-1,{0,0}};
+ * the sticks; rot_ccw rot_cw turn the left stick round (the rotate keys). An empty file releases everything. */
+static struct { uint32_t buttons; int stick[4]; int touch_side; float mouse[2]; int rotate; } injected={0,{-1,-1,-1,-1},-1,{0,0},0};
 static int replay_armed;      /* 1 while a BB_PAD_REPLAY recording plays, 2 once it ended */
 static uint64_t replay_start; /* 0: (re)start at the next sample */
 /* Scripted mouse motion (mx= my=, pixels/s) as this sample's mouse movement (sample_host). */
@@ -1888,8 +2182,11 @@ static void read_inject(void) {
     injected.touch_side=-1;
     for (int i=0;i<4;++i) injected.stick[i]=-1;
     injected.mouse[0]=injected.mouse[1]=0.0f;
+    injected.rotate=0;
     char token[64];
     while (fscanf(f,"%63s",token)==1) {
+        if (!strcmp(token,"rot_ccw")) injected.rotate=-1; /* the rotate keys, scripted */
+        if (!strcmp(token,"rot_cw")) injected.rotate=1;
         if (!strcmp(token,"replay") && replay_armed!=1) { replay_armed=1; replay_start=0; } /* BB_PAD_REPLAY */
         if (!strcmp(token,"touchpad_left") || !strcmp(token,"touchpad_right")) {
             injected.buttons|=BTN_TOUCHPAD;
@@ -2051,6 +2348,7 @@ static void sample(PadData *d) {
     if (injected.buttons & BTN_R2) d->r2=255;
     uint8_t *axes[4]={&d->left_x,&d->left_y,&d->right_x,&d->right_y};
     for (int i=0;i<4;++i) if (injected.stick[i]>=0) *axes[i]=(uint8_t)injected.stick[i];
+    rotate_stick(d,injected.rotate ? injected.rotate : host_rotate,now_us());
     /* U2, U3 (no joypad callback): the right stick held a little while the mouse turns the follow
      * camera's direction (follow_push, see follow_camera), unless the stick is in use */
     const uint64_t now=now_us();

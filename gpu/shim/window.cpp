@@ -1,5 +1,7 @@
 // bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
 #include <array>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
@@ -31,6 +33,20 @@ bool window_focused{true};
 // only then (runtime_pad.c, bbgpu_window_foreground). SDL's keyboard focus can be lost while the
 // window stays in front, and with it SDL dropped the gamepad events (from BilalReloaded's port).
 std::atomic<bool> window_foreground{true};
+// Alt+Enter switched between window and fullscreen: its Enter is kept from the game until released
+// (Enter is a default key for Options).
+std::atomic<bool> enter_swallowed{false};
+// Alt+Enter switches only between shapes the game was set up for: the ultrawide field of view and the
+// native render size are taken once at start (runtime_ultrawide.c: the screen in fullscreen, else
+// BB_WINDOW_SIZE), so another shape would be stretched or pillarboxed. start_aspect: that shape;
+// windowed_w/h: the window's own size (as created, or the last size while not fullscreen).
+double start_aspect = 0.0;
+int windowed_w = 0, windowed_h = 0;
+
+double DesktopAspect(SDL_Window* window) {
+    const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(window));
+    return mode && mode->w > 0 && mode->h > 0 ? double(mode->w) / double(mode->h) : 0.0;
+}
 
 u32 MouseBit(u8 button) {
     switch (button) {
@@ -97,12 +113,17 @@ extern "C" int bbgpu_window_foreground(void) {
     return window_foreground.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
+extern "C" int bbgpu_window_enter_swallowed(void) {
+    return enter_swallowed.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 namespace Frontend {
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
     // Their events come whatever SDL thinks of the keyboard focus; whether the game is in front
-    // is decided from Windows instead (window_foreground). BB_PAD_BACKGROUND=0: as before.
+    // is decided from Windows instead (window_foreground). BB_PAD_BACKGROUND=0: as before;
+    // BB_PAD_BACKGROUND=1: the game also takes them while another window is in front (runtime_pad.c).
     if (const char* env = std::getenv("BB_PAD_BACKGROUND"); !(env && env[0] == '0')) {
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     }
@@ -128,6 +149,10 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
+    windowed_w = width_;
+    windowed_h = height_;
+    start_aspect = fullscreen && fullscreen[0] == '1' ? DesktopAspect(window)
+                                                      : double(width_) / double(height_ > 0 ? height_ : 1);
     // bbport: a game started from the collection menu (run.py sets BB_RAISE_WINDOW) opened behind
     // other windows, as the menu's process had ended: no input until the window was clicked.
     if (const char* raise = std::getenv("BB_RAISE_WINDOW"); raise && raise[0] == '1') {
@@ -244,6 +269,36 @@ bool WindowSDL::PollEvents() {
             UpdateTextTitle();
             continue;
         }
+        // Alt+Enter: window <-> fullscreen while playing (the launcher's Fullscreen is SDL's borderless
+        // fullscreen on the desktop's mode, as here). The swapchain follows the size change through the
+        // resize events below (the presenter recreates it when the window size differs). Leaving
+        // fullscreen gives the window its own size back (BB_WINDOW_SIZE as the game started, or the
+        // last window size). The Enter is kept from the game (Options) until it is released.
+        // Only when the screen and the window have the same shape (within 1%): the game's field of
+        // view and render size stay as they were set up at start (start_aspect above).
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+            (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER) && (event.key.mod & SDL_KMOD_ALT)) {
+            const bool full = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
+            const double target = full ? double(windowed_w) / double(windowed_h > 0 ? windowed_h : 1)
+                                       : DesktopAspect(window);
+            if (start_aspect <= 0.0 || target <= 0.0 || std::abs(target / start_aspect - 1.0) > 0.01) {
+                LOG_WARNING(Frontend,
+                            "Alt+Enter: window and screen shapes differ ({:.3f} set up at start, {:.3f} for {}); "
+                            "not switched, change it in the launcher",
+                            start_aspect, target, full ? "the window" : "fullscreen");
+                std::printf("Alt+Enter: window and screen shapes differ; change it in the launcher\n");
+                std::fflush(stdout);
+            } else if (SDL_SetWindowFullscreen(window, !full)) {
+                LOG_INFO(Frontend, "Alt+Enter: {}", full ? "window" : "fullscreen");
+            } else {
+                LOG_WARNING(Frontend, "Alt+Enter: could not switch: {}", SDL_GetError());
+            }
+            enter_swallowed = true;
+            continue;
+        }
+        if (event.type == SDL_EVENT_KEY_UP && (event.key.key == SDLK_RETURN || event.key.key == SDLK_KP_ENTER)) {
+            enter_swallowed = false;
+        }
         // BB_TEXTURE_DUMP=1: F10 saves the textures of the next frame (user/texture_dump).
         if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_F10 && !event.key.repeat) {
             Vulkan::FrameCapture::ArmTextureDump();
@@ -296,6 +351,7 @@ bool WindowSDL::PollEvents() {
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST: {
             window_focused = false;
+            enter_swallowed = false; // its key-up may go to another window
             std::scoped_lock lock{mouse_mutex};
             mouse_buttons = 0;
             break;
@@ -306,6 +362,11 @@ bool WindowSDL::PollEvents() {
             SDL_GetWindowSizeInPixels(window, &w, &h);
             width = w;
             height = h;
+            if (event.type == SDL_EVENT_WINDOW_RESIZED && event.window.data1 > 0 && event.window.data2 > 0 &&
+                !(SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN)) {
+                windowed_w = event.window.data1;
+                windowed_h = event.window.data2;
+            }
             break;
         }
         case SDL_EVENT_QUIT:
@@ -315,6 +376,12 @@ bool WindowSDL::PollEvents() {
         default:
             break;
         }
+    }
+    // The window mode change (or another window holding the keys meanwhile) can swallow Enter's key-up:
+    // once neither Enter is held, the game gets Enter again.
+    if (enter_swallowed.load(std::memory_order_relaxed)) {
+        const bool* keys = SDL_GetKeyboardState(nullptr);
+        if (!keys || (!keys[SDL_SCANCODE_RETURN] && !keys[SDL_SCANCODE_KP_ENTER])) enter_swallowed = false;
     }
     return is_open;
 }

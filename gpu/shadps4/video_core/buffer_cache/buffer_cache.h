@@ -207,6 +207,24 @@ public:
     /// Rasterizer::OnSubmit; at most every 2 s). See buffer_cache.cpp.
     void ReclaimArenaMemory();
 
+    /// bbport (BB_VRAM_STATS): where the arenas' video memory is, and how much of it a give-back
+    /// could free (GPU thread).
+    struct ArenaStats {
+        u64 arenas = 0, reserved_bytes = 0;            ///< sparse buffers and their size
+        u64 chunk_bytes = 0, chunk_host_bytes = 0;     ///< memory allocated for them (VRAM, system)
+        u64 chunk_carved_bytes = 0;                    ///< of it handed out at least once
+        u64 bound_bytes = 0;                           ///< bound to guest ranges now
+        u64 free_run_bytes = 0, held_bytes = 0;        ///< given back: reusable, waiting for the GPU
+        u64 probation_bytes = 0;                       ///< on probation before a give-back
+        u64 unused_bytes = 0, unused_windows = 0;      ///< bound, 1 MiB windows unused >= 60 s
+        u64 unused_gpu_bytes = 0;                      ///< of those: GPU data (cannot go)
+        u64 released_total_bytes = 0;                  ///< given back since the start
+        u64 limit_bytes = 0;                           ///< give-back limit, 0: give-back off
+        bool ages_known = false;                       ///< give-back on (it keeps the ages)
+    };
+    /// `ages`: also the unused windows (walks the bound ranges).
+    ArenaStats GetArenaStats(bool ages);
+
     /// bbport: the arenas' guest and GPU address ranges and the resident block ranges (GPU
     /// crash report).
     void DumpArenas() const;
@@ -519,6 +537,12 @@ private:
     /// the watch bit (bit 0) or without; returns the resident blocks.
     u64 WatchArenaBlocks(u64 first_block, u64 end_block, bool watch);
     u64 resident_in_use_blocks = 0;
+    u64 released_total_blocks = 0; ///< bbport (BB_VRAM_STATS): given back since the start
+    u64 reclaim_limit_bytes = 0;   ///< bbport (BB_VRAM_STATS): ReclaimArenaMemory's limit, once known
+    /// bbport (ReclaimArenaMemory): the driver's usage passed BB_ARENA_USAGE_PCT of its budget
+    /// and has not yet fallen 5 points below it; the arenas then give back down to the excess.
+    bool usage_pressure = false;
+    bool usage_pressure_logged = false;
     bool has_pending_unbinds = false;
     /// Moves deferred unbinds whose tick the GPU has finished into pending_binds.
     void QueueFinishedUnbinds();

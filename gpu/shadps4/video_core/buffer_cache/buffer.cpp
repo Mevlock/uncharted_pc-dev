@@ -198,6 +198,8 @@ void UniqueBuffer::Destroy() {
     }
     if (vram_bytes) {
         Vulkan::Vram::buffer_bytes.fetch_sub(vram_bytes, std::memory_order_relaxed);
+        Vulkan::Vram::buffer_kind_bytes[vram_kind].fetch_sub(vram_bytes, std::memory_order_relaxed);
+        Vulkan::Vram::buffer_kind_count[vram_kind].fetch_sub(1, std::memory_order_relaxed);
         vram_bytes = 0;
     }
     if (allocation) {
@@ -254,7 +256,10 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
         vmaGetAllocationMemoryProperties(allocator, allocation, &placed);
         if (placed & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
             vram_bytes = buffer_ci.size;
+            vram_kind = static_cast<u8>(std::min<u32>(static_cast<u32>(mem_type), 4));
             Vulkan::Vram::buffer_bytes.fetch_add(vram_bytes, std::memory_order_relaxed);
+            Vulkan::Vram::buffer_kind_bytes[vram_kind].fetch_add(vram_bytes, std::memory_order_relaxed);
+            Vulkan::Vram::buffer_kind_count[vram_kind].fetch_add(1, std::memory_order_relaxed);
         }
     } else {
         buffer_ci.flags |=

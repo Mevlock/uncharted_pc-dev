@@ -230,6 +230,11 @@ void UniqueImage::Recycle() {
     size_bytes = 0;
 }
 
+u64 UniqueImage::RecycledBytes() {
+    std::scoped_lock lk{recycled_mutex};
+    return recycled_bytes;
+}
+
 void UniqueImage::Destroy() {
     if (image) {
         ForgetImageAddress(static_cast<VkImage>(image));

@@ -75,6 +75,18 @@ public:
 protected:
     [[nodiscard]] std::string GetDebugString() const;
 
+    /// bbport (perf10): set 0 pushed through a descriptor update template (one per write layout:
+    /// bindings, counts, types), its descriptors packed in binding order straight into the
+    /// recording chunk. False when the writes don't fit one (the caller pushes the writes).
+    bool PushWithTemplate(vk::PipelineLayout layout, const DescriptorWrites& set_writes) const;
+
+    struct PushTemplate {
+        std::vector<u64> keys; ///< per write: binding, array element, count, type
+        vk::DescriptorUpdateTemplate handle;
+        u32 slots;
+    };
+    mutable std::vector<PushTemplate> push_templates;
+
     const Instance& instance;
     Scheduler& scheduler;
     DescriptorHeap& desc_heap;

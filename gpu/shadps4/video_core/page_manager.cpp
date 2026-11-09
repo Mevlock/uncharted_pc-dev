@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <x86intrin.h>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -18,6 +21,7 @@
 #include "core/memory.h"
 #include "core/signals.h"
 #include "video_core/page_manager.h"
+#include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 extern "C" void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
@@ -560,6 +564,47 @@ struct SignalImpl : public PageManager::Impl {
 
     void Protect(VAddr address, size_t size, Core::MemoryPermission perms) override {
         RENDERER_TRACE;
+        // bbport diagnosis (perf10, BB_PROTECT_STATS=1): protection changes per second, on the
+        // draw recording thread (stage B) and elsewhere, with their pages and time.
+        static const bool stats = [] {
+            const char* env = std::getenv("BB_PROTECT_STATS");
+            return env && env[0] == '1';
+        }();
+        const u64 t0 = stats ? __rdtsc() : 0;
+        ProtectInner(address, size, perms);
+        if (stats) {
+            static std::atomic<u64> calls[2][2]{}, pages[2]{}, cycles[2]{};
+            static std::atomic<u64> window{0};
+            const u32 b = Vulkan::DrawPipe::OnStageB() ? 1 : 0;
+            const u32 w = True(perms & Core::MemoryPermission::Write) ? 1 : 0;
+            calls[b][w].fetch_add(1, std::memory_order_relaxed);
+            pages[b].fetch_add((size + 4095) >> 12, std::memory_order_relaxed);
+            const u64 now = __rdtsc();
+            cycles[b].fetch_add(now - t0, std::memory_order_relaxed);
+            u64 start = window.load(std::memory_order_relaxed);
+            if (start == 0) {
+                window.compare_exchange_strong(start, now);
+            } else if (now - start > 5'000'000'000ull && window.compare_exchange_strong(start, now)) {
+                // Per 5e9 TSC ticks (~1.3-1.7 s on 3-4 GHz parts): rates are per window, the
+                // cycle share = cycles / window ticks.
+                const double ticks = double(now - start);
+                double v[2][4];
+                for (u32 t = 0; t < 2; ++t) {
+                    v[t][0] = double(calls[t][0].exchange(0));
+                    v[t][1] = double(calls[t][1].exchange(0));
+                    v[t][2] = double(pages[t].exchange(0));
+                    v[t][3] = 100.0 * double(cycles[t].exchange(0)) / ticks;
+                }
+                std::printf("Protect stats (per 5e9 TSC ticks): stage B %.0f protect + %.0f unprotect, "
+                            "%.0f pages, %.2f%% of a core; other threads %.0f protect + %.0f unprotect, "
+                            "%.0f pages, %.2f%% of a core\n",
+                            v[1][0], v[1][1], v[1][2], v[1][3], v[0][0], v[0][1], v[0][2], v[0][3]);
+                std::fflush(stdout);
+            }
+        }
+    }
+
+    void ProtectInner(VAddr address, size_t size, Core::MemoryPermission perms) {
         auto* memory = Core::Memory::Instance();
         auto& impl = memory->GetAddressSpace();
         // bbport: with read tracking (BB_READBACKS=2) a page both GPU- and CPU-modified (the

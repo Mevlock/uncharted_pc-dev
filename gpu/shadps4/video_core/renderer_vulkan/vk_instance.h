@@ -7,6 +7,7 @@
 #include <atomic>
 #include <mutex>
 #include <span>
+#include <string>
 #include <thread>
 #include <unordered_map>
 
@@ -555,6 +556,17 @@ public:
 
     /// bbport: one line with the memory split (BB_VRAM_LOG).
     void ReportMemory(const char* why = "") const;
+
+    /// bbport (BB_VRAM_STATS): the driver's usage and budget of the device-local heaps (less the
+    /// BB_VRAM_SIMULATE_MIB ballast; the budget capped as GetDeviceMemoryBudgetNow), VMA's blocks and allocations on them, and per heap
+    /// "h0 usage/budget/size" (every heap, "*": device-local) in MiB.
+    struct VramTotals {
+        u64 usage = 0, budget = 0, size = 0;
+        u64 vma_block_bytes = 0, vma_alloc_bytes = 0, vma_blocks = 0, vma_allocs = 0;
+        u64 ballast_bytes = 0;
+        std::string heaps;
+    };
+    VramTotals QueryVramTotals(bool with_heaps) const;
 
     /// bbport (BB_VRAM_SIMULATE_MIB): writes a few bytes into every ballast block, so the driver
     /// keeps them in video memory. Unused, Windows moves them to system memory over the session

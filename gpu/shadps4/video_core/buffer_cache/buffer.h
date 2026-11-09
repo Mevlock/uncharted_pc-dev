@@ -55,7 +55,7 @@ struct UniqueBuffer {
           bda_addr{std::exchange(other.bda_addr, 0)},
           allocator{std::exchange(other.allocator, VK_NULL_HANDLE)},
           allocation{std::exchange(other.allocation, VK_NULL_HANDLE)},
-          vram_bytes{std::exchange(other.vram_bytes, 0)} {}
+          vram_bytes{std::exchange(other.vram_bytes, 0)}, vram_kind{other.vram_kind} {}
 
     UniqueBuffer& operator=(UniqueBuffer&& other) noexcept {
         if (this != &other) {
@@ -66,6 +66,7 @@ struct UniqueBuffer {
             allocator = std::exchange(other.allocator, VK_NULL_HANDLE);
             allocation = std::exchange(other.allocation, VK_NULL_HANDLE);
             vram_bytes = std::exchange(other.vram_bytes, 0);
+            vram_kind = other.vram_kind;
         }
         return *this;
     }
@@ -81,6 +82,7 @@ struct UniqueBuffer {
     VmaAllocator allocator;
     VmaAllocation allocation{};
     u64 vram_bytes{}; ///< bbport: device-local bytes counted for this buffer
+    u8 vram_kind{};   ///< bbport: its MemoryType (Vram::buffer_kind_bytes)
 };
 
 struct Buffer {

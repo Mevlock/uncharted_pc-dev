@@ -146,14 +146,21 @@ public:
 
     /// Any thread: flattened user data chunks back to the pool (vk_draw_prep.cpp, FlatArena).
     static void ReturnChunks(std::vector<std::unique_ptr<u32[]>>& chunks);
+    /// Any thread: a finished submission's prepared draw array and command copy back to the
+    /// pool Build takes them from (vk_draw_prep.cpp, perf10).
+    static void ReturnArrays(Submission& submission);
+    /// Any thread: the shared pointer's deleter of a recycled submission (vk_draw_prep.cpp).
+    static void RecycleSubmission(Submission* submission);
 
     struct Submission {
         ~Submission() {
             ReturnChunks(flat_chunks);
+            ReturnArrays(*this);
         }
         u64 seq{};
         std::vector<u32> commands;
         std::unique_ptr<PreparedDraw[]> draws;
+        u32 draws_capacity{}; ///< elements in `draws` (a pooled array may be longer than num_draws)
         u32 num_draws{};
         u32 num_dispatches{};
         std::vector<std::unique_ptr<u32[]>> flat_chunks; ///< from the claiming worker (pooled)
@@ -167,6 +174,7 @@ public:
         /// Draws a helper already took for pipeline compilation (see WorkerLoop, assist).
         std::unique_ptr<std::atomic<bool>[]> draw_taken;
         std::unique_ptr<std::atomic<bool>[]> dispatch_taken; ///< likewise for dispatches
+        u32 draw_taken_capacity{}, dispatch_taken_capacity{}; ///< elements in the two above
     };
 
 private:
