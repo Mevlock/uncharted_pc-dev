@@ -29,6 +29,11 @@ int mouse_wheel{};
 u32 mouse_buttons{};
 std::atomic<bool> mouse_look{false}, mouse_captured{false};
 bool window_focused{true};
+// Without mouse look (controller play) the cursor was left showing over the game: it hides after
+// two seconds without mouse movement and comes back when the mouse moves (the menu shows it too).
+constexpr u64 CursorIdleNs = 2'000'000'000ull;
+u64 cursor_moved_ns = 0;
+bool cursor_hidden = false;
 // The game window is in front (Windows' own answer, set each event poll): the controller is read
 // only then (runtime_pad.c, bbgpu_window_foreground). SDL's keyboard focus can be lost while the
 // window stays in front, and with it SDL dropped the gamepad events (from BilalReloaded's port).
@@ -250,9 +255,28 @@ bool WindowSDL::PollEvents() {
             mouse_dx = mouse_dy = 0.0f;
             mouse_buttons = 0;
         }
+        // Mouse look's relative mode hides the cursor itself; otherwise an idle cursor is hidden
+        // while the game has the focus and nothing needs it (menu, text entry).
+        const bool hide = window_focused && !text_active && !BbOverlay::CapturesInput() &&
+                          SDL_GetTicksNS() - cursor_moved_ns > CursorIdleNs;
+        if (!mouse_captured && hide != cursor_hidden) {
+            if (hide) {
+                SDL_HideCursor();
+            } else {
+                SDL_ShowCursor();
+            }
+            cursor_hidden = hide;
+        }
     }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_EVENT_MOUSE_MOTION && !mouse_captured) {
+            cursor_moved_ns = SDL_GetTicksNS();
+            if (cursor_hidden) { // back at once, not at the next poll
+                SDL_ShowCursor();
+                cursor_hidden = false;
+            }
+        }
         if (text_active && (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN)) {
             std::scoped_lock lock{text_mutex};
             if (event.type == SDL_EVENT_TEXT_INPUT) {
