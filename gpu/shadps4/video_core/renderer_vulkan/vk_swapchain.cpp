@@ -235,6 +235,10 @@ void Swapchain::FindPresentMode() {
         present_mode = vk::PresentModeKHR::eMailbox;
     } else if (requested_mode == "Fifo") {
         present_mode = vk::PresentModeKHR::eFifo;
+    } else if (requested_mode == "FifoRelaxed") {
+        // bbport: the launcher's "FIFO Relaxed" (from spacepepperoni's Linux port, fd92c745); without
+        // this it logged "Unknown present mode" and used Mailbox. A GPU without it falls back to Fifo.
+        present_mode = vk::PresentModeKHR::eFifoRelaxed;
     } else if (requested_mode == "Immediate") {
         present_mode = vk::PresentModeKHR::eImmediate;
     } else {
