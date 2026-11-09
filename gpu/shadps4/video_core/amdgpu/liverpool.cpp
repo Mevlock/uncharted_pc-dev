@@ -39,6 +39,7 @@
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_guest_sync_stats.h"
+#include "video_core/renderer_vulkan/vk_runtime.h"
 
 namespace VideoCore {
 extern std::atomic<u32> g_async_stalled; // buffer_cache.cpp
@@ -1298,10 +1299,15 @@ void ScanDcb(std::span<const u32> dcb, int depth) {
 namespace {
 /// bbport diagnosis (BB_GUEST_SYNC_STATS=1, perf10 step 0): counts the guest's sync packets and
 /// hands each sync point to the recording thread in order (vk_guest_sync_stats.h).
-void RunGuestSyncPoint(Vulkan::Rasterizer&, const u8* data) {
+void RunGuestSyncPoint(Vulkan::Rasterizer& rasterizer, const u8* data) {
     Vulkan::GuestSync::Kind kind;
     std::memcpy(&kind, data, sizeof(kind));
-    Vulkan::GuestSync::NoteSyncB(kind);
+    if (Vulkan::GuestSync::On()) {
+        Vulkan::GuestSync::NoteSyncB(kind);
+    }
+    if (Vulkan::GuestSync::GuestBarriers() && Vulkan::GuestSync::IsStrong(kind)) {
+        rasterizer.GetRuntime().guest_barrier_pending = true;
+    }
 }
 
 void NoteGuestSyncPacket(Vulkan::Rasterizer* rasterizer, PM4ItOpcode opcode, const PM4Header* header,
@@ -1339,8 +1345,10 @@ void NoteGuestSyncPacket(Vulkan::Rasterizer* rasterizer, PM4ItOpcode opcode, con
     case PM4ItOpcode::DmaData: kind = DmaData; break;
     default: return;
     }
-    NoteStageA(ring, kind);
-    if (rasterizer && IsSyncPoint(kind)) {
+    if (On()) {
+        NoteStageA(ring, kind);
+    }
+    if (rasterizer && (On() ? IsSyncPoint(kind) : IsStrong(kind))) {
         rasterizer->RunInOrder(&RunGuestSyncPoint, &kind, sizeof(kind));
     }
 }
@@ -1464,7 +1472,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // They may write guest memory: not before fences deferred earlier.
                 rasterizer->WaitDeferredSignals();
             }
-            if (Vulkan::GuestSync::On()) {
+            if (Vulkan::GuestSync::On() || Vulkan::GuestSync::GuestBarriers()) {
                 NoteGuestSyncPacket(rasterizer, opcode, header, 0);
             }
             switch (opcode) {
@@ -2430,7 +2438,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             rasterizer->DrainDrawPipe(by_opcode ? static_cast<u32>(opcode)
                                                 : Vulkan::DrawPipe::ReasonCompute);
         }
-        if (Vulkan::GuestSync::On()) {
+        if (Vulkan::GuestSync::On() || Vulkan::GuestSync::GuestBarriers()) {
             NoteGuestSyncPacket(rasterizer, opcode, header, 1);
         }
 

@@ -800,6 +800,9 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
         .range_start = offset,
         .range_end = offset + size - 1,
     };
+    if (guest_dirty) {
+        return true; // BB_GUEST_BARRIERS: guest stores are not tracked by range
+    }
     bool has_access = barrier_tracker.FindRange(range, Access::Write);
     if (check_read_access && !has_access) {
         has_access |= barrier_tracker.FindRange(range, Access::Read);
@@ -916,6 +919,8 @@ void Runtime::FlushBarriers(u32 site) {
     memory_barrier.srcAccessMask = vk::AccessFlagBits2::eNone;
 
     image_barriers.clear();
+    guest_dirty = false;
+    guest_barrier_pending = false;
     barrier_tracker.Clear();
     tracked_inserts = 0;
     ++access_epoch;

@@ -98,6 +98,17 @@ public:
     /// site: what asked for the barrier (diagnosis only, GuestSync::Site).
     void FlushBarriers(u32 site = 0);
 
+    /// perf10 step 4 (GuestSync::GuestBarriers, measurement only): a guest shader stores; the
+    /// next barrier covers all writes.
+    void NoteGuestWrite() {
+        guest_dirty = true;
+        memory_barrier.srcStageMask |= vk::PipelineStageFlagBits2::eAllCommands;
+        memory_barrier.srcAccessMask |= vk::AccessFlagBits2::eShaderWrite;
+    }
+    bool guest_dirty = false;            ///< guest stores since the last barrier
+    bool guest_barrier_pending = false;  ///< a strong guest sync point came since
+    u8 guest_last_work = 0;              ///< 1 draw, 2 dispatch
+
     /// bbport: runs before this thread changes image state (layouts, pending image
     /// barriers): the rasterizer joins its texture binding helper there (BindHelper).
     void SetImageAccessHook(void (*hook)(void*), void* context) {

@@ -31,6 +31,19 @@ inline bool On() {
     return on;
 }
 
+/// perf10 step 4, MEASUREMENT ONLY, UNSAFE (BB_GUEST_BARRIERS=1): guest shader buffer bindings
+/// skip the barrier tracker; a strong guest sync point, a switch between draws and dispatches,
+/// or any host transfer emits one global barrier when a guest shader stored since the last one.
+/// Gives the frame-rate ceiling of guest-driven barriers; storage written and read with no
+/// strong guest sync between (merged async compute) is not ordered.
+inline bool GuestBarriers() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_GUEST_BARRIERS");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
 /// Packet kinds counted in stage A (per ring class: 0 graphics, 1 compute queues).
 enum Kind : u32 {
     EwCsPartial,

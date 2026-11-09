@@ -4148,6 +4148,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (GuestSync::On()) {
         GuestSync::NoteWork(false);
     }
+    if (GuestSync::GuestBarriers()) {
+        if (runtime.guest_dirty && (runtime.guest_barrier_pending || runtime.guest_last_work == 2)) {
+            needs_barrier = true;
+        }
+        runtime.guest_last_work = 1;
+    }
     // bbport diagnosis (BB_FRAME_STATS): stage B draws by class (depth-only / colour), cycles.
     struct DrawClassTimer {
         u32 cls;
@@ -5342,6 +5348,12 @@ void Rasterizer::WaitHleCopies(u32 where) {
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     if (GuestSync::On()) {
         GuestSync::NoteWork(true);
+    }
+    if (GuestSync::GuestBarriers()) {
+        if (runtime.guest_dirty && (runtime.guest_barrier_pending || runtime.guest_last_work == 1)) {
+            needs_barrier = true;
+        }
+        runtime.guest_last_work = 2;
     }
     // bbport diagnosis (BB_DISPATCH_STATS=1): stage B time per dispatch by section.
     struct DispatchTimer {
@@ -7171,7 +7183,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 const u64 track_offset = in_span ? span.offset : offset;
                 const u64 track_size = in_span ? span.hi - span.lo : tracked_size;
                 span.tracked |= in_span;
-                if (track) {
+                if (GuestSync::GuestBarriers()) {
+                    if (desc.is_written) {
+                        runtime.NoteGuestWrite();
+                    }
+                } else if (track) {
                     bound_buffers.emplace_back(buffer, track_offset, track_size, desc.is_written);
                 }
                 if (g_gpu_checkpoints && num_checkpoint_buffers < std::size(checkpoint_buffers)) {
@@ -7186,7 +7202,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                         g_bind_cycles[2].fetch_add(__rdtsc() - t_inv, std::memory_order_relaxed);
                     }
                 }
-                if (track) {
+                if (track && !GuestSync::GuestBarriers()) {
                     const u64 t_find = StageBStats() ? __rdtsc() : 0;
                     needs_barrier |= runtime.IsBufferAccessed(buffer, track_offset, track_size,
                                                               desc.is_written);
