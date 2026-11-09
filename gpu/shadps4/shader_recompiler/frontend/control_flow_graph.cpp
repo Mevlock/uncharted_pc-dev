@@ -69,7 +69,9 @@ bool ScopeSplitScalar() {
 // branch it is a barrier in non-uniform control flow: undefined; NVIDIA and AMD let it pass, Intel
 // hardware threads whose lanes all skip it never arrive and the workgroup waits forever. It splits
 // the scope like a scalar instruction (ends it before, reopens it after), also when nothing of the
-// scope follows it. BB_SCOPE_SPLIT_BARRIER=0 turns it off (part of the shader cache version).
+// scope follows it. BB_SCOPE_SPLIT_BARRIER=0 turns it off. The shaders it changes (BB_BARRIER_CHECK
+// over every listed variant: only cs f8fa9165) get their own cache names (BinaryName), so the rest
+// of a player's cache stays valid.
 bool ScopeSplitBarrier() {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_SCOPE_SPLIT_BARRIER");

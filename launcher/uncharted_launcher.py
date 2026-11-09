@@ -2632,6 +2632,7 @@ class Launcher:
                 log.close()  # the game has its own handle
         self.job = GameJob(self.process)
         self.entered, self.last_problem, self.stopping = False, '', False
+        self.prep_shown = False
         if not closing:
             self.reader = threading.Thread(target=self.read_output, args=(self.process,), daemon=True)
             self.reader.start()
@@ -2714,6 +2715,7 @@ class Launcher:
                         self.show('log')
                 elif item.startswith('PREP '):
                     self.show_preparation(item)
+                    self.prep_shown = True
                 else:
                     stripped = item.strip()
                     if stripped.startswith(('STOP:', 'ERROR', 'GPU crash: the', 'Fault:')) or \
@@ -2724,6 +2726,14 @@ class Launcher:
                     if 'Entering original x86-64 code' in item:
                         self.entered = True
                         self.status.configure(text=_('The game is running.'), fg=GOLD)
+                        # The preparation page closed before the game code starts: its last progress line (sent
+                        # 4 a second, so often short of 100 %) stood on the Shaders page all session ("Step 2 of
+                        # 2 ... 60 %" on an Intel laptop, 2026-11-09). The marker follows a moment later, behind
+                        # the game, so the page's end is what says the shaders are prepared.
+                        if getattr(self, 'prep_shown', False) and not self.preparing:
+                            self.prep_shown = False
+                            title = next(t for k, t, _s, _e in GAMES if k == self.app['start'])
+                            self.prep_status.configure(text=_('{}: shaders prepared.').format(title), fg=GOLD)
                     elif item.startswith('Switching to '):
                         self.status.configure(text=_('Starting the next game of the collection…'), fg=GOLD)
                     self.append(item)

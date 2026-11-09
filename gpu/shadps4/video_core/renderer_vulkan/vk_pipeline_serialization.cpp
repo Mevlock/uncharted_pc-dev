@@ -75,7 +75,6 @@ static u32 TranslatedBinaryVersion() {
     return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0u : 0x10000u) |
            (Shader::CtaSplitEnabled() ? 0x20000u : 0u) |
            (Shader::WaveLdsBarriers() ? 0u : 0x40000u) |
-           (Shader::Gcn::ScopeSplitBarrier() ? 0x80000u : 0u) |
            ((Shader::ReadConstWindowDwords() >> 8) << 20) | TranslatorSwitchBits();
 }
 } // namespace Serialization
@@ -219,6 +218,12 @@ void RegisterShaderMeta(const Shader::Info& info,
 /// without a cache version bit (BB_EFFECT_LOOP_CLAMP) get a suffix: binaries saved before it (or
 /// with it off) are not taken for it, and the rest of the cache is kept.
 static std::string BinaryName(u64 pgm_hash, size_t perm_idx) {
+    // _bs1 (BB_SCOPE_SPLIT_BARRIER): the shaders whose barriers it moves out of a branch. Shader
+    // preparation of all three games' lists with BB_BARRIER_CHECK=1 found one: U3's shadow-filter
+    // prefix sum cs f8fa9165 (the Intel GPU hang). Only it is translated again, not the whole cache.
+    if (pgm_hash == 0xf8fa9165 && Shader::Gcn::ScopeSplitBarrier()) {
+        return fmt::format("{:#018x}_{}_bs1", pgm_hash, perm_idx);
+    }
     // _lc2: pixel shader 689d1af9 (its first clamp builds patched nothing; not to be taken).
     return Shader::Optimization::EffectLoopClamp(pgm_hash)
                ? fmt::format("{:#018x}_{}_{}", pgm_hash, perm_idx,
