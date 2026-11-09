@@ -75,6 +75,7 @@ static u32 TranslatedBinaryVersion() {
     return ShaderBinaryVersion | (Shader::Gcn::ScopeSplitScalar() ? 0u : 0x10000u) |
            (Shader::CtaSplitEnabled() ? 0x20000u : 0u) |
            (Shader::WaveLdsBarriers() ? 0u : 0x40000u) |
+           (Shader::Gcn::ScopeSplitBarrier() ? 0x80000u : 0u) |
            ((Shader::ReadConstWindowDwords() >> 8) << 20) | TranslatorSwitchBits();
 }
 } // namespace Serialization

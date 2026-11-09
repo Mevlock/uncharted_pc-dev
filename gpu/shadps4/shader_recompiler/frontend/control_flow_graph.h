@@ -53,6 +53,8 @@ struct Block : Hook {
 
 // bbport: BB_SCOPE_SPLIT_SCALAR (see control_flow_graph.cpp); part of the shader cache version.
 bool ScopeSplitScalar();
+// bbport: BB_SCOPE_SPLIT_BARRIER (see control_flow_graph.cpp); part of the shader cache version.
+bool ScopeSplitBarrier();
 
 class CFG {
     using Label = u32;

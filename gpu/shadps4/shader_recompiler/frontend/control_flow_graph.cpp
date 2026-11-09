@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include "common/assert.h"
@@ -58,6 +59,20 @@ static IR::Condition MakeCondition(const GcnInst& inst) {
 bool ScopeSplitScalar() {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_SCOPE_SPLIT_SCALAR");
+        return !(env && env[0] == '0');
+    }();
+    return enabled;
+}
+
+// bbport (Intel GPU hang, U3 chateau forest: the shadow-filter prefix sum cs f8fa9165): an
+// s_barrier inside a divergence scope runs for every wave on GCN whatever EXEC is, but in a SPIR-V
+// branch it is a barrier in non-uniform control flow: undefined; NVIDIA and AMD let it pass, Intel
+// hardware threads whose lanes all skip it never arrive and the workgroup waits forever. It splits
+// the scope like a scalar instruction (ends it before, reopens it after), also when nothing of the
+// scope follows it. BB_SCOPE_SPLIT_BARRIER=0 turns it off (part of the shader cache version).
+bool ScopeSplitBarrier() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_SCOPE_SPLIT_BARRIER");
         return !(env && env[0] == '0');
     }();
     return enabled;
@@ -204,9 +219,10 @@ void CFG::SplitDivergenceScopes() {
     // for the whole wave (ScopeSplitScalar). The scope ends before it and reopens after it.
     const auto splits_scope = [&](const Block& blk, size_t index, s32 curr_begin) {
         const auto& inst = inst_list[index];
-        if (!ScopeSplitScalar() || curr_begin == -1 || index >= blk.end_index ||
-            (inst.category != InstCategory::ScalarALU &&
-             inst.category != InstCategory::ScalarMemory)) {
+        const bool barrier = inst.opcode == Opcode::S_BARRIER && ScopeSplitBarrier();
+        if (curr_begin == -1 || index >= blk.end_index ||
+            (!barrier && (!ScopeSplitScalar() || (inst.category != InstCategory::ScalarALU &&
+                                                  inst.category != InstCategory::ScalarMemory)))) {
             return false;
         }
         for (u32 i = 0; i < inst.dst_count; i++) {
@@ -218,6 +234,17 @@ void CFG::SplitDivergenceScopes() {
         const auto first = inst_list.begin();
         if (std::all_of(first + curr_begin + 1, first + index, IgnoresExecMask)) {
             return false;
+        }
+        if (barrier) {
+            // Vector work of the scope comes before it: it leaves the scope, whatever follows.
+            static std::atomic<u32> logged{0};
+            if (logged.fetch_add(1) < 20) {
+                std::printf("Shader recompiler: s_barrier at pc %#x moved out of a divergence scope "
+                            "(BB_SCOPE_SPLIT_BARRIER)\n",
+                            index_to_pc[index]);
+                std::fflush(stdout);
+            }
+            return true;
         }
         for (size_t next = index + 1; next <= blk.end_index; next++) {
             const auto& later = inst_list[next];
