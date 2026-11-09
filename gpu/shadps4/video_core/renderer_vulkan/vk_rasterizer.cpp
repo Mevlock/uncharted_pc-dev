@@ -3742,6 +3742,44 @@ void Rasterizer::NoteNullPipelineDraw() {
 // bbport diagnosis: BB_DRAW_WATCH_INDICES=<n>[,<n>...]: draws the game issues with those index
 // counts, per 5 s, with their vertex/pixel program addresses (U2: is the carried gun's draw, 2991
 // indices like the picked-up Beretta's, issued at all?).
+// bbport 2026-11-09: do the games ever draw with alpha-to-coverage (DB_ALPHA_TO_MASK, 0xA2DC, bit 0)
+// or a partial MSAA sample mask (PA_SC_AA_MASK_X0Y0_X1Y0 / X0Y1_X1Y1, 0xA30E/0xA30F)? The renderer
+// ignores both (shadPS4 #5655 implements them). Each new combination is logged once (up to 16), with
+// the draw count so far; BB_AA_STATE_LOG=0: off. The registers sit in padding of the Regs struct.
+static void WatchAaState(const AmdGpu::Regs& regs) {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_AA_STATE_LOG");
+        return !(env && env[0] == '0');
+    }();
+    if (!on) {
+        return;
+    }
+    const u32 a2m = regs.reg_array[0xA2DC];
+    const u32 mask0 = regs.reg_array[0xA30E];
+    const u32 mask1 = regs.reg_array[0xA30F];
+    const bool a2m_on = (a2m & 1) != 0;
+    const bool partial_mask = (mask0 != 0xFFFFFFFFu && mask0 != 0) || (mask1 != 0xFFFFFFFFu && mask1 != 0);
+    static std::atomic<u64> draws{0};
+    const u64 n = draws.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (!a2m_on && !partial_mask) {
+        return;
+    }
+    static std::mutex lock;
+    static std::vector<std::array<u32, 4>> seen;
+    const std::array<u32, 4> key{a2m_on ? a2m : 0u, mask0, mask1, regs.aa_config.NumSamples()};
+    std::scoped_lock guard{lock};
+    if (seen.size() >= 16 || std::ranges::find(seen, key) != seen.end()) {
+        return;
+    }
+    seen.push_back(key);
+    std::printf("AA state: draw %llu uses %s%s (DB_ALPHA_TO_MASK %#x, PA_SC_AA_MASK %#010x %#010x, %u samples; "
+                "not implemented here, shadPS4 #5655)\n",
+                static_cast<unsigned long long>(n), a2m_on ? "alpha-to-coverage" : "",
+                partial_mask ? (a2m_on ? " and a partial sample mask" : "a partial sample mask") : "", a2m,
+                mask0, mask1, regs.aa_config.NumSamples());
+    std::fflush(stdout);
+}
+
 static void WatchDrawIndices(const AmdGpu::Regs& regs) {
     static const std::vector<u32> watch = [] {
         std::vector<u32> out;
@@ -3793,6 +3831,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
     RENDERER_TRACE;
     BbStats::draws.fetch_add(1, std::memory_order_relaxed);
     WatchDrawIndices(Regs());
+    WatchAaState(Regs());
 
     // bbport: with the draw pipeline this thread only selects the pipeline and hands the draw
     // to the recording thread (DrawRecord there); draws FilterDraw handles itself run here.
@@ -4931,6 +4970,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                               u32 max_count, VAddr count_address, u16 vertex_sgpr_offset,
                               u16 instance_sgpr_offset) {
     RENDERER_TRACE;
+    WatchAaState(Regs());
     // bbport: like direct draws, handed to the recording thread after the pipeline selection
     // (else the GPU thread waited here for a whole frame of queued draws).
     const bool pipelined = UseDrawPipe() && FilterDrawPasses() &&
