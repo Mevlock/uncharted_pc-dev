@@ -2149,25 +2149,38 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
     runtime.Transit(&depth, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                     vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
-    const auto cmdbuf = scheduler.CommandBuffer();
-    vk::ImageMemoryBarrier2 b{
-        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .srcAccessMask = vk::AccessFlagBits2::eNone,
-        .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
-        .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
-        .oldLayout = vk::ImageLayout::eUndefined,
-        .newLayout = vk::ImageLayout::eGeneral,
-        .image = vk::Image(motion_image),
-        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-    };
-    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
-    camera_motion.RecordVelocity(cmdbuf, depth_view, *motion_view, w, h);
-    b.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
-    b.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
-    b.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
-    b.dstAccessMask = vk::AccessFlagBits2::eShaderRead;
-    b.oldLayout = vk::ImageLayout::eGeneral;
-    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    // perf11: recorded in order by the Vulkan recording thread (the constants are taken now):
+    // the raw command buffer made the draw recording thread wait for that thread to run dry
+    // once a frame. Off by default (perf11 ABBA: -0.4%, noise; the other per-frame sync stays):
+    // BB_UPSCALER_DEFER=1 turns it on.
+    static const bool defer = [] {
+        const char* env = std::getenv("BB_UPSCALER_DEFER");
+        return env && env[0] == '1';
+    }();
+    if (defer) {
+        camera_motion.RecordVelocityDeferred(vk::Image(motion_image), depth_view, *motion_view, w,
+                                             h);
+    } else {
+        const auto cmdbuf = scheduler.CommandBuffer();
+        vk::ImageMemoryBarrier2 b{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eNone,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = vk::Image(motion_image),
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        camera_motion.RecordVelocity(cmdbuf, depth_view, *motion_view, w, h);
+        b.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+        b.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
+        b.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
+        b.dstAccessMask = vk::AccessFlagBits2::eShaderRead;
+        b.oldLayout = vk::ImageLayout::eGeneral;
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    }
     velocity_pending = true;
     velocity_depth = camera_motion.Depth();
     velocity_address = display;

@@ -405,6 +405,10 @@ void Scheduler::EndRendering() {
     });
 }
 
+#ifdef _WIN32
+extern "C" char __ImageBase;
+#endif
+
 void Scheduler::TraceDirectRecording(void* caller) {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_RECORDER_TRACE");
@@ -428,15 +432,16 @@ void Scheduler::TraceDirectRecording(void* caller) {
     std::ranges::sort(top, std::greater{});
     for (size_t i = 0; i < std::min<size_t>(top.size(), 8); ++i) {
 #ifdef _WIN32
-        struct { const char* dli_fname; void* dli_fbase; } info{nullptr, nullptr};
+        // perf11: exe offsets (llvm-symbolizer --relative-address); was the low half of the address.
+        struct { const char* dli_fname; void* dli_fbase; } info{"bb-probe.exe", &__ImageBase};
 #else
         Dl_info info{};
         dladdr(top[i].second, &info);
 #endif
-        std::printf("Recorder sync caller: %llu x %s+0x%lx\n",
+        std::printf("Recorder sync caller: %llu x %s+0x%llx\n",
                     static_cast<unsigned long long>(top[i].first),
                     info.dli_fname ? info.dli_fname : "?",
-                    static_cast<unsigned long>(reinterpret_cast<uintptr_t>(top[i].second) -
+                    static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(top[i].second) -
                                                reinterpret_cast<uintptr_t>(info.dli_fbase)));
     }
     callers.clear();

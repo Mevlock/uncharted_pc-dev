@@ -9367,6 +9367,22 @@ bool Rasterizer::DeferToNativeBatch(OrderedTask task, const u8* data, u32 size) 
 }
 
 bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
+    // perf11: why dispatches did not join a batch (printed every 5 s): no batched variant or not
+    // one workgroup, split workgroups, special buffer, empty V#, read-back/GPU data/big input,
+    // two arenas.
+    static std::array<u64, 7> bail{};
+    static u64 appended = 0;
+    static auto bail_window = std::chrono::steady_clock::now();
+    if (const auto now = std::chrono::steady_clock::now(); now - bail_window >= std::chrono::seconds(5)) {
+        std::printf("Native batch bail-outs (5 s): appended %llu, variant/shape %llu, split %llu, special "
+                    "%llu, empty %llu, input %llu, arenas %llu\n",
+                    (unsigned long long)appended, (unsigned long long)bail[0], (unsigned long long)bail[1],
+                    (unsigned long long)bail[2], (unsigned long long)bail[3], (unsigned long long)bail[4],
+                    (unsigned long long)bail[5]);
+        bail = {};
+        appended = 0;
+        bail_window = now;
+    }
     auto& b = native_batch;
     u64 t_last = __rdtsc();
     const auto lap_time = [&](u32 slot) {
@@ -9377,6 +9393,7 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
     const ComputePipeline* batched = pipeline_cache.FindBatchedComputePipeline(pipeline);
     const auto& cs_program = CsRegs();
     if (!batched || cs_program.dim_x != 1 || cs_program.dim_y != 1 || cs_program.dim_z != 1) {
+        ++bail[0];
         return false;
     }
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
@@ -9387,6 +9404,7 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
         .indirect = false,
     };
     if (Shader::IsSplitCtaProgram(cs.pgm_hash) || Shader::WorkgroupSplit(cs.cs_split_eligible, hw_cs) > 1) {
+        ++bail[1];
         return false;
     }
     const u32 num_buffers = static_cast<u32>(cs.buffers.size());
@@ -9404,10 +9422,12 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
             continue;
         }
         if (desc.IsSpecial()) {
+            ++bail[2];
             return false;
         }
         const auto sharp = desc.GetSharp(cs);
         if (!sharp.base_address || !sharp.GetSize()) {
+            ++bail[3];
             return false;
         }
         size[i] = memory->ClampRangeSize(sharp.base_address, sharp.GetSize());
@@ -9424,6 +9444,7 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
             (!desc.is_written &&
              (size[i] > VideoCore::BufferCache::STREAM_THRESHOLD ||
               buffer_cache.IsRegionGpuModified(sharp.base_address, size[i])))) {
+            ++bail[4];
             return false; // read-backs, GPU data and big inputs go the usual way
         }
         address[i] = sharp.base_address;
@@ -9483,6 +9504,7 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
         const u64 key = buffer_cache.ArenaKey(g.lo);
         if (buffer_cache.ArenaKey(g.hi - 1) != key ||
             (arena_key != ~u64{0} && key != arena_key)) {
+            ++bail[5];
             return false; // an object over two arenas: the usual way
         }
         arena_key = key;
@@ -9535,6 +9557,7 @@ bool Rasterizer::AppendNativeBatch(const ComputePipeline* pipeline) {
             b.written[i] = cs.buffers[i].is_written;
         }
     };
+    ++appended;
     lap_time(1);
     if (!fits) {
         FlushNativeBatch(reason);

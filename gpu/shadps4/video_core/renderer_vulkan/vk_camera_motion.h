@@ -81,6 +81,11 @@ public:
     void RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
                         vk::ImageView motion_view, u32 width, u32 height,
                         float jitter_scale = 1.0f);
+    /// perf11: the same pass with its constants taken now, recorded in order by the Vulkan
+    /// recording thread (Scheduler::Record) between barriers that take `motion_image` from
+    /// undefined to General for the pass and make its writes visible to all later commands.
+    void RecordVelocityDeferred(vk::Image motion_image, vk::ImageView depth_view,
+                                vk::ImageView motion_view, u32 width, u32 height);
     [[nodiscard]] VideoCore::ImageId Depth() const noexcept {
         return depth_id;
     }

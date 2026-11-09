@@ -531,6 +531,63 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
     cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
 }
 
+void CameraMotion::RecordVelocityDeferred(vk::Image motion_image, vk::ImageView depth_view,
+                                          vk::ImageView motion_view, u32 width, u32 height) {
+    const auto& camera = velocity_camera;
+    const PushConstants push{
+        .reproject = camera.to_previous_clip,
+        .proj = camera.uv_to_view,
+        .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], motion_deadzone(), 0.0f},
+        .size = {float(width), float(height)},
+        .jitter = {jitter[0], jitter[1]},
+        .previous_jitter = {previous_jitter[0], previous_jitter[1]},
+        .mode = (zero_motion_test() || !camera.valid || camera.cut) ? 3u : 2u,
+    };
+    const vk::Pipeline pipeline = *motion_pipeline;
+    const vk::PipelineLayout layout = *motion_pipeline_layout;
+    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        vk::ImageMemoryBarrier2 b{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eNone,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = motion_image,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        const vk::DescriptorImageInfo depth_info{.imageView = depth_view,
+                                                 .imageLayout = vk::ImageLayout::eGeneral};
+        const vk::DescriptorImageInfo motion_info{.imageView = motion_view,
+                                                  .imageLayout = vk::ImageLayout::eGeneral};
+        const std::array<vk::WriteDescriptorSet, 3> writes = {{
+            {.dstBinding = 0,
+             .descriptorCount = 1,
+             .descriptorType = vk::DescriptorType::eSampledImage,
+             .pImageInfo = &depth_info},
+            {.dstBinding = 1,
+             .descriptorCount = 1,
+             .descriptorType = vk::DescriptorType::eStorageImage,
+             .pImageInfo = &motion_info},
+            {.dstBinding = 2,
+             .descriptorCount = 1,
+             .descriptorType = vk::DescriptorType::eSampledImage,
+             .pImageInfo = &depth_info},
+        }};
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
+        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
+        cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push), &push);
+        cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        b.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+        b.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
+        b.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
+        b.dstAccessMask = vk::AccessFlagBits2::eShaderRead;
+        b.oldLayout = vk::ImageLayout::eGeneral;
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    });
+}
+
 void CameraMotion::OnConstants(const float* data) {
     // Scene constants: far plane 3000, 1/far, and the render size.
     if (data[0] != 3000.0f || data[4] < 64.0f || data[5] < 64.0f ||
