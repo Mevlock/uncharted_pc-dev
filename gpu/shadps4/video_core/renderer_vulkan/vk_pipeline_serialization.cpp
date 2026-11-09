@@ -2942,18 +2942,32 @@ void PipelineCache::WarmUpThread() {
     // shader files of a first U3 launch were written behind the game, which ran slowly for a minute or two on an
     // Intel laptop until they were on disk (and every time after clearing the shaders; a restart was smooth).
     // BB_PREP_PAGE_SAVE=0: they are written behind the game, as before.
+    // A very slow disk (a player's: ~1.1 s per write with 4 writers, 1584 queued = minutes) would keep the page up
+    // for that long: once 2 s of saving say the rest would take more than 20 s, the page closes and the rest is
+    // written behind the game, as before.
     if (prep_screen && ship_list && PageSavesShaders()) {
         const double t_save = elapsed_ms();
         const u32 total = db.PendingWrites();
-        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(180);
+        const auto start = std::chrono::steady_clock::now();
+        const auto end = start + std::chrono::seconds(60);
+        bool too_slow = false;
         while (db.PendingWrites() != 0 && std::chrono::steady_clock::now() < end) {
             const u32 left = db.PendingWrites();
             BbOverlay::SetShaderPreparation(4, total > left ? total - left : 0, total);
+            const double spent = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            const u32 saved = total > left ? total - left : 0;
+            if (spent >= 2.0 && (saved == 0 || spent / saved * left > 20.0)) {
+                too_slow = true;
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         BbOverlay::SetShaderPreparation(0, 0, 0);
-        std::printf("Preparation: %u shader files saved under the page in %.0f ms%s\n", total, elapsed_ms() - t_save,
-                    db.PendingWrites() ? " (not all: the rest behind the game)" : "");
+        const u32 left = db.PendingWrites();
+        std::printf("Preparation: %u of %u shader files saved under the page in %.0f ms%s\n", total - std::min(left, total),
+                    total, elapsed_ms() - t_save,
+                    left ? (too_slow ? " (the disk is slow: the rest behind the game)" : " (the rest behind the game)")
+                         : "");
     }
     if (prep_screen) {
         BbOverlay::SetPreparationScreen(false);
