@@ -187,6 +187,7 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
         Shader::Optimization::InterpolatedIntegerPass(program);
     }
     Shader::Optimization::CollectShaderInfoPass(program, profile);
+    Shader::Optimization::BarrierDivergenceCheck(program);
     Shader::IR::DumpProgram(program, info);
 
     return program;

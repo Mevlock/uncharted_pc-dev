@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <string_view>
 #include <unordered_set>
+#include <magic_enum/magic_enum.hpp>
 #include <vector>
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/ir_emitter.h"
@@ -239,6 +244,164 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
         if (node.type == Type::Block && divergence_depth == 0) {
             EmitBarrierInBlock(node.data.block);
         }
+    }
+}
+
+// bbport diagnosis (BB_BARRIER_CHECK=1): barriers left in control flow that may differ between the
+// invocations of a workgroup (a branch or a loop exit whose condition depends on the invocation,
+// on a wave-level value or on memory) - undefined in SPIR-V; Intel GPUs hang on them (U3 cs
+// f8fa9165). Conservative: any condition reached from a per-invocation source counts. One line per
+// shader: "Barrier check: <stage> <hash>: N barrier(s) in divergent control flow".
+static bool BarrierCheckOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_BARRIER_CHECK");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+
+// Uniformity across the workgroup: a value differs between invocations when it comes from a
+// per-invocation source (invocation ids, EXEC/VCC, lane and wave operations, atomics' returns) or
+// from any argument that does. Loads count only through their address/coordinate arguments (the
+// same location read by all invocations gives the same value: an LDS word after a barrier).
+// Merge blocks of branches and loops already found divergent: a phi there differs between
+// invocations whatever its arguments are.
+static thread_local const std::unordered_set<const IR::Block*>* g_divergent_merges = nullptr;
+
+static bool DivergentValue(const IR::Value& value, std::unordered_map<const IR::Inst*, bool>& memo) {
+    if (value.IsImmediate()) {
+        return false;
+    }
+    const IR::Inst* inst = value.Inst();
+    if (const auto it = memo.find(inst); it != memo.end()) {
+        return it->second;
+    }
+    memo[inst] = false; // a phi cycle: uniform unless another argument says otherwise
+    bool divergent = false;
+    const IR::Opcode op = inst->GetOpcode();
+    if (op == IR::Opcode::Phi && g_divergent_merges && g_divergent_merges->contains(inst->GetParent())) {
+        memo[inst] = true;
+        return true;
+    }
+    switch (op) {
+    case IR::Opcode::GetAttribute:
+    case IR::Opcode::GetAttributeU1:
+    case IR::Opcode::GetAttributeU32: {
+        const IR::Attribute attr = inst->Arg(0).Attribute();
+        divergent = attr != IR::Attribute::WorkgroupId && attr != IR::Attribute::WorkgroupIndex;
+        break;
+    }
+    case IR::Opcode::GetExec:
+    case IR::Opcode::GetVcc:
+    case IR::Opcode::GetVccLo:
+    case IR::Opcode::GetVccHi:
+    case IR::Opcode::GetVectorRegister:
+    case IR::Opcode::LaneId:
+    case IR::Opcode::ReadFirstLane:
+    case IR::Opcode::ReadLane:
+    case IR::Opcode::Ballot:
+    case IR::Opcode::BallotFindLsb:
+    case IR::Opcode::InverseBallot:
+        divergent = true;
+        break;
+    default: {
+        const std::string_view name = IR::NameOf(op);
+        if (name.find("Atomic") != std::string_view::npos || name.starts_with("Subgroup") ||
+            name.starts_with("Quad") || name.starts_with("Wave")) {
+            divergent = true;
+            break;
+        }
+        for (size_t arg = 0; arg < inst->NumArgs() && !divergent; ++arg) {
+            divergent = DivergentValue(inst->Arg(arg), memo); // immediates: uniform
+        }
+        break;
+    }
+    }
+    memo[inst] = divergent;
+    return divergent;
+}
+
+static bool MaybeDivergent(const IR::U1& cond) {
+    std::unordered_map<const IR::Inst*, bool> memo;
+    return DivergentValue(cond, memo);
+}
+
+void BarrierDivergenceCheck(const IR::Program& program) {
+    if (!BarrierCheckOn()) {
+        return;
+    }
+    using Type = IR::AbstractSyntaxNode::Type;
+    NodeSet divergent_loops;
+    NodeSet merges; // divergent ifs' and loops' merge blocks, grown until nothing changes
+    g_divergent_merges = &merges;
+    for (int round = 0; round < 8; ++round) {
+        const size_t before = merges.size();
+        for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+            if (node.type == Type::Repeat && MaybeDivergent(node.data.repeat.cond)) {
+                divergent_loops.emplace(node.data.repeat.merge);
+                merges.emplace(node.data.repeat.merge);
+            } else if (node.type == Type::Break && MaybeDivergent(node.data.break_node.cond)) {
+                divergent_loops.emplace(node.data.break_node.merge);
+                merges.emplace(node.data.break_node.merge);
+            } else if (node.type == Type::If && MaybeDivergent(node.data.if_node.cond)) {
+                merges.emplace(node.data.if_node.merge);
+            }
+        }
+        if (merges.size() == before) {
+            break;
+        }
+    }
+    u32 depth{};
+    NodeSet divergent_ifs;
+    u32 found{};
+    bool early_return{};
+    for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
+        switch (node.type) {
+        case Type::If:
+            if (MaybeDivergent(node.data.if_node.cond)) {
+                divergent_ifs.emplace(node.data.if_node.merge);
+                ++depth;
+            }
+            break;
+        case Type::EndIf:
+            if (divergent_ifs.contains(node.data.end_if.merge)) {
+                --depth;
+            }
+            break;
+        case Type::Loop:
+            if (divergent_loops.contains(node.data.loop.merge)) {
+                ++depth;
+            }
+            break;
+        case Type::Repeat:
+            if (divergent_loops.contains(node.data.repeat.merge)) {
+                --depth;
+            }
+            break;
+        case Type::Return:
+        case Type::Unreachable:
+            if (depth != 0) {
+                early_return = true; // later barriers are reached by only some invocations
+            }
+            break;
+        case Type::Block:
+            if (depth != 0 || early_return) {
+                for (const IR::Inst& inst : node.data.block->Instructions()) {
+                    found += inst.GetOpcode() == IR::Opcode::Barrier;
+                }
+            }
+            break;
+        default:
+            break;
+        }
+    }
+    g_divergent_merges = nullptr;
+    if (found) {
+        std::printf("Barrier check: %s %#018llx: %u barrier(s) in divergent control flow%s\n",
+                    std::string(magic_enum::enum_name(program.info.hw_stage)).c_str(),
+                    static_cast<unsigned long long>(program.info.pgm_hash), found,
+                    early_return ? " (after an early return)" : "");
+        std::fflush(stdout);
     }
 }
 
