@@ -376,15 +376,17 @@ void DrawPreparation::ReturnArrays(Submission& submission) {
 }
 
 namespace {
-// bbport (perf10): whole Submission objects are recycled too (BB_PREP_RECYCLE=0: off): the shared
-// pointer's deleter puts a finished one back with its buffers (commands, prepared draws, taken
-// flags, register delta) and its control block comes from a fixed-size pool, so a steady stream of
-// submissions (~30k/s in U3's crowd) makes no heap calls on the threads that build and retire
-// them. Only with the array pool on (BB_PREP_ARRAY_POOL).
+// bbport (perf10, experiment, OFF by default; BB_PREP_RECYCLE=1 turns it on): whole Submission
+// objects are recycled too: the shared pointer's deleter puts a finished one back with its buffers
+// (commands, prepared draws, taken flags, register delta) and its control block comes from a
+// fixed-size pool, so a steady stream of submissions (~30k/s in U3's crowd) makes no heap calls on
+// the threads that build and retire them. Only with the array pool on (BB_PREP_ARRAY_POOL).
+// U3 market vs the array pool alone (2026-11-09): CPU-bound -1.5%, usual +0.1%, slow CPU +3.8%
+// (noisy): not proven, kept off.
 bool RecycleEnabled() {
     static const bool on = [] {
         const char* env = std::getenv("BB_PREP_RECYCLE");
-        return ArrayPoolEnabled() && !(env && env[0] == '0');
+        return ArrayPoolEnabled() && env && env[0] == '1';
     }();
     return on;
 }
