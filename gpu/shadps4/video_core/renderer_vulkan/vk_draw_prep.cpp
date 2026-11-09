@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <array>
+#include <bit>
+#include <memory>
+#include <mutex>
 #include <unordered_set>
 
 #include "bbport_threads.h"
@@ -290,6 +293,88 @@ void DrawPreparation::ReturnChunks(std::vector<std::unique_ptr<u32[]>>& chunks) 
     chunks.clear(); // past the limit: freed as before
 }
 
+namespace {
+// bbport (perf10): the prepared draw arrays and command copies of finished submissions, reused by
+// Build. U3's market crowd builds ~30k submissions a second (3 draws each, up to ~100); their
+// arrays were freed by the last owner, usually the GPU thread (Rasterizer::RetireSubmission):
+// 12-17% of stage A's samples were in the process heap's free. Arrays are pooled by power-of-two
+// capacity (O(1) take and return) under a byte budget. BB_PREP_ARRAY_POOL=0: allocated and freed
+// as before.
+bool ArrayPoolEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_PREP_ARRAY_POOL");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+struct PooledDraws {
+    std::unique_ptr<PreparedDraw[]> draws;
+    u32 capacity;
+};
+std::mutex array_pool_mutex;
+constexpr u32 PoolClasses = 17; ///< capacities 1 << 0 .. 1 << 16
+std::array<std::vector<std::unique_ptr<PreparedDraw[]>>, PoolClasses> draws_pool; ///< by class
+std::vector<std::vector<u32>> commands_pool;   ///< guarded by array_pool_mutex
+size_t pool_bytes = 0;                         ///< guarded by array_pool_mutex
+constexpr size_t PoolByteBudget = 96u << 20;
+constexpr size_t CommandsPoolLimit = 512;
+constexpr size_t MaxPooledCommandWords = 4u << 20;
+/// The class of an array that holds `draws` (its capacity is 1 << class).
+u32 PoolClass(u32 draws) {
+    return draws <= 1 ? 0 : u32(std::bit_width(draws - 1));
+}
+// BB_PREP_POOL_STATS=1 (diagnosis): takes that found an array, returns kept / dropped, every 5 s.
+std::atomic<u64> pool_hits{0}, pool_misses{0}, pool_kept{0}, pool_dropped{0}, pool_draws{0}, pool_max_draws{0};
+void PoolStats() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_PREP_POOL_STATS");
+        return env && env[0] == '1';
+    }();
+    if (!on) {
+        return;
+    }
+    static std::atomic<s64> last{0};
+    const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+    s64 prev = last.load();
+    if (now - prev < 5'000'000'000ll || !last.compare_exchange_strong(prev, now)) {
+        return;
+    }
+    const u64 builds = pool_hits.load() + pool_misses.load();
+    std::printf("Prep array pool (5 s): %llu builds (%llu found an array, %llu allocated), %llu returned "
+                "(%llu kept, %llu freed), %.0f draws each, largest %llu\n",
+                (unsigned long long)builds, (unsigned long long)pool_hits.exchange(0),
+                (unsigned long long)pool_misses.exchange(0),
+                (unsigned long long)(pool_kept.load() + pool_dropped.load()),
+                (unsigned long long)pool_kept.exchange(0), (unsigned long long)pool_dropped.exchange(0),
+                builds ? double(pool_draws.exchange(0)) / double(builds) : 0.0,
+                (unsigned long long)pool_max_draws.exchange(0));
+    std::fflush(stdout);
+}
+} // namespace
+
+void DrawPreparation::ReturnArrays(Submission& submission) {
+    if (!ArrayPoolEnabled()) {
+        return;
+    }
+    std::scoped_lock lk{array_pool_mutex};
+    const u32 cls = PoolClass(submission.draws_capacity);
+    const size_t draw_bytes = size_t(submission.draws_capacity) * sizeof(PreparedDraw);
+    if (submission.draws && cls < PoolClasses && (1u << cls) == submission.draws_capacity &&
+        pool_bytes + draw_bytes <= PoolByteBudget) {
+        draws_pool[cls].push_back(std::move(submission.draws));
+        pool_bytes += draw_bytes;
+        pool_kept.fetch_add(1, std::memory_order_relaxed);
+    } else if (submission.draws) {
+        pool_dropped.fetch_add(1, std::memory_order_relaxed);
+    }
+    const size_t command_bytes = submission.commands.capacity() * sizeof(u32);
+    if (command_bytes != 0 && submission.commands.capacity() <= MaxPooledCommandWords &&
+        commands_pool.size() < CommandsPoolLimit && pool_bytes + command_bytes <= PoolByteBudget) {
+        commands_pool.push_back(std::move(submission.commands));
+        pool_bytes += command_bytes;
+    }
+}
+
 DrawPreparation::DrawPreparation(PipelineCache& pipeline_cache_)
     : pipeline_cache{pipeline_cache_} {
     worker_count = DefaultWorkerCount();
@@ -321,12 +406,52 @@ std::shared_ptr<DrawPreparation::Submission> DrawPreparation::Build(
         return {};
     }
     auto submission = std::make_shared<Submission>();
+    if (ArrayPoolEnabled()) {
+        std::scoped_lock lk{array_pool_mutex};
+        if (!commands_pool.empty()) {
+            submission->commands = std::move(commands_pool.back());
+            commands_pool.pop_back();
+            pool_bytes -= submission->commands.capacity() * sizeof(u32);
+        }
+    }
     submission->commands.assign(commands.begin(), commands.end());
     ForEachPacket(submission->commands, [&](const AmdGpu::PM4Header* header) {
         submission->num_draws += IsDirectDraw(header->type3.opcode);
         submission->num_dispatches += IsDispatch(header->type3.opcode);
     });
-    submission->draws = std::make_unique<PreparedDraw[]>(submission->num_draws);
+    PooledDraws pooled{};
+    const u32 cls = PoolClass(submission->num_draws);
+    if (ArrayPoolEnabled() && cls < PoolClasses) {
+        pooled.capacity = 1u << cls;
+        std::scoped_lock lk{array_pool_mutex};
+        auto& list = draws_pool[cls];
+        if (!list.empty()) {
+            pooled.draws = std::move(list.back());
+            list.pop_back();
+            pool_bytes -= size_t(pooled.capacity) * sizeof(PreparedDraw);
+        }
+    }
+    (pooled.draws ? pool_hits : pool_misses).fetch_add(1, std::memory_order_relaxed);
+    pool_draws.fetch_add(submission->num_draws, std::memory_order_relaxed);
+    if (submission->num_draws > pool_max_draws.load(std::memory_order_relaxed)) {
+        pool_max_draws.store(submission->num_draws, std::memory_order_relaxed);
+    }
+    PoolStats();
+    if (pooled.draws) {
+        // As make_unique<PreparedDraw[]> leaves them: value-initialised.
+        for (u32 i = 0; i < submission->num_draws; ++i) {
+            std::destroy_at(&pooled.draws[i]);
+            std::construct_at(&pooled.draws[i]);
+        }
+        submission->draws = std::move(pooled.draws);
+        submission->draws_capacity = pooled.capacity;
+    } else {
+        // A pooled size class (a power of two) when the pool is on.
+        const u32 capacity =
+            ArrayPoolEnabled() && cls < PoolClasses ? 1u << cls : submission->num_draws;
+        submission->draws = std::make_unique<PreparedDraw[]>(capacity);
+        submission->draws_capacity = capacity;
+    }
     submission->draw_taken = std::make_unique<std::atomic<bool>[]>(submission->num_draws);
     submission->dispatch_taken =
         std::make_unique<std::atomic<bool>[]>(submission->num_dispatches);
