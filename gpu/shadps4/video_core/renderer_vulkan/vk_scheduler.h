@@ -908,7 +908,7 @@ public:
     /// signal runs.
     void SignalAfterHostCopies(std::function<void()> signal, u64 landing_seq = 0);
 
-    /// bbport (perf6, BB_RAW_FENCE=1: on; off by default, slow-CPU result open): SignalAfterHostCopies for a plain-data signal
+    /// bbport (perf6; on by default since perf11, BB_RAW_FENCE=0: off): SignalAfterHostCopies for a plain-data signal
     /// (`fn(bytes)`, at most RawSignalBytes): recorded inline, and on the recording thread run at
     /// once when no copy or landing is ahead of it, without building std::function callbacks.
     /// U3 has ~300k compute fences/s in crowds, three heap allocations each before.

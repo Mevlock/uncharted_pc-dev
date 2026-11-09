@@ -6732,10 +6732,129 @@ static bool SpanInvalidate() {
     return on;
 }
 
+// perf11 MEASUREMENT ONLY (BB_BIND_MEMO_CEILING=1, UNSAFE, off): the ceiling of a binding memo. A stage
+// whose buffers are all read-only plain buffers (no ring copies, no special buffers) and whose V#s equal those of
+// its last binding in the same command buffer (tick) and stream buffer lap replays that binding's results: the
+// descriptor infos, push offsets and barrier ranges, with the barrier check redone. NOT checked: CPU writes to the
+// buffers since (no upload) - wrong data possible. Counts hits/misses every 5 s.
+namespace {
+struct BindMemoEntry {
+    u64 key = 0;
+    u64 tick = ~u64{0};
+    u64 lap = 0;
+    const Shader::Info* stage = nullptr;
+    u32 count = 0;
+    struct Item {
+        vk::Buffer handle;
+        u64 offset;
+        u64 range;
+        u32 adjust;
+        const VideoCore::Buffer* buffer; ///< null: not tracked
+        u64 track_offset;
+        u64 track_size;
+    };
+    std::array<Item, 16> items;
+};
+std::array<BindMemoEntry, 1024> g_bind_memo;
+u64 g_bind_memo_hits = 0, g_bind_memo_misses = 0, g_bind_memo_ineligible = 0;
+bool BindMemoCeiling() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_BIND_MEMO_CEILING");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+} // namespace
+
 void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* prepared,
                              Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data, u32& write_index) {
     const u64 alignment = instance.StorageMinAlignment();
+    BindMemoEntry* memo_entry = nullptr;
+    u64 memo_key = 0;
+    if (BindMemoCeiling() && DrawPipe::OnStageB()) {
+        static auto window = std::chrono::steady_clock::now();
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(5)) {
+            std::printf("Bind memo ceiling (5 s): hits %llu, misses %llu, ineligible %llu\n",
+                        (unsigned long long)g_bind_memo_hits, (unsigned long long)g_bind_memo_misses,
+                        (unsigned long long)g_bind_memo_ineligible);
+            g_bind_memo_hits = g_bind_memo_misses = g_bind_memo_ineligible = 0;
+            window = now;
+        }
+        bool eligible = !stage.buffers.empty() && stage.buffers.size() <= 16 && !FrameCapture::Active() && !gbuffer_draw &&
+                        !DrawLog::Active();
+        u64 key = stage.pgm_hash * 0x9E3779B97F4A7C15ull ^ reinterpret_cast<u64>(&stage);
+        for (u32 i = 0; eligible && i < stage.buffers.size(); ++i) {
+            const auto& desc = stage.buffers[i];
+            // Ring copies and the flat user data buffer are made again on a hit (cheap); other special buffers
+            // and written buffers leave the stage to the full path.
+            if (num_ring_stages && FindRingBinding(stage, i)) {
+                continue;
+            }
+            if (desc.IsSpecial() && desc.buffer_type == Shader::BufferType::Flatbuf) {
+                continue;
+            }
+            if (desc.IsSpecial() || desc.is_written) {
+                eligible = false;
+                break;
+            }
+            const AmdGpu::Buffer v = prepared ? prepared->buffer_sharps[i] : desc.GetSharp(stage);
+            u64 words[2];
+            std::memcpy(words, &v, sizeof(words));
+            key = (key ^ words[0]) * 0x100000001B3ull;
+            key = (key ^ words[1]) * 0x100000001B3ull;
+        }
+        if (!eligible) {
+            ++g_bind_memo_ineligible;
+        } else {
+            memo_key = key | 1;
+            auto& e = g_bind_memo[(memo_key >> 7) % g_bind_memo.size()];
+            const u64 tick = scheduler.CurrentTick();
+            const u64 lap = buffer_cache.GetStreamBuffer().Laps();
+            if (e.key == memo_key && e.stage == &stage && e.tick == tick && e.lap == lap &&
+                e.count == stage.buffers.size()) {
+                ++g_bind_memo_hits;
+                for (u32 i = 0; i < e.count; ++i) {
+                    const auto& item = e.items[i];
+                    const auto& desc = stage.buffers[i];
+                    if (const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, i) : nullptr) {
+                        if (!desc.IsSpecial()) {
+                            push_data.AddOffset(binding.buffer, 0);
+                        }
+                        buffer_infos.emplace_back(constant_ring->Handle(), ring->offset, ring->size);
+                    } else if (desc.IsSpecial()) {
+                        auto& vk_buffer = buffer_cache.GetStreamBuffer();
+                        const u32 ubo_size = stage.FlatUserData().size() * sizeof(u32);
+                        const u64 offset = vk_buffer.Copy(stage.FlatUserData().data(), ubo_size, alignment);
+                        buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
+                    } else {
+                        push_data.AddOffset(binding.buffer, item.adjust);
+                        buffer_infos.emplace_back(item.handle, item.offset, item.range);
+                    }
+                    if (item.buffer) {
+                        bound_buffers.emplace_back(item.buffer, item.track_offset, item.track_size, false);
+                        needs_barrier |= runtime.IsBufferAccessed(item.buffer, item.track_offset, item.track_size,
+                                                                  false);
+                    }
+                    auto& set_write = set_writes[write_index++];
+                    set_write.dstSet = VK_NULL_HANDLE;
+                    set_write.dstBinding = binding.unified++;
+                    set_write.dstArrayElement = 0;
+                    set_write.descriptorCount = 1;
+                    set_write.descriptorType = vk::DescriptorType::eStorageBuffer;
+                    set_write.pBufferInfo = &buffer_infos.back();
+                    ++binding.buffer;
+                }
+                return;
+            }
+            ++g_bind_memo_misses;
+            memo_entry = &e;
+            e.key = 0; // filled at the end
+        }
+    }
+    const size_t memo_infos_before = buffer_infos.size();
+    const size_t memo_bound_before = bound_buffers.size();
+    const u32 memo_first_buffer = binding.buffer;
     // bbport diagnosis: BB_TRACE_BUFFERS=<hash> prints the V# of every buffer binding of that
     // shader and the first bytes of guest memory behind it (first 6 draws).
     static const u64 trace_hash = [] {
@@ -7239,6 +7358,37 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         set_write.descriptorType = vk::DescriptorType::eStorageBuffer;
         set_write.pBufferInfo = &buffer_infos.back();
         ++binding.buffer;
+    }
+    // BB_BIND_MEMO_CEILING: this binding's results for the next identical one. Barrier ranges are matched to the
+    // buffers by order (one bound_buffers entry per tracked buffer; a coalesced span is tracked by its first view).
+    if (memo_entry && buffer_infos.size() - memo_infos_before == stage.buffers.size()) {
+        auto& e = *memo_entry;
+        const size_t tracked = bound_buffers.size() - memo_bound_before;
+        size_t next_bound = memo_bound_before;
+        bool ok = true;
+        for (u32 i = 0; i < stage.buffers.size(); ++i) {
+            const auto& info = buffer_infos[memo_infos_before + i];
+            auto& item = e.items[i];
+            item.handle = info.buffer;
+            item.offset = info.offset;
+            item.range = info.range;
+            item.adjust = push_data.buf_offsets[memo_first_buffer + i];
+            item.buffer = nullptr;
+            if (next_bound < bound_buffers.size() && bound_buffers[next_bound].buffer->Handle() == info.buffer) {
+                item.buffer = bound_buffers[next_bound].buffer;
+                item.track_offset = bound_buffers[next_bound].offset;
+                item.track_size = bound_buffers[next_bound].size;
+                ++next_bound;
+            }
+        }
+        ok = next_bound - memo_bound_before == tracked;
+        if (ok) {
+            e.key = memo_key;
+            e.stage = &stage;
+            e.tick = scheduler.CurrentTick();
+            e.lap = buffer_cache.GetStreamBuffer().Laps();
+            e.count = u32(stage.buffers.size());
+        }
     }
     if (BindMemoStats() && DrawPipe::OnStageB() && !stage.buffers.empty()) {
         u64 key = stage.pgm_hash * 0x9E3779B97F4A7C15ull;

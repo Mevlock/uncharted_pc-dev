@@ -458,11 +458,12 @@ std::unique_ptr<RecordChunk> Scheduler::AcquireChunk() {
 }
 
 bool Scheduler::RawFencesOn() {
-    // Off by default (2026-11-03 market route ABBA): fence task 0.35 -> 0.27-0.30 us, CPU-bound +2.8% mean /
-    // +1.0% crowd, but slow CPU +3.5% mean / -4.4% crowd (both pairs): not proven, needs another slow round.
+    // On by default since perf11 (2026-11-09, U3 market ABBA vs off, same exe): CPU-bound +2.0% / +0.7%, slow CPU
+    // -1.9% / +0.9% / +3.2% (market dip better in all three), usual +0.3%. (2026-11-03: CPU-bound +2.8%, slow crowd
+    // -4.4%.) BB_RAW_FENCE=0: the std::function path.
     static const bool on = [] {
         const char* env = std::getenv("BB_RAW_FENCE");
-        return env && env[0] == '1';
+        return !(env && env[0] == '0');
     }();
     return on;
 }
