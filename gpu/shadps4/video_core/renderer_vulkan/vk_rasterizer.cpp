@@ -3202,6 +3202,12 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
             }
             self.FlushNativeBatch(task.task == &EndNativeRunTask ? 0 : 1);
         }
+        // perf10: the statistics by task function cost two TSC reads and two atomic adds per
+        // task (~300k/s in U3's crowd): with BB_STAGEB_STATS=1 only.
+        if (!StageBStats()) {
+            task.task(self, data + sizeof(TaskPacket));
+            return;
+        }
         const u64 start = __rdtsc();
         task.task(self, data + sizeof(TaskPacket));
         // Statistics by task function (stage B only writes; the report reads approximately).
