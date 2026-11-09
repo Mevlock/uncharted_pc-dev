@@ -293,6 +293,9 @@ private:
     void RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderState& state,
                          bool is_indexed, u32 num_indices, u32 num_instances, u32 first_vertex,
                          u32 first_instance);
+    /// bbport (scene HDR): a motion blur dispatch after the tone pass again on the HDR values.
+    void RecordHdrBlurShadow(const ComputePipeline& pipeline, u64 cs_hash, u32 groups_x,
+                             u32 groups_y, u32 groups_z);
     vk::Buffer hdr_settings_buffer{}; ///< the tone pass replacement's settings (BbHdr::Tuning), a ring
     VmaAllocation hdr_settings_allocation{};
     void* hdr_settings_mapped = nullptr;

@@ -2149,7 +2149,9 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
         return;
     }
     velocity_pending = false;
-    scene_shadow.drawn = false; // drawn again by this frame's pass after the tone pass
+    // Drawn again by this frame's pass after the tone pass. Not the motion blur shadows: this
+    // runs at that pass's own start, after the blur (they are cleared after the upscale).
+    scene_shadow.drawn = false;
     if (!scaled_session || !camera_motion.VelocityMode() || failed || !Active() ||
         !camera_motion.Ready()) {
         return;
@@ -2270,7 +2272,7 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
                         "XeSS or TAA have it)\n");
         }
     }
-    tone_shadow.drawn = scene_shadow.drawn = false;
+    tone_shadow.drawn = scene_shadow.drawn = blur1_shadow.drawn = blur2_shadow.drawn = false;
     if (hdr_input != last_hdr_input) {
         reset = true;
         last_hdr_input = hdr_input;
@@ -2340,7 +2342,7 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
 // bbport: scene HDR (HdrScene). From moistman7's PR #156 to BilalReloaded's port; the composite
 // with the HUD is the port's own (its HUD stays in the 8-bit UI image).
 TemporalUpscaler::ShadowTarget TemporalUpscaler::HdrShadowTarget(HdrShadow which, u32 w, u32 h) {
-    auto& shadow = which == HdrShadow::Tone ? tone_shadow : scene_shadow;
+    auto& shadow = Shadow(which);
     if (!shadow.image || shadow.width != w || shadow.height != h) {
         const auto device = instance.GetDevice();
         if (shadow.image) {
@@ -2369,7 +2371,9 @@ TemporalUpscaler::ShadowTarget TemporalUpscaler::HdrShadowTarget(HdrShadow which
         }));
         shadow.width = w;
         shadow.height = h;
-        std::printf("HDR: %s shadow %ux%u\n", which == HdrShadow::Tone ? "tone" : "scene", w, h);
+        static constexpr const char* names[] = {"tone", "scene", "motion blur setup",
+                                                "motion blur"};
+        std::printf("HDR: %s shadow %ux%u\n", names[u32(which)], w, h);
     }
     return {vk::Image(shadow.image), *shadow.view};
 }

@@ -149,7 +149,10 @@ public:
     /// with that shadow as its input into the Scene shadow (linear HDR, the game's distortion and
     /// overlays included), which the upscale reads instead of the game's 8-bit frame
     /// (RunScaledVelocity); the presenter shows the HDR composite of it and the frame's HUD.
-    enum class HdrShadow { Tone, Scene };
+    /// Blur1/Blur2: the game's motion blur after the tone pass (compute 006d71bb: the half-size
+    /// colour and weight from the tone pass output, then 19367542: the blur), run again on the
+    /// Tone shadow; the pass after the tone pass adds Blur2 (its binding 3) where things move.
+    enum class HdrShadow { Tone, Scene, Blur1, Blur2 };
     struct ShadowTarget {
         vk::Image image;
         vk::ImageView view;
@@ -160,7 +163,34 @@ public:
     /// The shadow's RGBA16F image at w x h (made or resized here), for this frame's draw.
     ShadowTarget HdrShadowTarget(HdrShadow which, u32 w, u32 h);
     void HdrShadowDrawn(HdrShadow which) {
-        (which == HdrShadow::Tone ? tone_shadow : scene_shadow).drawn = true;
+        Shadow(which).drawn = true;
+    }
+    [[nodiscard]] bool HdrShadowWasDrawn(HdrShadow which) const noexcept {
+        return Shadow(which).drawn;
+    }
+    [[nodiscard]] vk::ImageView HdrShadowView(HdrShadow which) const noexcept {
+        return *Shadow(which).view;
+    }
+    [[nodiscard]] std::pair<u32, u32> HdrShadowSize(HdrShadow which) const noexcept {
+        return {Shadow(which).width, Shadow(which).height};
+    }
+    /// A motion blur dispatch to run again on the HDR values: its output shadow, and the shadow
+    /// it reads in place of the game's image (Tone for the first, Blur1 for the second).
+    [[nodiscard]] bool HdrBlurPass(u64 cs_hash, HdrShadow& out, HdrShadow& in) const noexcept {
+        if (!hdr_scene || !tone_shadow.drawn) {
+            return false;
+        }
+        if (u32(cs_hash) == 0x006d71bbu) {
+            out = HdrShadow::Blur1;
+            in = HdrShadow::Tone;
+            return true;
+        }
+        if (u32(cs_hash) == 0x19367542u && blur1_shadow.drawn) {
+            out = HdrShadow::Blur2;
+            in = HdrShadow::Blur1;
+            return true;
+        }
+        return false;
     }
     /// The pass after the tone pass, with a Tone shadow drawn this frame to read.
     [[nodiscard]] bool HdrPostPass(u64 ps_hash) const noexcept {
@@ -398,7 +428,16 @@ private:
         u32 width = 0, height = 0;
         bool drawn = false; ///< this frame
     };
-    ShadowImage tone_shadow, scene_shadow;
+    ShadowImage tone_shadow, scene_shadow, blur1_shadow, blur2_shadow;
+    ShadowImage& Shadow(HdrShadow which) noexcept {
+        return which == HdrShadow::Tone    ? tone_shadow
+               : which == HdrShadow::Scene ? scene_shadow
+               : which == HdrShadow::Blur1 ? blur1_shadow
+                                           : blur2_shadow;
+    }
+    const ShadowImage& Shadow(HdrShadow which) const noexcept {
+        return const_cast<TemporalUpscaler*>(this)->Shadow(which);
+    }
     bool last_hdr_input = false; ///< the upscaler's input domain last frame (its history)
     bool hdr_frame = false;      ///< output_image holds the shown frame's HDR scene (split done)
     VAddr hdr_address = 0;       ///< the display buffer of that frame

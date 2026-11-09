@@ -935,6 +935,7 @@ void Rasterizer::RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderS
     Pipeline::DescriptorWrites writes = set_writes;
     vk::DescriptorBufferInfo settings_info{};
     vk::DescriptorImageInfo tone_info{};
+    vk::DescriptorImageInfo blur_info{};
     Shadow which{};
     if (pipeline.GetHdrRole() == GraphicsPipeline::HdrRole::Tone) {
         // The menu's HDR settings (BbHdr::Tuning) change live: each change takes the next slot
@@ -984,12 +985,22 @@ void Rasterizer::RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderS
     } else if (upscaler->HdrPostPass(ps->pgm_hash)) {
         tone_info = {.imageView = upscaler->ToneShadowView(),
                      .imageLayout = vk::ImageLayout::eGeneral};
+        // The game's motion blur of this frame run again on the HDR values (RecordHdrBlurShadow):
+        // its result in place of the 8-bit one at binding 3, which the pass adds where things
+        // move (else that part of the picture was the SDR frame, clipped at paper white).
+        const bool blur = upscaler->HdrShadowWasDrawn(Shadow::Blur2);
+        blur_info = {.imageView = blur ? upscaler->HdrShadowView(Shadow::Blur2) : vk::ImageView{},
+                     .imageLayout = vk::ImageLayout::eGeneral};
         bool swapped = false;
         for (auto& write : writes) {
             if (write.dstBinding == 2 && write.descriptorCount == 1 &&
                 write.descriptorType == vk::DescriptorType::eSampledImage) {
                 write.pImageInfo = &tone_info;
                 swapped = true;
+            }
+            if (blur && write.dstBinding == 3 && write.descriptorCount == 1 &&
+                write.descriptorType == vk::DescriptorType::eSampledImage) {
+                write.pImageInfo = &blur_info;
             }
         }
         if (!swapped) {
@@ -1051,6 +1062,93 @@ void Rasterizer::RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderS
                    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderStorageRead |
                        vk::AccessFlagBits2::eTransferRead);
     upscaler->HdrShadowDrawn(which);
+}
+
+// bbport (scene HDR): the game's motion blur between the tone pass and the pass after it, in all
+// three games: compute 006d71bb (8x8 groups) reads the tone pass output (binding 3) and writes the
+// half-size colour with a blur weight from the motion vectors (binding 4); 19367542 blurs that
+// (reads binding 2, writes binding 3); the pass after the tone pass adds the result. Each is
+// recorded again right after the game's own, with the HDR shadows in place of its 8-bit images:
+// Tone -> Blur1 -> Blur2, which that pass's HDR copy reads (RecordHdrShadow). Same constants,
+// buffers and groups; the game's dispatches are untouched.
+void Rasterizer::RecordHdrBlurShadow(const ComputePipeline& pipeline, u64 cs_hash, u32 groups_x,
+                                     u32 groups_y, u32 groups_z) {
+    using Shadow = TemporalUpscaler::HdrShadow;
+    Shadow out{}, in{};
+    if (!upscaler->HdrBlurPass(cs_hash, out, in)) {
+        return;
+    }
+    const bool first = out == Shadow::Blur1;
+    const u32 in_binding = first ? 3 : 2, out_binding = first ? 4 : 3;
+    const auto [tone_w, tone_h] = upscaler->HdrShadowSize(Shadow::Tone);
+    const u32 w = (tone_w + 1) / 2, h = (tone_h + 1) / 2;
+    Pipeline::DescriptorWrites writes = set_writes;
+    const vk::DescriptorImageInfo in_info{.imageView = upscaler->HdrShadowView(in),
+                                          .imageLayout = vk::ImageLayout::eGeneral};
+    const auto target = upscaler->HdrShadowTarget(out, w, h);
+    const vk::DescriptorImageInfo out_info{.imageView = target.view,
+                                           .imageLayout = vk::ImageLayout::eGeneral};
+    u32 found = 0;
+    for (auto& write : writes) {
+        if (write.descriptorCount != 1) {
+            continue;
+        }
+        if (write.dstBinding == in_binding &&
+            write.descriptorType == vk::DescriptorType::eSampledImage) {
+            write.pImageInfo = &in_info;
+            found |= 1;
+        } else if (write.dstBinding == out_binding &&
+                   write.descriptorType == vk::DescriptorType::eStorageImage) {
+            write.pImageInfo = &out_info;
+            found |= 2;
+        }
+    }
+    if (found != 3) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::printf("HDR: motion blur pass %08x has other bindings: the blur stays 8-bit\n",
+                        u32(cs_hash));
+        }
+        return;
+    }
+    const vk::Image image = target.image;
+    const auto barrier = [&](vk::ImageLayout old_layout, vk::PipelineStageFlags2 src,
+                             vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst,
+                             vk::AccessFlags2 dst_access) {
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = src,
+            .srcAccessMask = src_access,
+            .dstStageMask = dst,
+            .dstAccessMask = dst_access,
+            .oldLayout = old_layout,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = image,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        scheduler.Record([b](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        });
+    };
+    barrier(vk::ImageLayout::eUndefined, vk::PipelineStageFlagBits2::eAllCommands,
+            vk::AccessFlagBits2::eMemoryRead, vk::PipelineStageFlagBits2::eComputeShader,
+            vk::AccessFlagBits2::eShaderStorageWrite);
+    pipeline.BindResources(writes, push_data);
+    const vk::Pipeline handle = pipeline.Handle();
+    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+        cmdbuf.dispatch(groups_x, groups_y, groups_z);
+    });
+    barrier(vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+            vk::AccessFlagBits2::eShaderStorageWrite, vk::PipelineStageFlagBits2::eAllCommands,
+            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderSampledRead);
+    upscaler->HdrShadowDrawn(out);
+    static bool told = false;
+    if (!told && out == Shadow::Blur2) {
+        told = true;
+        std::printf("HDR: the motion blur runs on the HDR scene too (%ux%u)\n", w, h);
+        std::fflush(stdout);
+    }
 }
 
 inline const AmdGpu::Regs& Rasterizer::Regs() const {
@@ -5827,6 +5925,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         crumb_scheduler->WriteBreadcrumb(cmdbuf, crumb, vk::PipelineStageFlagBits2::eComputeShader);
     });
     DebugState.IncDispatch();
+    if (upscaler->HdrScene()) [[unlikely]] {
+        RecordHdrBlurShadow(*pipeline, cs.pgm_hash, groups_x, dim_y, dim_z);
+    }
 
     ResetBindings(true);
     scheduler.KickRecording();
