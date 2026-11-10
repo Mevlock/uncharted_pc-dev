@@ -891,6 +891,9 @@ static U3Row u3_rows[U3_ROWS];
 /* U3: the < > of a settings row are two texts 10-20 wide and 33.6 tall side by side (antikmewzik: x 378 and 394 on the audio
  * volume rows), narrower than a row; kept here (u3_lock) */
 static U3Row u3_arrows[16];
+/* U2/U3: the rails of the sliders (sensitivity, volumes): a text whose picture is 100+ (U3: 60+) wide and at most 12 tall, laid out
+ * in a row's rectangle (antikmewzik's u2_slider_note / u3_slider_note); x, y and h of the row, w = the rail's width (u3_lock) */
+static U3Row u3_sliders[8];
 static pthread_mutex_t u3_lock=PTHREAD_MUTEX_INITIALIZER;
 static volatile uint64_t u3_page_us;     /* the last update of a focused menu page */
 static volatile uint64_t u3_info_us;     /* an information box (a locked reward) is over the menu */
@@ -952,6 +955,20 @@ static void u3_text(const uint64_t *regs) {
             memcpy(seen[nseen].r,r,sizeof(r)); memcpy(seen[nseen].q,q,sizeof(q)); ++nseen;
             printf("Menu mouse: text box %.1f %.1f %.1f x %.1f style%s %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f\n",r[0],r[1],r[2],r[3],ok ? "" : " (unreadable)",
                    s9[0],s9[1],s9[2],s9[3],s9[4],s9[5],s9[6],s9[7],s9[8]);
+        }
+    }
+    {   /* a slider's rail (the size of its picture: the text object, rcx, +0x3c) */
+        float sz[2];
+        if (safe_read(sz,regs[6]+0x3c,8) && sz[1]>0.0f && sz[1]<=12.0f &&
+            ((u2m && sz[0]>=100.0f && r[3]>=24.0f && r[3]<=42.0f) || (u3m && sz[0]>=60.0f && r[3]>=20.0f && r[3]<=44.0f))) {
+            pthread_mutex_lock(&u3_lock);
+            int slot=0;
+            for (int i=0;i<8;++i) {
+                if (fabsf(u3_sliders[i].x-r[0])<0.5f && fabsf(u3_sliders[i].y-r[1])<0.5f) { slot=i; break; }
+                if (u3_sliders[i].us<u3_sliders[slot].us) slot=i;
+            }
+            u3_sliders[slot]=(U3Row){r[0],r[1],sz[0],r[3],0.0f,now,0};
+            pthread_mutex_unlock(&u3_lock);
         }
     }
     if (u3m && r[2]>=10.0f && r[2]<=20.0f && r[3]>=33.0f && r[3]<=34.2f) {
@@ -1158,7 +1175,9 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     for (int i=0;i<U3_ROWS;++i) {
         const U3Row *r=&u3_rows[i];
         if (!r->us || now-r->us>=100000) continue;
-        if (r->sel>=0.5f) {   /* the most lit (a fading highlight is two rows); U3's Yes/No: the lit one inside the highlight bar */
+        /* the most lit (a fading highlight is two rows); U3's Yes/No: the lit one inside the highlight bar. U2's section titles
+         * (Aiming, Camera: 34.2 tall, the rows 33.6) are drawn lit all the time: never the selection */
+        if (r->sel>=0.5f && !(u2m && fabsf(r->h-34.2f)<0.15f)) {
             const int bar=!u2m && u3_in_bar(r,now);
             if (!have_sel || bar>sel_bar || (bar==sel_bar && (r->sel>sel.sel+0.01f || (fabsf(r->sel-sel.sel)<=0.01f && r->w>sel.w)))) { sel=*r; have_sel=1; sel_bar=bar; }
         }
@@ -1262,14 +1281,47 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             if (mouse_debug()) printf("Menu mouse: U2 click on a value or arrow (%s) of the row at y %.0f\n",picked==BTN_LEFT ? "left" : "right",picked_cy);
         }
     }
-    if (ch.dir && now>=ch.until) ch.dir=0;
+    if (ch.dir && now>=ch.until) {
+        if (mouse_debug()) printf("Menu mouse: value click dropped: the row at y %.0f never came (lit row %s at y %.0f)\n",ch.cy,have_sel ? "yes" : "no",sel_cy);
+        ch.dir=0;
+    }
     if (ch.dir) {   /* the clicked row is the selected one for a moment: press */
         if (have_sel && fabsf(sel_cy-ch.cy)<8.0f) {
             if (!ch.seen) ch.seen=now;
-            if (now-ch.seen>=100000) { ch.press_dir=ch.dir; ch.press_until=now+70000; ch.dir=0; }
+            if (now-ch.seen>=100000) {
+                ch.press_dir=ch.dir; ch.press_until=now+70000; ch.dir=0;
+                if (mouse_debug()) printf("Menu mouse: value press %s on the row at y %.0f\n",ch.press_dir==BTN_LEFT ? "left" : "right",ch.cy);
+            }
         } else ch.seen=0;
     }
     if (now<ch.press_until) out|=ch.press_dir;
+    /* dragging a slider (antikmewzik's fallback, from the drawn rail on both codes): a click on a rail selects its row (no cross);
+     * while the button is held, one left / right press per tenth of the rail the cursor moves, once the row is the selected one */
+    static struct { int on; uint32_t dir; float last, acc, w, cy; uint64_t next, press_until; } dr;
+    if (clicked && !picked && !dialog) {
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<8;++i) {
+            const U3Row *sl=&u3_sliders[i];
+            if (!sl->us || now-sl->us>=100000 || ux<sl->x-10.0f || ux>sl->x+sl->w+10.0f || uy<sl->y || uy>=sl->y+sl->h) continue;
+            dr.on=1; dr.last=ux; dr.acc=0.0f; dr.w=sl->w; dr.cy=sl->y+sl->h*0.5f; dr.next=0;
+            picked=1;   /* (no cross: it does nothing on a slider) */
+            if (mouse_debug()) printf("Menu mouse: slider grabbed (row at y %.0f, rail %.0f..%.0f)\n",dr.cy,sl->x,sl->x+sl->w);
+            break;
+        }
+        pthread_mutex_unlock(&u3_lock);
+    }
+    if (dr.on && !left) dr.on=0;
+    if (dr.on) {
+        dr.acc+=ux-dr.last; dr.last=ux;
+        const float step=dr.w/10.0f;
+        if (dr.acc>2.0f*step) dr.acc=2.0f*step; else if (dr.acc<-2.0f*step) dr.acc=-2.0f*step;   /* no backlog: the knob stops with the mouse */
+        if (have_sel && fabsf(sel_cy-dr.cy)<8.0f && fabsf(dr.acc)>=step && now>=dr.next) {
+            dr.dir=dr.acc>0.0f ? BTN_RIGHT : BTN_LEFT;
+            dr.acc-=dr.acc>0.0f ? step : -step;
+            dr.press_until=now+60000; dr.next=now+100000;
+        }
+    }
+    if (now<dr.press_until) out|=dr.dir;
     if (clicked && have_hov && !picked) { h.click=1; h.click_deadline=now+1500000; h.active=1; }
     else if (clicked && !have_sel && !picked) h.click_until=now+150000;   /* no rows (the title's "press a button"): a click presses cross */
     if (h.click && now>h.click_deadline) h.click=0;
