@@ -497,7 +497,9 @@ static int look_ready_check(LookCheck *s, const unsigned char *camera, float hea
         const float turn=fabsf(wrap_angle(s->after-s->before));
         const float from_before=fabsf(wrap_angle(heading-s->before));
         const float from_after=fabsf(wrap_angle(heading-s->after));
-        if (from_before<0.2f*turn && from_after>0.8f*turn) {
+        /* (more than half of the turn taken back counts: U3's chase cameras (chapter 3, young Drake on the stairs) pull
+         * the direction back to their path every frame and kept ~10% of each mouse turn, which only ever read as kept) */
+        if (from_before<0.5f*turn && from_after>0.5f*turn) {
             ++s->dropped;
             if (++s->lost>=3) {
                 s->lost=0;
@@ -528,7 +530,7 @@ static void checked_turn(LookCheck *s, const unsigned char *camera, float *dir, 
     rotate_look(dir,dx,per_count);
     ++s->turns;
     const float after=atan2f(dir[0],dir[2]);
-    if (fabsf(wrap_angle(after-before))>=0.01745f) {
+    if (fabsf(wrap_angle(after-before))>=0.003f) {   /* (0.17 degrees: a slow move at 144 FPS turns ~0.5 a frame) */
         s->camera=camera;
         s->before=before;
         s->after=after;
@@ -596,7 +598,12 @@ static void u3_camera_input(unsigned char *camera, float *look, uint64_t *regs) 
     const float frame_time=clock ? *(const float *)(clock+0x19c) : 1.0f/60.0f;
     float dx=0, dy=0;
     char mode='-';
-    const int took=frame_take(&u3_frame,camera,&dx,&dy,&mode);
+    /* the camera that takes most of each turn back (chase cameras): the mouse is the stick for a moment (LookCheck) */
+    static LookCheck check={.name="U3 follow"};
+    const int ready=!look || look_ready_check(&check,camera,atan2f(look[0],look[2]),now_ms());
+    int took=0;
+    if (ready) took=frame_take(&u3_frame,camera,&dx,&dy,&mode);
+    else { look_camera_ms=now_ms(); mode='f'; }
     const float *f=(const float *)camera;
     if (mode!='s') steer_update(&u3_steer,took ? dx : 0.0f,look_scale(),frame_time,f[0x7578/4]*f[0x7604/4]*0.017453292f);
     trace_extra[0]=(float)((const unsigned char *)stick-camera); /* the kept stick's offset: 0x3c4 */
@@ -608,7 +615,7 @@ static void u3_camera_input(unsigned char *camera, float *look, uint64_t *regs) 
     if (!took || (dx==0.0f && dy==0.0f) || !look) return;
     game_invert(u3_invert_flags(camera),&dx,&dy);
     const float per_count=look_scale();
-    if (dx!=0.0f) rotate_look(look,dx,per_count);
+    if (dx!=0.0f) checked_turn(&check,camera,look,dx,per_count);
     if (dy!=0.0f) {
         const float yaw_full=f[0x7578/4]*f[0x7604/4]*0.017453292f; /* rad/s at full stick */
         const float pitch_full=f[0x7588/4]*f[0x7608/4];             /* curve units/s */
@@ -632,7 +639,12 @@ static void u2_camera_input(unsigned char *camera, float *look, uint64_t *regs) 
     if (!camera) return;
     float dx=0, dy=0;
     char mode='-';
-    const int took=frame_take(&u2_frame,camera,&dx,&dy,&mode);
+    /* the camera that takes most of each turn back (chase cameras): the mouse is the stick for a moment (LookCheck) */
+    static LookCheck check={.name="U2 follow"};
+    const int ready=!look || look_ready_check(&check,camera,atan2f(look[0],look[2]),now_ms());
+    int took=0;
+    if (ready) took=frame_take(&u2_frame,camera,&dx,&dy,&mode);
+    else { look_camera_ms=now_ms(); mode='f'; }
     const float *tune=*(const float *const *)(camera+0x8d00);
     if (mode!='s' && tune) {
         const float full_rate=tune[0x70/4]**(const float *)(camera+0x9fa8)*0.017453292f;
@@ -647,7 +659,7 @@ static void u2_camera_input(unsigned char *camera, float *look, uint64_t *regs) 
     if (!took || (dx==0.0f && dy==0.0f) || !look) return;
     game_invert(u2g.invert,&dx,&dy);
     const float per_count=look_scale();
-    if (dx!=0.0f) rotate_look(look,dx,per_count);
+    if (dx!=0.0f) checked_turn(&check,camera,look,dx,per_count);
     if (dy!=0.0f && tune) {
         const float *f=(const float *)camera;
         const float yaw_full=tune[0x70/4]*f[0x9fa8/4]*0.017453292f;
