@@ -301,7 +301,7 @@ bool WindowSDL::PollEvents() {
         }
         // Mouse look's relative mode hides the cursor itself; otherwise an idle cursor is hidden
         // while the game has the focus and nothing needs it (menu, text entry).
-        const bool hide = window_focused && !text_active && !BbOverlay::CapturesInput() && !menu_cursor &&
+        const bool hide = window_focused && !text_active && !BbOverlay::CapturesInput() &&
                           SDL_GetTicksNS() - cursor_moved_ns > CursorIdleNs;
         // In a game menu the cursor shows a hand over what answers a click (the menu mouse).
         {
