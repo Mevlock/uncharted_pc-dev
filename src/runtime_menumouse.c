@@ -1332,12 +1332,12 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     }
     pthread_mutex_unlock(&u3_lock);
     if (info) have_hov=0;   /* an information box: the menu below is left alone */
-    if (u2m) {   /* U2's information boxes (a locked reward or skin: a panel 600-800 wide centred on the screen, 700 x 220-245 at x 290): the list
+    if (u2m) {   /* U2's information boxes (a locked reward or skin: a panel 700 wide centred on the screen, 220-245 tall at x 290): the list
                   * below is left alone while one is open (the Chapter select picture, 520 wide, is not one) */
         pthread_mutex_lock(&u3_lock);
         for (int i=0;i<8 && have_hov;++i) {
             const U3Row *p=&u2_panels[i];
-            if (p->us && now-p->us<150000 && p->w>=600.0f && p->w<=800.0f && p->h>=150.0f && p->h<=400.0f && fabsf(p->x+p->w*0.5f-640.0f)<40.0f) have_hov=0;
+            if (p->us && now-p->us<150000 && p->w>=690.0f && p->w<=710.0f && p->h>=150.0f && p->h<=400.0f && fabsf(p->x+p->w*0.5f-640.0f)<10.0f) have_hov=0;   /* (Rewards > Categories has a panel 600-646 wide of its own) */
         }
         pthread_mutex_unlock(&u3_lock);
     }
