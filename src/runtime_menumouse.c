@@ -1,8 +1,8 @@
 #define _GNU_SOURCE
-/* Mouse in the menus of Uncharted 1 and 3 (hover follows the cursor, click, wheel, sliders, scroll bars, lists,
+/* Mouse in the menus of Uncharted 1, 2 and 3 (hover follows the cursor, click, wheel, sliders, scroll bars, lists,
  * Yes/No confirmations, the side or right button goes back) by antikmewzik
  * (github.com/antikmewzik/uncharted_pc_controls_qol, branch u2-mkb-qol 65522a6, src/runtime_pad.c: "the mouse in the
- * menus (U1)" and his U2/U3 menu rows, GPL-2.0-or-later as this port; Uncharted 3: see its section). His code runs here nearly as he wrote it (marked "port:" where it
+ * menus (U1)" and his U2/U3 menu rows, GPL-2.0-or-later as this port; Uncharted 2 and 3: see their section). His code runs here nearly as he wrote it (marked "port:" where it
  * differs): the loader's callbacks (probe.c) and this port's pad read (runtime_pad.c); both game codes, 1.02 (his
  * addresses; US CUSA02320 1.02 = EU CUSA02343 1.02) and 1.00 (EU CUSA02343 1.00 = US CUSA02320 1.00: the same code
  * moved, located by masked signatures). Every hook site and every game function it calls is checked against the
@@ -905,6 +905,16 @@ static const unsigned char u3_page_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x4
 static const unsigned char u3_page_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,
                                                0x48,0x49,0x89,0xf7,0x49,0x89,0xfd,0x48,0x8d,0x05};
 static const U3MenuCode *u3m;
+/* Uncharted 2: the same menu text routine (U3's was made from it; 1.00 compiled like U3's 1.00, located by its code), the selected row
+ * marked by style[5] at 3 (U3: style[6] at 1). No page hook here yet: the hover steps the highlight with the d-pad onto the row under
+ * the cursor (as antikmewzik's first U3 menus did), two columns (the main menu) by left and right. */
+typedef struct { const char *version; uint64_t text; } U2MenuCode;
+static const U2MenuCode u2_menu_codes[]={{"1.02",0x5b56d0},{"1.00",0x28ddf0}};
+static const unsigned char u2_text_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x28,0x49,0x89,0xcc,
+                                               0x48,0x89,0xd3,0x49,0x89,0xf7,0x49,0x89,0xfe,0x48,0x8b,0x0d};
+static const unsigned char u2_text_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x38,0x45,0x89,0xce,
+                                               0x4d,0x89,0xc5,0x49,0x89,0xcf,0x48,0x89,0xd3,0x48,0x89,0x75};
+static const U2MenuCode *u2m;
 typedef int64_t (__attribute__((sysv_abi)) *guest_vcall_fn)(uint64_t);
 typedef void (__attribute__((sysv_abi)) *guest_set_fn)(uint64_t, int);
 
@@ -916,7 +926,9 @@ static void u3_text(const uint64_t *regs) {
     if (!(r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f) || !safe_read(st,regs[5],sizeof(st))) return;
     /* only a colour (0..2) followed by the flags is a style (other calls pass something else in rdx) */
     for (int k=0;k<4;++k) if (!(st[k]>=0.0f && st[k]<=2.0f)) return;
-    if (!(st[6]>=0.0f && st[6]<=1.01f)) return;
+    /* the selection mark, kept as 0..1: U3 style[6] (0..1), U2 style[5] (0..3) */
+    const float mark=u2m ? st[5]/3.0f : st[6];
+    if (!(mark>=0.0f && mark<=1.01f)) return;
     pthread_mutex_lock(&u3_lock);
     int slot=-1, oldest=0;
     for (int i=0;i<U3_ROWS;++i) {
@@ -925,7 +937,7 @@ static void u3_text(const uint64_t *regs) {
         if (u3_rows[i].us<u3_rows[oldest].us) oldest=i;
     }
     if (slot<0) slot=oldest;
-    u3_rows[slot]=(U3Row){r[0],r[1],r[2],r[3],st[6],now};
+    u3_rows[slot]=(U3Row){r[0],r[1],r[2],r[3],mark,now};
     pthread_mutex_unlock(&u3_lock);
 }
 /* A focused page (rows or not: the controller picture has none) keeps the menu mode on; the page holding the row under the cursor moves
@@ -992,15 +1004,16 @@ static void u3_page(uint64_t self, uint64_t image) {
     u3_jump_page=self; u3_jump_row=target; u3_jump_us=now_us();
 }
 static int u3_menu_open(uint64_t now) {
-    if (u3_page_us && now-u3_page_us<150000 && u3_page_us<=now+1000000) return 1;
-    int lit=0;
+    static uint64_t seen;   /* (the highlight fades from row to row: the menu stays on for a moment without a lit row) */
+    int lit=u3_page_us && now-u3_page_us<150000 && u3_page_us<=now+1000000;
     pthread_mutex_lock(&u3_lock);
-    for (int i=0;i<U3_ROWS && !lit;++i) if (u3_rows[i].us && now-u3_rows[i].us<300000 && u3_rows[i].sel>=0.83f) lit=1;
+    for (int i=0;i<U3_ROWS && !lit;++i) if (u3_rows[i].us && now-u3_rows[i].us<300000 && u3_rows[i].sel>=0.5f) lit=1;
     pthread_mutex_unlock(&u3_lock);
-    return lit;
+    if (lit) seen=now;
+    return seen && now-seen<800000;
 }
 static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
-    static struct { float last_x, last_y, req_cy; int last_left, active, click; uint64_t click_until, click_deadline, req_us; } h={-1e9f,-1e9f,-1.0f,0,0,0,0,0,0};
+    static struct { float last_x, last_y, req_cy, step_cy, step_cx; int last_left, active, click, steps, step_dir; uint64_t click_until, click_deadline, req_us, step_until, next_step; } h={-1e9f,-1e9f,-1.0f,-1.0f,-1.0f,0,0,0,0,0,0,0,0,0,0};
     uint32_t out=0;
     float ux=0, uy=0;
     if (scripted_cursor) { ux=scripted_ux*UI_WIDTH; uy=scripted_uy*UI_HEIGHT; }
@@ -1029,20 +1042,34 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     for (int i=0;i<U3_ROWS;++i) {
         const U3Row *r=&u3_rows[i];
         if (!r->us || now-r->us>=100000) continue;
-        if (r->sel>=0.83f && (!have_sel || r->w>sel.w)) { sel=*r; have_sel=1; }
+        if (r->sel>=0.5f && (!have_sel || r->sel>sel.sel+0.01f || (fabsf(r->sel-sel.sel)<=0.01f && r->w>sel.w))) { sel=*r; have_sel=1; }   /* the most lit (a fading highlight is two rows) */
         if (ux>=r->x && ux<=r->x+r->w && uy>=r->y && uy<=r->y+r->h && (!have_hov || r->w*r->h<hov.w*hov.h)) { hov=*r; have_hov=1; }
     }
     pthread_mutex_unlock(&u3_lock);
     if (info) have_hov=0;   /* an information box: the menu below is left alone */
     menu_hover=have_hov;
     const float hov_cy=hov.y+hov.h*0.5f, sel_cy=sel.y+sel.h*0.5f;
-    const int same=have_hov && have_sel && fabsf(hov_cy-sel_cy)<1.5f;
+    /* the same row: the same line, and (two columns: U2's main menu) overlapping in x */
+    const int same=have_hov && have_sel && fabsf(hov_cy-sel_cy)<1.5f && hov.x<sel.x+sel.w && sel.x<hov.x+hov.w;
     if (moved) h.active=1;
     if (now<wheel_until_us[0] || now<wheel_until_us[1]) h.active=0;   /* the wheel moves the highlight: the cursor waits until it moves again */
     if (clicked && have_hov) { h.click=1; h.click_deadline=now+1500000; h.active=1; }
     else if (clicked && !have_sel) h.click_until=now+150000;   /* no rows (the title's "press a button"): a click presses cross */
     if (h.click && now>h.click_deadline) h.click=0;
-    if (have_hov && !same && (h.active || h.click) && !u3_jump_req) {
+    if (u2m && have_hov && have_sel && !same && (h.active || h.click)) {
+        /* U2: one d-pad press every 110 ms towards the row under the cursor; a row the presses never reach (a section title) is given up
+         * after as many presses as rows between them and two more, until the cursor moves to another row */
+        const float hov_cx=hov.x+hov.w*0.5f, sel_cx=sel.x+sel.w*0.5f;
+        if (fabsf(hov_cy-h.step_cy)>1.0f || fabsf(hov_cx-h.step_cx)>1.0f) { h.step_cy=hov_cy; h.step_cx=hov_cx; h.steps=0; }
+        const int budget=(int)ceilf(fabsf(hov_cy-sel_cy)/fmaxf(hov.h,20.0f))+2;
+        if (now>=h.next_step && h.steps<budget) {
+            h.step_dir=hov_cy>sel_cy+1.5f ? BTN_DOWN : hov_cy<sel_cy-1.5f ? BTN_UP : hov_cx>sel_cx ? BTN_RIGHT : BTN_LEFT;
+            h.step_until=now+50000; h.next_step=now+110000; ++h.steps;
+        }
+        if (h.steps>=budget && now>=h.next_step) { h.active=0; h.click=0; }
+    }
+    if (now<h.step_until) out|=(uint32_t)h.step_dir;
+    if (!u2m && have_hov && !same && (h.active || h.click) && !u3_jump_req) {
         /* the page answers within a frame: ask for a new row at once, again every 150 ms while the highlight has not come */
         if (fabsf(hov_cy-h.req_cy)>1.0f || now-h.req_us>150000) {
             u3_jump_cx=hov.x+hov.w*0.5f; u3_jump_cy=hov_cy; u3_jump_done=0; u3_jump_req=1;
@@ -1104,7 +1131,14 @@ void runtime_menumouse_prepare(unsigned char *image, uint64_t image_size) {
         u3m=c;
         printf("Menu mouse: Uncharted 3 (game code %s): menus follow the mouse\n",c->version);
     }
-    if (!u1m && !u3m) puts("Menu mouse: no known menu code in this executable (the menus keep the keys and the controller)");
+    for (size_t i=0;i<sizeof(u2_menu_codes)/sizeof(*u2_menu_codes) && !u1m && !u3m && !u2m;++i) {
+        const U2MenuCode *c=&u2_menu_codes[i];
+        const int v102=i==0;
+        if (!code_is(c->text,v102 ? u2_text_102_code : u2_text_100_code,v102 ? sizeof(u2_text_102_code) : sizeof(u2_text_100_code))) continue;
+        u2m=c;
+        printf("Menu mouse: Uncharted 2 (game code %s): menus follow the mouse\n",c->version);
+    }
+    if (!u1m && !u3m && !u2m) puts("Menu mouse: no known menu code in this executable (the menus keep the keys and the controller)");
     fflush(stdout);
 }
 #define CB(name) static void MS_ABI name(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14, const uint64_t *regs)
@@ -1118,7 +1152,7 @@ CB(u1_event_102) { if (u1m==&u1_menu_codes[0]) u1_menu_event(rdi,rsi,base,r14,re
 CB(u1_event_100) { if (u1m==&u1_menu_codes[1]) u1_menu_event(rdi,rsi,base,r14,regs); }
 CB(u1_credits_102) { if (u1m==&u1_menu_codes[0]) u1_credits_tick(rdi,rsi,base,r14,regs); }
 CB(u1_credits_100) { if (u1m==&u1_menu_codes[1]) u1_credits_tick(rdi,rsi,base,r14,regs); }
-CB(u3_text_cb) { (void)rdi; (void)rsi; (void)base; (void)r14; if (u3m) u3_text(regs); }
+CB(u3_text_cb) { (void)rdi; (void)rsi; (void)base; (void)r14; if (u3m || u2m) u3_text(regs); }
 CB(u3_page_cb) { (void)rsi; (void)r14; (void)regs; if (u3m) u3_page(rdi,base); }
 #define SITE(name,at,sig,moved,cb) {name,at,sig,sizeof(sig),moved,cb,NULL}
 static const RuntimeGuestCallback u1_sites[]={
@@ -1144,10 +1178,15 @@ static const RuntimeGuestCallback u3_sites[]={
     SITE("U3 1.00 menu text (menu mouse)",0x1d6060,u3_text_100_code,6,u3_text_cb),
     SITE("U3 1.00 menu page update (menu mouse)",0x1c5000,u3_page_100_code,6,u3_page_cb),
 };
+static const RuntimeGuestCallback u2_sites[]={
+    SITE("U2 1.02 menu text (menu mouse)",0x5b56d0,u2_text_102_code,6,u3_text_cb),
+    SITE("U2 1.00 menu text (menu mouse)",0x28ddf0,u2_text_100_code,6,u3_text_cb),
+};
 const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
     /* only the sites of the code found */
     if (u1m) { *count=sizeof(u1_sites)/sizeof(*u1_sites)/2; return u1m==&u1_menu_codes[0] ? u1_sites : u1_sites+*count; }
     if (u3m) { *count=2; return u3m==&u3_menu_codes[0] ? u3_sites : u3_sites+2; }
+    if (u2m) { *count=1; return u2m==&u2_menu_codes[0] ? u2_sites : u2_sites+1; }
     *count=0;
     return u1_sites;
 }
@@ -1155,7 +1194,7 @@ const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
 /* A menu is open. U1: the pause (the game's frame time is 0), the credits, or menu rows drawn lately (title, main menu, game
  * selection); in play no menu row is drawn (hints are free texts). U3: a focused menu page, or a lit menu row. */
 int runtime_menumouse_active(void) {
-    if (!u1m && !u3m) return 0;
+    if (!u1m && !u3m && !u2m) return 0;
     const uint64_t now=now_us();
     int open=0;
     if (u1m) {
@@ -1178,7 +1217,7 @@ uint32_t runtime_menumouse_buttons(const bool *k, uint32_t mouse, int wheel, int
     if (wheel>0) wheel_until_us[0]=now+80000;
     if (wheel<0) wheel_until_us[1]=now+80000;
     uint32_t out=0;
-    if (u3m) out=u3_menu_buttons(mouse,now);
+    if (u3m || u2m) out=u3_menu_buttons(mouse,now);
     else {
         out=menu_mouse_buttons(k,mouse,now);
         /* the wheel moves the highlight (a carousel or a Yes/No: sideways), unless a list's scroll bar takes it */
