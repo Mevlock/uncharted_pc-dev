@@ -889,6 +889,16 @@ static U3Row u3_rows[U3_ROWS];
 static pthread_mutex_t u3_lock=PTHREAD_MUTEX_INITIALIZER;
 static volatile uint64_t u3_page_us;     /* the last update of a focused menu page */
 static volatile uint64_t u3_info_us;     /* an information box (a locked reward) is over the menu */
+/* U3's Yes/No (the pause menu's Quit, return to checkpoint): both choices are drawn lit (style[6] 1); the chosen one has the
+ * highlight bar drawn around it, an unlit text box a few units larger on each side (520 x 40 around 512 x 32). u3_lock held. */
+static int u3_in_bar(const U3Row *t, uint64_t now) {
+    for (int i=0;i<U3_ROWS;++i) {
+        const U3Row *b=&u3_rows[i];
+        if (!b->us || now-b->us>=100000 || b->sel>=0.5f || b->w<=t->w || b->w-t->w>16.0f || b->h-t->h>16.0f) continue;
+        if (b->x<=t->x+0.5f && b->y<=t->y+0.5f && b->x+b->w>=t->x+t->w-0.5f && b->y+b->h>=t->y+t->h-0.5f) return 1;
+    }
+    return 0;
+}
 static volatile int u3_jump_req, u3_jump_done;   /* the hover asks (pad thread), a page answers (game thread): 1 done, -1 not possible, -2 nothing selectable */
 static volatile float u3_jump_cx, u3_jump_cy;
 static uint64_t u3_jump_page, u3_jump_us; static int u3_jump_row=-1;
@@ -924,16 +934,17 @@ static void u3_text(const uint64_t *regs) {
     if (!safe_read(r,regs[4],16)) return;
     const uint64_t now=now_us();
     if (fabsf(r[0]-358.0f)<2.0f && fabsf(r[2]-564.0f)<3.0f && r[3]>=150.0f) u3_info_us=now;   /* (his: the box of a locked reward) */
-    if (mouse_debug()) {   /* BB_MOUSE_DEBUG=1: each text box once (its place and style), to tell which ones are rows */
-        static float seen[3000][4]; static int nseen;
-        int known=0;
+    if (mouse_debug() && r[3]>=24.0f && r[3]<=42.0f) {   /* BB_MOUSE_DEBUG=1: each row-sized text box and each change of its style (to tell the highlight) */
+        static struct { float r[4]; int q[9]; } seen[3000];
+        static int nseen;
         float s9[9]={0};
         const int ok=safe_read(s9,regs[5],sizeof(s9));
-        const float key[4]={r[0],r[1],r[2]+1000.0f*roundf(s9[0]*10.0f)+100000.0f*roundf(s9[5]*10.0f),r[3]+1000.0f*roundf(s9[4]*20.0f)+100000.0f*roundf(s9[7]*10.0f)+10000000.0f*roundf(s9[8]*10.0f)};   /* (a row: its style changes count too) */
-        const int row=r[3]>=24.0f && r[3]<=42.0f;
-        for (int i=0;i<nseen && !known;++i) known=fabsf(seen[i][0]-r[0])<0.5f && fabsf(seen[i][1]-r[1])<0.5f && fabsf(seen[i][2]-key[2])<0.5f && fabsf(seen[i][3]-key[3])<0.5f;
-        if (!known && nseen<3000 && row) {
-            memcpy(seen[nseen],row ? key : r,sizeof(r)); ++nseen;
+        int q[9], known=0;
+        for (int k=0;k<9;++k) q[k]=(int)lroundf(s9[k]*10.0f);
+        for (int i=0;i<nseen && !known;++i)
+            known=!memcmp(seen[i].q,q,sizeof(q)) && fabsf(seen[i].r[0]-r[0])<0.5f && fabsf(seen[i].r[1]-r[1])<0.5f && fabsf(seen[i].r[2]-r[2])<0.5f && fabsf(seen[i].r[3]-r[3])<0.5f;
+        if (!known && nseen<3000) {
+            memcpy(seen[nseen].r,r,sizeof(r)); memcpy(seen[nseen].q,q,sizeof(q)); ++nseen;
             printf("Menu mouse: text box %.1f %.1f %.1f x %.1f style%s %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f\n",r[0],r[1],r[2],r[3],ok ? "" : " (unreadable)",
                    s9[0],s9[1],s9[2],s9[3],s9[4],s9[5],s9[6],s9[7],s9[8]);
         }
@@ -1053,13 +1064,30 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     const int info=u3_info_us && now-u3_info_us<300000;
     /* the rows drawn now: the one under the cursor (the smallest that holds it: a row's label and value are texts of their own) and the lit one */
     U3Row hov={0}, sel={0};
-    int have_hov=0, have_sel=0;
+    int have_hov=0, have_sel=0, sel_bar=0;
     pthread_mutex_lock(&u3_lock);
     for (int i=0;i<U3_ROWS;++i) {
         const U3Row *r=&u3_rows[i];
         if (!r->us || now-r->us>=100000) continue;
-        if (r->sel>=0.5f && (!have_sel || r->sel>sel.sel+0.01f || (fabsf(r->sel-sel.sel)<=0.01f && r->w>sel.w))) { sel=*r; have_sel=1; }   /* the most lit (a fading highlight is two rows) */
+        if (r->sel>=0.5f) {   /* the most lit (a fading highlight is two rows); U3's Yes/No: the lit one inside the highlight bar */
+            const int bar=!u2m && u3_in_bar(r,now);
+            if (!have_sel || bar>sel_bar || (bar==sel_bar && (r->sel>sel.sel+0.01f || (fabsf(r->sel-sel.sel)<=0.01f && r->w>sel.w)))) { sel=*r; have_sel=1; sel_bar=bar; }
+        }
         if (ux>=r->x && ux<=r->x+r->w && uy>=r->y && uy<=r->y+r->h && (!have_hov || r->w*r->h<hov.w*hov.h)) { hov=*r; have_hov=1; }
+    }
+    /* U3's Yes/No: the lit choice in the bar and another lit choice of its size in the same column. The jump cannot move it (it
+     * would move the pause page behind it): the d-pad steps to the choice under the cursor (its bar's size counts), as on U2. */
+    int dialog=0;
+    if (sel_bar) {
+        U3Row choice={0};
+        int have_choice=0;
+        for (int i=0;i<U3_ROWS;++i) {
+            const U3Row *r=&u3_rows[i];
+            if (!r->us || now-r->us>=100000 || r->sel<0.5f || fabsf(r->x-sel.x)>0.5f || fabsf(r->w-sel.w)>0.5f || fabsf(r->h-sel.h)>0.5f) continue;
+            if (fabsf(r->y-sel.y)>1.0f) dialog=1;
+            if (ux>=r->x-4.0f && ux<=r->x+r->w+4.0f && uy>=r->y-4.0f && uy<=r->y+r->h+4.0f) { choice=*r; have_choice=1; }
+        }
+        if (dialog) { hov=choice; have_hov=have_choice; }
     }
     pthread_mutex_unlock(&u3_lock);
     if (info) have_hov=0;   /* an information box: the menu below is left alone */
@@ -1072,7 +1100,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     if (clicked && have_hov) { h.click=1; h.click_deadline=now+1500000; h.active=1; }
     else if (clicked && !have_sel) h.click_until=now+150000;   /* no rows (the title's "press a button"): a click presses cross */
     if (h.click && now>h.click_deadline) h.click=0;
-    if (u2m && have_hov && have_sel && !same && (h.active || h.click)) {
+    if ((u2m || dialog) && have_hov && have_sel && !same && (h.active || h.click)) {
         /* U2: one d-pad press every 110 ms towards the row under the cursor; a row the presses never reach (a section title) is given up
          * after as many presses as rows between them and two more, until the cursor moves to another row */
         const float hov_cx=hov.x+hov.w*0.5f, sel_cx=sel.x+sel.w*0.5f;
@@ -1085,7 +1113,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         if (h.steps>=budget && now>=h.next_step) { h.active=0; h.click=0; }
     }
     if (now<h.step_until) out|=(uint32_t)h.step_dir;
-    if (!u2m && have_hov && !same && (h.active || h.click) && !u3_jump_req) {
+    if (!u2m && !dialog && have_hov && !same && (h.active || h.click) && !u3_jump_req) {
         /* the page answers within a frame: ask for a new row at once, again every 150 ms while the highlight has not come */
         if (fabsf(hov_cy-h.req_cy)>1.0f || now-h.req_us>150000) {
             u3_jump_cx=hov.x+hov.w*0.5f; u3_jump_cy=hov_cy; u3_jump_done=0; u3_jump_req=1;
