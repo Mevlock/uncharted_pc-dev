@@ -7,8 +7,10 @@
  * addresses; US CUSA02320 1.02 = EU CUSA02343 1.02) and 1.00 (EU CUSA02343 1.00 = US CUSA02320 1.00: the same code
  * moved, located by masked signatures). Every hook site and every game function it calls is checked against the
  * original bytes first; a game code that does not match keeps the menus as they are (logged). Not taken: his menu
- * keys (Enter, Esc, Alt, Backspace), the keyboard row of the Controls menu, the compare-with-friends and photo mode
- * changes, the probes (F7/F8/F9). BB_MENU_MOUSE=0: off. */
+ * keys (Enter, Esc, Alt, Backspace; the port keeps its own bindings), the keyboard row of the Controls menu (the port has no
+ * bindings window to open), the probes (F7/F8/F9). His compare-with-friends removal, the photo mode row, the Treasures model
+ * turned with the mouse, U3's chapter carousel and Yes/No by value and U2's controller picture are in (both codes, see
+ * "antikmewzik's other menu changes" below). BB_MENU_MOUSE=0: off. */
 #include "runtime_menumouse.h"
 #include "gpu/bbgpu.h"
 extern float runtime_ultrawide_scale;   /* runtime_ultrawide.c: the UI squeeze (< 0: Vert+, the vertical share) */
@@ -92,7 +94,7 @@ static const unsigned char *code_ref(const CodeRef *r) {
 static int camera_stopped(void) { return u1_frame_time && !(*u1_frame_time>0.0f); }
 static uint64_t wheel_until_us[2];   /* port: set by the pad read (runtime_menumouse_buttons) */
 static volatile int u1_rail_wheel;   /* U1: a list with a scrollbar is on screen: the wheel scrolls its view (the bar's thumb) instead of moving the highlight */
-static volatile uint64_t u1_hide_select_us;   /* (his prompt bar change is not taken: kept for his list code) */
+static volatile uint64_t u1_hide_select_us;   /* U1 Statistics: a statistic is selected (his list code): the prompt bar drops its SELECT (u1_bar_flags) */
 static int scripted_cursor;          /* port: BB_PAD_FILE runs: the cursor and buttons from the pad file */
 static float scripted_ux, scripted_uy;
 
@@ -1996,13 +1998,122 @@ static const RuntimeGuestCallback u2_sites[]={
     SITE("U2 1.00 menu text (menu mouse)",0x28ddf0,u2_text_100_code,6,u3_text_cb),
     SITE("U2 1.00 list control update (menu mouse)",0x267f60,u2_list_100_code,8,u2_list_cb),
 };
+/* ---- antikmewzik's other menu changes (his runtime_pad.c; 1.02 his addresses, 1.00 located 2026-11-10 by the same code) ---- */
+/* Statistics, "compare with friends" (text 0x9a8d0b3e): the online comparison does not work here. The prompt bar draws that prompt by
+ * kind (U1 kind 4, U2 kind 7, U3 kind 0x80): U1 and U2 note the moment their branch runs (the hook on its first test) and the branch's
+ * jump goes past the drawing; U3's kind test compares with -1 (never taken). While it is up, the cross (Enter, a click) does nothing
+ * (U1 always; U2 except on the rows that open a sub menu; U3 on a line with its value on the right). The SELECT prompt of the same bar
+ * goes on a statistic (U1, U3: bit 0 of the bar's flags cleared). */
+static volatile uint64_t u1_compare_us, u2_compare_us, u3_hide_select_us;
+static volatile int u2_sel_plain_row, u3_sel_value;
+CB(u1_compare_cb) { (void)rdi; (void)rsi; (void)base; (void)r14; (void)regs; if (u1m) u1_compare_us=now_us(); }
+/* (the hook moves "mov r15d, r9d; mov [rbp-0x258], r15d": the flags are still in r9, regs[3], restored by the thunk) */
+CB(u1_bar_flags_cb) { (void)rdi; (void)rsi; (void)base; (void)r14; if (u1m && now_us()-u1_hide_select_us<150000) ((uint64_t *)(uintptr_t)regs)[3]&=~(uint64_t)1; }
+CB(u2_compare_cb) { (void)rdi; (void)rsi; (void)base; (void)r14; (void)regs; if (u2m) u2_compare_us=now_us(); }
+/* U3 1.02: at "mov edx, r9d; and edx, 1" (r9 = regs[3]). 1.00 keeps the flags in [rbp-0x2b0] and reloads them into edi there
+ * ("mov edi, [rbp-0x2b0]" is the moved instruction, run after this): the frame is rbp = rsp+0x310 (push rbp, five pushes, sub rsp
+ * 0x2e8; no other change of rsp before), so the dword is at the guest's rsp+0x60; the guest's rsp is just above the saved registers
+ * and the 128-byte red-zone step (regs+25). The later reloads (0x1c7066, 0x1c7172) see the cleared bit as well, as 1.02's spill. */
+CB(u3_bar_flags_102_cb) { (void)rdi; (void)rsi; (void)base; (void)r14; if (u3m && now_us()-u3_hide_select_us<150000) ((uint64_t *)(uintptr_t)regs)[3]&=~(uint64_t)1; }
+CB(u3_bar_flags_100_cb) {
+    (void)rdi; (void)rsi; (void)base; (void)r14;
+    if (!u3m || now_us()-u3_hide_select_us>=150000) return;
+    uint32_t *flags=(uint32_t *)(uintptr_t)((uint64_t)(uintptr_t)(regs+25)+0x60);
+    *flags&=~1u;
+}
+static const unsigned char u1_compare_code[]={0x41,0x83,0x7d,0x48,0x00,0x0f,0x84,0x34,0x02,0x00,0x00,0x4c,0x8d,0x3d};   /* cmp dword [r13+0x48],0; je (both codes) */
+static const unsigned char u1_compare_je_code[]={0x0f,0x84,0x34,0x02,0x00,0x00,0x4c,0x8d,0x3d};
+static const unsigned char u1_compare_je_patch[]={0x0f,0x84,0xf8,0x02,0x00,0x00};   /* past the prompt (1.02 0x129267, 1.00 0x129117) */
+static const unsigned char u1_compare_jmp_code[]={0xe9,0x2f,0x02,0x00,0x00,0x4c,0x8d,0x35};
+static const unsigned char u1_compare_jmp_patch[]={0xe9,0xec,0x02,0x00,0x00};
+static const unsigned char u1_bar_flags_code[]={0x45,0x89,0xcf,0x44,0x89,0xbd,0xa8,0xfd,0xff,0xff,0x4c,0x89,0x85,0xa0,0xfd,0xff,0xff};   /* mov r15d, r9d; mov [rbp-0x258], r15d */
+static const unsigned char u2_compare_102_code[]={0x41,0x83,0x7f,0x48,0x00,0x0f,0x84,0x8b,0x04,0x00,0x00,0x4d,0x89,0xfd};   /* cmp dword [r15+0x48],0; jz 0x5a595d */
+static const unsigned char u2_compare_jz_102_code[]={0x0f,0x84,0x8b,0x04,0x00,0x00,0x4d,0x89,0xfd};
+static const unsigned char u2_compare_jz_102_patch[]={0xe9,0x11,0x06,0x00,0x00,0x90};   /* jmp 0x5a5ae2, the next prompt (where kind != 7 goes) */
+static const unsigned char u2_compare_100_code[]={0x41,0x83,0x7d,0x48,0x00,0x0f,0x84,0xb4,0x02,0x00,0x00,0x4c,0x8d,0x3d};   /* cmp dword [r13+0x48],0; jz 0x2822c0 */
+static const unsigned char u2_compare_jz_100_code[]={0x0f,0x84,0xb4,0x02,0x00,0x00,0x4c,0x8d,0x3d};
+static const unsigned char u2_compare_jz_100_patch[]={0xe9,0xac,0x03,0x00,0x00,0x90};   /* jmp 0x2823b7, the next prompt (where kind != 7 goes) */
+static const unsigned char u3_compare_102_code[]={0x41,0x81,0xf9,0x80,0x00,0x00,0x00,0x0f,0x85,0x71,0x07,0x00,0x00};   /* cmp r9d,0x80; jne 0x6284e3 */
+static const unsigned char u3_compare_102_patch[]={0x41,0x81,0xf9,0xff,0xff,0xff,0xff};
+static const unsigned char u3_compare_100_code[]={0x81,0xff,0x80,0x00,0x00,0x00,0x0f,0x85,0x63,0x03,0x00,0x00};   /* cmp edi,0x80; jne 0x1c7500 */
+static const unsigned char u3_compare_100_patch[]={0x81,0xff,0xff,0xff,0xff,0xff};
+static const unsigned char u3_bar_flags_102_code[]={0x44,0x89,0xca,0x83,0xe2,0x01,0x0f,0x94,0xc3,0x44,0x89,0xc9};   /* mov edx, r9d; and edx, 1; sete bl */
+static const unsigned char u3_bar_flags_100_code[]={0x8b,0xbd,0x50,0xfd,0xff,0xff,0xc4,0xe3,0x79,0x21,0x05};   /* mov edi, [rbp-0x2b0]; vinsertps */
+static const unsigned char u3_bar_100_frame[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xe8,0x02,0x00,0x00};   /* 0x1c6c30: the frame the 1.00 hook relies on */
+#define PATCH(name,at,sig,p) {name,at,sig,sizeof(sig),sizeof(p),NULL,p}
+/* the cross held back on a statistic (the pad read, every input; see runtime_menumouse_filter) */
+static int u3_stat_selected(uint64_t now) {
+    U3Row sel={0}; int have=0;
+    pthread_mutex_lock(&u3_lock);
+    for (int i=0;i<U3_ROWS;++i) { const U3Row *r=&u3_rows[i]; if (r->us && now-r->us<100000 && r->sel>=0.5f && r->h>=24.0f && r->h<=42.0f && (!have || r->sel>sel.sel+0.01f)) { sel=*r; have=1; } }
+    int value=0;
+    /* a statistics line (28.6 tall) has its value in a second text to its right; the Rewards categories (labels at x 292..347) can be chosen */
+    if (have && sel.h>=26.0f && sel.h<=30.0f && (sel.x<288.0f || sel.x>350.0f))
+        for (int i=0;i<U3_ROWS && !value;++i) { const U3Row *r=&u3_rows[i]; if (r->us && now-r->us<100000 && r->w>=5.0f && fabsf(r->y-sel.y)<2.0f && r->x>=sel.x+sel.w-1.0f) value=1; }
+    /* U2: the selected row is a 768-wide row of a list (no value column: it opens a sub menu) */
+    u2_sel_plain_row=have && fabsf(sel.h-29.2f)<0.3f && fabsf(sel.x-270.0f)<1.0f && fabsf(sel.w-768.0f)<1.5f;
+    pthread_mutex_unlock(&u3_lock);
+    return value;
+}
+uint32_t runtime_menumouse_filter(uint32_t buttons, int keyboard) {
+    const uint64_t now=now_us();
+    if (u1m && menu_mode && u1_compare_us && now-u1_compare_us<250000) buttons&=~(uint32_t)BTN_CROSS;
+    if (u3m || u2m) {
+        const int stat=u3_stat_selected(now);
+        if (u3m) { u3_sel_value=stat; if (stat) u3_hide_select_us=now; }
+        if (keyboard && u2m && u2_compare_us && now-u2_compare_us<300000 && !u2_sel_plain_row) buttons&=~(uint32_t)BTN_CROSS;
+        if (keyboard && u3m && u3_sel_value) buttons&=~(uint32_t)BTN_CROSS;
+    }
+    return buttons;
+}
+
+#define U1_SITES_102 \
+    SITE("U1 1.02 compare-with-friends prompt (hook) (menu mouse)",0x128f64,u1_compare_code,5,u1_compare_cb), \
+    PATCH("U1 1.02 compare-with-friends prompt (skip 1) (menu mouse)",0x128f69,u1_compare_je_code,u1_compare_je_patch), \
+    PATCH("U1 1.02 compare-with-friends prompt (skip 2) (menu mouse)",0x128f76,u1_compare_jmp_code,u1_compare_jmp_patch), \
+    SITE("U1 1.02 prompt bar flags (menu mouse)",0x128c8a,u1_bar_flags_code,10,u1_bar_flags_cb)
+#define U1_SITES_100 \
+    SITE("U1 1.00 compare-with-friends prompt (hook) (menu mouse)",0x128e14,u1_compare_code,5,u1_compare_cb), \
+    PATCH("U1 1.00 compare-with-friends prompt (skip 1) (menu mouse)",0x128e19,u1_compare_je_code,u1_compare_je_patch), \
+    PATCH("U1 1.00 compare-with-friends prompt (skip 2) (menu mouse)",0x128e26,u1_compare_jmp_code,u1_compare_jmp_patch), \
+    SITE("U1 1.00 prompt bar flags (menu mouse)",0x128b3a,u1_bar_flags_code,10,u1_bar_flags_cb)
+#define U2_SITES_102 \
+    SITE("U2 1.02 compare-with-friends prompt (hook) (menu mouse)",0x5a54c7,u2_compare_102_code,5,u2_compare_cb), \
+    PATCH("U2 1.02 compare-with-friends prompt (skip) (menu mouse)",0x5a54cc,u2_compare_jz_102_code,u2_compare_jz_102_patch)
+#define U2_SITES_100 \
+    SITE("U2 1.00 compare-with-friends prompt (hook) (menu mouse)",0x282001,u2_compare_100_code,5,u2_compare_cb), \
+    PATCH("U2 1.00 compare-with-friends prompt (skip) (menu mouse)",0x282006,u2_compare_jz_100_code,u2_compare_jz_100_patch)
+#define U3_SITES_102 \
+    PATCH("U3 1.02 compare-with-friends prompt (skip) (menu mouse)",0x627d65,u3_compare_102_code,u3_compare_102_patch), \
+    SITE("U3 1.02 prompt bar flags (menu mouse)",0x6277e8,u3_bar_flags_102_code,6,u3_bar_flags_102_cb)
+#define U3_SITES_100 \
+    PATCH("U3 1.00 compare-with-friends prompt (skip) (menu mouse)",0x1c7191,u3_compare_100_code,u3_compare_100_patch), \
+    SITE("U3 1.00 prompt bar flags (menu mouse)",0x1c6ecb,u3_bar_flags_100_code,6,u3_bar_flags_100_cb)
+
+static const RuntimeGuestCallback u1_more_102[]={U1_SITES_102}, u1_more_100[]={U1_SITES_100};
+static const RuntimeGuestCallback u2_more_102[]={U2_SITES_102}, u2_more_100[]={U2_SITES_100};
+static const RuntimeGuestCallback u3_more_102[]={U3_SITES_102}, u3_more_100[]={U3_SITES_100};
+/* the sites of the code found: the menu mouse's, then these (the 1.00 U3 flags hook only on its known frame) */
+static RuntimeGuestCallback mm_sites[64];
 const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
-    /* only the sites of the code found */
-    if (u1m) { *count=sizeof(u1_sites)/sizeof(*u1_sites)/2; return u1m==&u1_menu_codes[0] ? u1_sites : u1_sites+*count; }
-    if (u3m) { *count=4; return u3m==&u3_menu_codes[0] ? u3_sites : u3_sites+4; }
-    if (u2m) { *count=2; return u2m==&u2_menu_codes[0] ? u2_sites : u2_sites+2; }
-    *count=0;
-    return u1_sites;
+    const RuntimeGuestCallback *a=NULL, *b=NULL;
+    size_t na=0, nb=0;
+#define TAKE(x,n,y) do { a=(x); na=(n); b=(y); nb=sizeof(y)/sizeof(*(y)); } while (0)
+    if (u1m) { const size_t n=sizeof(u1_sites)/sizeof(*u1_sites)/2; if (u1m==&u1_menu_codes[0]) TAKE(u1_sites,n,u1_more_102); else TAKE(u1_sites+n,n,u1_more_100); }
+    if (u3m) { if (u3m==&u3_menu_codes[0]) TAKE(u3_sites,4,u3_more_102); else TAKE(u3_sites+4,4,u3_more_100); }
+    if (u2m) { if (u2m==&u2_menu_codes[0]) TAKE(u2_sites,2,u2_more_102); else TAKE(u2_sites+2,2,u2_more_100); }
+#undef TAKE
+    size_t n=0;
+    for (size_t i=0;i<na && n<64;++i) mm_sites[n++]=a[i];
+    for (size_t i=0;i<nb && n<64;++i) {
+        if (b[i].callback==u3_bar_flags_100_cb && !code_is(0x1c6c30,u3_bar_100_frame,sizeof(u3_bar_100_frame))) {
+            puts("Menu mouse: U3 1.00 prompt bar frame differs: its SELECT stays");
+            continue;
+        }
+        mm_sites[n++]=b[i];
+    }
+    *count=n;
+    return mm_sites;
 }
 
 /* A menu is open. U1: the pause (the game's frame time is 0), the credits, or menu rows drawn lately (title, main menu, game

@@ -18,3 +18,6 @@ uint32_t runtime_menumouse_buttons(const bool *keys, uint32_t mouse, int wheel, 
 /* The left stick's x the menu mouse holds for a moment (U3's art gallery viewer arrows: the viewer reads the stick, not the d-pad):
  * -1 left, 1 right, 0 none. */
 int runtime_menumouse_stick_x(void);
+/* The pad buttons after the menu changes that hold one back (the cross on a statistic: the compare-with-friends screen does not
+ * work offline). keyboard: the keyboard and mouse are the device in use. */
+uint32_t runtime_menumouse_filter(uint32_t buttons, int keyboard);

@@ -1399,6 +1399,8 @@ static void sample_host(PadData *d) {
     }
     /* The mouse turns the cameras directly where a camera hook takes it (runtime_mouselook.c); elsewhere it
      * is the right stick (the keys' right stick wins on its axis). */
+    /* (a game menu: the menu mouse's changes that hold a button back, e.g. the cross on a statistic) */
+    if (menu) d->buttons=runtime_menumouse_filter(d->buttons,keyboard_in_use || scripted);
     mouse_stick(d,mdx,mdy,captured,rx,ry);
 }
 
