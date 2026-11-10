@@ -924,11 +924,26 @@ static void u3_text(const uint64_t *regs) {
     if (!safe_read(r,regs[4],16)) return;
     const uint64_t now=now_us();
     if (fabsf(r[0]-358.0f)<2.0f && fabsf(r[2]-564.0f)<3.0f && r[3]>=150.0f) u3_info_us=now;   /* (his: the box of a locked reward) */
+    if (mouse_debug()) {   /* BB_MOUSE_DEBUG=1: each text box once (its place and style), to tell which ones are rows */
+        static float seen[3000][4]; static int nseen;
+        int known=0;
+        float s9[9]={0};
+        const int ok=safe_read(s9,regs[5],sizeof(s9));
+        const float key[4]={r[0],r[1],r[2]+1000.0f*roundf(s9[0]*10.0f)+100000.0f*roundf(s9[5]*10.0f),r[3]+1000.0f*roundf(s9[4]*20.0f)+100000.0f*roundf(s9[7]*10.0f)+10000000.0f*roundf(s9[8]*10.0f)};   /* (a row: its style changes count too) */
+        const int row=r[3]>=24.0f && r[3]<=42.0f;
+        for (int i=0;i<nseen && !known;++i) known=fabsf(seen[i][0]-r[0])<0.5f && fabsf(seen[i][1]-r[1])<0.5f && fabsf(seen[i][2]-key[2])<0.5f && fabsf(seen[i][3]-key[3])<0.5f;
+        if (!known && nseen<3000 && row) {
+            memcpy(seen[nseen],row ? key : r,sizeof(r)); ++nseen;
+            printf("Menu mouse: text box %.1f %.1f %.1f x %.1f style%s %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f\n",r[0],r[1],r[2],r[3],ok ? "" : " (unreadable)",
+                   s9[0],s9[1],s9[2],s9[3],s9[4],s9[5],s9[6],s9[7],s9[8]);
+        }
+    }
     if (!(r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f) || !safe_read(st,regs[5],sizeof(st))) return;
     /* only a colour (0..2) followed by the flags is a style (other calls pass something else in rdx) */
     for (int k=0;k<4;++k) if (!(st[k]>=0.0f && st[k]<=2.0f)) return;
-    /* the selection mark, kept as 0..1: U3 style[6] (0..1), U2 style[5] (0..3) */
-    const float mark=u2m ? st[5]/3.0f : st[6];
+    /* the selection mark, kept as 0..1: U3 style[6] (0..1), U2 style[5] (0..3) times style[7] (0..1): on U2's rows style[7] is 1 and
+     * style[5] the mark; on its Yes/No (the pause menu's Quit, return to checkpoint) style[5] is 3 on both choices and style[7] the mark */
+    const float mark=u2m ? st[5]/3.0f*st[7] : st[6];
     if (!(mark>=0.0f && mark<=1.01f)) return;
     pthread_mutex_lock(&u3_lock);
     int slot=-1, oldest=0;
