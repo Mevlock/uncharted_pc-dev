@@ -1390,6 +1390,7 @@ static void sample_host(PadData *d) {
         }
         /* (a controller used last: the cursor resting over a row must not pull the highlight back from the pad's moves) */
         if (menu && keyboard_in_use) d->buttons|=runtime_menumouse_buttons(k,menu_buttons,menu_wheel,0,0.0f,0.0f);
+        if (menu && keyboard_in_use && runtime_menumouse_stick_x()) d->left_x=runtime_menumouse_stick_x()<0 ? 0 : 255;
         host_rotate=action_down(A_ROT_CW,k,mouse,now)-action_down(A_ROT_CCW,k,mouse,now);
         rx=action_down(A_RS_RIGHT,k,mouse,now)-action_down(A_RS_LEFT,k,mouse,now);
         ry=action_down(A_RS_DOWN,k,mouse,now)-action_down(A_RS_UP,k,mouse,now);
@@ -1425,8 +1426,10 @@ static void injected_menu(PadData *d) {
     static int wheel_given;
     const int w=injected.wheel-wheel_given;   /* wheel=<count>: a running count of notches (up +, down -) */
     wheel_given=injected.wheel;
-    if (injected.cursor[0]>=0.0f)
+    if (injected.cursor[0]>=0.0f) {
         d->buttons|=runtime_menumouse_buttons(NULL,injected.mouse_buttons,w,1,injected.cursor[0],injected.cursor[1]);
+        if (runtime_menumouse_stick_x()) d->left_x=runtime_menumouse_stick_x()<0 ? 0 : 255;
+    }
 }
 static void read_inject(void) {
     static const char *path; static int checked; static uint64_t last_check; static struct timespec mtime;

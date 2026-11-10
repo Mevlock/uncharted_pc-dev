@@ -15,3 +15,6 @@ int runtime_menumouse_active(void);
  * 8 X1 16 X2; wheel: notches since the last read). scripted: BB_PAD_FILE gives the cursor (sx, sy: 0..1 of the
  * 16:9 menu picture). */
 uint32_t runtime_menumouse_buttons(const bool *keys, uint32_t mouse, int wheel, int scripted, float sx, float sy);
+/* The left stick's x the menu mouse holds for a moment (U3's art gallery viewer arrows: the viewer reads the stick, not the d-pad):
+ * -1 left, 1 right, 0 none. */
+int runtime_menumouse_stick_x(void);
