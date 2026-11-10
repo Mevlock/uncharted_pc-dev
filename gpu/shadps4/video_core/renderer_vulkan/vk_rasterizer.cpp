@@ -2111,6 +2111,11 @@ extern "C" void BbHleSrcCheck(unsigned long long src, unsigned long long dst) {
     }
 }
 
+/// perf11: whether BbHleReadCheck can do anything (BB_HLE_READ_WATCH=1), read once by its callers.
+extern "C" bool BbHleReadWatchOn() {
+    return HleReadWatch::Enabled();
+}
+
 extern "C" void BbHleReadCheck(u64 address, u64 size, const char* what) {
     if (!HleReadWatch::Enabled() || HleReadWatch::count.load(std::memory_order_acquire) == 0 || !address || !size ||
         DrawPipe::OnStageB()) {

@@ -2934,7 +2934,8 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
         NoteHotUse(device_addr, size);
     }
     NoteGpuUse(device_addr, size);
-    if (BbEopTraceOn() && !is_written) {
+    static const bool eop_trace = BbEopTraceOn(); // perf11: read once (a call into liverpool.cpp per obtain)
+    if (eop_trace && !is_written) {
         BbEopTraceRead(device_addr, size,
                        IsRegionGpuModified(device_addr, size) ? "buffer bind (GPU data)" : "buffer bind");
     }

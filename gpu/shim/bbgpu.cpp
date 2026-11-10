@@ -118,9 +118,16 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
 extern "C" bool BbEopTraceOn();
 extern "C" void BbEopTraceRead(u64 address, u64 size, const char* path);
 extern "C" void BbHleReadCheck(u64 address, u64 size, const char* what); // diagnosis, vk_rasterizer.cpp
+extern "C" bool BbHleReadWatchOn();
 static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
-    BbHleReadCheck(source, size, "a guest memory copy");
-    if (BbEopTraceOn()) {
+    // perf11: both diagnoses are normally off but cost two calls into other files per copy (~8% of the ring
+    // collector's time in U3's crowd, which makes many small copies); their switches are read once here.
+    static const bool hle_check = BbHleReadWatchOn();
+    static const bool eop_trace = BbEopTraceOn();
+    if (hle_check) {
+        BbHleReadCheck(source, size, "a guest memory copy");
+    }
+    if (eop_trace) {
         BbEopTraceRead(source, size, "guest copy");
     }
     while (size) {
