@@ -888,6 +888,9 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
 typedef struct { float x, y, w, h, sel; uint64_t us; int front; } U3Row;   /* front: U2 text drawn emphasised (style[5] 3: the lit row, a Yes/No's choices) */
 #define U3_ROWS 192
 static U3Row u3_rows[U3_ROWS];
+/* U3: the < > of a settings row are two texts 10-20 wide and 33.6 tall side by side (antikmewzik: x 378 and 394 on the audio
+ * volume rows), narrower than a row; kept here (u3_lock) */
+static U3Row u3_arrows[16];
 static pthread_mutex_t u3_lock=PTHREAD_MUTEX_INITIALIZER;
 static volatile uint64_t u3_page_us;     /* the last update of a focused menu page */
 static volatile uint64_t u3_info_us;     /* an information box (a locked reward) is over the menu */
@@ -950,6 +953,17 @@ static void u3_text(const uint64_t *regs) {
             printf("Menu mouse: text box %.1f %.1f %.1f x %.1f style%s %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f\n",r[0],r[1],r[2],r[3],ok ? "" : " (unreadable)",
                    s9[0],s9[1],s9[2],s9[3],s9[4],s9[5],s9[6],s9[7],s9[8]);
         }
+    }
+    if (u3m && r[2]>=10.0f && r[2]<=20.0f && r[3]>=33.0f && r[3]<=34.2f) {
+        pthread_mutex_lock(&u3_lock);
+        int slot=0;
+        for (int i=0;i<16;++i) {
+            if (fabsf(u3_arrows[i].x-r[0])<0.5f && fabsf(u3_arrows[i].y-r[1])<0.5f) { slot=i; break; }
+            if (u3_arrows[i].us<u3_arrows[slot].us) slot=i;
+        }
+        u3_arrows[slot]=(U3Row){r[0],r[1],r[2],r[3],0.0f,now,0};
+        pthread_mutex_unlock(&u3_lock);
+        return;
     }
     if (!(r[3]>=24.0f && r[3]<=42.0f && r[2]>=20.0f) || !safe_read(st,regs[5],sizeof(st))) return;
     /* only a colour (0..2) followed by the flags is a style (other calls pass something else in rdx) */
@@ -1198,6 +1212,23 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     uint32_t picked=0;
     float picked_cy=0.0f;
     if (clicked && mouse_debug()) printf("Menu mouse: click at %.0f %.0f: cursor row %s %.0f %.0f %.0fx%.0f, dialog %d\n",ux,uy,have_hov ? "yes" : "no",hov.x,hov.y,hov.w,hov.h,dialog);
+    if (clicked && u3m && !dialog) {   /* U3: a click on a row's < > (antikmewzik's U3 arrow click): left of the second text "left" */
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<16 && !picked;++i) {
+            const U3Row *a=&u3_arrows[i];
+            if (!a->us || now-a->us>=150000) continue;
+            for (int j=0;j<16;++j) {
+                const U3Row *b=&u3_arrows[j];
+                if (i==j || !b->us || now-b->us>=150000 || fabsf(a->y-b->y)>=1.0f || b->x<=a->x || b->x>a->x+a->w+8.0f) continue;
+                if (ux>=a->x-4.0f && ux<=b->x+b->w+4.0f && uy>=a->y && uy<a->y+a->h) { picked=ux<b->x ? BTN_LEFT : BTN_RIGHT; picked_cy=a->y+a->h*0.5f; break; }
+            }
+        }
+        pthread_mutex_unlock(&u3_lock);
+        if (picked) {
+            ch.dir=picked; ch.cy=picked_cy; ch.until=now+1500000; ch.seen=0; h.active=1;
+            if (mouse_debug()) printf("Menu mouse: U3 click on an arrow (%s) of the row at y %.0f\n",picked==BTN_LEFT ? "left" : "right",picked_cy);
+        }
+    }
     if (clicked && u2m && !dialog) {
         pthread_mutex_lock(&u3_lock);
         for (int i=0;i<U3_ROWS && !picked;++i) {
