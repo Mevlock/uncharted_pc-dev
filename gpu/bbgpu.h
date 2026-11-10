@@ -67,6 +67,8 @@ int bbgpu_window_foreground(void);
  * click (the hand), 2 the left button held. */
 void bbgpu_menu_cursor(int open);
 void bbgpu_set_cursor(int state);
+/* 1 when the last frame filled the window (a widened gameplay frame: its 16:9 layout stretched), 0 when shown at 16:9. */
+int bbgpu_frame_fills_window(void);
 /* 1 while the Enter of an Alt+Enter (window <-> fullscreen) is still held: the game must not see it. */
 int bbgpu_window_enter_swallowed(void);
 /* In-game trophy notice (the overlay draws it for a few seconds, one at a time): grade 1 platinum,

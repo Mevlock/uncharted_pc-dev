@@ -128,6 +128,13 @@ extern std::atomic<bool> g_last_frame_scene; // vk_rasterizer.cpp TakeSceneFrame
 }
 static std::atomic<int> back_request{0};
 
+// The menu mouse (runtime_menumouse.c): a widened gameplay frame fills the window (its 16:9 layout stretched across it, so
+// the pause menu over the play is too); other frames are shown at 16:9 in the middle.
+extern "C" int runtime_ultrawide_fill;
+extern "C" int bbgpu_frame_fills_window(void) {
+    return runtime_ultrawide_fill && Vulkan::g_last_frame_scene.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 extern "C" int bbgpu_take_back_request(void) {
     return back_request.exchange(0, std::memory_order_acq_rel);
 }
