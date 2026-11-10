@@ -1409,6 +1409,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         if (ux>=r->x && ux<=r->x+r->w && uy>=r->y && uy<=r->y+r->h && 
             (!have_hov || r->front>hov.front || (r->front==hov.front && r->w*r->h<hov.w*hov.h))) { hov=*r; have_hov=1; }   /* U2: the rows faded behind a Yes/No lose to its choices */
     }
+    const U3Row raw_hov=hov; const int have_raw=have_hov;   /* (the text under the cursor, before the rules below) */
     if (have_hov && u3m)
         for (int i=0;i<8;++i)
             if (u3_ghost_us[i] && now-u3_ghost_us[i]<300000 && fabsf(u3_ghost_y[i]-hov.y)<1.0f) { have_hov=0; break; }   /* a ghost row: not a target */
@@ -1476,6 +1477,19 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
                     hov=sel; have_hov=1; break;
                 }
             }
+        }
+        pthread_mutex_unlock(&u3_lock);
+    }
+    if (u3m && !have_hov && have_raw && have_sel && !dialog) {   /* U3: a window (an unlocked skin's Enable): the text under the cursor and the lit
+                                                                * button both on one window panel drawn in the last 150 ms -> the button */
+        const float scx=sel.x+sel.w*0.5f, scy=sel.y+sel.h*0.5f;
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<8;++i) {
+            const U3Row *p=&u2_panels[i];
+            if (!p->us || now-p->us>=150000 || p->h>300.0f) continue;
+            const int in_sel=scx>=p->x && scx<=p->x+p->w && scy>=p->y && scy<=p->y+p->h;
+            const int in_raw=raw_hov.x>=p->x-1.0f && raw_hov.x+raw_hov.w<=p->x+p->w+1.0f && raw_hov.y>=p->y-1.0f && raw_hov.y+raw_hov.h<=p->y+p->h+1.0f;
+            if (in_sel && in_raw) { hov=sel; have_hov=1; break; }
         }
         pthread_mutex_unlock(&u3_lock);
     }
