@@ -513,6 +513,7 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
     const int moved=fabsf(mx-h.last_x)>=1.0f || fabsf(my-h.last_y)>=1.0f;
     h.last_x=mx; h.last_y=my;
     if (moved && !h.drag) { h.active=1; h.presses=0; }
+    if (mouse_debug() && moved) { static uint64_t shown; if (now-shown>300000) { shown=now; printf("Menu mouse: cursor at %.0f %.0f (menu space)\n",ux,uy); } }   /* port: debug */
     if (now<wheel_until_us[0] || now<wheel_until_us[1] ||
         (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN]))) h.active=0;
     const int left=(mouse & 1u)!=0, clicked=left && !h.last_left;
