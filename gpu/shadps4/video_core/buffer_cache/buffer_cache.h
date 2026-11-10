@@ -310,16 +310,48 @@ private:
                 return !(env && env[0] == '0');
             }();
             const VAddr end = address + size;
+            // perf11: 99% of the adds (U3 market route) are ranges already in the set; confirming that cost a
+            // shared lock and a tree lookup (0.12 us, ~4% of stage B). A range this thread confirmed is
+            // remembered with the change counts of its first and last 64 KiB block; while no subtract has
+            // reached either, it is still in the set and the add returns without the lock. Subtracts bump the
+            // counts under the exclusive lock, so a count read here equal to the one stored means no subtract
+            // took any of the range in between (an add racing a later subtract is ordered before it, as with
+            // the lock). Ranges over two blocks apart are not remembered. BB_RANGE_CONFIRM_MEMO=0: off.
+            static const bool confirm_memo = [] {
+                const char* env = std::getenv("BB_RANGE_CONFIRM_MEMO");
+                return !(env && env[0] == '0');
+            }();
+            const u64 first_block = address >> ConfirmBlockShift;
+            const u64 last_block = (end - 1) >> ConfirmBlockShift;
+            const bool memorable = confirm_memo && size && last_block - first_block <= 1;
+            ConfirmEntry* entry = nullptr;
+            if (memorable) {
+                thread_local std::array<ConfirmEntry, ConfirmEntries> confirmed{};
+                const u64 slot = ((address >> 6) ^ (address >> 18) ^ size) & (ConfirmEntries - 1);
+                entry = &confirmed[slot];
+                if (entry->owner == instance_id && entry->address == address && entry->size == size &&
+                    entry->first_count == BlockCount(first_block) &&
+                    entry->last_count == BlockCount(last_block)) {
+                    return;
+                }
+            }
+            const auto remember = [&] { // under the lock: the counts cannot change meanwhile
+                if (entry) {
+                    *entry = {instance_id, address, size, BlockCount(first_block), BlockCount(last_block)};
+                }
+            };
             if (memo) {
                 // Inside the recent union, or already in the set (marked the frame before): a
                 // lookup under the shared lock instead of an insert under the exclusive one.
                 std::shared_lock lock{mutex};
                 if ((address >= covered_lo && end <= covered_hi) || set.Contains(address, size)) {
+                    remember();
                     return;
                 }
             }
             std::unique_lock lock{mutex};
             set.Add(address, size);
+            remember();
             if (covered_lo < covered_hi && address <= covered_hi && end >= covered_lo) {
                 covered_lo = std::min(covered_lo, address);
                 covered_hi = std::max(covered_hi, end);
@@ -333,6 +365,19 @@ private:
             set.Subtract(address, size);
             if (address < covered_hi && address + size > covered_lo) {
                 covered_lo = covered_hi = 0;
+            }
+            // The confirmations of every block it reaches are void (a long range: all of them).
+            if (size) {
+                const u64 first = address >> ConfirmBlockShift, last = (address + size - 1) >> ConfirmBlockShift;
+                if (last - first >= ConfirmCounts) {
+                    for (u64 i = 0; i < ConfirmCounts; ++i) {
+                        block_counts[i].fetch_add(1, std::memory_order_release);
+                    }
+                } else {
+                    for (u64 block = first; block <= last; ++block) {
+                        block_counts[block & (ConfirmCounts - 1)].fetch_add(1, std::memory_order_release);
+                    }
+                }
             }
         }
         bool Intersects(VAddr address, size_t size) const {
@@ -363,9 +408,28 @@ private:
         }
 
     private:
+        static constexpr u32 ConfirmBlockShift = 16;  ///< 64 KiB blocks
+        static constexpr u64 ConfirmCounts = 1u << 16; ///< change counts, by block (a shared slot only voids more)
+        static constexpr u64 ConfirmEntries = 4096;    ///< ranges remembered per thread
+        struct ConfirmEntry {
+            u64 owner; ///< the set's instance_id (0: empty slot)
+            VAddr address;
+            u64 size;
+            u32 first_count, last_count;
+        };
+        u32 BlockCount(u64 block) const {
+            return block_counts[block & (ConfirmCounts - 1)].load(std::memory_order_acquire);
+        }
+
         mutable Common::SrwSharedMutexT<1> mutex; ///< BB_SRW_RANGES=1: a slim reader/writer lock
         RangeSet set;
         VAddr covered_lo = 0, covered_hi = 0; ///< guarded by `mutex`
+        std::unique_ptr<std::atomic<u32>[]> block_counts{new std::atomic<u32>[ConfirmCounts]{}};
+        /// Unique per set ever made: a remembered range never matches a later set at the same address.
+        const u64 instance_id = [] {
+            static std::atomic<u64> next{1};
+            return next.fetch_add(1, std::memory_order_relaxed);
+        }();
     };
     LockedRangeSet gpu_modified_ranges;
     struct LateReadBack {
