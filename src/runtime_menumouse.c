@@ -739,11 +739,11 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
         int texts, rows;
         menu_texts_visible(now,&texts,&rows);
         if (mouse_debug()) printf("Runtime: menu click ui=(%.0f %.0f) on_row=%d control=%d texts=%d rows=%d\n",ux,uy,on_row,on_control ? ctl.kind : 0,texts,rows);
-        if (mouse_debug() && texts<=4) {   /* a confirmation box has few texts: list them (to tell it from the other screens) */
+        if (mouse_debug() && (texts<=4 || (!on_row && !on_control && !list_ctl))) {   /* (also a click on nothing known: what is drawn there) */ {   /* a confirmation box has few texts: list them (to tell it from the other screens) */
             pthread_mutex_lock(&menu_text_lock);
             for (int i=0;i<menu_text_count;++i) { const MenuText *t=&menu_texts[i]; if (now-t->us<100000) printf("Runtime:   text item ord=%d x=%.1f y=%.1f w=%.1f h=%.1f\n",t->ordinal,t->x,t->y,t->w,t->h); }
             for (int i=0;i<free_text_count;++i) { const MenuText *t=&free_texts[i]; if (now-t->us<100000) printf("Runtime:   text free x=%.1f y=%.1f w=%.1f h=%.1f\n",t->x,t->y,t->w,t->h); }
-            pthread_mutex_unlock(&menu_text_lock);
+            pthread_mutex_unlock(&menu_text_lock); }
         }
         if (h.sb_drag) {
             /* the press is on a scrollbar: nothing else takes it (the selected row's sub-menu must not open) */
@@ -1480,18 +1480,19 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         }
         pthread_mutex_unlock(&u3_lock);
     }
-    if (u3m && !have_hov && have_raw && have_sel && !dialog) {   /* U3: a window (an unlocked skin's Enable): the text under the cursor and the lit
-                                                                * button both on one window panel drawn in the last 150 ms -> the button */
-        const float scx=sel.x+sel.w*0.5f, scy=sel.y+sel.h*0.5f;
+    static uint64_t u3_win_cross_until;
+    if (u3m && !have_hov && have_raw && !dialog) {   /* U3: a window (an unlocked skin's Enable, drawn unlit: the title above is the lit text): the
+                                                   * text under the cursor inside a window panel drawn in the last 150 ms -> a click presses cross */
+        int in_win=0;
         pthread_mutex_lock(&u3_lock);
-        for (int i=0;i<8;++i) {
-            const U3Row *p=&u2_panels[i];
+        for (int k=0;k<8 && !in_win;++k) {
+            const U3Row *p=&u2_panels[k];
             if (!p->us || now-p->us>=150000 || p->h>300.0f) continue;
-            const int in_sel=scx>=p->x && scx<=p->x+p->w && scy>=p->y && scy<=p->y+p->h;
-            const int in_raw=raw_hov.x>=p->x-1.0f && raw_hov.x+raw_hov.w<=p->x+p->w+1.0f && raw_hov.y>=p->y-1.0f && raw_hov.y+raw_hov.h<=p->y+p->h+1.0f;
-            if (in_sel && in_raw) { hov=sel; have_hov=1; break; }
+            in_win=raw_hov.x>=p->x-1.0f && raw_hov.x+raw_hov.w<=p->x+p->w+1.0f && raw_hov.y>=p->y-1.0f && raw_hov.y+raw_hov.h<=p->y+p->h+1.0f &&
+                   ux>=raw_hov.x-8.0f && ux<=raw_hov.x+raw_hov.w+8.0f && uy>=raw_hov.y-8.0f && uy<=raw_hov.y+raw_hov.h+8.0f;
         }
         pthread_mutex_unlock(&u3_lock);
+        if (in_win && clicked) { u3_win_cross_until=now+120000; if (mouse_debug()) puts("Menu mouse: U3 window button click: cross"); }
     }
     {   /* Treasures: the model's panel (the list's rectangle runs under it): no hover there; a press on it turns the model while held */
         static float mlast_x, mlast_y;
@@ -1960,6 +1961,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         if (h.click) { h.click=0; h.click_until=now+120000; }
     }
     if (now<h.click_until) out|=BTN_CROSS;
+    if (u3m && now<u3_win_cross_until) out|=BTN_CROSS;
     /* the wheel (antikmewzik's per-screen wheel): over a list longer than its rows seen it scrolls the view three rows a notch (the
      * selection stays); on a Yes/No side by side (U2) it goes left / right; elsewhere a d-pad row */
     static uint64_t wheel_seen[2];
