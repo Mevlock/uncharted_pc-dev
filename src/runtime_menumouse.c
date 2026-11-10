@@ -1084,9 +1084,12 @@ static void u2_jump(uint64_t image) {
             if (!row && !box) continue;
             safe_read(&id,ch[k]+0x10,4);
             if (id==0x905ec3adu || id==0xbea3cef1u) continue;   /* (antik) the stereo page's two hidden rows */
-            if (cx<rc[0]-8.0f || cx>rc[0]+rc[2]+8.0f) continue;
+            /* by the row's line; of two rows on one line (the main menu's columns) the nearer in x. A value drawn right of its row (Off / On)
+             * is outside the child's rectangle: it still selects its row */
             const float d=box ? (cy>=rc[1] && cy<=rc[1]+rc[3] ? 0.0f : 1e3f) : fabsf(rc[1]+rc[3]*0.5f-cy);
-            if (d<10.0f && d<best) { best=d; best_ch[0]=ch[focus]; best_vt[0]=vt[focus]; best_ch[1]=ch[k]; best_vt[1]=vt[k]; found=1; }
+            const float dx=cx<rc[0] ? rc[0]-cx : cx>rc[0]+rc[2] ? cx-(rc[0]+rc[2]) : 0.0f;
+            const float score=d+0.02f*dx;
+            if (d<10.0f && score<best) { best=score; best_ch[0]=ch[focus]; best_vt[0]=vt[focus]; best_ch[1]=ch[k]; best_vt[1]=vt[k]; found=1; }
         }
     }
     if (!found) { if (!pages) u2_nopage_us=now_us(); if (mouse_debug()) printf("Menu mouse: U2 jump: no row at %.0f %.0f (%d pages)\n",cx,cy,pages); u3_jump_done=-2; return; }
@@ -1205,6 +1208,9 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         /* the next press once the highlight has left the row of the last one (its fade takes a while: pressing on a timer overshot), or
          * after 250 ms if it has not moved */
         const int moved_on=h.steps>0 && now>=h.step_until+20000 && (fabsf(sel_cy-h.step_sel_cy)>1.0f || fabsf(sel_cx-h.step_sel_cx)>1.0f);
+        /* sideways only between two choices drawn emphasised (a Yes/No): on a settings row left/right change its value */
+        const int sideways=fabsf(hov_cy-sel_cy)<=1.5f;
+        if (sideways && !(hov.front && sel.front) && !dialog) h.steps=budget;
         if ((now>=h.next_step || moved_on) && h.steps<budget) {
             h.step_dir=hov_cy>sel_cy+1.5f ? BTN_DOWN : hov_cy<sel_cy-1.5f ? BTN_UP : hov_cx>sel_cx ? BTN_RIGHT : BTN_LEFT;
             h.step_until=now+50000; h.next_step=now+250000; ++h.steps;
