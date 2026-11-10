@@ -1464,8 +1464,20 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         int lists=0, focused=0;
         pthread_mutex_lock(&u3_lock);
         for (int i=0;i<16;++i) { const U2List *l=&u2_lists[i]; if (l->us && now-l->us<150000 && l->vis>=3 && l->rh>=70.0f) { ++lists; if (l->focused) ++focused; } }   /* (a settings row's selector is a control of one row, 34 tall: not a list) */
+        if (lists && !focused) {
+            have_hov=0;
+            /* the window's own button (an unlocked skin's Enable): its lit row, under the cursor anywhere on the window's panel (a panel
+             * drawn in the last 150 ms holding the lit row's centre) -> the click presses it */
+            const float scx=sel.x+sel.w*0.5f, scy=sel.y+sel.h*0.5f;
+            for (int i=0;i<8 && have_sel;++i) {
+                const U3Row *p=&u2_panels[i];
+                if (!p->us || now-p->us>=150000) continue;
+                if (scx>=p->x && scx<=p->x+p->w && scy>=p->y && scy<=p->y+p->h && ux>=p->x && ux<=p->x+p->w && uy>=p->y && uy<=p->y+p->h) {
+                    hov=sel; have_hov=1; break;
+                }
+            }
+        }
         pthread_mutex_unlock(&u3_lock);
-        if (lists && !focused) have_hov=0;
     }
     {   /* Treasures: the model's panel (the list's rectangle runs under it): no hover there; a press on it turns the model while held */
         static float mlast_x, mlast_y;
