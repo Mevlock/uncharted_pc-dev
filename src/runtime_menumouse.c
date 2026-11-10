@@ -945,7 +945,7 @@ typedef void (__attribute__((sysv_abi)) *guest_set_fn)(uint64_t, int);
  * maximum); +0x248 is the first row seen, +0x244 the rows seen, +0x22c / +0x228 the value it followed last. A hover on a list row
  * sets the value by the game's own call here, on its thread (EU 1.00's control is compiled differently: not found yet, the d-pad
  * steps there). */
-typedef struct { uint64_t w, ds; int cur, lo, hi, top, vis; uint64_t us; float rx, ry, rw, rh; } U2List;   /* r*: the control's rectangle (+0x90) */
+typedef struct { uint64_t w, ds; int cur, lo, hi, top, vis; uint64_t us; float rx, ry, rw, rh; int focused; } U2List;   /* focused: the control's flag at +8 (as a page's children) */   /* r*: the control's rectangle (+0x90) */
 static U2List u2_lists[16];
 static volatile uint64_t u2_set_ds;
 static volatile int u2_set_val, u2_set_pending, u2_set_keep;
@@ -999,7 +999,11 @@ static void u2_list_update(uint64_t self, uint64_t image) {
     int slot=-1, oldest=0;
     for (int i=0;i<16;++i) { if (u2_lists[i].w==self) { slot=i; break; } if (u2_lists[i].us<u2_lists[oldest].us) oldest=i; }
     if (slot<0) { slot=oldest; if (mouse_debug()) printf("Menu mouse: U2 list control %#llx: values %d..%d (now %d), rows %d..%d seen\n",(unsigned long long)self,lo,hi,cur,top,top+vis-1); }
-    u2_lists[slot]=(U2List){self,ds,cur,lo,hi,top,vis,now,rc[0],rc[1],rc[2],rc[3]};
+    uint8_t fl=0;
+    safe_read(&fl,self+8,1);
+    if (mouse_debug() && u2_lists[slot].w==self && (u2_lists[slot].focused!=0)!=(fl!=0))
+        printf("Menu mouse: U2 list control %#llx (values %d..%d): focus flag %d -> %d\n",(unsigned long long)self,lo,hi,u2_lists[slot].focused,fl);
+    u2_lists[slot]=(U2List){self,ds,cur,lo,hi,top,vis,now,rc[0],rc[1],rc[2],rc[3],fl};
     pthread_mutex_unlock(&u3_lock);
 }
 
@@ -1332,14 +1336,13 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     }
     pthread_mutex_unlock(&u3_lock);
     if (info) have_hov=0;   /* an information box: the menu below is left alone */
-    if (u2m) {   /* U2's information boxes (a locked reward or skin: a panel 700 wide centred on the screen, 220-245 tall at x 290): the list
-                  * below is left alone while one is open (the Chapter select picture, 520 wide, is not one) */
+    if (u2m) {   /* a window over U2's lists (a locked reward or skin): the lists on screen (controls with 3+ rows seen) have all lost the focus
+                  * to it (their flag at +8): the lists below are left alone until it closes (the game's own state, any size or language) */
+        int lists=0, focused=0;
         pthread_mutex_lock(&u3_lock);
-        for (int i=0;i<8 && have_hov;++i) {
-            const U3Row *p=&u2_panels[i];
-            if (p->us && now-p->us<150000 && p->w>=690.0f && p->w<=710.0f && p->h>=200.0f && p->h<=250.0f && fabsf(p->x+p->w*0.5f-640.0f)<3.0f) have_hov=0;   /* (Rewards > Categories has a panel 600-646 wide of its own, Skins one of 700 x 305 at x 294) */
-        }
+        for (int i=0;i<16;++i) { const U2List *l=&u2_lists[i]; if (l->us && now-l->us<150000 && l->vis>=3) { ++lists; if (l->focused) ++focused; } }
         pthread_mutex_unlock(&u3_lock);
+        if (lists && !focused) have_hov=0;
     }
     /* U2's chapter carousel (antikmewzik's): the rows behind it are left alone; a click on its panel left of the pictures presses
      * left, right of them right, on the picture in the middle cross (choose) */
@@ -1529,7 +1532,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         U2List l={0}; int have=0;
         for (int i=0;i<16 && col>=0;++i) {
             const U2List *c=&u2_lists[i];
-            if (!c->us || now-c->us>150000 || c->vis<2 || c->hi-c->lo+1<=c->vis || abs(c->vis-cnt[col])>1) continue;
+            if (!c->us || now-c->us>150000 || c->vis<2 || c->hi-c->lo+1<=c->vis || abs(c->vis-cnt[col])>1 || !c->focused) continue;
             if (!have || c->hi-c->lo>l.hi-l.lo) { l=*c; have=1; }
         }
         pthread_mutex_unlock(&u3_lock);
@@ -1595,7 +1598,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         pthread_mutex_lock(&u3_lock);
         for (int i=0;i<16;++i) {
             l=u2_lists[i];
-            if (!l.us || now-l.us>150000 || l.hi-l.lo<1 || l.cur<l.lo || l.cur>l.hi || l.vis<1) continue;
+            if (!l.us || now-l.us>150000 || l.hi-l.lo<1 || l.cur<l.lo || l.cur>l.hi || l.vis<1 || !l.focused) continue;
             const int rows=l.hi-l.lo+1<l.vis ? l.hi-l.lo+1 : l.vis;   /* (a short list: all its values seen) */
             const int d=abs(rows-n);
             if (d<bestd || (d==bestd && l.hi-l.lo>best.hi-best.lo)) { bestd=d; best=l; have=1; }
