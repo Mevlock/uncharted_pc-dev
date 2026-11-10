@@ -1416,7 +1416,14 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             const int bar=!u2m && u3_in_bar(r,now);
             if (!have_sel || bar>sel_bar || (bar==sel_bar && (r->sel>sel.sel+0.01f || (fabsf(r->sel-sel.sel)<=0.01f && r->w>sel.w)))) { sel=*r; have_sel=1; sel_bar=bar; }
         }
-        if (u3m && r->w>750.0f && !(fabsf(r->x-380.0f)<1.0f && fabsf(r->w-520.0f)<1.0f)) continue;   /* (antik) a wide banner above the menu is not a row */
+        if (u3m && r->w>750.0f && !(fabsf(r->x-380.0f)<1.0f && fabsf(r->w-520.0f)<1.0f)) {   /* (antik) a wide banner above the menu is not a row */
+            int in_list=0;   /* (but a row of a list on screen is: Treasures' rows are 796 wide) */
+            for (int k=0;k<16 && !in_list;++k) {
+                const U2List *l=&u2_lists[k];
+                in_list=l->us && now-l->us<300000 && l->vis>=3 && l->rh>=70.0f && r->y>=l->ry-1.0f && r->y+r->h<=l->ry+l->rh+1.0f && r->x>=l->rx-4.0f && r->x+r->w<=l->rx+l->rw+4.0f;
+            }
+            if (!in_list) continue;
+        }
         if (ux>=r->x && ux<=r->x+r->w && uy>=r->y && uy<=r->y+r->h && 
             (!have_hov || r->front>hov.front || (r->front==hov.front && r->w*r->h<hov.w*hov.h))) { hov=*r; have_hov=1; }   /* U2: the rows faded behind a Yes/No lose to its choices */
     }
