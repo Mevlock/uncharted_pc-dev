@@ -1541,14 +1541,18 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             }
         }
     }
-    if (!left) sb.drag=0;
-    if (sb.drag) h.active=0;   /* (dragging the bar: no hover jumps meanwhile) */
+    static uint64_t sb_released;
+    if (!left && sb.drag) { sb.drag=0; sb_released=now; }
+    /* dragging the bar, and a moment after: no hover jumps or steps (the cursor past the list's end hovered the page's title, and the
+     * d-pad steps towards it wrapped the list round to its other end) */
+    const int sb_quiet=sb.drag || (sb_released && now-sb_released<400000);
+    if (sb_quiet) { h.active=0; h.click=0; }
     int list_jump=0;
     /* U2 1.02, a list (no page holds its rows): its value is set to the row under the cursor at once. The list's rows are the texts in
      * the hovered row's column (24-31 tall); the list control is the fresh one whose rows seen match their count; the row's place counts
      * from its first row seen (the top of the column). No drawn highlight is read: it fades after a jump (counting from it overshot), and
      * some lists draw other lit texts (Skins). A hover never scrolls the list. */
-    if (u2m && step_mode && !dialog && have_hov && hov.h>=24.0f && hov.h<=31.0f && (h.active || h.click)) {
+    if (u2m && step_mode && !dialog && !sb_quiet && have_hov && hov.h>=24.0f && hov.h<=31.0f && (h.active || h.click)) {
         float pitch=1e9f, top_cy=1e9f, ys[32];
         int n=0;
         pthread_mutex_lock(&u3_lock);
@@ -1590,7 +1594,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             }
         }
     }
-    if (step_mode && !list_jump && have_hov && have_sel && !same && (h.active || h.click)) {
+    if (step_mode && !list_jump && !sb_quiet && have_hov && have_sel && !same && (h.active || h.click)) {
         /* U2: one d-pad press every 110 ms towards the row under the cursor; a row the presses never reach (a section title) is given up
          * after as many presses as rows between them and two more, until the cursor moves to another row */
         const float hov_cx=hov.x+hov.w*0.5f, sel_cx=sel.x+sel.w*0.5f;
@@ -1602,6 +1606,9 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         /* sideways only between two choices drawn emphasised (a Yes/No): on a settings row left/right change its value */
         const int sideways=fabsf(hov_cy-sel_cy)<=1.5f;
         if (sideways && !(hov.front && sel.front) && !dialog) h.steps=budget;
+        /* two presses that did not move the highlight: the row under the cursor is not one the presses reach (a title; the lit row
+         * read is not this list's): given up, pressing on would wrap the list round */
+        if (h.steps>=2 && now>=h.next_step && !moved_on && fabsf(sel_cy-h.step_sel_cy)<=1.0f && fabsf(sel_cx-h.step_sel_cx)<=1.0f) h.steps=budget;
         if ((now>=h.next_step || moved_on) && h.steps<budget) {
             h.step_dir=hov_cy>sel_cy+1.5f ? BTN_DOWN : hov_cy<sel_cy-1.5f ? BTN_UP : hov_cx>sel_cx ? BTN_RIGHT : BTN_LEFT;
             h.step_until=now+50000; h.next_step=now+250000; ++h.steps;
