@@ -1492,6 +1492,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         pthread_mutex_unlock(&u3_lock);
     }
     static uint64_t u3_win_cross_until;
+    int win_hover=0;
     if (u3m && !have_hov && have_raw && !dialog) {   /* U3: a window (an unlocked skin's Enable, drawn unlit: the title above is the lit text): the
                                                    * text under the cursor inside a window panel drawn in the last 150 ms -> a click presses cross */
         int in_win=0;
@@ -1503,6 +1504,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
                    ux>=raw_hov.x-8.0f && ux<=raw_hov.x+raw_hov.w+8.0f && uy>=raw_hov.y-8.0f && uy<=raw_hov.y+raw_hov.h+8.0f;
         }
         pthread_mutex_unlock(&u3_lock);
+        win_hover=in_win;
         if (in_win && clicked) { u3_win_cross_until=now+120000; if (mouse_debug()) puts("Menu mouse: U3 window button click: cross"); }
     }
     {   /* Treasures: the model's panel (the list's rectangle runs under it): no hover there; a press on it turns the model while held */
@@ -1527,7 +1529,13 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         }
     }
     if (now<car.until) out|=car.dir;
-    menu_hover=have_hov;
+    {   /* the hand also over what answers a click without being a row: a window's button, the gallery viewers' < >, U2's chapter carousel */
+        const int arrows=uy>=596.0f && uy<=664.0f && ((ux>=92.0f && ux<=146.0f) || (ux>=1134.0f && ux<=1188.0f));
+        const int gal=arrows && ((u3m && u3_gallery_us && now-u3_gallery_us<4000000) ||
+                                 (u2m && !have_sel && !have_hov && !dialog && !(u2_layout_us && now-u2_layout_us<1000000) && !carousel));
+        const int car_hover=carousel && ux>=298.0f && ux<=980.0f && uy>=156.0f && uy<=475.0f;
+        menu_hover=have_hov || win_hover || gal || car_hover;
+    }
     const float hov_cy=hov.y+hov.h*0.5f, sel_cy=sel.y+sel.h*0.5f;
     int dialog_side=0;   /* U2: a Yes/No side by side on screen (two emphasised choices on one line): the wheel goes left / right */
     if (u2m && have_sel && sel.front) {
