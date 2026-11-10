@@ -1510,7 +1510,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             if (k==nx) { if (nx>=16) continue; xs[nx]=a->x; cnt[nx]=0; ++nx; }
             ++cnt[k];
         }
-        int col=-1; for (int k=0;k<nx;++k) if (col<0 || cnt[k]>cnt[col]) col=k;
+        int col=-1; for (int k=0;k<nx;++k) if (col<0 || cnt[k]>cnt[col] || (cnt[k]==cnt[col] && xs[k]<xs[col])) col=k;   /* (a tie: the leftmost, the bar is left of the list) */
         float top_cy=1e9f, bot_cy=-1e9f;
         if (col>=0) for (int i=0;i<U3_ROWS;++i) {
             const U3Row *a=&u3_rows[i];
@@ -1524,6 +1524,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             if (!have || c->hi-c->lo>l.hi-l.lo) { l=*c; have=1; }
         }
         pthread_mutex_unlock(&u3_lock);
+        if (clicked && mouse_debug()) printf("Menu mouse: scroll bar check: column x %.0f (%d rows, %.0f..%.0f), list %s (%d seen)\n",col>=0 ? xs[col] : -1.0f,col>=0 ? cnt[col] : 0,top_cy,bot_cy,have ? "yes" : "no",have ? l.vis : 0);
         if (have && cnt[col]>=2) {
             const float pitch=(bot_cy-top_cy)/(float)(cnt[col]-1), top=top_cy-pitch*0.5f, rail_h=pitch*(float)l.vis, rowx=xs[col];
             const int in_rail=ux>=rowx-70.0f && ux<=rowx-12.0f && uy>=top && uy<=top+rail_h;
