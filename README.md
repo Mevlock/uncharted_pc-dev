@@ -94,7 +94,7 @@ Fixes and features from: [Umar](https://github.com/Umar-Qayyum-dev) (button prom
 the NVIDIA large-workgroup fix), [drakolordx7](https://github.com/drakolordx7/uncharted_pc) (first-sight
 stutter, Uncharted 2 crash fixes, Xbox prompts, trophies, XeSS, the convoy speed fix),
 [BilalReloaded](https://github.com/bc160201983/Uncharted-The-Nathan-Drake-Collection-PC-port) (idle thread
-sleep, the render target heap move, chapter unlocks), [G3545](https://github.com/G3545),
+sleep, the render target heap move, chapter unlocks, mouse look: src/runtime_mouselook.c), [G3545](https://github.com/G3545),
 [d4rksp4rt4n](https://github.com/d4rksp4rt4n), [eduardoghi](https://github.com/eduardoghi),
 [iannitram](https://github.com/iannitram), [antikmewzik](https://github.com/antikmewzik/uncharted_pc_controls_qol),
 [spacepepperoni](https://github.com/spacepepperoni/uncharted_Linux), [zorde23](https://github.com/zorde23/Uncharted_Collection_PC),

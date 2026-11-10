@@ -8,7 +8,10 @@ static int rumble_calls;
 static uint16_t rumble_low, rumble_high;
 int bbgpu_overlay_captures_input(void) { return capture; }
 void bbgpu_mouse_configure(int look) { (void)look; }
-void bbgpu_mouse_rate(double window_s, float *rate_x, float *rate_y) { (void)window_s; *rate_x=*rate_y=0.0f; }
+int runtime_mouselook_enabled(void) { return 1; }
+unsigned runtime_mouselook_calls(void) { return 0; }
+void runtime_mouselook_pause(int paused) { (void)paused; }
+void runtime_mouselook_trace_pad(int direct, float stick_x, float stick_y) { (void)direct; (void)stick_x; (void)stick_y; }
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel) {
     *dx=*dy=0; *buttons=0; *wheel=0;
     return 0;

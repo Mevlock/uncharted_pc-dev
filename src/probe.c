@@ -17,6 +17,7 @@ uint64_t runtime_guest_tsc(void);
 #include "red_zone.h"
 #endif
 #include "cpu_check.h"
+#include "runtime_mouselook.h"
 #include "isa_rewrite.h"
 #if !defined(__x86_64__) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
@@ -1036,14 +1037,17 @@ static int callback_thunk(unsigned char *f, size_t moved, const void *callback) 
     return 1;
 }
 static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t image_size) {
-    size_t count=0;
+    size_t count=0, look_count=0;
     const RuntimeGuestCallback *callbacks=runtime_guest_callbacks(&count);
     guest_image_size=image_size;
+    /* Mouse look (runtime_mouselook.c): its sites after the others, for the game and version found here. */
+    runtime_mouselook_prepare(image,image_size);
+    const RuntimeGuestCallback *look=runtime_mouselook_callbacks(&look_count);
     /* A patch in two parts (a stub in a dead path, ", stub)", then the jump or call to it, ", jump)" or ", call)",
      * the next entry): the jump goes in only after its stub did. */
     int stub_in=0;
-    for (size_t i=0;i<count;++i) {
-        const RuntimeGuestCallback *c=&callbacks[i];
+    for (size_t i=0;i<count+look_count;++i) {
+        const RuntimeGuestCallback *c=i<count ? &callbacks[i] : &look[i-count];
         const int is_stub=strstr(c->name,", stub)")!=NULL;
         const int needs_stub=strstr(c->name,", jump)")!=NULL || strstr(c->name,", call)")!=NULL;
         if (is_stub) stub_in=0;
@@ -2279,6 +2283,7 @@ int main(int argc, char **argv) {
         uint64_t image_end=0;
         for (uint64_t s=0;s<ns;++s) if (segments[s].address+segments[s].size>image_end) image_end=segments[s].address+segments[s].size;
         install_game_callbacks(segments, ns, image_end);
+        runtime_mouselook_install_patches(near_image_memory);
 #ifdef _WIN32
         install_ndgi_hooks(image_end);
 #endif

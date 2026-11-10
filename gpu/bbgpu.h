@@ -57,14 +57,13 @@ void bbgpu_mouse_configure(int look);
  * it is; 0 before the first frame with a known camera. */
 int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds);
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
-/* The mouse motion only (BB_MOUSE_HOOK_TAKE=1): a camera hook takes it at its own update. */
-int bbgpu_mouse_take_motion(float *dx, float *dy);
+/* Mouse look (src/runtime_mouselook.c): the motion (pixels) since the last take, for a camera hook taking it
+ * when the game updates its camera; motion older than 250 ms is dropped. 1 while the cursor is captured. */
+int bbgpu_mouse_take_look(float *dx, float *dy);
 /* The game window is in front (Windows; 1 without a window): the controller is read only then. */
 int bbgpu_window_foreground(void);
 /* 1 while the Enter of an Alt+Enter (window <-> fullscreen) is still held: the game must not see it. */
 int bbgpu_window_enter_swallowed(void);
-/* The mouse movement over the last window_s seconds, in pixels per second, from the event times (paced cameras). */
-void bbgpu_mouse_rate(double window_s, float *rate_x, float *rate_y);
 /* In-game trophy notice (the overlay draws it for a few seconds, one at a time): grade 1 platinum,
  * 2 gold, 3 silver, 4 bronze; png is the trophy's icon (a PNG file) or empty. */
 void bbgpu_trophy_notify(int grade, const char *game, const char *name, const void *png, uint64_t png_size);

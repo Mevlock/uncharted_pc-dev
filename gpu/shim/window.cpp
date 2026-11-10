@@ -16,15 +16,11 @@ namespace {
 // the motion, buttons and wheel of its events; the pad sampling takes them (bbgpu_mouse_sample).
 std::mutex mouse_mutex;
 float mouse_dx{}, mouse_dy{};
-// The mouse's movement with the event times (SDL ns), for bbgpu_mouse_rate: the cameras take the
-// mouse's rate over a short window instead of whatever reached the last pad read.
-struct MouseMark {
-    u64 ns;
-    double x, y;
-};
-std::array<MouseMark, 512> mouse_marks{};
-size_t mouse_mark_next = 0, mouse_mark_count = 0;
-double mouse_cum_x = 0.0, mouse_cum_y = 0.0;
+// The mouse's movement for the camera hooks (src/runtime_mouselook.c, after BilalReloaded's port): a
+// second sum of the same motion that a camera hook takes when the game updates its camera
+// (bbgpu_mouse_take_look), independent of the pad read; look_taken_ns: the last take.
+float look_dx{}, look_dy{};
+u64 look_taken_ns = 0;
 int mouse_wheel{};
 u32 mouse_buttons{};
 std::atomic<bool> mouse_look{false}, mouse_captured{false};
@@ -69,41 +65,18 @@ extern "C" void bbgpu_mouse_configure(int look) {
     mouse_look = look != 0;
 }
 
-// The mouse's movement over the last `window_s` seconds, per second (pixels/s), from the event times.
-extern "C" void bbgpu_mouse_rate(double window_s, float* rate_x, float* rate_y) {
+// bbport (src/runtime_mouselook.c, from BilalReloaded's port, gow3_mouse.cpp gow3gpu_mouse_take_look):
+// the motion since the last take, for a camera hook taking it when the game updates the camera.
+// Motion older than 250 ms (no camera hook ran meanwhile) is dropped: it would turn the camera all at
+// once when a hook runs again. 1 while the cursor is captured.
+extern "C" int bbgpu_mouse_take_look(float* dx, float* dy) {
     std::scoped_lock lock{mouse_mutex};
-    *rate_x = *rate_y = 0.0f;
     const u64 now = SDL_GetTicksNS();
-    const u64 from = now - static_cast<u64>(window_s * 1e9);
-    // the movement up to `from`: the newest mark at or before it (all marks newer: the ring's start)
-    double base_x = mouse_mark_count < mouse_marks.size() ? 0.0 : mouse_cum_x;
-    double base_y = mouse_mark_count < mouse_marks.size() ? 0.0 : mouse_cum_y;
-    bool found = false;
-    for (size_t i = 0; i < mouse_mark_count; ++i) { // newest first
-        const auto& m = mouse_marks[(mouse_mark_next + mouse_marks.size() - 1 - i) % mouse_marks.size()];
-        if (m.ns <= from) {
-            base_x = m.x;
-            base_y = m.y;
-            found = true;
-            break;
-        }
-    }
-    if (!found && mouse_mark_count == mouse_marks.size()) { // the ring is newer than the window: its oldest
-        const auto& m = mouse_marks[mouse_mark_next];
-        base_x = m.x;
-        base_y = m.y;
-    }
-    *rate_x = static_cast<float>((mouse_cum_x - base_x) / window_s);
-    *rate_y = static_cast<float>((mouse_cum_y - base_y) / window_s);
-}
-
-/// bbport (BB_MOUSE_HOOK_TAKE=1, test): the mouse motion only, for a camera hook taking it at its own update;
-/// buttons and the wheel stay for the pad read. 0 when the mouse is not captured.
-extern "C" int bbgpu_mouse_take_motion(float* dx, float* dy) {
-    std::scoped_lock lock{mouse_mutex};
-    *dx = mouse_dx;
-    *dy = mouse_dy;
-    mouse_dx = mouse_dy = 0.0f;
+    const bool fresh = look_taken_ns && now - look_taken_ns < 250'000'000ull;
+    look_taken_ns = now;
+    *dx = fresh ? look_dx : 0.0f;
+    *dy = fresh ? look_dy : 0.0f;
+    look_dx = look_dy = 0.0f;
     return mouse_captured ? 1 : 0;
 }
 
@@ -293,10 +266,18 @@ bool WindowSDL::PollEvents() {
         const bool want = mouse_look && window_focused && !text_active &&
                           !BbOverlay::CapturesInput() && !(keys && keys[SDL_SCANCODE_LALT]);
         if (want != mouse_captured) {
+            if (want) {
+                // Raw, linear counts for mouse look (as BilalReloaded's port, gow3_mouse.cpp): no system
+                // acceleration curve or scale, whatever a user's SDL_* environment variables say.
+                SDL_SetHintWithPriority(SDL_HINT_MOUSE_RELATIVE_SYSTEM_SCALE, "0", SDL_HINT_OVERRIDE);
+                SDL_SetHintWithPriority(SDL_HINT_MOUSE_RELATIVE_SPEED_SCALE, "1", SDL_HINT_OVERRIDE);
+                SDL_SetHintWithPriority(SDL_HINT_MOUSE_RELATIVE_WARP_MOTION, "0", SDL_HINT_OVERRIDE);
+            }
             SDL_SetWindowRelativeMouseMode(window, want);
             mouse_captured = want;
             std::scoped_lock lock{mouse_mutex};
             mouse_dx = mouse_dy = 0.0f;
+            look_dx = look_dy = 0.0f;
             mouse_buttons = 0;
         }
         // Mouse look's relative mode hides the cursor itself; otherwise an idle cursor is hidden
@@ -391,11 +372,8 @@ bool WindowSDL::PollEvents() {
                 std::scoped_lock lock{mouse_mutex};
                 mouse_dx += event.motion.xrel;
                 mouse_dy += event.motion.yrel;
-                mouse_cum_x += event.motion.xrel;
-                mouse_cum_y += event.motion.yrel;
-                mouse_marks[mouse_mark_next] = {event.motion.timestamp, mouse_cum_x, mouse_cum_y};
-                mouse_mark_next = (mouse_mark_next + 1) % mouse_marks.size();
-                mouse_mark_count = std::min(mouse_mark_count + 1, mouse_marks.size());
+                look_dx += event.motion.xrel;
+                look_dy += event.motion.yrel;
             }
             break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
