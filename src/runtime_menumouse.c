@@ -977,6 +977,7 @@ typedef void (__attribute__((sysv_abi)) *guest_set_fn)(uint64_t, int);
  * sets the value by the game's own call here, on its thread (EU 1.00: the same function at 0x267f60). */
 typedef struct { uint64_t w, ds; int cur, lo, hi, top, vis; uint64_t us; float rx, ry, rw, rh; int focused; } U2List;   /* focused: the control's flag at +8 (as a page's children) */   /* r*: the control's rectangle (+0x90) */
 static U2List u2_lists[16];
+static uint64_t u2_dropdown_w;   /* the open drop-down list control (see u2_list_update), 0: none */
 static volatile uint64_t u2_set_ds;
 static volatile int u2_set_val, u2_set_pending, u2_set_keep;
 static volatile uint64_t u2_set_us;   /* (a request no list took: dropped after 300 ms) */
@@ -1033,7 +1034,10 @@ static void u2_list_update(uint64_t self, uint64_t image) {
     uint8_t fl=0;
     safe_read(&fl,self+8,1);
     if (mouse_debug() && u2_lists[slot].w==self && (u2_lists[slot].focused!=0)!=(fl!=0))
-        printf("Menu mouse: U2 list control %#llx (values %d..%d): focus flag %d -> %d\n",(unsigned long long)self,lo,hi,u2_lists[slot].focused,fl);
+        printf("Menu mouse: U2 list control %#llx (values %d..%d, top %d, %d shown, rect %.0f %.0f %.0fx%.0f): focus flag %d -> %d\n",(unsigned long long)self,lo,hi,top,vis,rc[0],rc[1],rc[2],rc[3],u2_lists[slot].focused,fl);
+    /* a drop-down (U2's difficulty choice): a list that gains the focus with no rectangle yet (it animates open from 0x0) */
+    if (fl && !(u2_lists[slot].w==self && u2_lists[slot].focused) && rc[2]<1.0f && rc[3]<1.0f) u2_dropdown_w=self;
+    else if (!fl && u2_dropdown_w==self) u2_dropdown_w=0;
     u2_lists[slot]=(U2List){self,ds,cur,lo,hi,top,vis,now,rc[0],rc[1],rc[2],rc[3],fl};
     pthread_mutex_unlock(&u3_lock);
 }
@@ -1405,8 +1409,17 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     const int info=u3_info_us && now-u3_info_us<300000;
     /* the rows drawn now: the one under the cursor (the smallest that holds it: a row's label and value are texts of their own) and the lit one */
     U3Row hov={0}, sel={0};
-    int have_hov=0, have_sel=0, sel_bar=0;
+    int have_hov=0, have_sel=0, sel_bar=0, hov_pri=0;
     pthread_mutex_lock(&u3_lock);
+    /* an open list in front (U2's difficulty choice: a focused list of 5 over the Game page): its rows win over the page's texts
+     * under it (the hidden "On" of Tutorial Hints, smaller than "Hard", took the click: the list chose the current value) */
+    float fl[4]={0}; int have_fl=0;
+    for (int k=0;k<16 && (u2m || u3m);++k) {
+        const U2List *l=&u2_lists[k];
+        if (!l->us || now-l->us>=150000 || !l->focused || l->vis<2 || l->rh<40.0f || l->rw<40.0f) continue;
+        if (ux<l->rx || ux>l->rx+l->rw || uy<l->ry || uy>l->ry+l->rh) continue;
+        if (!have_fl || l->rw*l->rh<fl[2]*fl[3]) { fl[0]=l->rx; fl[1]=l->ry; fl[2]=l->rw; fl[3]=l->rh; have_fl=1; }
+    }
     for (int i=0;i<U3_ROWS;++i) {
         const U3Row *r=&u3_rows[i];
         if (!r->us || now-r->us>=100000) continue;
@@ -1424,8 +1437,9 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             }
             if (!in_list) continue;
         }
+        const int pri=have_fl && r->x>=fl[0]-2.0f && r->x+r->w<=fl[0]+fl[2]+2.0f && r->y>=fl[1]-2.0f && r->y+r->h<=fl[1]+fl[3]+2.0f;
         if (ux>=r->x && ux<=r->x+r->w && uy>=r->y && uy<=r->y+r->h && 
-            (!have_hov || r->front>hov.front || (r->front==hov.front && r->w*r->h<hov.w*hov.h))) { hov=*r; have_hov=1; }   /* U2: the rows faded behind a Yes/No lose to its choices */
+            (!have_hov || pri>hov_pri || (pri==hov_pri && (r->front>hov.front || (r->front==hov.front && r->w*r->h<hov.w*hov.h))))) { hov=*r; have_hov=1; hov_pri=pri; }   /* U2: the rows faded behind a Yes/No lose to its choices */
     }
     const U3Row raw_hov=hov; const int have_raw=have_hov;   /* (the text under the cursor, before the rules below) */
     if (have_hov && u3m)
@@ -1478,6 +1492,27 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     }
     pthread_mutex_unlock(&u3_lock);
     if (info) have_hov=0;   /* an information box: the menu below is left alone */
+    /* U2's drop-down choice (Options > Game > Difficulty: Easy .. Brutal over the page): a focused list of a few values with no
+     * rectangle of its own whose texts the menu hooks do not see. It opens level with the lit row, one value per 29.2 below,
+     * right of that row's label. The cursor there picks the value (the page behind is left alone: its hidden "On" took the click) */
+    static struct { int on, want; uint64_t ds; } dd;
+    dd.on=0;
+    if (u2m && have_sel && !dialog) {
+        pthread_mutex_lock(&u3_lock);
+        for (int k=0;k<16 && !dd.on;++k) {
+            const U2List *l=&u2_lists[k];
+            if (!l->us || now-l->us>=150000 || !l->focused || l->w!=u2_dropdown_w || l->vis<2 || l->vis>8) continue;
+            /* its rectangle once it is open (650 278 250x146: 5 rows of 29.2); while it opens, level with the lit row */
+            const int rect=l->rw>40.0f && l->rh>=20.0f*(float)l->vis;
+            const float pitch=rect ? l->rh/(float)l->vis : 29.2f, top=rect ? l->ry : sel.y+sel.h*0.5f-pitch*0.5f;
+            const float left=rect ? l->rx-10.0f : sel.x+sel.w-20.0f, right=rect ? l->rx+l->rw+10.0f : sel.x+sel.w+420.0f;
+            if (ux<left || ux>right || uy<top || uy>=top+pitch*(float)l->vis) continue;
+            int v=l->top+(int)((uy-top)/pitch); v=v<l->lo ? l->lo : v>l->hi ? l->hi : v;
+            dd.on=1; dd.want=v; dd.ds=l->ds;
+        }
+        pthread_mutex_unlock(&u3_lock);
+        if (dd.on) have_hov=0;
+    }
     if (u2m) {   /* a window over U2's lists (a locked reward or skin): the lists on screen (controls with 3+ rows seen) have all lost the focus
                   * to it (their flag at +8): the lists below are left alone until it closes (the game's own state, any size or language) */
         int lists=0, focused=0;
@@ -1492,7 +1527,11 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
                 const U3Row *p=&u2_panels[i];
                 if (!p->us || now-p->us>=150000) continue;
                 if (scx>=p->x && scx<=p->x+p->w && scy>=p->y && scy<=p->y+p->h && ux>=p->x && ux<=p->x+p->w && uy>=p->y && uy<=p->y+p->h) {
-                    hov=sel; have_hov=1; break;
+                    /* (one of the window's own buttons under the cursor, emphasised as its choices are: that one, OK in the
+                     * difficulty window's OK / Cancel; elsewhere on the window the lit one) */
+                    const int own=have_raw && raw_hov.front && raw_hov.x>=p->x && raw_hov.x+raw_hov.w<=p->x+p->w &&
+                                  raw_hov.y>=p->y && raw_hov.y+raw_hov.h<=p->y+p->h;
+                    hov=own ? raw_hov : sel; have_hov=1; break;
                 }
             }
         }
@@ -1601,6 +1640,15 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         if (now<dj.cross_until) out|=BTN_CROSS;
     }
     if (clicked && mouse_debug()) printf("Menu mouse: click at %.0f %.0f: cursor row %s %.0f %.0f %.0fx%.0f, dialog %d\n",ux,uy,have_hov ? "yes" : "no",hov.x,hov.y,hov.w,hov.h,dialog);
+    if (clicked && mouse_debug()) {   /* (debug) the texts drawn near the click */
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<U3_ROWS;++i) {
+            const U3Row *r=&u3_rows[i];
+            if (!r->us || now-r->us>=100000 || uy<r->y-40.0f || uy>r->y+r->h+40.0f || ux<r->x-200.0f || ux>r->x+r->w+200.0f) continue;
+            printf("Menu mouse:   near: %.1f %.1f %.1fx%.1f sel %.2f front %d\n",r->x,r->y,r->w,r->h,r->sel,r->front);
+        }
+        pthread_mutex_unlock(&u3_lock);
+    }
     if (clicked && u3m && !dialog) {   /* U3: a click on a row's < > (antikmewzik's U3 arrow click): left of the second text "left" */
         pthread_mutex_lock(&u3_lock);
         for (int i=0;i<16 && !picked;++i) {
@@ -1884,6 +1932,14 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         } else lc.landed=0;
     }
     if (now<lc.cross_until) out|=BTN_CROSS;
+    if (dd.on) {   /* (the drop-down, above) its value follows the cursor; a click presses cross once it is there */
+        menu_hover=1; list_jump=1; h.click=0; h.click_until=0;
+        if (!u2_set_pending || u2_set_val!=dd.want) { u2_set_ds=dd.ds; u2_set_val=dd.want; u2_set_keep=0; u2_set_us=now; u2_set_pending=1; }
+        if (clicked) {
+            lc.on=1; lc.ds=dd.ds; lc.want=dd.want; lc.until=now+1500000; lc.landed=0;
+            if (mouse_debug()) printf("Menu mouse: U2 drop-down click on value %d\n",dd.want);
+        }
+    }
     /* U2 1.02, a list (no page holds its rows): its value is set to the row under the cursor at once. The list's rows are the texts in
      * the hovered row's column (24-31 tall); the list control is the fresh one whose rows seen match their count; the row's place counts
      * from its first row seen (the top of the column). No drawn highlight is read: it fades after a jump (counting from it overshot), and
