@@ -257,7 +257,9 @@ static int menu_dialog_find(uint64_t now, DialogInfo *d) {
         for (int i=0;i<total;++i) {
             const MenuText *t=pass ? &free_texts[i] : &menu_texts[i];
             if (now-t->us>100000 || t->w<=1.0f) continue;
-            if (t->w>150.0f) { if (nt<48) { titx[nt]=t->x+t->w*0.5f; tity[nt]=t->y+t->h*0.5f; ++nt; } continue; }
+            /* port: any text can be the question (the pause menu's Quit asks only "Quit", 55 wide); only a wide one is never a choice */
+            if (nt<48) { titx[nt]=t->x+t->w*0.5f; tity[nt]=t->y+t->h*0.5f; ++nt; }
+            if (t->w>150.0f) continue;
             if (t->w>90.0f || t->h<18.0f || t->h>40.0f || n>=48) continue;
             cx[n]=t->x; cy[n]=t->y; cw[n]=t->w; ch[n]=t->h; ++n;
         }
