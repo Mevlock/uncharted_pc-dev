@@ -1038,6 +1038,10 @@ static volatile int model_drag;               /* the left button went down on th
 static volatile float model_ax, model_ay;     /* the cursor's motion since the scene's last frame, radians */
 static volatile uint64_t u3_scene;            /* U3: the scene (rdi at its update's start; r15 at the hook, a register the thunk does not keep) */
 static volatile int u3_note_pending; static volatile int32_t u3_note_value; static volatile uint64_t u3_note_ds, u3_note_fn, u3_note_queue;
+/* U3 Chapter select's carousel (antikmewzik's u3_carousel_hook; 1.02 0x5eccb0, 1.00 0x1a0490): a control with a data source (+0x18:
+ * get +0, set +8, minimum +0x38, maximum +0x40, as the sliders); opened it is 289 tall with the pictures. The wheel over it and a click
+ * on its arrows (drawn outside its rectangle) set the chapter by value (u2_set_*, applied in its draw on the game's thread). */
+static struct { uint64_t w, ds, us; int cur, lo, hi; float rc[4]; } u3_car;
 static void u3_list_update(uint64_t self, uint64_t image, int which) {
     uint64_t ds=0, vt=0, f0=0, f8=0, fmin=0, fmax=0; float rc[4]={0,0,0,0};
     if (self<0x10000 || !safe_read(rc,self+0x90,16) || rc[3]<100.0f) return;
@@ -1654,6 +1658,19 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         gallery_stick_dir=ux<640.0f ? -1 : 1; gallery_stick_until=now+150000; picked=1;
         if (mouse_debug()) printf("Menu mouse: U3 gallery arrow: %s\n",gallery_stick_dir<0 ? "left" : "right");
     }
+    /* U3 Chapter select, the opened carousel: its < > sit outside its rectangle (4 to 55 left / right of it, away from its top and bottom
+     * 60): a click there sets the chapter one down / up (antikmewzik's) */
+    const int car_on=u3m && u3_car.us && now-u3_car.us<150000 && u3_car.rc[3]>200.0f && u3_car.hi>u3_car.lo;
+    if (clicked && car_on && !picked && !dialog) {
+        const float *r=u3_car.rc;
+        const int left_a=ux>=r[0]-55.0f && ux<=r[0]-4.0f, right_a=ux>=r[0]+r[2]+4.0f && ux<=r[0]+r[2]+55.0f;
+        if ((left_a || right_a) && uy>=r[1]+60.0f && uy<=r[1]+r[3]-60.0f) {
+            int v=(u2_set_pending && u2_set_ds==u3_car.ds ? u2_set_val : u3_car.cur)+(left_a ? -1 : 1);
+            v=v<u3_car.lo ? u3_car.lo : v>u3_car.hi ? u3_car.hi : v;
+            u2_set_ds=u3_car.ds; u2_set_val=v; u2_set_keep=0; u2_set_us=now; u2_set_pending=1; picked=1;
+            if (mouse_debug()) printf("Menu mouse: U3 carousel arrow %s -> %d\n",left_a ? "left" : "right",v);
+        }
+    }
     if (clicked && have_hov && !picked) { h.click=1; h.click_deadline=now+1500000; h.active=1; }
     else if (clicked && !have_sel && !picked) h.click_until=now+150000;   /* no rows (the title's "press a button"): a click presses cross */
     if (h.click && now>h.click_deadline) h.click=0;
@@ -1860,7 +1877,19 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
      * selection stays); on a Yes/No side by side (U2) it goes left / right; elsewhere a d-pad row */
     static uint64_t wheel_seen[2];
     int wheel_done=0;
-    if (in_list && over_list.hi-over_list.lo+1>over_list.vis) {
+    const int over_car=car_on && !dialog && ux>=u3_car.rc[0]-55.0f && ux<=u3_car.rc[0]+u3_car.rc[2]+55.0f && uy>=u3_car.rc[1] && uy<=u3_car.rc[1]+u3_car.rc[3];
+    if (over_car) {   /* U3 Chapter select: the wheel over the opened carousel changes the chapter (antikmewzik's) */
+        for (int i=0;i<2;++i) {
+            if (wheel_until_us[i]==wheel_seen[i]) continue;
+            wheel_seen[i]=wheel_until_us[i];
+            if (now>=wheel_until_us[i]) continue;
+            int v=(u2_set_pending && u2_set_ds==u3_car.ds ? u2_set_val : u3_car.cur)+(i==0 ? -1 : 1);
+            v=v<u3_car.lo ? u3_car.lo : v>u3_car.hi ? u3_car.hi : v;
+            u2_set_ds=u3_car.ds; u2_set_val=v; u2_set_keep=0; u2_set_us=now; u2_set_pending=1;
+            if (mouse_debug()) printf("Menu mouse: U3 carousel wheel -> %d\n",v);
+        }
+        wheel_done=1;
+    } else if (in_list && over_list.hi-over_list.lo+1>over_list.vis) {
         for (int i=0;i<2;++i) {
             if (wheel_until_us[i]==wheel_seen[i]) continue;
             wheel_seen[i]=wheel_until_us[i];
@@ -2163,6 +2192,30 @@ static const unsigned char u3_model_100_code[]={0xc5,0xfa,0x10,0x85,0xcc,0xfd,0x
 static const unsigned char u3_scene_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x98,0x03,0x00,0x00,0x49,0x89,0xf6,0x49,0x89,0xff};
 static const unsigned char u3_scene_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x48,0x02,0x00,0x00,0x48,0x89,0xf3,0x49,0x89,0xff};
 
+/* U3 Chapter select's carousel draw (see u3_car): the chapter set by a pending request, the control noted */
+CB(u3_carousel_cb) {
+    (void)rsi; (void)r14; (void)regs;
+    if (!u3m || rdi<0x10000) return;
+    uint64_t ds=0, vt=0, f0=0, f8=0, fmin=0, fmax=0; float rc[4]={0,0,0,0};
+    if (!safe_read(rc,rdi+0x90,16) || !safe_read(&ds,rdi+0x18,8) || ds<0x10000 || !safe_read(&vt,ds,8) || vt<0x10000) return;
+    if (!safe_read(&f0,vt,8) || !safe_read(&f8,vt+8,8) || !safe_read(&fmin,vt+0x38,8) || !safe_read(&fmax,vt+0x40,8)) return;
+    const uint64_t lo_code=base, hi_code=base+0x2000000;
+    if (f0<lo_code || f0>=hi_code || f8<lo_code || f8>=hi_code || fmin<lo_code || fmin>=hi_code || fmax<lo_code || fmax>=hi_code) return;
+    int cur=(int)(int32_t)((guest_vcall_fn)(uintptr_t)f0)(ds);
+    const int lo=(int)(int32_t)((guest_vcall_fn)(uintptr_t)fmin)(ds), hi=(int)(int32_t)((guest_vcall_fn)(uintptr_t)fmax)(ds);
+    if (u2_set_pending && u2_set_ds==ds) {
+        int v=u2_set_val; if (v<lo) v=lo; if (v>hi) v=hi;
+        ((guest_set_fn)(uintptr_t)f8)(ds,v);
+        u2_set_pending=0;
+        if (mouse_debug()) printf("Menu mouse: U3 carousel set(%d) (was %d, range %d..%d)\n",v,cur,lo,hi);
+        cur=v;
+    }
+    if (mouse_debug() && (u3_car.w!=rdi || now_us()-u3_car.us>1000000)) printf("Menu mouse: U3 carousel %#llx: chapter %d of %d..%d, rect %.0f %.0f %.0fx%.0f\n",(unsigned long long)rdi,cur,lo,hi,rc[0],rc[1],rc[2],rc[3]);
+    u3_car.w=rdi; u3_car.ds=ds; u3_car.cur=cur; u3_car.lo=lo; u3_car.hi=hi; memcpy(u3_car.rc,rc,sizeof(rc)); u3_car.us=now_us();
+}
+static const unsigned char u3_carousel_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0x07,0x00,0x00,0x49,0x89,0xd7,0x49,0x89,0xf4,0x48,0x89,0xf9};
+static const unsigned char u3_carousel_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x18,0x0a,0x00,0x00,0x49,0x89,0xd4,0x49,0x89,0xf7,0x49,0x89,0xfd};
+
 #define U1_SITES_102 \
     SITE("U1 1.02 compare-with-friends prompt (hook) (menu mouse)",0x128f64,u1_compare_code,5,u1_compare_cb), \
     PATCH("U1 1.02 compare-with-friends prompt (skip 1) (menu mouse)",0x128f69,u1_compare_je_code,u1_compare_je_patch), \
@@ -2185,12 +2238,14 @@ static const unsigned char u3_scene_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x
     PATCH("U3 1.02 compare-with-friends prompt (skip) (menu mouse)",0x627d65,u3_compare_102_code,u3_compare_102_patch), \
     SITE("U3 1.02 prompt bar flags (menu mouse)",0x6277e8,u3_bar_flags_102_code,6,u3_bar_flags_102_cb), \
     SITE("U3 1.02 Treasures scene (menu mouse)",0x65f010,u3_scene_102_code,6,u3_scene_cb), \
-    SITE("U3 1.02 Treasures model (menu mouse)",0x65f6b0,u3_model_102_code,8,u3_model_102_cb)
+    SITE("U3 1.02 Treasures model (menu mouse)",0x65f6b0,u3_model_102_code,8,u3_model_102_cb), \
+    SITE("U3 1.02 chapter carousel draw (menu mouse)",0x5eccb0,u3_carousel_102_code,8,u3_carousel_cb)
 #define U3_SITES_100 \
     PATCH("U3 1.00 compare-with-friends prompt (skip) (menu mouse)",0x1c7191,u3_compare_100_code,u3_compare_100_patch), \
     SITE("U3 1.00 prompt bar flags (menu mouse)",0x1c6ecb,u3_bar_flags_100_code,6,u3_bar_flags_100_cb), \
     SITE("U3 1.00 Treasures scene (menu mouse)",0x1f6e10,u3_scene_100_code,6,u3_scene_cb), \
-    SITE("U3 1.00 Treasures model (menu mouse)",0x1f74f8,u3_model_100_code,8,u3_model_100_cb)
+    SITE("U3 1.00 Treasures model (menu mouse)",0x1f74f8,u3_model_100_code,8,u3_model_100_cb), \
+    SITE("U3 1.00 chapter carousel draw (menu mouse)",0x1a0490,u3_carousel_100_code,8,u3_carousel_cb)
 
 static const RuntimeGuestCallback u1_more_102[]={U1_SITES_102}, u1_more_100[]={U1_SITES_100};
 static const RuntimeGuestCallback u2_more_102[]={U2_SITES_102}, u2_more_100[]={U2_SITES_100};
