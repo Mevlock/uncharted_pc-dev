@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -113,9 +114,21 @@ public:
     const Result& Wait(u64 seq) {
         if (packets_done.load(std::memory_order_acquire) < seq) {
             ++waits;
+            const bool stats = WaitStats();
+            const u64 t0 = stats ? __rdtsc() : 0;
+            const bool asleep = stats && sleeping.load(std::memory_order_relaxed);
+            const u64 behind = stats ? head.load(std::memory_order_relaxed) -
+                                           done.load(std::memory_order_relaxed)
+                                     : 0;
             while (packets_done.load(std::memory_order_acquire) < seq) {
                 _mm_pause();
             }
+            if (stats) {
+                NoteWait(__rdtsc() - t0, asleep, behind);
+            }
+        }
+        if (WaitStats()) {
+            ++wait_calls;
         }
         return results[seq % results.size()];
     }
@@ -138,6 +151,39 @@ public:
     u64 waits = 0; ///< stage B: packets it had to wait for
 
 private:
+    /// BB_RING_WAIT_STATS=1: every 5 s, how often stage B waited for the collector, how long, and whether the
+    /// collector was asleep (wake-up latency) or busy (behind by that many items) when the wait began.
+    static bool WaitStats() {
+        static const bool on = [] {
+            const char* env = std::getenv("BB_RING_WAIT_STATS");
+            return env && env[0] == '1';
+        }();
+        return on;
+    }
+    void NoteWait(u64 cycles, bool asleep, u64 behind) {
+        (asleep ? wait_cycles_asleep : wait_cycles_busy) += cycles;
+        ++(asleep ? waits_asleep : waits_busy);
+        behind_sum += behind;
+        const u64 now = __rdtsc();
+        if (!stats_t0) {
+            stats_t0 = now;
+        }
+        if (now - stats_t0 > 5ull * 3'000'000'000ull) { // ~5 s at ~3 GHz TSC (rough window)
+            const double total = double(now - stats_t0);
+            std::printf("Ring waits (stage B): %llu of %llu packets waited; busy collector %llu (%.2f%% of "
+                        "the time, %.1f items behind on average), asleep %llu (%.2f%% of the time)\n",
+                        static_cast<unsigned long long>(waits_busy + waits_asleep),
+                        static_cast<unsigned long long>(wait_calls),
+                        static_cast<unsigned long long>(waits_busy), 100.0 * wait_cycles_busy / total,
+                        waits_busy + waits_asleep ? double(behind_sum) / double(waits_busy + waits_asleep) : 0.0,
+                        static_cast<unsigned long long>(waits_asleep), 100.0 * wait_cycles_asleep / total);
+            wait_cycles_busy = wait_cycles_asleep = waits_busy = waits_asleep = behind_sum = wait_calls = 0;
+            stats_t0 = now;
+        }
+    }
+    u64 wait_calls = 0, waits_busy = 0, waits_asleep = 0, wait_cycles_busy = 0, wait_cycles_asleep = 0;
+    u64 behind_sum = 0, stats_t0 = 0; ///< stage B (BB_RING_WAIT_STATS)
+
     enum class ItemKind : u32 { Candidate, Bytes, End };
     struct Item {
         u64 address; ///< guest address, or offset in `bytes`
