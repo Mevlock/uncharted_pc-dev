@@ -1190,8 +1190,57 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     const int same=have_hov && have_sel && fabsf(hov_cy-sel_cy)<1.5f && hov.x<sel.x+sel.w && sel.x<hov.x+hov.w;
     if (moved) h.active=1;
     if (now<wheel_until_us[0] || now<wheel_until_us[1]) h.active=0;   /* the wheel moves the highlight: the cursor waits until it moves again */
-    if (clicked && have_hov) { h.click=1; h.click_deadline=now+1500000; h.active=1; }
-    else if (clicked && !have_sel) h.click_until=now+150000;   /* no rows (the title's "press a button"): a click presses cross */
+    /* U2 settings rows (after antikmewzik's u2_menu_buttons): a click on the < > arrows of the selected row (two 33.6 tall texts 20
+     * apart, 100+ wide, the glyph 15 into each: the left half of the 50 from the first is "left", the rest "right"), or on the first or
+     * last of the values written in a row (Off / On: texts up to 130 wide right of x 600, two or more on a line that has its label left
+     * of them) selects the row, then presses left or right once. Cross does nothing there; a middle value only selects the row. */
+    static struct { uint32_t dir, press_dir; float cy; uint64_t until, seen, press_until; } ch;
+    uint32_t picked=0;
+    float picked_cy=0.0f;
+    if (clicked && mouse_debug()) printf("Menu mouse: click at %.0f %.0f: cursor row %s %.0f %.0f %.0fx%.0f, dialog %d\n",ux,uy,have_hov ? "yes" : "no",hov.x,hov.y,hov.w,hov.h,dialog);
+    if (clicked && u2m && !dialog) {
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<U3_ROWS && !picked;++i) {
+            const U3Row *a=&u3_rows[i];
+            if (!a->us || now-a->us>=150000 || a->sel>=0.5f || a->h<33.0f || a->h>34.2f || a->w<100.0f) continue;
+            for (int j=0;j<U3_ROWS;++j) {
+                const U3Row *b=&u3_rows[j];
+                if (i==j || !b->us || now-b->us>=150000 || b->sel>=0.5f || b->h<33.0f || b->h>34.2f || b->w<100.0f) continue;
+                if (b->x>a->x+14.0f && b->x<a->x+26.0f && fabsf(a->y-b->y)<1.0f && uy>=a->y && uy<a->y+a->h && ux>=a->x && ux<a->x+50.0f) {
+                    picked=ux<a->x+25.0f ? BTN_LEFT : BTN_RIGHT; picked_cy=a->y+a->h*0.5f;
+                    break;
+                }
+            }
+        }
+        if (!picked && have_hov && hov.w<=130.0f && hov.x>=600.0f) {
+            const float cy=hov.y+hov.h*0.5f;
+            float minx=1e9f, maxx=-1e9f;
+            int n=0, label=0;
+            for (int i=0;i<U3_ROWS;++i) {
+                const U3Row *r=&u3_rows[i];
+                if (!r->us || now-r->us>=100000 || fabsf(r->y+r->h*0.5f-cy)>=4.0f) continue;
+                if (r->x<600.0f) { label=1; continue; }
+                if (r->w>130.0f) continue;
+                ++n; if (r->x<minx) minx=r->x; if (r->x>maxx) maxx=r->x;
+            }
+            if (n>=2 && label) { picked=hov.x<=minx+1.0f ? BTN_LEFT : hov.x>=maxx-1.0f ? BTN_RIGHT : 0; picked_cy=cy; }
+        }
+        pthread_mutex_unlock(&u3_lock);
+        if (picked) {
+            ch.dir=picked; ch.cy=picked_cy; ch.until=now+1500000; ch.seen=0; h.active=1;
+            if (mouse_debug()) printf("Menu mouse: U2 click on a value or arrow (%s) of the row at y %.0f\n",picked==BTN_LEFT ? "left" : "right",picked_cy);
+        }
+    }
+    if (ch.dir && now>=ch.until) ch.dir=0;
+    if (ch.dir) {   /* the clicked row is the selected one for a moment: press */
+        if (have_sel && fabsf(sel_cy-ch.cy)<8.0f) {
+            if (!ch.seen) ch.seen=now;
+            if (now-ch.seen>=100000) { ch.press_dir=ch.dir; ch.press_until=now+70000; ch.dir=0; }
+        } else ch.seen=0;
+    }
+    if (now<ch.press_until) out|=ch.press_dir;
+    if (clicked && have_hov && !picked) { h.click=1; h.click_deadline=now+1500000; h.active=1; }
+    else if (clicked && !have_sel && !picked) h.click_until=now+150000;   /* no rows (the title's "press a button"): a click presses cross */
     if (h.click && now>h.click_deadline) h.click=0;
     /* U2: the page's focus jumps to the row under the cursor (u2_jump, on the game thread); a row no page holds (U2's Yes/No, whose
      * choices are not page rows) is stepped to with the d-pad instead, until the cursor goes to another row */
@@ -1376,6 +1425,7 @@ int runtime_menumouse_active(void) {
 uint32_t runtime_menumouse_buttons(const bool *k, uint32_t mouse, int wheel, int scripted, float sx, float sy) {
     const uint64_t now=now_us();
     scripted_cursor=scripted; scripted_ux=sx; scripted_uy=sy;
+    if (mouse_debug()) { static uint32_t last=~0u; if (mouse!=last) { last=mouse; printf("Menu mouse: buttons %#x\n",mouse); } }
     if (wheel>0) wheel_until_us[0]=now+80000;
     if (wheel<0) wheel_until_us[1]=now+80000;
     uint32_t out=0;
