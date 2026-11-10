@@ -1032,6 +1032,75 @@ static void u3_page(uint64_t self, uint64_t image) {
     u3_jump_done=1;
     u3_jump_page=self; u3_jump_row=target; u3_jump_us=now_us();
 }
+/* U2's direct jump (after antikmewzik's u2_menu_jump_service, US 1.02; here on both codes): the menu builder's host (from the
+ * Quit hook in it, runtime_exit_menu.c) points to its pages; a page is {.., u32 children at +0xb4, children at +0xb8}, a child
+ * {vtable, u8 focused at +8, u32 id at +0x10, rect x y w h at +0x90}, vtable +0x30 sets its focus. Of the pages with exactly one
+ * focused child, the child drawn under the cursor (its middle within 10 of the cursor's row, the cursor's x inside it) takes the
+ * focus. Hidden pages are updated too: requiring the cursor inside the child keeps a page behind a dialog from taking it. */
+static volatile uint64_t u2_host;
+void runtime_menumouse_u2_host(uint64_t host) {
+    if (host!=u2_host) printf("Menu mouse: Uncharted 2 menu host %#llx (direct jump to the row under the cursor)\n",(unsigned long long)host);
+    u2_host=host;
+}
+static void u2_jump(uint64_t image) {
+    if (!u3_jump_req) return;
+    const float cy=u3_jump_cy, cx=u3_jump_cx;
+    const uint64_t host=u2_host;
+    uint64_t q[0x220];
+    u3_jump_req=0;
+    if (host<0x10000 || !safe_read(q,host,sizeof(q))) { if (mouse_debug()) printf("Menu mouse: U2 jump: no menu host (%#llx)\n",(unsigned long long)host); u3_jump_done=-1; return; }
+    int pages=0;
+    uint64_t best_ch[2]={0}, best_vt[2]={0};
+    float best=1e9f;
+    int found=0;
+    for (int i=0;i<0x220;++i) {
+        uint64_t arr=0, ch[64], vt[64];
+        int32_t n=0;
+        if (q[i]<0x10000 || !safe_read(&n,q[i]+0xb4,4) || n<2 || n>64 || !safe_read(&arr,q[i]+0xb8,8) || arr<0x10000 || !safe_read(ch,arr,(size_t)n*8)) continue;
+        int focus=-1, nfocus=0, valid=1;
+        for (int k=0;k<n && valid;++k) {
+            uint8_t f=0;
+            if (ch[k]<0x10000 || !safe_read(&vt[k],ch[k],8) || vt[k]<image || vt[k]>=image+0x2000000 || !safe_read(&f,ch[k]+8,1)) valid=0;
+            else if (f) { if (focus<0) focus=k; ++nfocus; }
+        }
+        if (!valid || nfocus!=1) continue;
+        ++pages;
+        if (mouse_debug()) {
+            static uint64_t shown[32]; int known=0, slot=-1;
+            for (int z=0;z<32;++z) { if (shown[z]==q[i]) known=1; if (!shown[z] && slot<0) slot=z; }
+            if (!known && slot>=0) {
+                shown[slot]=q[i];
+                printf("Menu mouse: U2 page host+%#x %#llx, %d children (focus %d):",i*8,(unsigned long long)q[i],n,focus);
+                for (int k=0;k<n;++k) { float rc[4]={0}; safe_read(rc,ch[k]+0x90,16); printf(" [%.0f %.0f %.0f %.0f]",rc[0],rc[1],rc[2],rc[3]); }
+                printf("\n");
+            }
+        }
+        for (int k=0;k<n;++k) {
+            float rc[4];
+            uint32_t id=0;
+            if (!safe_read(rc,ch[k]+0x90,16)) continue;
+            const int row=rc[3]>=28.0f && rc[3]<=46.0f, box=rc[3]>200.0f && rc[3]<400.0f;   /* rows 28-36, buttons ~42, the chapter picker 238 */
+            if (!row && !box) continue;
+            safe_read(&id,ch[k]+0x10,4);
+            if (id==0x905ec3adu || id==0xbea3cef1u) continue;   /* (antik) the stereo page's two hidden rows */
+            if (cx<rc[0]-8.0f || cx>rc[0]+rc[2]+8.0f) continue;
+            const float d=box ? (cy>=rc[1] && cy<=rc[1]+rc[3] ? 0.0f : 1e3f) : fabsf(rc[1]+rc[3]*0.5f-cy);
+            if (d<10.0f && d<best) { best=d; best_ch[0]=ch[focus]; best_vt[0]=vt[focus]; best_ch[1]=ch[k]; best_vt[1]=vt[k]; found=1; }
+        }
+    }
+    if (!found) { if (mouse_debug()) printf("Menu mouse: U2 jump: no row at %.0f %.0f (%d pages)\n",cx,cy,pages); u3_jump_done=-2; return; }
+    if (best_ch[0]!=best_ch[1]) {
+        uint64_t f0=0, f1=0;
+        if (!safe_read(&f0,best_vt[0]+0x30,8) || !safe_read(&f1,best_vt[1]+0x30,8) || f0<image || f0>=image+0x2000000 || f1<image || f1>=image+0x2000000) {
+            u3_jump_done=-1;
+            return;
+        }
+        ((guest_set_fn)(uintptr_t)f0)(best_ch[0],0);
+        ((guest_set_fn)(uintptr_t)f1)(best_ch[1],1);
+        if (mouse_debug()) printf("Menu mouse: U2 focus moved to the row at y %.0f\n",cy);
+    }
+    u3_jump_done=1;
+}
 static int u3_menu_open(uint64_t now) {
     static uint64_t seen;   /* (the highlight fades from row to row: the menu stays on for a moment without a lit row) */
     int lit=u3_page_us && now-u3_page_us<150000 && u3_page_us<=now+1000000;
@@ -1042,7 +1111,7 @@ static int u3_menu_open(uint64_t now) {
     return seen && now-seen<800000;
 }
 static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
-    static struct { float last_x, last_y, req_cy, step_cy, step_cx; int last_left, active, click, steps, step_dir; uint64_t click_until, click_deadline, req_us, step_until, next_step; } h={-1e9f,-1e9f,-1.0f,-1.0f,-1.0f,0,0,0,0,0,0,0,0,0,0};
+    static struct { float last_x, last_y, req_cy, step_cy, step_cx; int last_left, active, click, steps, step_dir; uint64_t click_until, click_deadline, req_us, step_until, next_step; float nojump_cy, nojump_cx; int nojump; } h={-1e9f,-1e9f,-1.0f,-1.0f,-1.0f,0,0,0,0,0,0,0,0,0,0,0,0,0};
     uint32_t out=0;
     float ux=0, uy=0;
     if (scripted_cursor) { ux=scripted_ux*UI_WIDTH; uy=scripted_uy*UI_HEIGHT; }
@@ -1102,7 +1171,13 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     if (clicked && have_hov) { h.click=1; h.click_deadline=now+1500000; h.active=1; }
     else if (clicked && !have_sel) h.click_until=now+150000;   /* no rows (the title's "press a button"): a click presses cross */
     if (h.click && now>h.click_deadline) h.click=0;
-    if ((u2m || dialog) && have_hov && have_sel && !same && (h.active || h.click)) {
+    /* U2: the page's focus jumps to the row under the cursor (u2_jump, on the game thread); a row no page holds (U2's Yes/No, whose
+     * choices are not page rows) is stepped to with the d-pad instead, until the cursor goes to another row */
+    const float hov_cx0=hov.x+hov.w*0.5f;
+    if (h.nojump && (fabsf(hov_cy-h.nojump_cy)>1.0f || fabsf(hov_cx0-h.nojump_cx)>1.0f)) h.nojump=0;
+    if (u2m && !u3_jump_req && u3_jump_done<0 && have_hov && fabsf(hov_cy-h.req_cy)<=1.0f) { h.nojump=1; h.nojump_cy=hov_cy; h.nojump_cx=hov_cx0; u3_jump_done=0; }
+    const int step_mode=dialog || (u2m && (h.nojump || !u2_host));
+    if (step_mode && have_hov && have_sel && !same && (h.active || h.click)) {
         /* U2: one d-pad press every 110 ms towards the row under the cursor; a row the presses never reach (a section title) is given up
          * after as many presses as rows between them and two more, until the cursor moves to another row */
         const float hov_cx=hov.x+hov.w*0.5f, sel_cx=sel.x+sel.w*0.5f;
@@ -1115,7 +1190,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         if (h.steps>=budget && now>=h.next_step) { h.active=0; h.click=0; }
     }
     if (now<h.step_until) out|=(uint32_t)h.step_dir;
-    if (!u2m && !dialog && have_hov && !same && (h.active || h.click) && !u3_jump_req) {
+    if (!step_mode && have_hov && !same && (h.active || h.click) && !u3_jump_req) {
         /* the page answers within a frame: ask for a new row at once, again every 150 ms while the highlight has not come */
         if (fabsf(hov_cy-h.req_cy)>1.0f || now-h.req_us>150000) {
             u3_jump_cx=hov.x+hov.w*0.5f; u3_jump_cy=hov_cy; u3_jump_done=0; u3_jump_req=1;
@@ -1198,7 +1273,7 @@ CB(u1_event_102) { if (u1m==&u1_menu_codes[0]) u1_menu_event(rdi,rsi,base,r14,re
 CB(u1_event_100) { if (u1m==&u1_menu_codes[1]) u1_menu_event(rdi,rsi,base,r14,regs); }
 CB(u1_credits_102) { if (u1m==&u1_menu_codes[0]) u1_credits_tick(rdi,rsi,base,r14,regs); }
 CB(u1_credits_100) { if (u1m==&u1_menu_codes[1]) u1_credits_tick(rdi,rsi,base,r14,regs); }
-CB(u3_text_cb) { (void)rdi; (void)rsi; (void)base; (void)r14; if (u3m || u2m) u3_text(regs); }
+CB(u3_text_cb) { (void)rdi; (void)rsi; (void)r14; if (u3m || u2m) u3_text(regs); if (u2m) u2_jump(base); }
 CB(u3_page_cb) { (void)rsi; (void)r14; (void)regs; if (u3m) u3_page(rdi,base); }
 #define SITE(name,at,sig,moved,cb) {name,at,sig,sizeof(sig),moved,cb,NULL}
 static const RuntimeGuestCallback u1_sites[]={

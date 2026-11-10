@@ -262,8 +262,16 @@ static void dc_handler(const DcLayout *l, unsigned char *host, uint32_t id) {
 /* regs: rbx r11 r10 r9 r8 rdx rcx rax rflags: the menu data's pointer is in rax (regs[7]). */
 void __attribute__((ms_abi)) runtime_exit_menu_u2_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                        const uint64_t *regs) {
-    (void)rdi; (void)rsi; (void)image; (void)r14;
+    (void)rdi; (void)rsi;
     dc_add_quit(&dc_u2,(unsigned char *)(uintptr_t)regs[7]);
+    /* the menu builder's host (its first argument; the store here is host+0x17a8): the builder keeps it in rbx on 1.02
+     * (0x5c53b4 mov rbx,rdi) and in r14 on 1.00 (0x29d764 mov r14,rdi); told apart by those instructions (the hook site itself
+     * is patched). The menu mouse finds the page on screen through it (runtime_menumouse.c, U2 direct jump). */
+    static const unsigned char keep_102[]={0x48,0x89,0xfb,0x48,0x89,0x9d,0xa8,0xfe,0xff,0xff};   /* mov rbx,rdi; mov [rbp-0x158],rbx */
+    static const unsigned char keep_100[]={0x48,0x81,0xec,0x88,0x01,0x00,0x00,0x49,0x89,0xfe};   /* sub rsp,0x188; mov r14,rdi */
+    const unsigned char *code=(const unsigned char *)(uintptr_t)image;
+    if (!memcmp(code+0x5c53b4,keep_102,sizeof(keep_102))) runtime_menumouse_u2_host(regs[0]);
+    else if (!memcmp(code+0x29d75d,keep_100,sizeof(keep_100))) runtime_menumouse_u2_host(r14);
 }
 void __attribute__((ms_abi)) runtime_exit_menu_u3_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                        const uint64_t *regs) {
