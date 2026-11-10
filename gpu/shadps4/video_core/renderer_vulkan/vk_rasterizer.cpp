@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "bbport_toggles.h"
 #include "bbport_trace.h"
+#include "bbport_keyicons.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
 #include "core/debug_state.h"
@@ -9190,6 +9191,54 @@ void Rasterizer::UpdateViewportScissorState() const {
         };
         viewports.push_back(empty_viewport);
         scissors.push_back(empty_scissor);
+    }
+
+    // bbport: antikmewzik's key prompts (bbport_keyicons). A draw sampling the icon atlas is noted (bbgpu_atlas_recent), the
+    // first draw of each HUD button texture logged; the prompts the game draws smaller or elsewhere than the others (the
+    // "rotate the stick" frames, the d-pad "V", the journal, the press frames) are zoomed about a fixed point of the target
+    // (fractions of it: any resolution) by widening the viewport. With a controller only the journal and U3's d-pad move.
+    if (BbKeyIcons::Enabled() && !bound_images.empty()) {
+        int kind = 0;
+        const bool pad = BbKeyIcons::InputMode() != 0;
+        for (const auto id : bound_images) {
+            const auto icon = texture_cache.KeyIcon(id);
+            if (icon.key == 1) {
+                BbKeyIcons::NoteAtlasDraw();
+            } else if (icon.key == 2) {
+                BbKeyIcons::NoteKeyDraw(icon.hash);
+                if (!kind && icon.prompt && (!pad || icon.prompt == 3 || icon.prompt == 6)) {
+                    kind = icon.prompt;
+                }
+            }
+        }
+        if (kind && !regs.IsClipDisabled()) {
+            float zoom, ax, ay, down, right;
+            BbKeyIcons::PromptTransform(kind, &zoom, &ax, &ay, &down, &right);
+            auto& vp = viewports[0];
+            // The viewport may be flipped (negative height): the anchor is a fraction from the top of the target
+            // either way, the zoom is the same linear map about it.
+            const float top = std::min(vp.y, vp.y + vp.height);
+            const float cx = vp.x + ax * vp.width, cy = top + ay * std::fabs(vp.height);
+            vk::Viewport z = vp;
+            z.x = cx - zoom * (cx - vp.x) + right * std::fabs(vp.width);
+            z.y = cy - zoom * (cy - vp.y) + down * std::fabs(vp.height);
+            z.width = vp.width * zoom;
+            z.height = vp.height * zoom;
+            const float max_w = float(instance.GetMaxViewportWidth()), max_h = float(instance.GetMaxViewportHeight());
+            const float y_low = std::min(z.y, z.y + z.height), y_high = std::max(z.y, z.y + z.height);
+            static std::atomic<bool> reported{false};
+            if ((zoom != 1.0f || down != 0.0f || right != 0.0f) && z.width <= max_w && std::fabs(z.height) <= max_h &&
+                z.x >= -max_w && y_low >= -max_h && z.x + z.width < max_w && y_high < max_h) {
+                if (!reported.exchange(true)) {
+                    std::printf("KeyIcons: prompt kind %d zoomed x%.2f about (%.3f, %.3f), down %.3f, of a %.0fx%.0f target\n",
+                                kind, zoom, ax, ay, down, vp.width, vp.height);
+                }
+                vp = z;
+            } else if (!reported.exchange(true)) {
+                std::printf("KeyIcons: prompt zoom skipped (viewport %.0fx%.0f, limit %.0fx%.0f)\n", z.width, z.height,
+                            max_w, max_h);
+            }
+        }
     }
 
     auto& dynamic_state = scheduler.GetDynamicState();

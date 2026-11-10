@@ -250,7 +250,13 @@ target_include_directories(bbgpu PRIVATE third_party/imgui third_party/imgui/bac
 # Japanese: a Noto Sans JP subset (tools/make_overlay_font_ja.py), loaded only when the menu speaks Japanese.
 target_compile_definitions(bbgpu PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
     BB_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf"
-    BB_FONT_JA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/NotoSansJP-overlay.ttf")
+    BB_FONT_JA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/NotoSansJP-overlay.ttf"
+    BB_KEYASSETS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/shim/assets/bbport_key_assets.bin"
+    BB_XBOXASSETS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/shim/assets/bbport_xbox_assets.bin")
+# antikmewzik's key and Xbox prompt pictures (shim/bbport_keyicons.cpp): the templates of the keys and mice and the
+# hand-drawn Xbox pictures, embedded.
+set_source_files_properties(shim/bbport_keyicons.cpp PROPERTIES
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shim/assets/bbport_key_assets.bin;${CMAKE_CURRENT_SOURCE_DIR}/shim/assets/bbport_xbox_assets.bin")
 set_source_files_properties(shim/bbport_overlay.cpp PROPERTIES
     OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf;${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/NotoSansJP-overlay.ttf")
 target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)

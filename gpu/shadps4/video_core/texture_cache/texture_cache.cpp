@@ -28,6 +28,7 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/button_prompts.h"
+#include "bbport_keyicons.h"
 #include "video_core/texture_cache/host_compatibility.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
@@ -1528,7 +1529,152 @@ void ReplaceButtonPrompts(Vulkan::Runtime& runtime, Image& image) {
 
 } // namespace
 
+bool TextureCache::PatchKeyIcons(Image& image) {
+    const auto& info = image.info;
+    if (info.num_samples > 1 || info.resources.layers != 1 || info.props.is_volume || !info.guest_address ||
+        True(image.flags & ImageFlagBits::GpuModified)) {
+        return false;
+    }
+    // BC1 (the colors; U3's are sRGB) and BC4 (the alpha masks): 8 bytes a block; the atlas is a 512x512 RGBA8 picture,
+    // the Controls screen's controller diagram a 2048x1024 one.
+    const bool is_block = info.pixel_format == vk::Format::eBc1RgbUnormBlock ||
+                          info.pixel_format == vk::Format::eBc1RgbaUnormBlock ||
+                          info.pixel_format == vk::Format::eBc1RgbSrgbBlock ||
+                          info.pixel_format == vk::Format::eBc1RgbaSrgbBlock ||
+                          info.pixel_format == vk::Format::eBc4UnormBlock;
+    const bool is_atlas = info.size.width == 512 && info.size.height == 512 &&
+                          info.pixel_format == vk::Format::eR8G8B8A8Unorm;
+    const bool is_diagram = info.size.width == 2048 && info.size.height == 1024 &&
+                            info.pixel_format == vk::Format::eR8G8B8A8Unorm;
+    if (!is_atlas && !is_diagram &&
+        !(is_block && BbKeyIcons::IsTextureCandidate(info.size.width, info.size.height))) {
+        return false;
+    }
+    // Known by their content (the whole guest texture, as antikmewzik's table names them; 1.00 data mapped to 1.02).
+    const u64 raw_hash = XXH3_64bits(std::bit_cast<const u8*>(info.guest_address), info.guest_size);
+    const u64 hash = BbKeyIcons::CanonicalHash(raw_hash);
+    const bool atlas = is_atlas && BbKeyIcons::IsAtlasHash(hash);
+    const bool target = !is_atlas && BbKeyIcons::IsTextureTarget(hash);
+    image.bb_key = atlas ? 1 : target ? 2 : 0;
+    image.bb_prompt = target ? u8(BbKeyIcons::PromptKind(hash)) : 0;
+    image.bb_key_hash = target ? hash : 0;
+    if (!atlas && !target) {
+        if (!is_atlas && (info.pixel_format == vk::Format::eBc1RgbUnormBlock ||
+                          info.pixel_format == vk::Format::eBc1RgbaUnormBlock)) {
+            BbKeyIcons::NoteUnknownTexture(hash, info.size.width, info.size.height,
+                                           std::bit_cast<const u8*>(info.guest_address), info.guest_size);
+        }
+        return false;
+    }
+    {
+        std::scoped_lock lock{key_icon_mutex};
+        const u8 kind = atlas ? 1 : BbKeyIcons::IsPulseMask(hash) ? 3 : 2;
+        const bool known = std::ranges::any_of(key_icon_ranges, [&](const KeyIconRange& r) {
+            return r.address == info.guest_address && r.size == info.guest_size;
+        });
+        if (!known) {
+            key_icon_ranges.push_back({info.guest_address, u32(info.guest_size), kind});
+        }
+    }
+    if (hash != raw_hash) {
+        static std::atomic<int> noted{0};
+        if (noted++ < 64) {
+            std::printf("KeyIcons: texture %016llx of the 1.00 data taken as %016llx\n",
+                        static_cast<unsigned long long>(raw_hash), static_cast<unsigned long long>(hash));
+        }
+    }
+    // A PlayStation controller (or Nintendo buttons, drawn by button_prompts.cpp): the game's own pictures.
+    if (BbKeyIcons::InputMode() == 1) {
+        return true;
+    }
+
+    // Every mip level, back to back (only mip 0 of the atlas), read back, painted and uploaded again. This waits for
+    // the GPU twice, only for these few textures (a switch of device uploads each one again).
+    const u32 levels = atlas ? 1 : std::min<u32>(info.resources.levels, 12);
+    // (BC1 and BC4: 8 bytes a 4x4 block; the RGBA8 pictures: 4 bytes a pixel)
+    const u32 block_bytes = is_block ? 8 : 4;
+    const u32 block_w = is_block ? 4 : 1, block_h = is_block ? 4 : 1;
+    boost::container::small_vector<vk::BufferImageCopy, 12> copies;
+    u32 data_size = 0;
+    for (u32 m = 0; m < levels; ++m) {
+        const u32 width = std::max(info.size.width >> m, 1u), height = std::max(info.size.height >> m, 1u);
+        copies.push_back({
+            .bufferOffset = data_size,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource{
+                .aspectMask = vk::ImageAspectFlagBits::eColor,
+                .mipLevel = m,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {width, height, 1},
+        });
+        data_size += Common::DivCeil(width, block_w) * Common::DivCeil(height, block_h) * block_bytes;
+    }
+    if (data_size == 0) {
+        return true;
+    }
+    const auto download = runtime.GetStagingPool().Request(data_size, MemoryType::HostCached, 16);
+    auto download_copies = copies;
+    for (auto& copy : download_copies) {
+        copy.bufferOffset += download.offset;
+    }
+    runtime.DownloadImage(&image, download.buffer, download_copies);
+    scheduler.Finish();
+    download.Invalidate();
+    std::vector<u8> data(download.mapped, download.mapped + data_size);
+    const bool u3_atlas = atlas && (hash == BbKeyIcons::U3AtlasHash || hash == BbKeyIcons::U3AtlasShapesHash);
+    const bool changed = u3_atlas ? BbKeyIcons::PatchU3Atlas(hash, data.data(), info.size.width, info.size.height)
+                         : atlas  ? BbKeyIcons::PatchU1Atlas(data.data(), info.size.width, info.size.height)
+                                  : BbKeyIcons::PatchU1Texture(hash, data.data(), data.size(), levels);
+    if (!changed) {
+        return true;
+    }
+    const auto upload = runtime.GetStagingPool().Request(data_size, MemoryType::HostUncached, 16);
+    std::memcpy(upload.mapped, data.data(), data_size);
+    upload.Flush();
+    for (auto& copy : copies) {
+        copy.bufferOffset += upload.offset;
+    }
+    runtime.UploadImage(&image, upload.buffer, copies);
+    scheduler.Finish();
+    return true;
+}
+
 void TextureCache::UpdateButtonPrompts() {
+    if (BbKeyIcons::Enabled()) {
+        // The device used last (bbgpu_prompts_controller, BB_BUTTON_PROMPTS, BB_BUTTON_PROMPTS_FILE) picks his style too:
+        // keys, Xbox, or the game's own (PlayStation; the Nintendo pictures come from button_prompts.cpp).
+        ButtonPrompts::Switches();
+        const auto style = ButtonPrompts::Shown();
+        BbKeyIcons::SetInputMode(style == ButtonPrompts::Style::Keyboard ? 0 : style == ButtonPrompts::Style::Xbox ? 2 : 1);
+        // antikmewzik's pictures: a device switch uploads every known texture again, a menu switch (and each step of the
+        // menu pastilles' fade) the atlas, and the blinking halo of the pressed key is uploaded about 11 times a second.
+        BbKeyIcons::TickMenuPhase();
+        const u32 mode = BbKeyIcons::ModeGeneration(), menu = BbKeyIcons::MenuGeneration();
+        const auto now = std::chrono::steady_clock::now();
+        const bool pulse = BbKeyIcons::InputMode() == 0 && now - key_icon_pulse > std::chrono::milliseconds(90);
+        if (mode != key_icon_mode_generation || menu != key_icon_menu_generation || pulse) {
+            const bool all = mode != key_icon_mode_generation, atlases = menu != key_icon_menu_generation;
+            key_icon_mode_generation = mode;
+            key_icon_menu_generation = menu;
+            if (pulse) {
+                key_icon_pulse = now;
+            }
+            std::vector<KeyIconRange> ranges;
+            {
+                std::scoped_lock lock{key_icon_mutex};
+                ranges = key_icon_ranges;
+            }
+            for (const auto& r : ranges) {
+                if (all || (atlases && r.kind == 1) || (pulse && r.kind == 3)) {
+                    InvalidateMemory(r.address, r.size);
+                }
+            }
+        }
+    }
     const u32 switches = ButtonPrompts::Switches();
     if (switches == button_prompt_switches) {
         return;
@@ -1681,7 +1827,13 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
-    ReplaceButtonPrompts(runtime, image);
+    // antikmewzik's key and Xbox pictures where he has them; ours (button_prompts.cpp) for the Nintendo buttons and the
+    // pictures his tables don't know.
+    image.bb_key = 0;
+    const bool his = BbKeyIcons::Enabled() && PatchKeyIcons(image);
+    if (!his || BbKeyIcons::InputMode() == 1) {
+        ReplaceButtonPrompts(runtime, image);
+    }
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,

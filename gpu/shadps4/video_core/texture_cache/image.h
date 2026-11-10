@@ -171,6 +171,11 @@ public:
     /// bbport: remade by format (TextureCache::ResolveDepthOverlap): its Vulkan image is recycled
     /// when it is deleted.
     bool recycle_on_delete = false;
+    /// bbport: antikmewzik's key and Xbox prompts (bbport_keyicons): 1 the icon atlas, 2 a HUD button texture (hash in
+    /// bb_key_hash), the kind of prompt drawn moved or zoomed (BbKeyIcons::PromptKind), 0 for every other image.
+    u8 bb_key = 0;
+    u8 bb_prompt = 0;
+    u64 bb_key_hash = 0;
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;
     VAddr guest_begin = 0; ///< info.guest_address

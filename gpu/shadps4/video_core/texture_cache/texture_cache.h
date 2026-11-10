@@ -119,7 +119,22 @@ public:
 
     /// bbport: after the button prompts switched between the game's pictures, the keyboard's and
     /// Xbox, the button prompt pictures are uploaded again (button_prompts.h). GPU thread, once per submission.
+    /// Also antikmewzik's (bbport_keyicons): after a device or menu switch, and the blinking halo of the pressed
+    /// key a few times a second.
     void UpdateButtonPrompts();
+
+    /// bbport: what bbport_keyicons knows of an image (Image::bb_key, bb_prompt, bb_key_hash): read per draw, no LRU touch.
+    struct KeyIconInfo {
+        u8 key = 0, prompt = 0;
+        u64 hash = 0;
+    };
+    [[nodiscard]] KeyIconInfo KeyIcon(ImageId id) const {
+        if (!id || !slot_images.is_allocated(id)) {
+            return {};
+        }
+        const Image& image = slot_images[id];
+        return {image.bb_key, image.bb_prompt, image.bb_key_hash};
+    }
 
     /// Evicts any images that overlap the unmapped range.
     void UnmapMemory(VAddr cpu_addr, size_t size);
@@ -489,6 +504,10 @@ private:
     /// Copies image memory back to CPU.
     void DownloadImageMemory(ImageId image_id, bool sync = false);
 
+    /// bbport: antikmewzik's key and Xbox prompts: an uploaded icon atlas or HUD button texture is read back, painted
+    /// (bbport_keyicons) and uploaded again. True when the texture is one of those it knows.
+    bool PatchKeyIcons(Image& image);
+
     /// Thread function for copying downloaded images out to CPU memory.
     void DownloadedImagesThread(const std::stop_token& token);
 
@@ -592,6 +611,17 @@ private:
     std::array<FindImageCacheEntry, 1024> find_image_cache{};
     std::atomic<u64> registry_generation{0};
     u32 button_prompt_switches = 0;
+    /// bbport: the guest ranges of the textures PatchKeyIcons knows (1 atlas, 2 HUD button, 3 blinking mask), uploaded
+    /// again when its device or menu generation changes (UpdateButtonPrompts).
+    struct KeyIconRange {
+        VAddr address;
+        u32 size;
+        u8 kind;
+    };
+    std::mutex key_icon_mutex;
+    std::vector<KeyIconRange> key_icon_ranges;
+    u32 key_icon_mode_generation = 0, key_icon_menu_generation = 0;
+    std::chrono::steady_clock::time_point key_icon_pulse{};
     std::mutex samplers_mutex;
     /// perf11: raised whenever the GC destroys a sampler (GetSampler's memo; starts at 1, an
     /// empty memo entry has 0).
