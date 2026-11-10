@@ -660,17 +660,19 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
         /* Statistiques (a list with a column of values on the right): only the difficulties of Contre-la-montre (rows with an empty value) open
          * something. A click on a statistic does nothing, and the section titles (dimmer: style[1] 0.5) are never selected by the game, so
          * the cursor over one must not chase it (the highlight shook between the rows around it). */
-        int stats=0, label=-1, value_w=0, bright_label=0, nvals=0;
+        int stats=0, label=-1, value_w=0, bright_label=0, nvals=0, titles=0;
         pthread_mutex_lock(&menu_text_lock);
         for (int i=0;i<menu_text_count;++i) {
             const MenuText *t=&menu_texts[i];
             if (t->item!=list.item || now-t->us>100000 || t->ordinal<1) continue;
             if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) ++nvals;
+            if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]<0.7f && t->style[5]<2.5f) ++titles;   /* (a section title, dim) */
             if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]>=0.7f) bright_label=1;   /* (Récompenses: every label, the highlighted one too, is at style[1] 0.5) */
             if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && uy>=t->y-2.0f && uy<t->y+list.pitch-2.0f) label=i;
         }
+        /* (the pause menu's costume list has a value column too (???) but no dim section titles: its rows can be chosen) */
         stats=nvals>=3;   /* (Médailles has one lone icon on the right, not a column of values) */
-        if (!bright_label) stats=0;  /* Récompenses: every label is dim (style[1] 0.5) next to a value column; only Statistiques mixes dim titles with normal rows */
+        if (!bright_label || !titles) stats=0;  /* Récompenses: every label is dim (style[1] 0.5) next to a value column; only Statistiques mixes dim titles with normal rows */
         if (label>=0) {
             const MenuText *l=&menu_texts[label];
             for (int i=0;i<menu_text_count;++i) {
@@ -683,9 +685,12 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
             }
         }
         pthread_mutex_unlock(&menu_text_lock);
+        if (clicked && mouse_debug())
+            printf("Runtime: list click ui=(%.0f %.0f): stats %d (values %d, bright %d, titles %d), label %d value %d title %d noclick %d, delta %d\n",
+                   ux,uy,stats,nvals,bright_label,titles,label,value_w,list_title,list_noclick,list_delta);
     }
     if (list_found) {   /* Statistiques, highlight on a statistic (a row with a value): no "SÉLECTIONNER" in the prompt bar, see u1_bar_flags */
-        int stats=0, sel_value=0, bright_label=0, nvals=0;
+        int stats=0, sel_value=0, bright_label=0, nvals=0, titles=0;
         pthread_mutex_lock(&menu_text_lock);
         const MenuText *sl=NULL;
         for (int i=0;i<menu_text_count;++i) {
@@ -694,8 +699,9 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
             if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) ++nvals;
             if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]>=0.7f) bright_label=1;
             if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && t->style[5]>2.5f) sl=t;
+            if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]<0.7f && t->style[5]<2.5f) ++titles;
         }
-        stats=nvals>=3 && bright_label;
+        stats=nvals>=3 && bright_label && titles;
         if (sl) for (int i=0;i<menu_text_count;++i) {
             const MenuText *t=&menu_texts[i];
             if (t->item==list.item && now-t->us<=100000 && t->ordinal>=1 && t->x>list.colx+300.0f && t->h<30.0f && fabsf(t->y-sl->y)<2.0f && t->w>0.5f) sel_value=1;
