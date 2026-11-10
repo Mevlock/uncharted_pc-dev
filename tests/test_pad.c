@@ -18,6 +18,12 @@ int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel) {
 }
 int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds) { (void)yaw_degrees; (void)age_seconds; return 0; }
 void bbgpu_prompts_controller(int device) { (void)device; }
+void bbgpu_menu_cursor(int open) { (void)open; }
+int runtime_menumouse_active(void) { return 0; }
+uint32_t runtime_menumouse_buttons(const bool *keys, uint32_t mouse, int wheel, int scripted, float sx, float sy) {
+    (void)keys; (void)mouse; (void)wheel; (void)scripted; (void)sx; (void)sy;
+    return 0;
+}
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;

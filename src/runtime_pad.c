@@ -25,6 +25,7 @@
 #include "runtime.h"
 #include "gpu/bbgpu.h"
 #include "runtime_mouselook.h"
+#include "runtime_menumouse.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1260,6 +1261,7 @@ static void rotate_stick(PadData *d, int rotate_dir, uint64_t now) {
 }
 
 static void injected_mouse(float *dx, float *dy);
+static void injected_menu(PadData *d);
 static void sample_host(PadData *d) {
     host_rotate=0;
     memset(d,0,sizeof(*d));
@@ -1285,6 +1287,18 @@ static void sample_host(PadData *d) {
     }
     if (scripted) { injected_mouse(&mdx,&mdy); captured=1; mouse=0; wheel=0; }
     const uint64_t now=now_us();
+    /* A game menu on screen (runtime_menumouse.c): the cursor is free, the mouse buttons and the wheel go to the
+     * menu (hover, click, back), not to the keys of the play. */
+    const int menu=runtime_menumouse_active();
+    bbgpu_menu_cursor(menu);
+    if (menu && scripted) { injected_menu(d); mdx=mdy=0.0f; }
+    uint32_t menu_buttons=0;
+    int menu_wheel=0;
+    if (menu && !scripted) {
+        menu_buttons=mouse; menu_wheel=wheel;
+        mouse=0; wheel=0; wheel_until_us[0]=wheel_until_us[1]=0;
+        mdx=mdy=0.0f; captured=0;
+    }
     int rx=0, ry=0; /* the keyboard's right stick */
     if (!scripted) { /* the player's controller and keyboard */
         if (wheel>0) wheel_until_us[0]=now+80000;
@@ -1366,6 +1380,7 @@ static void sample_host(PadData *d) {
             if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
             if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
         }
+        if (menu) d->buttons|=runtime_menumouse_buttons(k,menu_buttons,menu_wheel,0,0.0f,0.0f);
         host_rotate=action_down(A_ROT_CW,k,mouse,now)-action_down(A_ROT_CCW,k,mouse,now);
         rx=action_down(A_RS_RIGHT,k,mouse,now)-action_down(A_RS_LEFT,k,mouse,now);
         ry=action_down(A_RS_DOWN,k,mouse,now)-action_down(A_RS_UP,k,mouse,now);
@@ -1382,7 +1397,7 @@ static void sample_host(PadData *d) {
  * options touchpad touchpad_left touchpad_right up down left right) are held while listed;
  * touchpad defaults to a left-side click; lx= ly= rx= ry= (0..255) override
  * the sticks; rot_ccw rot_cw turn the left stick round (the rotate keys). An empty file releases everything. */
-static struct { uint32_t buttons; int stick[4]; int touch_side; float mouse[2]; int rotate; } injected={0,{-1,-1,-1,-1},-1,{0,0},0};
+static struct { uint32_t buttons; int stick[4]; int touch_side; float mouse[2]; int rotate; float cursor[2]; uint32_t mouse_buttons; int wheel; } injected={0,{-1,-1,-1,-1},-1,{0,0},0,{-1,-1},0,0};
 static int replay_armed;      /* 1 while a BB_PAD_REPLAY recording plays, 2 once it ended */
 static uint64_t replay_start; /* 0: (re)start at the next sample */
 /* Scripted mouse motion (mx= my=, pixels/s) as this sample's mouse movement (sample_host). */
@@ -1395,6 +1410,14 @@ static void injected_mouse(float *dx, float *dy) {
     *dx=injected.mouse[0]*dt; *dy=injected.mouse[1]*dt;
     scripted_rate[0]=injected.mouse[0]; scripted_rate[1]=injected.mouse[1];
     scripted_mouse=1;
+}
+/* BB_PAD_FILE cx= cy= click rclick back wheel=: the menu mouse, scripted (runtime_menumouse.c). */
+static void injected_menu(PadData *d) {
+    static int wheel_given;
+    const int w=injected.wheel-wheel_given;   /* wheel=<count>: a running count of notches (up +, down -) */
+    wheel_given=injected.wheel;
+    if (injected.cursor[0]>=0.0f)
+        d->buttons|=runtime_menumouse_buttons(NULL,injected.mouse_buttons,w,1,injected.cursor[0],injected.cursor[1]);
 }
 static void read_inject(void) {
     static const char *path; static int checked; static uint64_t last_check; static struct timespec mtime;
@@ -1427,6 +1450,8 @@ static void read_inject(void) {
     for (int i=0;i<4;++i) injected.stick[i]=-1;
     injected.mouse[0]=injected.mouse[1]=0.0f;
     injected.rotate=0;
+    injected.cursor[0]=injected.cursor[1]=-1.0f;
+    injected.mouse_buttons=0;
     char token[64];
     while (fscanf(f,"%63s",token)==1) {
         if (!strcmp(token,"rot_ccw")) injected.rotate=-1; /* the rotate keys, scripted */
@@ -1439,6 +1464,13 @@ static void read_inject(void) {
         for (size_t i=0;i<sizeof(names)/sizeof(*names);++i) if (!strcmp(token,names[i].name)) injected.buttons|=names[i].ps;
         for (int i=0;i<4;++i) if (!strncmp(token,sticks[i],3)) { int v=atoi(token+3); injected.stick[i]=v<0 ? 0 : v>255 ? 255 : v; }
         if (!strncmp(token,"mx=",3)) injected.mouse[0]=(float)atof(token+3); /* mouse motion, pixels/s */
+        /* the menu mouse (runtime_menumouse.c): the cursor (0..1 of the 16:9 menu picture), its buttons, wheel notches */
+        if (!strncmp(token,"cx=",3)) injected.cursor[0]=(float)atof(token+3);
+        if (!strncmp(token,"cy=",3)) injected.cursor[1]=(float)atof(token+3);
+        if (!strcmp(token,"click")) injected.mouse_buttons|=1u;
+        if (!strcmp(token,"rclick")) injected.mouse_buttons|=2u;
+        if (!strcmp(token,"back")) injected.mouse_buttons|=8u;
+        if (!strncmp(token,"wheel=",6)) injected.wheel=atoi(token+6);   /* a running count of notches: each change scrolls by the difference */
         if (!strncmp(token,"my=",3)) injected.mouse[1]=(float)atof(token+3);
     }
     fclose(f);

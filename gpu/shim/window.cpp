@@ -24,6 +24,10 @@ u64 look_taken_ns = 0;
 int mouse_wheel{};
 u32 mouse_buttons{};
 std::atomic<bool> mouse_look{false}, mouse_captured{false};
+// A game menu is on screen (bbgpu_menu_cursor, the menu mouse by antikmewzik): the cursor is free and shown;
+// cursor_state: its look (0 arrow, 1 hand, 2 pressed), applied by the window thread.
+std::atomic<bool> menu_cursor{false};
+std::atomic<int> cursor_state{0};
 bool window_focused{true};
 // Without mouse look (controller play) the cursor was left showing over the game: it hides after
 // two seconds without mouse movement and comes back when the mouse moves (the menu shows it too).
@@ -63,6 +67,14 @@ u32 MouseBit(u8 button) {
 
 extern "C" void bbgpu_mouse_configure(int look) {
     mouse_look = look != 0;
+}
+
+extern "C" void bbgpu_menu_cursor(int open) {
+    menu_cursor = open != 0;
+}
+
+extern "C" void bbgpu_set_cursor(int state) {
+    cursor_state = state;
 }
 
 // bbport (src/runtime_mouselook.c, from BilalReloaded's port, gow3_mouse.cpp gow3gpu_mouse_take_look):
@@ -263,7 +275,7 @@ bool WindowSDL::PollEvents() {
     // the settings menu, text entry and a held Left Alt give it back.
     {
         const bool* keys = SDL_GetKeyboardState(nullptr);
-        const bool want = mouse_look && window_focused && !text_active &&
+        const bool want = mouse_look && window_focused && !text_active && !menu_cursor &&
                           !BbOverlay::CapturesInput() && !(keys && keys[SDL_SCANCODE_LALT]);
         if (want != mouse_captured) {
             if (want) {
@@ -282,8 +294,26 @@ bool WindowSDL::PollEvents() {
         }
         // Mouse look's relative mode hides the cursor itself; otherwise an idle cursor is hidden
         // while the game has the focus and nothing needs it (menu, text entry).
-        const bool hide = window_focused && !text_active && !BbOverlay::CapturesInput() &&
+        const bool hide = window_focused && !text_active && !BbOverlay::CapturesInput() && !menu_cursor &&
                           SDL_GetTicksNS() - cursor_moved_ns > CursorIdleNs;
+        // In a game menu the cursor shows a hand over what answers a click (the menu mouse).
+        {
+            static SDL_Cursor* arrow = nullptr;
+            static SDL_Cursor* hand = nullptr;
+            static int shown = -1;
+            const int state = menu_cursor ? cursor_state.load() : 0;
+            const int want_shape = state == 0 ? 0 : 1;
+            if (want_shape != shown) {
+                if (!arrow) {
+                    arrow = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_DEFAULT);
+                    hand = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER);
+                }
+                if (SDL_Cursor* c = want_shape ? hand : arrow) {
+                    SDL_SetCursor(c);
+                }
+                shown = want_shape;
+            }
+        }
         if (!mouse_captured && hide != cursor_hidden) {
             if (hide) {
                 SDL_HideCursor();

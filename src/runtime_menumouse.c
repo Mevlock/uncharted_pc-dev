@@ -1,0 +1,976 @@
+#define _GNU_SOURCE
+/* Mouse in the menus of Uncharted 1 (hover follows the cursor, click, wheel, sliders, scroll bars, lists,
+ * Yes/No confirmations, the side or right button goes back) by antikmewzik
+ * (github.com/antikmewzik/uncharted_pc_controls_qol, branch u2-mkb-qol 65522a6, src/runtime_pad.c: "the mouse in the
+ * menus (U1)", GPL-2.0-or-later as this port). His code runs here nearly as he wrote it (marked "port:" where it
+ * differs): the loader's callbacks (probe.c) and this port's pad read (runtime_pad.c); both game codes, 1.02 (his
+ * addresses; US CUSA02320 1.02 = EU CUSA02343 1.02) and 1.00 (EU CUSA02343 1.00 = US CUSA02320 1.00: the same code
+ * moved, located by masked signatures). Every hook site and every game function it calls is checked against the
+ * original bytes first; a game code that does not match keeps the menus as they are (logged). Not taken: his menu
+ * keys (Enter, Esc, Alt, Backspace), the keyboard row of the Controls menu, the compare-with-friends and photo mode
+ * changes, the probes (F7/F8/F9). BB_MENU_MOUSE=0: off. */
+#include "runtime_menumouse.h"
+#include "gpu/bbgpu.h"
+#include <math.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <SDL3/SDL.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#define MS_ABI __attribute__((ms_abi))
+enum {
+    BTN_L3=0x2, BTN_R3=0x4, BTN_OPTIONS=0x8, BTN_UP=0x10, BTN_RIGHT=0x20, BTN_DOWN=0x40, BTN_LEFT=0x80,
+    BTN_L2=0x100, BTN_R2=0x200, BTN_L1=0x400, BTN_R1=0x800, BTN_TRIANGLE=0x1000, BTN_CIRCLE=0x2000,
+    BTN_CROSS=0x4000, BTN_SQUARE=0x8000,
+};
+typedef uint64_t (__attribute__((sysv_abi)) *guest_fn2)(uint64_t,uint64_t);
+static uint64_t now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u; }
+static int mouse_debug(void) {
+    static int on=-1;
+    if (on<0) on=getenv("BB_MOUSE_DEBUG")!=NULL;
+    return on;
+}
+static int safe_read(void *dst, uint64_t src, size_t size) {
+    if (src<0x10000 || src>0x00007fffffffffffull) return 0;
+#ifdef _WIN32
+    SIZE_T got=0;
+    return ReadProcessMemory(GetCurrentProcess(),(LPCVOID)(uintptr_t)src,dst,size,&got) && got==size;
+#else
+    memcpy(dst,(const void *)(uintptr_t)src,size); return 1;
+#endif
+}
+static int safe_write(uint64_t dst, const void *src, size_t size) {
+    if (dst<0x10000 || dst>0x00007fffffffffffull) return 0;
+#ifdef _WIN32
+    SIZE_T put=0;
+    return WriteProcessMemory(GetCurrentProcess(),(LPVOID)(uintptr_t)dst,src,size,&put) && put==size;
+#else
+    memcpy((void *)(uintptr_t)dst,src,size); return 1;
+#endif
+}
+
+/* ---- port: the game code (U1): hook sites, the game functions called, the globals read ---------- */
+typedef struct { uint64_t at; unsigned char op[3]; } CodeRef;   /* "lea reg, [rip + disp32]" (7 bytes) */
+typedef struct {
+    const char *version;
+    uint64_t item_begin1, item_end1, item_begin2, item_end2, text_draw, menu_event, credits, select_index;
+    CodeRef frame_time;   /* the game's frame time (0 while paused) */
+    uint64_t volumes;     /* the four volume floats of the Options (0: not known, those sliders go by steps) */
+} U1MenuCode;
+static const U1MenuCode u1_menu_codes[]={
+    {"1.02",0x133fbc,0x133fc8,0x133feb,0x133ff7,0x13acf0,0x1336c0,0x3b41e0,0x1335a0,{0x860b,{0x48,0x8d,0x05}},0xcc3db8},
+    {"1.00",0x133e2c,0x133e38,0x133e5b,0x133e67,0x13aa70,0x133530,0x576a30,0x133410,{0x860b,{0x48,0x8d,0x05}},0},
+};
+static const U1MenuCode *u1m;           /* the code found, NULL: none (the menus stay as they are) */
+static uint64_t u1_image;               /* port: the image base once a code matched (his name) */
+static const volatile float *u1_frame_time;
+static unsigned char *mm_image;
+static uint64_t mm_image_size;
+/* The original bytes at each site (the moved instructions first). */
+static const unsigned char u1_menu_item_begin_code[]={0x48,0x8b,0x07,0x4c,0x89,0xf6,0x4c,0x89,0xfa,0xff,0x50,0x18};
+static const unsigned char u1_menu_item_end1_code[]={0x41,0x8b,0x8d,0x98,0x00,0x00,0x00,0x41,0x8b,0x85,0x50,0x01,0x00,0x00};
+static const unsigned char u1_menu_item_end2_code[]={0x49,0x8b,0x04,0x24,0x48,0x3b,0x45,0xd0,0x75,0x12};
+static const unsigned char u1_menu_event_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18,0x49,0x89,0xf6};
+static const unsigned char u1_select_index_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50,0x89,0xf3,0x49,0x89,0xfe,0x4d};
+static int code_is(uint64_t at, const unsigned char *bytes, size_t n) {
+    return mm_image && at && at+n<=mm_image_size && !memcmp(mm_image+at,bytes,n);
+}
+static const unsigned char *code_ref(const CodeRef *r) {
+    if (!r->at || r->at+7>mm_image_size || memcmp(mm_image+r->at,r->op,3)) return NULL;
+    int32_t disp;
+    memcpy(&disp,mm_image+r->at+3,4);
+    const int64_t target=(int64_t)r->at+7+disp;
+    return target>0 && (uint64_t)target<mm_image_size ? mm_image+target : NULL;
+}
+static int camera_stopped(void) { return u1_frame_time && !(*u1_frame_time>0.0f); }
+static uint64_t wheel_until_us[2];   /* port: set by the pad read (runtime_menumouse_buttons) */
+static volatile int u1_rail_wheel;   /* U1: a list with a scrollbar is on screen: the wheel scrolls its view (the bar's thumb) instead of moving the highlight */
+static volatile uint64_t u1_hide_select_us;   /* (his prompt bar change is not taken: kept for his list code) */
+static int scripted_cursor;          /* port: BB_PAD_FILE runs: the cursor and buttons from the pad file */
+static float scripted_ux, scripted_uy;
+
+typedef struct { uint64_t item; float x, y, w, h, rx, ry, rw, rh; uint64_t us; int ordinal; float style[8]; } MenuText;
+static int menu_text_ordinal;             /* the n-th text of the item being drawn */
+#define MENU_TEXTS 256
+static MenuText menu_texts[MENU_TEXTS];
+static int menu_text_count;
+static uint64_t menu_text_item;           /* the item whose draw is running, 0 outside */
+static pthread_mutex_t menu_text_lock=PTHREAD_MUTEX_INITIALIZER;
+static volatile uint64_t menu_text_frame_us;       /* the clock of the last text of the first item: a new frame starts */
+static void MS_ABI u1_menu_item_begin(uint64_t item, uint64_t unused, uint64_t image, uint64_t r14, const uint64_t *regs) {
+    (void)unused; (void)image; (void)r14; (void)regs;
+    menu_text_item=item;
+    menu_text_ordinal=0;
+}
+static void MS_ABI u1_menu_item_end(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14, const uint64_t *regs) {
+    (void)unused0; (void)unused1; (void)image; (void)r14; (void)regs;
+    menu_text_item=0;
+}
+static int menu_mode;   /* port: a U1 menu is open (runtime_menumouse_active) */
+/* Texts drawn in a menu outside of any menu item (the scrolling lists, the carousels, titles, footers, arrows): the
+ * rectangle of each, kept by position, to find out what such a screen is made of (F9) and, for the lists, which line is
+ * highlighted (its style differs). */
+#define FREE_TEXTS 160
+static MenuText free_texts[FREE_TEXTS];
+static int free_text_count;
+/* The credits (U1 1.02): the credits task updates and draws itself in image+0x3b41e0 (strings "CREDITS:: ..." and "credits-roll"), called every
+ * frame while they are on screen; they draw no menu text the port sees, so the menu keys and the mouse would otherwise be off there. */
+static volatile uint64_t u1_credits_us;
+static int u1_credits_recent(uint64_t now) { return u1_credits_us && now-u1_credits_us<300000 && u1_credits_us<=now+1000000; }
+static void MS_ABI u1_credits_tick(uint64_t task, uint64_t unused1, uint64_t image, uint64_t r14, const uint64_t *regs) {   /* task = rdi: its first word is the state, 7..11 while the credits roll */
+    (void)unused1; (void)image; (void)r14; (void)regs;
+    uint32_t state=0;
+    static uint32_t last_state=0xffffffffu;
+    if (!safe_read(&state,task,4)) return;
+    if (mouse_debug() && state!=last_state) { last_state=state; printf("Runtime: U1 credits task state %u\n",state); }
+    if (state-7u<5u) u1_credits_us=now_us();
+}
+static const unsigned char u1_credits_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x98,0x01,0x00,0x00};
+static void MS_ABI u1_text_draw(uint64_t unused0, uint64_t unused1, uint64_t image, uint64_t r14, const uint64_t *regs) {
+    (void)unused0; (void)unused1; (void)image; (void)r14;
+    const uint64_t item=menu_text_item;
+    if (!item && !menu_mode) return;
+    /* port: rdx (the style), rcx (the laid-out text), r8 (the rectangle), r9d (the horizontal alignment) from the
+     * registers this loader's thunk saved, the 7th argument (vertical alignment) above the return address */
+    const uint64_t style=regs[5], layout=regs[6], rect=regs[4];
+    const uint32_t halign=(uint32_t)regs[3];
+    uint32_t valign=(uint32_t)regs[26];
+    float r[4], size[2], offset[2];
+    if (!safe_read(r,rect,16) || !safe_read(&size[0],layout+0x14,4) || !safe_read(&size[1],layout+0x18,4) ||
+        !safe_read(&offset[0],style+0x20,4) || !safe_read(&offset[1],style+0x24,4)) return;
+    const float x=halign==2 ? r[0]+r[2]-size[0] : halign==0 ? r[0] : r[0]+(r[2]-size[0])*0.5f;
+    const float y=valign==2 ? r[1]+r[3]-size[1] : valign==0 ? r[1] : r[1]+(r[3]-size[1])*0.5f;
+    pthread_mutex_lock(&menu_text_lock);
+    const uint64_t now=now_us();
+    if (!item) {
+        MenuText free_text={0,x+offset[0],y+offset[1],size[0],size[1],r[0],r[1],r[2],r[3],now,0,{0}};
+        if (!safe_read(free_text.style,style,sizeof(free_text.style))) memset(free_text.style,0,sizeof(free_text.style));
+        int fslot=-1;
+        for (int i=0;i<free_text_count;++i) {
+            const MenuText *o=&free_texts[i];
+            if (fabsf(o->rx-r[0])<0.5f && fabsf(o->ry-r[1])<0.5f && fabsf(o->rw-r[2])<0.5f && fabsf(o->rh-r[3])<0.5f &&
+                fabsf(o->w-free_text.w)<3.0f) { fslot=i; break; }
+        }
+        if (fslot<0) for (int i=0;i<free_text_count;++i) if (now-free_texts[i].us>300000) { fslot=i; break; }
+        if (fslot<0 && free_text_count<FREE_TEXTS) fslot=free_text_count++;
+        if (fslot>=0) free_texts[fslot]=free_text;
+        pthread_mutex_unlock(&menu_text_lock);
+        return;
+    }
+    menu_text_frame_us=now;
+    const int ordinal=menu_text_ordinal++;
+    MenuText text={item,x+offset[0],y+offset[1],size[0],size[1],r[0],r[1],r[2],r[3],now,ordinal,{0}};
+    if (!safe_read(text.style,style,sizeof(text.style))) memset(text.style,0,sizeof(text.style));
+    int slot=-1;
+    for (int i=0;i<menu_text_count;++i)  /* the same text of the same item: the newest draw replaces the old one */
+        if (menu_texts[i].item==item && menu_texts[i].ordinal==ordinal) { slot=i; break; }
+    if (slot<0) { /* an old entry (not drawn for 200 ms: a closed menu) makes room first */
+        for (int i=0;i<menu_text_count;++i) if (now-menu_texts[i].us>200000) { slot=i; break; }
+    }
+    if (slot<0 && menu_text_count<MENU_TEXTS) slot=menu_text_count++;
+    if (slot>=0) menu_texts[slot]=text;
+    pthread_mutex_unlock(&menu_text_lock);
+}
+static const unsigned char u1_text_draw_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x58,0x44,0x89,0xcb};
+/* U1 1.02: the menu's event handler (0x1336c0: rdi the menu, rsi the event {context ptr, type (1 up, 2 down), float}). Up and down
+ * reach a scrolling list through it, one row per event. To take the highlight of a list to the row under the cursor in one go, the
+ * pad thread arms a number of extra steps and presses the direction once; this hook, on the game's own thread and with the real
+ * event, then replays the handler that many more times with a copy of the event (the context pointer is only good during the
+ * call, so it cannot be kept for later). */
+static volatile uint64_t u1_jump_menu, u1_jump_us, u1_event_last_menu;
+static volatile int u1_jump_steps, u1_jump_type, u1_jump_busy, u1_event_last_type, u1_event_count;
+static volatile uint32_t u1_jump_done, u1_measure_done;
+static volatile uint64_t u1_measure_item;
+static volatile int u1_measure_n;
+static int list_top_read(uint64_t item);
+static void list_top_write(uint64_t item, int top);
+static int list_index_raw(uint64_t item) {   /* the highlighted row of a list: the u32 at model+0x14, model = *(item+8) */
+    uint64_t model=0; uint32_t idx=0;
+    if (!safe_read(&model,item+8,8) || !safe_read(&idx,model+0x14,4) || idx>4096) return -1;
+    return (int)idx;
+}
+static void MS_ABI u1_menu_event(uint64_t menu, uint64_t ev, uint64_t image, uint64_t r14, const uint64_t *regs) {
+    (void)r14; (void)regs;
+    u1_event_last_menu=menu;
+    { uint32_t ty=0; if (safe_read(&ty,ev+8,4) && ty) { u1_event_last_type=(int)ty; ++u1_event_count; } }
+    if (u1_jump_busy || (u1_jump_steps<=0 && !u1_measure_item) || menu!=u1_jump_menu) return;
+    if (now_us()-u1_jump_us>250000) { u1_jump_steps=0; u1_measure_item=0; return; }
+    uint64_t copy[4];
+    if (!safe_read(copy,ev,sizeof(copy))) return;
+    if ((int32_t)(copy[1]&0xffffffffu)!=u1_jump_type) {
+        if ((copy[1]&0xffffffffu) && mouse_debug()) printf("Runtime: list jump: event type %u ignored (wanted %d), value %08x, ctx %#llx\n",(unsigned)(copy[1]&0xffffffffu),u1_jump_type,(unsigned)(copy[1]>>32),(unsigned long long)copy[0]);
+        return;
+    }
+    const guest_fn2 handler=(guest_fn2)(uintptr_t)(image+u1m->menu_event);   /* port: by game code */
+    if (u1_measure_item) {
+        /* The length of a list, found without the player seeing the highlight run: all inside this one call, press down until the
+         * highlighted row stops growing or wraps to the top, then go back to just before where it was (the real press that is
+         * still to come moves it one down) and put the view back. */
+        const uint64_t item=u1_measure_item;
+        u1_measure_item=0;
+        u1_jump_busy=1;
+        const int idx0=list_index_raw(item), top0=list_top_read(item);
+        uint64_t down[4]={copy[0],copy[1],copy[2],copy[3]}, up[4]={copy[0],copy[1],copy[2],copy[3]};
+        down[1]=(copy[1]&~0xffffffffull)|2u; up[1]=(copy[1]&~0xffffffffull)|1u;
+        int prev=idx0, cur=idx0, wrapped=0, total=0;
+        for (int i=0;i<400 && idx0>=0;++i) {
+            handler(menu,(uint64_t)(uintptr_t)down);
+            cur=list_index_raw(item);
+            if (cur<0) break;
+            if (cur<=prev) { total=prev+1; wrapped=cur<prev; break; }
+            prev=cur;
+        }
+        if (total>0) {
+            const int back=idx0>=1 ? idx0-1 : idx0;
+            if (wrapped) for (int i=0;i<back;++i) handler(menu,(uint64_t)(uintptr_t)down);
+            else for (int i=0;i<cur-back;++i) handler(menu,(uint64_t)(uintptr_t)up);
+        }
+        if (top0>=0) list_top_write(item,top0);
+        u1_jump_busy=0;
+        u1_measure_n=total;
+        ++u1_measure_done;
+        return;
+    }
+    const int n=u1_jump_steps;
+    u1_jump_steps=0;
+    u1_jump_busy=1;
+    for (int i=0;i<n;++i) handler(menu,(uint64_t)(uintptr_t)copy);
+    u1_jump_busy=0;
+    ++u1_jump_done;
+}
+/* A confirmation (return to the checkpoint, to the main menu): a line of exactly two short texts (Oui / Non) near the middle of the
+ * screen, the bottom prompts (three on their line) and the list rows (many pairs) being told apart by those counts. The texts may be
+ * the row's own or free ones, so both tables are read. Returns the left and the right text. */
+typedef struct { float lx, ly, lw, lh, rx, ry, rw, rh; } DialogInfo;
+static int menu_dialog_find(uint64_t now, DialogInfo *d) {
+    float cx[48], cy[48], cw[48], ch[48], titx[48], tity[48];
+    int n=0, nt=0;
+    pthread_mutex_lock(&menu_text_lock);
+    for (int pass=0;pass<2;++pass) {
+        const int total=pass ? free_text_count : menu_text_count;
+        for (int i=0;i<total;++i) {
+            const MenuText *t=pass ? &free_texts[i] : &menu_texts[i];
+            if (now-t->us>100000 || t->w<=1.0f) continue;
+            if (t->w>150.0f) { if (nt<48) { titx[nt]=t->x+t->w*0.5f; tity[nt]=t->y+t->h*0.5f; ++nt; } continue; }
+            if (t->w>90.0f || t->h<18.0f || t->h>40.0f || n>=48) continue;
+            cx[n]=t->x; cy[n]=t->y; cw[n]=t->w; ch[n]=t->h; ++n;
+        }
+    }
+    pthread_mutex_unlock(&menu_text_lock);
+    int found=0;
+    for (int a=0;a<n;++a) for (int b=0;b<n;++b) {
+        if (cx[a]>=cx[b]-20.0f) continue;
+        const float ya=cy[a]+ch[a]*0.5f;
+        if (fabsf(ya-(cy[b]+ch[b]*0.5f))>=4.0f) continue;
+        int on_line=0;
+        for (int c=0;c<n;++c) if (fabsf(ya-(cy[c]+ch[c]*0.5f))<4.0f) ++on_line;
+        const float mid=((cx[a]+cw[a]*0.5f)+(cx[b]+cw[b]*0.5f))*0.5f;
+        if (on_line!=2 || fabsf(mid-640.0f)>=120.0f || cx[b]-(cx[a]+cw[a])>120.0f) continue;
+        int title=0;   /* the question: a wide text centred over the pair, 40..130 above it */
+        for (int t=0;t<nt;++t) if (fabsf(titx[t]-mid)<50.0f && ya-tity[t]>40.0f && ya-tity[t]<130.0f) title=1;
+        if (!title) continue;
+        if (found) return 0;   /* a second pair: a list, not a confirmation */
+        *d=(DialogInfo){cx[a],cy[a],cw[a],ch[a],cx[b],cy[b],cw[b],ch[b]};
+        found=1;
+    }
+    return found;
+}
+/* A carousel screen (cinematics, chapters): its item draws a 13x13 arrow text. There the wheel and the left/right keys move
+ * sideways, not up and down. A confirmation has the same wheel. */
+static int menu_carousel_recent(uint64_t now) {
+    DialogInfo dialog;
+    if (menu_dialog_find(now,&dialog)) return 1;
+    int found=0;
+    pthread_mutex_lock(&menu_text_lock);
+    for (int i=0;i<menu_text_count && !found;++i) {
+        const MenuText *t=&menu_texts[i];
+        if (t->ordinal>=1 && now-t->us<100000 && t->w>=12.0f && t->w<=14.0f && t->h>=12.0f && t->h<=14.0f && t->style[0]>0.0f) found=1;
+    }
+    pthread_mutex_unlock(&menu_text_lock);
+    return found;
+}
+/* A scrolling list (treasures, medals, statistics): ONE menu item that draws the rows itself, a label column of texts 25.2 tall
+ * (27.7 for the highlighted row, whose style[5] is 3.0) with a pitch of 29.2. Returns the highlighted row's centre, the pitch,
+ * the label column and the vertical extent of the rows. */
+typedef struct { float sel_cy, pitch, colx, top, bottom; uint64_t item; } ListInfo;
+static int menu_list_find_ex(uint64_t now, ListInfo *info, int need_highlight) {
+    int found=0;
+    pthread_mutex_lock(&menu_text_lock);
+    float best_x=0.0f; int best=0; uint64_t best_item=0;
+    for (int i=0;i<menu_text_count;++i) {
+        const MenuText *a=&menu_texts[i];
+        if (a->ordinal<1 || now-a->us>100000 || a->w<=1.0f || a->h<22.0f || a->h>29.0f) continue;
+        int n=0;
+        for (int j=0;j<menu_text_count;++j) {
+            const MenuText *b=&menu_texts[j];
+            if (b->item==a->item && b->ordinal>=1 && now-b->us<=100000 && b->w>1.0f && b->h>=22.0f && b->h<=29.0f && fabsf(b->x-a->x)<1.0f) ++n;
+        }
+        if (n>best) { best=n; best_x=a->x; best_item=a->item; }
+    }
+    if (best>=2) {
+        float ys[64]; int nys=0; float sel=-1.0f, top=1e9f, bottom=-1e9f;
+        for (int j=0;j<menu_text_count && nys<64;++j) {
+            const MenuText *b=&menu_texts[j];
+            if (b->ordinal<1 || now-b->us>100000 || b->w<=1.0f || b->h<22.0f || b->h>29.0f || fabsf(b->x-best_x)>=1.0f) continue;
+            ys[nys++]=b->y+b->h*0.5f;
+            if (b->y<top) top=b->y;
+            if (b->y+b->h>bottom) bottom=b->y+b->h;
+            if (b->style[5]>2.5f) sel=b->y+b->h*0.5f;
+        }
+        float pitch=1e9f;
+        for (int a=0;a<nys;++a) for (int b=0;b<nys;++b) { const float d=ys[a]-ys[b]; if (d>5.0f && d<pitch) pitch=d; }
+        if ((sel>=0.0f || !need_highlight) && pitch>=25.0f && pitch<=35.0f) { info->sel_cy=sel; info->pitch=pitch; info->colx=best_x; info->top=top; info->bottom=bottom; info->item=best_item; found=1; }
+    }
+    pthread_mutex_unlock(&menu_text_lock);
+    return found;
+}
+/* ---- the mouse in the menus (U1) ------------------------------------------------------------
+ * The game's menu texts are laid out in a 1280x720 space (measured: a 5-row menu has its rows at x 367.5, width
+ * 600, height 33.6 and a pitch of 33.6, which matches the screenshots at 1125 lines). The cursor, put in that
+ * space, tells which row of which menu it is on (u1_text_draw records the row rectangles). Hovering a row
+ * presses the d-pad up or down, one step every 100 ms, until the menu's selected index (menu+0x150) is that
+ * row; a left click on a row selects it the same way and then presses cross. With no menu text on screen (the
+ * "press a key to start" screen) a left click presses cross. The wheel and the keys stop the hover until the
+ * cursor moves again. */
+#define UI_WIDTH 1280.0f
+#define UI_HEIGHT 720.0f
+/* Rows the game never selects (the section titles, the text over a picture): a hover that cannot reach one gives up and the
+ * row is ignored for 30 s, instead of pressing up and down for ever. */
+typedef struct { uint64_t menu; int index; uint64_t until; } MenuSkip;
+static MenuSkip menu_skips[16];
+static int menu_skipped(uint64_t menu, int index, uint64_t now) {
+    for (int i=0;i<16;++i) if (menu_skips[i].menu==menu && menu_skips[i].index==index && now<menu_skips[i].until) return 1;
+    return 0;
+}
+static void menu_skip(uint64_t menu, int index, uint64_t now) {
+    int slot=0;
+    for (int i=0;i<16;++i) { if (now>=menu_skips[i].until) { slot=i; break; } if (menu_skips[i].until<menu_skips[slot].until) slot=i; }
+    menu_skips[slot]=(MenuSkip){menu,index,now+30000000u};
+    printf("Runtime: menu row %d of %#llx cannot be selected: ignored\n",index,(unsigned long long)menu);
+}
+static int menu_row_at(float ux, float uy, uint64_t now, uint64_t *menu_out, int *index_out, int *count_out) {
+    int found=0;
+    pthread_mutex_lock(&menu_text_lock);
+    for (int i=0;i<menu_text_count && !found;++i) {
+        const MenuText *t=&menu_texts[i];
+        if (t->ordinal!=0 || now-t->us>100000) continue;
+        if (ux<t->rx || ux>t->rx+t->rw || uy<t->ry || uy>t->ry+t->rh) continue;
+        uint64_t menu=0; int32_t count=0;
+        if (!safe_read(&menu,t->item+0x80,8) || !safe_read(&count,menu+0x98,4)) continue;
+        for (int j=0;j<count && j<64;++j) {
+            uint64_t p=0;
+            if (safe_read(&p,menu+0xa0+8u*(uint64_t)j,8) && p==t->item) {
+                if (menu_skipped(menu,j,now)) break;
+                *menu_out=menu; *index_out=j; *count_out=count; found=1; break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&menu_text_lock);
+    return found;
+}
+/* How many texts were drawn lately, and how many of those belong to a real menu item (a text drawn while the
+ * hooks think an item is being drawn may be a stale tag: the screens that are not menus). */
+static void menu_texts_visible(uint64_t now, int *texts, int *rows) {
+    *texts=*rows=0;
+    pthread_mutex_lock(&menu_text_lock);
+    for (int i=0;i<menu_text_count;++i) {
+        const MenuText *t=&menu_texts[i];
+        if (now-t->us>=100000) continue;
+        ++*texts;
+        uint64_t menu=0; int32_t count=0;
+        if (t->ordinal==0 && safe_read(&menu,t->item+0x80,8) && safe_read(&count,menu+0x98,4) && count>0 && count<64) ++*rows;
+    }
+    pthread_mutex_unlock(&menu_text_lock);
+}
+/* The controls inside a row (U1 1.02, from the recorded texts of the row): the two small 10x10 draws are the left
+ * and right arrows (the smaller x is the left one), small value texts (height 20..30, width up to 100, from the
+ * 4th text on) are the choices of an Oui/Non style row (the left choice is a left press, the right one a right
+ * press), a thin wide bar (height up to 12, width from 100) is a slider. kind: 1 left, 2 right, 3 slider. */
+typedef struct { int kind; uint64_t menu; int index; uint64_t item; float tx, tw; } MenuControl;
+static int menu_control_at(float ux, float uy, uint64_t now, MenuControl *c) {
+    int found=0;
+    pthread_mutex_lock(&menu_text_lock);
+    for (int i=0;i<menu_text_count && !found;++i) {
+        const MenuText *t=&menu_texts[i];
+        if (t->ordinal<1 || now-t->us>100000) continue;
+        int kind=0;
+        if (t->w<=14.0f && t->h<=14.0f) {                       /* an arrow (10x10 in the rows, 13x13 in the carousels) */
+            if (ux<t->x-8 || ux>t->x+t->w+8 || uy<t->y-8 || uy>t->y+t->h+8) continue;
+            int partners=0;
+            kind=1;   /* the left arrow, unless another arrow of the row lies further left */
+            for (int j=0;j<menu_text_count;++j) {
+                const MenuText *o=&menu_texts[j];
+                if (j!=i && o->item==t->item && o->ordinal>=1 && o->w<=14.0f && o->h<=14.0f) { ++partners; if (o->x<t->x) kind=2; }
+            }
+            if (!partners) kind=t->x+t->w*0.5f<640.0f ? 1 : 2;   /* one arrow alone (a carousel end): left half or right half */
+            if (t->style[0]<=0.0f) continue;
+        } else if (t->ordinal>=3 && t->w<=100.0f && t->h>=20.0f && t->h<=30.0f) {   /* a choice */
+            if (ux<t->x || ux>t->x+t->w || uy<t->y || uy>t->y+t->h) continue;
+            int left_of_me=0, right_of_me=0;
+            for (int j=0;j<menu_text_count;++j) {
+                const MenuText *o=&menu_texts[j];
+                if (j==i || o->item!=t->item || o->ordinal<3 || o->w>100.0f || o->h<20.0f || o->h>30.0f) continue;
+                if (o->x<t->x-1.0f) ++left_of_me; else if (o->x>t->x+1.0f) ++right_of_me;
+            }
+            kind=right_of_me>0 && left_of_me==0 ? 1 : left_of_me>0 && right_of_me==0 ? 2 : 0;
+            if (!kind) continue;
+        } else if (t->ordinal>=3 && t->h<12.0f && t->w>=100.0f) { /* a slider */
+            if (ux<t->x-6 || ux>t->x+t->w+6 || uy<t->y-12 || uy>t->y+t->h+12) continue;
+            kind=3;
+        } else continue;
+        uint64_t menu=0; int32_t count=0;
+        if (!safe_read(&menu,t->item+0x80,8) || !safe_read(&count,menu+0x98,4)) continue;
+        for (int j=0;j<count && j<64;++j) {
+            uint64_t p=0;
+            if (safe_read(&p,menu+0xa0+8u*(uint64_t)j,8) && p==t->item) { c->kind=kind; c->menu=menu; c->index=j; c->item=t->item; c->tx=t->x; c->tw=t->w; found=1; break; }
+        }
+    }
+    pthread_mutex_unlock(&menu_text_lock);
+    return found;
+}
+/* The scrollbar rail of a list: a text draw 8 wide and ~438 tall (the first draws of the list item); returns its rectangle and the
+ * list item. The thumb is not readable, so the bar is followed by the list's selected row: the item's model (+8) keeps it at +0x14
+ * (counted over all the rows, the section titles too). The number of rows is measured once by scrolling to the end. */
+static int menu_rail_find(uint64_t now, float *rx, float *ry, float *rw, float *rh, uint64_t *item) {
+    int found=0;
+    pthread_mutex_lock(&menu_text_lock);
+    for (int i=0;i<menu_text_count && !found;++i) {
+        const MenuText *t=&menu_texts[i];
+        if (t->ordinal<1 || now-t->us>100000 || t->w<6.0f || t->w>10.0f || t->h<200.0f) continue;
+        *rx=t->x; *ry=t->y; *rw=t->w; *rh=t->h; *item=t->item; found=1;
+    }
+    pthread_mutex_unlock(&menu_text_lock);
+    return found;
+}
+/* The first visible row of a list (found by watching the list item in game): the int at item+0x238 (0 at the top, one more each
+ * time the highlight goes past the last visible row), with a scroll animation (item+0x23c a flag, item+0x240 a float that runs
+ * from 0 and rests at 1.0). Writing the row and resting the animation moves the list at once without touching the highlight. */
+static int list_top_read(uint64_t item) {
+    int32_t v=0;
+    return safe_read(&v,item+0x238,4) && v>=0 && v<4096 ? (int)v : -1;
+}
+static void list_top_write(uint64_t item, int top) {
+    const int32_t v=top, flag=0; const float rest=1.0f;
+    safe_write(item+0x238,&v,4); safe_write(item+0x23c,&flag,4); safe_write(item+0x240,&rest,4);
+}
+static int menu_list_index(uint64_t item) {
+    uint64_t model=0; uint32_t idx=0;
+    if (!safe_read(&model,item+8,8) || !safe_read(&idx,model+0x14,4) || idx>4096) return -1;
+    return (int)idx;
+}
+/* The menu's own "select this row" (0x1335a0: menu, index): it asks the row if it can be selected, deselects the old one and selects
+ * the new, like a press of up or down but at any distance. Nothing happens for a row that cannot be selected. */
+static void menu_select_index(uint64_t menu, int index) {
+    if (!u1_image || !menu || index<0) return;
+    ((guest_fn2)(uintptr_t)(u1_image+u1m->select_index))(menu,(uint64_t)(uint32_t)index);   /* port: by game code */
+    if (mouse_debug()) {   /* port: BB_MOUSE_DEBUG=1: each row the cursor selects (scripted checks) */
+        int32_t sel=-1;
+        safe_read(&sel,menu+0x150,4);
+        printf("Menu mouse: row %d of menu %#llx asked, the menu's selected row is now %d\n",index,(unsigned long long)menu,sel);
+    }
+}
+static int menu_hover;   /* the cursor is over something that answers a click (the golden arrow lights up) */
+static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) {
+    menu_hover=0;
+    static struct {
+        int active, target, presses, click_pending, click_action, last_left, drag, queue, last_dir, last_sel, last_target, last_press, list_active, list_click, list_presses,
+            sb_drag, sb_measure, sb_same, sb_last, sb_n, sb_cmp, direct_tries, list_armed, jump_fail, dlg_sel, sb_by_wheel, sb_pending;
+        uint64_t wseen[2];
+        uint32_t jump_done_at_arm;
+        int press_dir, freeze_on, freeze_top, sb_m_armed, sb_m_fallback; uint32_t sb_m_done; uint64_t press_until, freeze_item, freeze_end, sb_m_until, sb_m_deadline;
+        uint64_t sb_item, sb_cached_item, list_hold, dlg_seen, dlg_cross_at;
+        float sb_y, sb_h;
+        float last_x, last_y;
+        /* the slider being dragged: track x and width (UI space), number of steps, pointer to its value when the
+         * game keeps it as a float (0..100 or 0..1), the position we put it at (-1: not known yet) */
+        float sl_x, sl_w; int sl_steps, sl_est, sl_extra_max; uint64_t sl_vp;
+        uint64_t menu, click_until, click_deadline, step_until, next_step, list_deadline, list_last_step;
+        int step_dir;
+    } h;
+    uint32_t out=0;
+    float mx=0, my=0, ux=0, uy=0;
+    if (scripted_cursor) {   /* port: BB_PAD_FILE cx= cy= (fractions of the 16:9 menu picture) */
+        ux=scripted_ux*UI_WIDTH; uy=scripted_uy*UI_HEIGHT; mx=ux; my=uy;
+    } else {
+        SDL_Window *w=SDL_GetMouseFocus();
+        int ww=0, wh=0;
+        if (!w) return 0;
+        SDL_GetMouseState(&mx,&my);
+        SDL_GetWindowSize(w,&ww,&wh);
+        if (ww<=0 || wh<=0) return 0;
+        const float scale=fminf((float)ww/UI_WIDTH,(float)wh/UI_HEIGHT);
+        ux=(mx-((float)ww-UI_WIDTH*scale)*0.5f)/scale; uy=(my-((float)wh-UI_HEIGHT*scale)*0.5f)/scale;
+    }
+    const int moved=fabsf(mx-h.last_x)>=1.0f || fabsf(my-h.last_y)>=1.0f;
+    h.last_x=mx; h.last_y=my;
+    if (moved && !h.drag) { h.active=1; h.presses=0; }
+    if (now<wheel_until_us[0] || now<wheel_until_us[1] ||
+        (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN]))) h.active=0;
+    const int left=(mouse & 1u)!=0, clicked=left && !h.last_left;
+    h.last_left=left;
+    if (!left) { h.drag=0; h.queue=0; }
+    /* A confirmation (Oui / Non): the cursor over a choice selects it (once, from where the selection is believed to be: "Non" when
+     * the box opens), a click selects it and then presses cross, the wheel and the keys go left and right. Nothing else on the
+     * screen reacts to the mouse there (a click elsewhere in the box must not validate the selected choice). */
+    {
+        DialogInfo dlg;
+        if (menu_dialog_find(now,&dlg)) {
+            if (now-h.dlg_seen>300000) { h.dlg_sel=2; h.dlg_cross_at=0; h.step_until=0; h.click_until=0; h.click_pending=0; h.queue=0; }
+            h.dlg_seen=now;
+            int which=0, pressed=0;
+            if (ux>=dlg.lx-12.0f && ux<=dlg.lx+dlg.lw+12.0f && uy>=dlg.ly-12.0f && uy<=dlg.ly+dlg.lh+12.0f) which=1;
+            else if (ux>=dlg.rx-12.0f && ux<=dlg.rx+dlg.rw+12.0f && uy>=dlg.ry-12.0f && uy<=dlg.ry+dlg.rh+12.0f) which=2;
+            if (k) {
+                if (k[SDL_SCANCODE_A] || k[SDL_SCANCODE_LEFT]) h.dlg_sel=1;
+                if (k[SDL_SCANCODE_D] || k[SDL_SCANCODE_RIGHT]) h.dlg_sel=2;
+            }
+            if (now<wheel_until_us[0]) h.dlg_sel=1; else if (now<wheel_until_us[1]) h.dlg_sel=2;
+            if (which) menu_hover=1;
+            if (which && (moved || clicked) && which!=h.dlg_sel) { h.step_dir=which; h.step_until=now+100000; h.dlg_sel=which; pressed=1; }
+            if (clicked && which) {
+                h.dlg_cross_at=now+(pressed ? 260000u : 30000u);
+                printf("Runtime: menu confirmation click on the %s choice\n",which==1 ? "left" : "right");
+            }
+            if (h.dlg_cross_at && now>=h.dlg_cross_at) { h.dlg_cross_at=0; h.click_until=now+120000; }
+            uint32_t o=0;
+            if (now<h.step_until) o|=h.step_dir==1 ? BTN_LEFT : BTN_RIGHT;
+            if (now<h.click_until) o|=BTN_CROSS;
+            return o;
+        }
+    }
+    /* The scrollbar of a list: press on the rail and drag. The first time on a list its length is measured (down to the end:
+     * the selected row stops growing or wraps), then the selected row follows the cursor along the rail. */
+    int sb_out=0;
+    {
+        float rx, ry, rw, rh; uint64_t ritem=0;
+        const int have_rail=menu_rail_find(now,&rx,&ry,&rw,&rh,&ritem);
+        if (!left && !h.sb_by_wheel) h.sb_drag=0;
+        u1_rail_wheel=have_rail;
+        if (h.sb_by_wheel && !have_rail) { h.sb_drag=0; h.sb_by_wheel=0; h.sb_pending=0; }
+        {   /* the wheel scrolls the list's view (the bar's thumb) like a drag of the bar would: a notch is one row; the highlight stays where it is */
+            int notch=0;
+            for (int i=0;i<2;++i) if (wheel_until_us[i]!=h.wseen[i]) { h.wseen[i]=wheel_until_us[i]; notch+=i==0 ? -1 : 1; }
+            if (have_rail && notch && !left && menu_list_index(ritem)>=0) {
+                if (!h.sb_drag) {
+                    h.sb_drag=1; h.sb_by_wheel=1; h.sb_pending=0; h.sb_item=ritem; h.sb_y=ry; h.sb_h=rh; h.sb_cmp=0; h.sb_same=0; h.sb_last=menu_list_index(ritem);
+                    h.sb_measure=(h.sb_cached_item!=ritem);
+                    if (h.sb_measure) h.sb_n=0;
+                    h.sb_m_armed=0; h.sb_m_fallback=0;
+                }
+                if (h.sb_by_wheel) h.sb_pending+=notch;
+            }
+        }
+        if (have_rail && ux>=rx-10.0f && ux<=rx+rw+10.0f && uy>=ry-4.0f && uy<=ry+rh+4.0f) menu_hover=1;
+        if (have_rail && clicked && ux>=rx-10.0f && ux<=rx+rw+10.0f && uy>=ry-4.0f && uy<=ry+rh+4.0f && menu_list_index(ritem)>=0) {
+            h.sb_drag=1; h.sb_item=ritem; h.sb_y=ry; h.sb_h=rh; h.sb_cmp=0; h.sb_same=0; h.sb_last=menu_list_index(ritem);
+            h.sb_measure=(h.sb_cached_item!=ritem);
+            if (h.sb_measure) h.sb_n=0;
+            h.sb_m_armed=0; h.sb_m_fallback=0;
+            printf("Runtime: scrollbar drag on list item %#llx, rows %s\n",(unsigned long long)ritem,h.sb_measure ? "to measure" : "known");
+        }
+        if (h.sb_drag) {
+            const int idx=menu_list_index(h.sb_item);
+            if (idx<0) h.sb_drag=0;
+            else if (h.sb_measure && !h.sb_m_fallback) {
+                /* one press carries the whole measure (see u1_menu_event); no result in half a second: the slow way below */
+                uint64_t lmenu=0;
+                if (!h.sb_m_armed) {
+                    if (safe_read(&lmenu,h.sb_item+0x80,8) && lmenu) {
+                        u1_measure_n=0; u1_jump_menu=lmenu; u1_jump_type=2; u1_jump_us=now; u1_measure_item=h.sb_item;
+                        h.sb_m_armed=1; h.sb_m_done=u1_measure_done; h.sb_m_until=now+50000; h.sb_m_deadline=now+500000;
+                    } else h.sb_m_fallback=1;
+                } else if (u1_measure_done!=h.sb_m_done) {
+                    if (u1_measure_n>0) { h.sb_n=u1_measure_n; h.sb_measure=0; h.sb_cached_item=h.sb_item; printf("Runtime: scrollbar: the list has %d rows (measured in one go)\n",h.sb_n); }
+                    else h.sb_m_fallback=1;
+                } else if (now>h.sb_m_deadline) { u1_measure_item=0; h.sb_m_fallback=1; }
+                if (h.sb_measure && !h.sb_m_fallback && now<h.sb_m_until) sb_out=BTN_DOWN;
+            }
+            else if (h.sb_measure) {
+                /* down until the row stops growing or wraps round to the top */
+                if (idx>h.sb_last && idx!=h.sb_last) { h.sb_same=0; h.sb_last=idx; }
+                else if (idx<h.sb_last) { h.sb_n=h.sb_last+1; h.sb_measure=0; h.sb_cached_item=h.sb_item; }
+                else if (++h.sb_same>24) { h.sb_n=idx+1; h.sb_measure=0; h.sb_cached_item=h.sb_item; }
+                if (!h.sb_measure) printf("Runtime: scrollbar: the list has %d rows\n",h.sb_n);
+                else if ((now/16000u)&1u) sb_out=BTN_DOWN;
+            }
+            if (!h.sb_measure && h.sb_drag && h.sb_by_wheel) {
+                ListInfo li; const int top=list_top_read(h.sb_item);
+                if (menu_list_find_ex(now,&li,0) && li.pitch>1.0f && top>=0) {
+                    const int visible=(int)floorf((li.bottom-li.top)/li.pitch+0.5f);
+                    const int max_top=h.sb_n-visible>0 ? h.sb_n-visible : 0;
+                    int want=top+h.sb_pending;
+                    want=want<0 ? 0 : want>max_top ? max_top : want;
+                    if (want!=top) list_top_write(h.sb_item,want);
+                }
+                h.sb_pending=0; h.sb_drag=0; h.sb_by_wheel=0;
+            } else if (!h.sb_measure && h.sb_drag) {
+                float f=(uy-h.sb_y)/h.sb_h; f=f<0.0f ? 0.0f : f>1.0f ? 1.0f : f;
+                ListInfo li;
+                if (menu_list_find_ex(now,&li,0) && li.pitch>1.0f && list_top_read(h.sb_item)>=0) {   /* the highlighted row may be out of view: not needed here */
+                    /* the bar scrolls the view (first visible row), the highlight stays where it is */
+                    const int visible=(int)floorf((li.bottom-li.top)/li.pitch+0.5f);
+                    const int max_top=h.sb_n-visible>0 ? h.sb_n-visible : 0;
+                    const int want=(int)floorf(f*(float)max_top+0.5f);
+                    if (list_top_read(h.sb_item)!=want) list_top_write(h.sb_item,want);
+                } else {
+                const int target=(int)floorf(f*(float)(h.sb_n>1 ? h.sb_n-1 : 1)+0.5f);
+                if (idx!=target) {
+                    const int dir=idx<target ? 1 : -1;
+                    if (h.sb_cmp!=0 && dir!=h.sb_cmp) h.sb_cmp=0;   /* the cursor moved to the other side: go the other way */
+                    h.sb_cmp=dir;
+                    if ((now/16000u)&1u) sb_out=dir>0 ? BTN_DOWN : BTN_UP;
+                }
+                }
+            }
+        }
+    }
+    /* A scrolling list: the cursor over its rows moves the highlight there (up or down presses until the highlighted row
+     * is at the cursor), a click then validates. */
+    ListInfo list={0};
+    int list_ctl=0, list_delta=0, list_title=0, list_noclick=0;
+    int list_found=menu_list_find_ex(now,&list,0);
+    if (list_found && list.sel_cy<0.0f) {   /* the highlighted row is out of view (scrolled away with the bar): where it would be */
+        const int top=list_top_read(list.item), idx=menu_list_index(list.item);
+        if (top>=0 && idx>=0) list.sel_cy=list.top+12.6f+(float)(idx-top)*list.pitch; else list_found=0;
+    }
+    if (list_found && ux>=list.colx-20.0f && ux<=list.colx+560.0f && uy>=list.top-4.0f && uy<=list.bottom+4.0f) {
+        list_ctl=1;
+        list_delta=(int)floorf((uy-list.sel_cy)/list.pitch+0.5f);
+        /* Statistiques (a list with a column of values on the right): only the difficulties of Contre-la-montre (rows with an empty value) open
+         * something. A click on a statistic does nothing, and the section titles (dimmer: style[1] 0.5) are never selected by the game, so
+         * the cursor over one must not chase it (the highlight shook between the rows around it). */
+        int stats=0, label=-1, value_w=0, bright_label=0, nvals=0;
+        pthread_mutex_lock(&menu_text_lock);
+        for (int i=0;i<menu_text_count;++i) {
+            const MenuText *t=&menu_texts[i];
+            if (t->item!=list.item || now-t->us>100000 || t->ordinal<1) continue;
+            if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) ++nvals;
+            if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]>=0.7f) bright_label=1;   /* (Récompenses: every label, the highlighted one too, is at style[1] 0.5) */
+            if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && uy>=t->y-2.0f && uy<t->y+list.pitch-2.0f) label=i;
+        }
+        stats=nvals>=3;   /* (Médailles has one lone icon on the right, not a column of values) */
+        if (!bright_label) stats=0;  /* Récompenses: every label is dim (style[1] 0.5) next to a value column; only Statistiques mixes dim titles with normal rows */
+        if (label>=0) {
+            const MenuText *l=&menu_texts[label];
+            for (int i=0;i<menu_text_count;++i) {
+                const MenuText *t=&menu_texts[i];
+                if (t->item==list.item && now-t->us<=100000 && t->ordinal>=1 && t->x>list.colx+300.0f && t->h<30.0f && fabsf(t->y-l->y)<2.0f && t->w>0.5f) value_w=1;
+            }
+            if (stats) {
+                if (l->style[1]<0.7f && l->style[5]<2.5f) { list_title=1; list_noclick=1; list_delta=0; }
+                else if (value_w) list_noclick=1;
+            }
+        }
+        pthread_mutex_unlock(&menu_text_lock);
+    }
+    if (list_found) {   /* Statistiques, highlight on a statistic (a row with a value): no "SÉLECTIONNER" in the prompt bar, see u1_bar_flags */
+        int stats=0, sel_value=0, bright_label=0, nvals=0;
+        pthread_mutex_lock(&menu_text_lock);
+        const MenuText *sl=NULL;
+        for (int i=0;i<menu_text_count;++i) {
+            const MenuText *t=&menu_texts[i];
+            if (t->item!=list.item || now-t->us>100000 || t->ordinal<1) continue;
+            if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) ++nvals;
+            if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]>=0.7f) bright_label=1;
+            if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && t->style[5]>2.5f) sl=t;
+        }
+        stats=nvals>=3 && bright_label;
+        if (sl) for (int i=0;i<menu_text_count;++i) {
+            const MenuText *t=&menu_texts[i];
+            if (t->item==list.item && now-t->us<=100000 && t->ordinal>=1 && t->x>list.colx+300.0f && t->h<30.0f && fabsf(t->y-sl->y)<2.0f && t->w>0.5f) sel_value=1;
+        }
+        pthread_mutex_unlock(&menu_text_lock);
+        if (stats && sel_value) u1_hide_select_us=now;
+    }
+    uint64_t menu=0; int index=-1, count=0;
+    const int on_row=list_ctl ? 0 : menu_row_at(ux,uy,now,&menu,&index,&count);
+    MenuControl ctl={0,0,-1,0,0,0};
+    const int on_control=!h.drag && !list_ctl && menu_control_at(ux,uy,now,&ctl);
+    if (list_ctl || on_row || on_control) menu_hover=1;
+    if (list_ctl) {
+        if (moved) { h.list_active=1; h.list_presses=0; }
+        if (now<wheel_until_us[0] || now<wheel_until_us[1] ||
+            (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN]))) h.list_active=0;
+        if (clicked && !list_noclick) { h.list_click=1; h.list_deadline=now+1500000; h.list_active=1; h.list_presses=0; }
+        if (list_title) h.list_active=0;
+    } else h.list_click=0;
+    /* Hovering a row at the edge of a list must not scroll it: the first row shown is noted when the cursor starts to move the
+     * highlight, and put back whenever the game moves it meanwhile (until a moment after the highlight is under the cursor, or the
+     * wheel or the keys take over). */
+    if (list.item) {
+        const int top=list_top_read(list.item);
+        const int user_scroll=now<wheel_until_us[0] || now<wheel_until_us[1] ||
+            (k && (k[SDL_SCANCODE_W] || k[SDL_SCANCODE_S] || k[SDL_SCANCODE_UP] || k[SDL_SCANCODE_DOWN]));
+        if (user_scroll || h.sb_drag || (h.freeze_on && h.freeze_item!=list.item)) h.freeze_on=0;
+        if (!h.freeze_on && list_ctl && (h.list_active || h.list_click) && list_delta!=0 && top>=0 && !user_scroll && !h.sb_drag) {
+            h.freeze_on=1; h.freeze_top=top; h.freeze_item=list.item; h.freeze_end=0;
+        }
+        if (h.freeze_on) {
+            if (top>=0 && top!=h.freeze_top) {
+                list_top_write(list.item,h.freeze_top);
+                printf("Runtime: list view kept at row %d (the game moved it to %d)\n",h.freeze_top,top);
+            }
+            if (list_delta==0) { if (!h.freeze_end) h.freeze_end=now+400000; } else h.freeze_end=0;
+            if (h.freeze_end && now>h.freeze_end) h.freeze_on=0;
+        }
+    } else h.freeze_on=0;
+    if (clicked) {
+        int texts, rows;
+        menu_texts_visible(now,&texts,&rows);
+        if (mouse_debug()) printf("Runtime: menu click ui=(%.0f %.0f) on_row=%d control=%d texts=%d rows=%d\n",ux,uy,on_row,on_control ? ctl.kind : 0,texts,rows);
+        if (mouse_debug() && texts<=4) {   /* a confirmation box has few texts: list them (to tell it from the other screens) */
+            pthread_mutex_lock(&menu_text_lock);
+            for (int i=0;i<menu_text_count;++i) { const MenuText *t=&menu_texts[i]; if (now-t->us<100000) printf("Runtime:   text item ord=%d x=%.1f y=%.1f w=%.1f h=%.1f\n",t->ordinal,t->x,t->y,t->w,t->h); }
+            for (int i=0;i<free_text_count;++i) { const MenuText *t=&free_texts[i]; if (now-t->us<100000) printf("Runtime:   text free x=%.1f y=%.1f w=%.1f h=%.1f\n",t->x,t->y,t->w,t->h); }
+            pthread_mutex_unlock(&menu_text_lock);
+        }
+        if (h.sb_drag) {
+            /* the press is on a scrollbar: nothing else takes it (the selected row's sub-menu must not open) */
+        } else if (on_control) {
+            h.target=ctl.index; h.menu=ctl.menu; h.click_pending=1; h.click_deadline=now+1500000; h.active=1; h.presses=0;
+            h.click_action=ctl.kind;
+            if (ctl.kind==3) {
+                uint64_t model=0, vp=0, steps=0;
+                h.drag=1; h.sl_x=ctl.tx; h.sl_w=ctl.tw; h.sl_steps=10; h.sl_est=-1; h.sl_vp=0; h.queue=0;
+                if (safe_read(&model,ctl.item+8,8) && safe_read(&vp,model+0x18,8)) {
+                    if (vp>=0x1000000ull) h.sl_vp=vp;               /* a float behind a pointer (brightness, sensitivity) */
+                    else if (vp>=2 && vp<=64) {                       /* the volumes: the number of steps; the four values are floats 0..1 */
+                        uint32_t slot=99;                               /* in an array of the data segment (1.02), in the order of the rows */
+                        h.sl_steps=(int)vp;
+                        if (u1_image && u1m->volumes && safe_read(&slot,model+0x14,4) && slot<4) h.sl_vp=u1_image+u1m->volumes+4u*slot;   /* port: by game code */
+                    }
+                }
+                (void)steps;
+                printf("Runtime: menu slider start steps=%d value ptr=%#llx track=(%.1f %.1f)\n",h.sl_steps,(unsigned long long)h.sl_vp,h.sl_x,h.sl_w);
+            }
+        } else if (on_row) {
+            h.target=index; h.menu=menu; h.click_pending=1; h.click_action=0; h.click_deadline=now+1500000; h.active=1; h.presses=0;
+        } else if (rows==0 && !list_ctl) h.click_until=now+150000;   /* no menu rows: "press a key to start", the game selection */
+    }
+    if (on_row && h.active && !h.click_pending && !h.drag) { h.target=index; h.menu=menu; }
+    if (!on_row && !on_control && !h.click_pending && !h.drag) h.menu=0;
+    int arrived=0;
+    if (h.target!=h.last_target) { h.last_target=h.target; h.last_dir=0; h.last_press=0; h.last_sel=-1; h.presses=0; h.direct_tries=0; }
+    if (h.menu && (h.active || h.click_pending || h.drag)) {
+        int32_t sel=-1;
+        if (safe_read(&sel,h.menu+0x150,4) && sel>=0) {
+            if (sel==h.target) {
+                h.presses=0; arrived=1; h.last_dir=0; h.last_press=0; h.direct_tries=0;
+                if (h.click_pending) {
+                    h.click_pending=0;
+                    if (h.click_action==0) h.click_until=now+120000;
+                    else if (h.click_action==1 || h.click_action==2) { h.step_dir=h.click_action; h.step_until=now+120000; }
+                }
+            } else if ((h.last_dir!=0 && ((sel<h.target) ? 1 : -1)!=h.last_dir && sel!=h.last_sel) ||
+                       (h.last_press!=0 && sel!=h.last_sel && (sel-h.last_sel)*h.last_press<0)) {
+                /* the selection went past the row without stopping on it, or wrapped round the other way (a row at the
+                 * start or the end of the menu): the game does not select this row */
+                menu_skip(h.menu,h.target,now);
+                h.active=0; h.click_pending=0; h.drag=0; h.presses=0; h.last_dir=0; h.menu=0;
+            } else if (h.presses<24 && u1_image && h.direct_tries<4) {
+                menu_select_index(h.menu,h.target);   /* straight to the row; a row that does not take it falls back to the presses below */
+                ++h.direct_tries;
+            } else if (h.presses<24 && ((now/50000u)&1u)) {
+                h.last_dir=(sel<h.target) ? 1 : -1; h.last_sel=sel; h.last_press=h.last_dir;
+                out|=(sel<h.target) ? BTN_DOWN : BTN_UP;
+                static uint64_t last_step;
+                if (now-last_step>90000) { last_step=now; ++h.presses; }
+            } else if (h.presses>=24) { h.active=0; h.click_pending=0; h.drag=0; }
+        }
+        if (h.click_pending && now>h.click_deadline) h.click_pending=0;
+    }
+    /* A slider dragged with the left button held: the bar goes where the cursor is. The cursor's place on the track
+     * gives the wanted step (0..steps). When the game keeps the value as a float (brightness 0..100, sensitivity
+     * 0..1) it is read and the difference is pressed; otherwise (the volumes) the bar is first taken to the left end
+     * with steps+1 presses, then the wanted number of right presses is added, and later moves press the
+     * difference from where we put it. */
+    if (h.drag && arrived && h.sl_w>1.0f) {
+        float fraction=(ux-h.sl_x)/h.sl_w;
+        fraction=fraction<0.0f ? 0.0f : fraction>1.0f ? 1.0f : fraction;
+        const int want=(int)floorf(fraction*(float)h.sl_steps+0.5f);
+        int est;
+        if (h.sl_vp) {
+            float v=0.0f;
+            if (safe_read(&v,h.sl_vp,4)) {
+                const float range=v>1.0001f ? 100.0f : 1.0f;
+                est=(int)floorf(v/range*(float)h.sl_steps+0.5f)+h.queue;
+            } else est=want;
+        } else {
+            if (h.sl_est<0) { h.queue-=h.sl_steps+1; h.sl_est=0; }
+            est=h.sl_est+h.queue+(h.sl_steps+1 > 0 ? 0 : 0);
+            est=h.sl_est;
+        }
+        if (h.sl_vp) h.queue+=want-est;
+        else {
+            h.queue+=want-h.sl_est; h.sl_est=want;
+            if (want==h.sl_steps && h.sl_extra_max==0) { h.queue+=4; h.sl_extra_max=1; }   /* a press may be lost: be sure of the end */
+            if (want!=h.sl_steps) h.sl_extra_max=0;
+        }
+        if (h.queue>60) h.queue=60;
+        if (h.queue<-60) h.queue=-60;
+    }    if (h.queue!=0 && now>=h.step_until && now>=h.next_step) {
+        h.step_dir=h.queue>0 ? 2 : 1;
+        h.step_until=now+35000; h.next_step=now+70000;
+        const int n=h.queue>0 ? h.queue : -h.queue;
+        if (h.drag && n>1 && h.menu && !u1_jump_steps && !u1_jump_busy) {   /* a slider far from the cursor: one real press (event 3 left, 4 right) carries the other steps, see u1_menu_event */
+            u1_jump_menu=h.menu; u1_jump_type=h.queue>0 ? 4 : 3; u1_jump_us=now; u1_jump_steps=n-1;
+            h.queue=h.queue>0 ? 1 : -1;
+            h.next_step=now+45000;
+        }
+        h.queue+=h.queue>0 ? -1 : 1;
+    }
+    if (now<h.step_until) out|=h.step_dir==1 ? BTN_LEFT : BTN_RIGHT;
+    out|=(uint32_t)sb_out;
+    if (list_ctl && list_delta!=0 && !h.sb_drag) {
+        /* never press past either end of the list: Up on the first row or Down on the last wraps round to the other end and the scroll bar's
+         * thumb leaps across (the cursor moving fast while the highlight lags behind a frame or two asks for exactly that) */
+        const int idx=menu_list_index(list.item);
+        if (idx>=0) {
+            if (list_delta<0 && -list_delta>idx) list_delta=-idx;
+            else if (list_delta>0 && h.sb_cached_item==list.item && h.sb_n>0 && list_delta>h.sb_n-1-idx) list_delta=h.sb_n-1-idx>0 ? h.sb_n-1-idx : 0;
+        }
+    }
+    if (!h.sb_drag && list_ctl && (h.list_active || h.list_click)) {
+        if (list_delta==0) {
+            h.list_presses=0; u1_jump_steps=0; h.list_armed=0;
+            if (h.list_click) { h.list_click=0; h.click_until=now+120000; }
+        } else if (h.list_presses<40 && ((now/16000u)&1u) && now>=h.list_hold) {
+            /* more than one row away: the first press carries the other steps (see u1_menu_event); until the highlight is seen
+             * to have moved, no further press is sent. A jump that never happens (3 times) leaves the plain presses. */
+            const int distance=list_delta<0 ? -list_delta : list_delta;
+            uint64_t lmenu=0;
+            if (h.jump_fail>=3 && now-h.list_hold>3000000) h.jump_fail=0;   /* give the jump another chance later */
+            if (distance>1 && h.jump_fail<3 && list.item && safe_read(&lmenu,list.item+0x80,8) && lmenu) {
+                if (h.list_armed) {
+                    if (u1_jump_done==h.jump_done_at_arm) {
+                        ++h.jump_fail;
+                        if (mouse_debug()) printf("Runtime: list jump not taken (%d): armed menu %#llx, last event menu %#llx, last non-zero event type %d (%d seen), wanted %d, steps left %d\n",h.jump_fail,(unsigned long long)u1_jump_menu,(unsigned long long)u1_event_last_menu,u1_event_last_type,u1_event_count,u1_jump_type,u1_jump_steps);
+                    } else h.jump_fail=0;
+                }
+                h.jump_done_at_arm=u1_jump_done; h.list_armed=1;
+                u1_jump_menu=lmenu; u1_jump_type=list_delta>0 ? 2 : 1; u1_jump_us=now;
+                u1_jump_steps=(distance>24 ? 24 : distance)-1;
+                h.list_hold=now+160000;
+                h.press_until=now+50000; h.press_dir=list_delta>0 ? 1 : -1;   /* the press is held long enough for the game to see it */
+            }
+            out|=list_delta>0 ? BTN_DOWN : BTN_UP;
+            if (now-h.list_last_step>90000) { h.list_last_step=now; ++h.list_presses; }
+        } else if (h.list_presses>=40) { h.list_active=0; h.list_click=0; }
+        if (h.list_click && now>h.list_deadline) h.list_click=0;
+    }
+    if (now<h.press_until && list_ctl && list_delta!=0) out|=h.press_dir>0 ? BTN_DOWN : BTN_UP;
+    if (now<h.click_until) out|=BTN_CROSS;
+    return out;
+}
+
+/* ---- port: the loader and the pad read -------------------------------------------------------- */
+static int menu_mouse_on(void) {
+    static int on=-1;
+    if (on<0) { const char *e=getenv("BB_MENU_MOUSE"); on=!(e && e[0]=='0'); }
+    return on;
+}
+void runtime_menumouse_prepare(unsigned char *image, uint64_t image_size) {
+    mm_image=image; mm_image_size=image_size;
+    if (!menu_mouse_on()) { puts("Menu mouse: off (BB_MENU_MOUSE=0)"); return; }
+    for (size_t i=0;i<sizeof(u1_menu_codes)/sizeof(*u1_menu_codes) && !u1m;++i) {
+        const U1MenuCode *c=&u1_menu_codes[i];
+        /* the text drawing routine first: it tells Uncharted 1 of this code from the other games */
+        if (!code_is(c->text_draw,u1_text_draw_code,sizeof(u1_text_draw_code))) continue;
+        const struct { const char *what; uint64_t at; const unsigned char *code; size_t n; } checks[]={
+            {"menu item draw (1)",c->item_begin1,u1_menu_item_begin_code,sizeof(u1_menu_item_begin_code)},
+            {"menu item draw end (1)",c->item_end1,u1_menu_item_end1_code,sizeof(u1_menu_item_end1_code)},
+            {"menu item draw (2)",c->item_begin2,u1_menu_item_begin_code,sizeof(u1_menu_item_begin_code)},
+            {"menu item draw end (2)",c->item_end2,u1_menu_item_end2_code,sizeof(u1_menu_item_end2_code)},
+            {"menu event",c->menu_event,u1_menu_event_code,sizeof(u1_menu_event_code)},
+            {"credits",c->credits,u1_credits_code,sizeof(u1_credits_code)},
+            {"select a row",c->select_index,u1_select_index_code,sizeof(u1_select_index_code)},
+        };
+        const char *bad=NULL;
+        for (size_t k=0;k<sizeof(checks)/sizeof(*checks) && !bad;++k) if (!code_is(checks[k].at,checks[k].code,checks[k].n)) bad=checks[k].what;
+        const unsigned char *ft=code_ref(&c->frame_time);
+        if (!bad && !ft) bad="frame time";
+        if (bad) { printf("Menu mouse: Uncharted 1 %s: the %s code differs: menus without the mouse\n",c->version,bad); break; }
+        u1_frame_time=(const volatile float *)ft;
+        u1_image=(uint64_t)(uintptr_t)image;
+        u1m=c;
+        printf("Menu mouse: Uncharted 1 (game code %s): menus follow the mouse\n",c->version);
+    }
+    fflush(stdout);
+}
+#define CB(name) static void MS_ABI name(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14, const uint64_t *regs)
+CB(u1_item_begin_102) { if (u1m==&u1_menu_codes[0]) u1_menu_item_begin(rdi,rsi,base,r14,regs); }
+CB(u1_item_begin_100) { if (u1m==&u1_menu_codes[1]) u1_menu_item_begin(rdi,rsi,base,r14,regs); }
+CB(u1_item_end_102) { if (u1m==&u1_menu_codes[0]) u1_menu_item_end(rdi,rsi,base,r14,regs); }
+CB(u1_item_end_100) { if (u1m==&u1_menu_codes[1]) u1_menu_item_end(rdi,rsi,base,r14,regs); }
+CB(u1_text_102) { if (u1m==&u1_menu_codes[0]) u1_text_draw(rdi,rsi,base,r14,regs); }
+CB(u1_text_100) { if (u1m==&u1_menu_codes[1]) u1_text_draw(rdi,rsi,base,r14,regs); }
+CB(u1_event_102) { if (u1m==&u1_menu_codes[0]) u1_menu_event(rdi,rsi,base,r14,regs); }
+CB(u1_event_100) { if (u1m==&u1_menu_codes[1]) u1_menu_event(rdi,rsi,base,r14,regs); }
+CB(u1_credits_102) { if (u1m==&u1_menu_codes[0]) u1_credits_tick(rdi,rsi,base,r14,regs); }
+CB(u1_credits_100) { if (u1m==&u1_menu_codes[1]) u1_credits_tick(rdi,rsi,base,r14,regs); }
+#define SITE(name,at,sig,moved,cb) {name,at,sig,sizeof(sig),moved,cb,NULL}
+static const RuntimeGuestCallback sites[]={
+    SITE("U1 1.02 menu item draw (1) (menu mouse)",0x133fbc,u1_menu_item_begin_code,9,u1_item_begin_102),
+    SITE("U1 1.02 menu item draw end (1) (menu mouse)",0x133fc8,u1_menu_item_end1_code,7,u1_item_end_102),
+    SITE("U1 1.02 menu item draw (2) (menu mouse)",0x133feb,u1_menu_item_begin_code,9,u1_item_begin_102),
+    SITE("U1 1.02 menu item draw end (2) (menu mouse)",0x133ff7,u1_menu_item_end2_code,8,u1_item_end_102),
+    SITE("U1 1.02 menu text draw (menu mouse)",0x13acf0,u1_text_draw_code,6,u1_text_102),
+    SITE("U1 1.02 menu event (menu mouse)",0x1336c0,u1_menu_event_code,6,u1_event_102),
+    SITE("U1 1.02 credits (menu mouse)",0x3b41e0,u1_credits_code,6,u1_credits_102),
+    SITE("U1 1.00 menu item draw (1) (menu mouse)",0x133e2c,u1_menu_item_begin_code,9,u1_item_begin_100),
+    SITE("U1 1.00 menu item draw end (1) (menu mouse)",0x133e38,u1_menu_item_end1_code,7,u1_item_end_100),
+    SITE("U1 1.00 menu item draw (2) (menu mouse)",0x133e5b,u1_menu_item_begin_code,9,u1_item_begin_100),
+    SITE("U1 1.00 menu item draw end (2) (menu mouse)",0x133e67,u1_menu_item_end2_code,8,u1_item_end_100),
+    SITE("U1 1.00 menu text draw (menu mouse)",0x13aa70,u1_text_draw_code,6,u1_text_100),
+    SITE("U1 1.00 menu event (menu mouse)",0x133530,u1_menu_event_code,6,u1_event_100),
+    SITE("U1 1.00 credits (menu mouse)",0x576a30,u1_credits_code,6,u1_credits_100),
+};
+const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
+    if (!u1m) { *count=0; return sites; }
+    /* only the sites of the code found */
+    *count=sizeof(sites)/sizeof(*sites)/2;
+    return u1m==&u1_menu_codes[0] ? sites : sites+*count;
+}
+
+/* A U1 menu is open: the pause (the game's frame time is 0), the credits, or menu rows drawn lately (title,
+ * main menu, game selection). In play no menu row is drawn (hints are free texts). */
+int runtime_menumouse_active(void) {
+    if (!u1m) return 0;
+    const uint64_t now=now_us();
+    int rows=0;
+    pthread_mutex_lock(&menu_text_lock);
+    for (int i=0;i<menu_text_count && !rows;++i) if (now-menu_texts[i].us<300000) rows=1;
+    pthread_mutex_unlock(&menu_text_lock);
+    const int open=camera_stopped() || u1_credits_recent(now) || rows;
+    if (open!=menu_mode) {
+        menu_mode=open;
+        printf("Menu mouse: %s\n",open ? "menu on screen: the cursor is free" : "menu gone");
+    }
+    return open;
+}
+
+uint32_t runtime_menumouse_buttons(const bool *k, uint32_t mouse, int wheel, int scripted, float sx, float sy) {
+    const uint64_t now=now_us();
+    scripted_cursor=scripted; scripted_ux=sx; scripted_uy=sy;
+    if (wheel>0) wheel_until_us[0]=now+80000;
+    if (wheel<0) wheel_until_us[1]=now+80000;
+    uint32_t out=menu_mouse_buttons(k,mouse,now);
+    /* the wheel moves the highlight (a carousel or a Yes/No: sideways), unless a list's scroll bar takes it */
+    if (menu_carousel_recent(now)) {
+        if (now<wheel_until_us[0]) out|=BTN_LEFT;
+        if (now<wheel_until_us[1]) out|=BTN_RIGHT;
+    } else if (!u1_rail_wheel) {
+        if (now<wheel_until_us[0]) out|=BTN_UP;
+        if (now<wheel_until_us[1]) out|=BTN_DOWN;
+    }
+    /* the side button ("back") and the right button go back */
+    if (mouse & (2u|8u)) out|=BTN_CIRCLE;
+    bbgpu_set_cursor((mouse & 1u) ? 2 : menu_hover ? 1 : 0);
+    return out;
+}
