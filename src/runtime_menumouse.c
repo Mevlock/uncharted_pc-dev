@@ -1005,6 +1005,54 @@ static void u2_list_update(uint64_t self, uint64_t image) {
     u2_lists[slot]=(U2List){self,ds,cur,lo,hi,top,vis,now,rc[0],rc[1],rc[2],rc[3],fl};
     pthread_mutex_unlock(&u3_lock);
 }
+/* U3's list (antikmewzik's u3_list_hook, 1.02 0x5e3e60; Bonus > Cutscenes, Treasures, Statistics): one control draws all the rows and keeps the
+ * selected row in its data source (+0x18; vtable +0 get, +8 set, +0x38 minimum, +0x40 maximum); +0x184 rows seen, +0x188 first row seen,
+ * +0x16c the selection the view last followed (told the new one for a hover: the view stays). Noted in u2_lists (top = first row seen).
+ * which: 0 the 1.02 site; 1, 2 the EU 1.00 candidates (logged with BB_MOUSE_DEBUG=1 until one is confirmed; not used). */
+static void u3_list_update(uint64_t self, uint64_t image, int which) {
+    uint64_t ds=0, vt=0, f0=0, f8=0, fmin=0, fmax=0; float rc[4]={0,0,0,0};
+    if (self<0x10000 || !safe_read(rc,self+0x90,16) || rc[3]<100.0f) return;
+    if (!safe_read(&ds,self+0x18,8) || ds<0x10000 || !safe_read(&vt,ds,8) || vt<0x10000) return;
+    if (!safe_read(&f0,vt,8) || !safe_read(&f8,vt+8,8) || !safe_read(&fmin,vt+0x38,8) || !safe_read(&fmax,vt+0x40,8)) return;
+    const uint64_t lo_code=image, hi_code=image+0x2000000;
+    if (f0<lo_code || f0>=hi_code || f8<lo_code || f8>=hi_code || fmin<lo_code || fmin>=hi_code || fmax<lo_code || fmax>=hi_code) return;
+    int cur=(int)(int32_t)((guest_vcall_fn)(uintptr_t)f0)(ds);
+    const int lo=(int)(int32_t)((guest_vcall_fn)(uintptr_t)fmin)(ds), hi=(int)(int32_t)((guest_vcall_fn)(uintptr_t)fmax)(ds);
+    int32_t vis=0, first=-1;
+    safe_read(&vis,self+0x184,4); safe_read(&first,self+0x188,4);
+    if (which) {   /* (EU 1.00 candidates: logged only) */
+        if (mouse_debug()) { static uint64_t seen[2][16]; int known=0; for (int i=0;i<16;++i) if (seen[which-1][i]==self) known=1;
+            static uint64_t last_us[2]; static int last_cur[2]={-99,-99};
+            if (!known || cur!=last_cur[which-1]) { for (int i=0;i<16 && !known;++i) if (!seen[which-1][i]) { seen[which-1][i]=self; break; }
+                if (now_us()-last_us[which-1]>100000) { last_us[which-1]=now_us(); last_cur[which-1]=cur;
+                    printf("Menu mouse: U3 1.00 list candidate %d: control %#llx values %d..%d now %d, +0x184 %d +0x188 %d, rect %.0f %.0f %.0fx%.0f\n",which,(unsigned long long)self,lo,hi,cur,vis,first,rc[0],rc[1],rc[2],rc[3]); } } }
+        return;
+    }
+    if (hi-lo<1) return;
+    if (u2_set_pending && u2_set_ds==ds) {
+        int v=u2_set_val; if (v<lo) v=lo; if (v>hi) v=hi;
+        const int32_t first_pre=first;
+        ((guest_set_fn)(uintptr_t)f8)(ds,v);
+        if (u2_set_keep) { const int32_t w=v; safe_write(self+0x16c,&w,4); safe_write(self+0x188,&first_pre,4); }   /* the view stays */
+        u2_set_pending=0;
+        if (mouse_debug()) printf("Menu mouse: U3 list set(%d) (was %d, range %d..%d, rows %d..%d seen)\n",v,cur,lo,hi,first,first+vis-1);
+        cur=v;
+    }
+    if (u2_scroll_pending && u2_scroll_w==self && vis>=3 && vis<=32) {
+        int t=u2_scroll_top; if (t>hi+1-vis) t=hi+1-vis; if (t<lo) t=lo;
+        const int32_t w=t; safe_write(self+0x188,&w,4); first=t;
+        u2_scroll_pending=0;
+    }
+    uint8_t fl=0;
+    safe_read(&fl,self+8,1);
+    const uint64_t now=now_us();
+    pthread_mutex_lock(&u3_lock);
+    int slot=-1, oldest=0;
+    for (int i=0;i<16;++i) { if (u2_lists[i].w==self) { slot=i; break; } if (u2_lists[i].us<u2_lists[oldest].us) oldest=i; }
+    if (slot<0) { slot=oldest; if (mouse_debug()) printf("Menu mouse: U3 list control %#llx: values %d..%d (now %d), rows %d..%d seen\n",(unsigned long long)self,lo,hi,cur,first,first+vis-1); }
+    u2_lists[slot]=(U2List){self,ds,cur,lo,hi,first>=lo ? first : lo,vis,now,rc[0],rc[1],rc[2],rc[3],fl};
+    pthread_mutex_unlock(&u3_lock);
+}
 
 static void u3_text(const uint64_t *regs) {
     float r[4], st[9];
@@ -1339,7 +1387,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
                   * to it (their flag at +8): the lists below are left alone until it closes (the game's own state, any size or language) */
         int lists=0, focused=0;
         pthread_mutex_lock(&u3_lock);
-        for (int i=0;i<16;++i) { const U2List *l=&u2_lists[i]; if (l->us && now-l->us<150000 && l->vis>=3) { ++lists; if (l->focused) ++focused; } }
+        for (int i=0;i<16;++i) { const U2List *l=&u2_lists[i]; if (l->us && now-l->us<150000 && l->vis>=3 && l->rh>=70.0f) { ++lists; if (l->focused) ++focused; } }   /* (a settings row's selector is a control of one row, 34 tall: not a list) */
         pthread_mutex_unlock(&u3_lock);
         if (lists && !focused) have_hov=0;
     }
@@ -1469,6 +1517,36 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     /* dragging a slider (antikmewzik's fallback, from the drawn rail on both codes): a click on a rail selects its row (no cross);
      * while the button is held, one left / right press per tenth of the rail the cursor moves, once the row is the selected one */
     static struct { int on; uint32_t dir; float last, acc, w, cy; uint64_t next, press_until; } dr;
+    /* U2 sliders, exact (antikmewzik's "slider direct"): the slider is a control with a data source like the lists (u2_list_update notes
+     * it): a click on its rail sets the value where the rail is clicked, a held button follows the cursor. The control is the fresh one
+     * with 3+ values laid out in the rail's row (its middle within 10, 20-45 tall). */
+    static struct { int on; uint64_t ds; int lo, hi, sent; float x, w; } ds_sl;
+    if (u2m && clicked && !picked && !dialog) {
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<8 && !picked;++i) {
+            const U3Row *sl=&u3_sliders[i];
+            if (!sl->us || now-sl->us>=100000 || ux<sl->x-10.0f || ux>sl->x+sl->w+10.0f || uy<sl->y || uy>=sl->y+sl->h) continue;
+            const float cy=sl->y+sl->h*0.5f;
+            float bd=10.0f; int best=-1;
+            for (int k=0;k<16;++k) {
+                const U2List *c=&u2_lists[k];
+                if (!c->us || now-c->us>150000 || c->hi-c->lo<2 || c->rh<20.0f || c->rh>45.0f) continue;
+                const float d=fabsf(c->ry+c->rh*0.5f-cy);
+                if (d<bd) { bd=d; best=k; }
+            }
+            if (best>=0) { ds_sl.on=1; ds_sl.ds=u2_lists[best].ds; ds_sl.lo=u2_lists[best].lo; ds_sl.hi=u2_lists[best].hi; ds_sl.sent=-99999; ds_sl.x=sl->x; ds_sl.w=sl->w; picked=1; }
+        }
+        pthread_mutex_unlock(&u3_lock);
+        if (picked && ds_sl.on && mouse_debug()) printf("Menu mouse: U2 slider grabbed (values %d..%d)\n",ds_sl.lo,ds_sl.hi);
+    }
+    if (ds_sl.on && !left) ds_sl.on=0;
+    if (ds_sl.on && ds_sl.w>0.0f) {
+        float f=(ux-ds_sl.x)/ds_sl.w; f=f<0.0f ? 0.0f : f>1.0f ? 1.0f : f;
+        const int want=ds_sl.lo+(int)floorf(f*(float)(ds_sl.hi-ds_sl.lo)+0.5f);
+        if (u2_set_pending && now-u2_set_us>300000) u2_set_pending=0;
+        if (want!=ds_sl.sent && !u2_set_pending) { u2_set_ds=ds_sl.ds; u2_set_val=want; u2_set_keep=0; u2_set_us=now; u2_set_pending=1; ds_sl.sent=want; }
+        h.active=0;
+    }
     static int drag_on=-1;   /* off until it is as good as the arrows (user 2026-11-10): BB_MENU_SLIDER_DRAG=1 turns it on */
     if (drag_on<0) { const char *e=getenv("BB_MENU_SLIDER_DRAG"); drag_on=e && e[0]=='1'; }
     if (clicked && !picked && !dialog && drag_on) {
@@ -1576,7 +1654,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
      * the hovered row's column (24-31 tall); the list control is the fresh one whose rows seen match their count; the row's place counts
      * from its first row seen (the top of the column). No drawn highlight is read: it fades after a jump (counting from it overshot), and
      * some lists draw other lit texts (Skins). A hover never scrolls the list. */
-    if (u2m && step_mode && !dialog && !sb_quiet && have_hov && hov.h>=24.0f && hov.h<=31.0f && (h.active || h.click || clicked)) {
+    if ((u2m || u3m) && step_mode && !dialog && !sb_quiet && have_hov && hov.h>=24.0f && hov.h<=31.0f && (h.active || h.click || clicked)) {
         float pitch=1e9f, top_cy=1e9f, ys[32];
         int n=0;
         pthread_mutex_lock(&u3_lock);
@@ -1761,11 +1839,21 @@ static const RuntimeGuestCallback u1_sites[]={
     SITE("U1 1.00 credits (menu mouse)",0x576a30,u1_credits_code,6,u1_credits_100),
 };
 /* (6 bytes moved: push rbp; mov rbp, rsp; push r15) */
+
+static const unsigned char u3_list_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x68,0x0b,0x00,0x00};
+static const unsigned char u3_listc1_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x68,0x08,0x00,0x00,0x49,0x89,0xd4};
+static const unsigned char u3_listc2_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x08,0x09,0x00,0x00,0x49,0x89,0xd7};
+CB(u3_list_cb) { (void)rsi; (void)r14; (void)regs; if (u3m) u3_list_update(rdi,base,0); }
+CB(u3_listc1_cb) { (void)rsi; (void)r14; (void)regs; if (u3m && mouse_debug()) u3_list_update(rdi,base,1); }
+CB(u3_listc2_cb) { (void)rsi; (void)r14; (void)regs; if (u3m && mouse_debug()) u3_list_update(rdi,base,2); }
 static const RuntimeGuestCallback u3_sites[]={
     SITE("U3 1.02 menu text (menu mouse)",0x63d6f0,u3_text_102_code,6,u3_text_cb),
     SITE("U3 1.02 menu page update (menu mouse)",0x6253f0,u3_page_102_code,6,u3_page_cb),
+    SITE("U3 1.02 list control draw (menu mouse)",0x5e3e60,u3_list_102_code,8,u3_list_cb),
     SITE("U3 1.00 menu text (menu mouse)",0x1d6060,u3_text_100_code,6,u3_text_cb),
     SITE("U3 1.00 menu page update (menu mouse)",0x1c5000,u3_page_100_code,6,u3_page_cb),
+    SITE("U3 1.00 list candidate 1 (menu mouse, debug)",0x1a3050,u3_listc1_100_code,8,u3_listc1_cb),
+    SITE("U3 1.00 list candidate 2 (menu mouse, debug)",0x1b03f0,u3_listc2_100_code,8,u3_listc2_cb),
 };
 /* (EU 1.00 = US 1.00: the same function at 0x267f60, located 2026-11-10 by its scroll call: the value stored to +0x228 and +0x22c, then
  * vtable +0x68 with it in esi and edx; the same widget fields, other registers) */
@@ -1783,7 +1871,7 @@ static const RuntimeGuestCallback u2_sites[]={
 const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
     /* only the sites of the code found */
     if (u1m) { *count=sizeof(u1_sites)/sizeof(*u1_sites)/2; return u1m==&u1_menu_codes[0] ? u1_sites : u1_sites+*count; }
-    if (u3m) { *count=2; return u3m==&u3_menu_codes[0] ? u3_sites : u3_sites+2; }
+    if (u3m) { if (u3m==&u3_menu_codes[0]) { *count=3; return u3_sites; } *count=4; return u3_sites+3; }
     if (u2m) { *count=2; return u2m==&u2_menu_codes[0] ? u2_sites : u2_sites+2; }
     *count=0;
     return u1_sites;

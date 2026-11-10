@@ -96,6 +96,7 @@ enum Shape : u8 {
     Puck,        ///< 512x512: a raised button seen from the side (tapping prompts)
     PressedPuck, ///< 512x512: the same button pressed down (hold prompts)
     HudDPad,     ///< 256x256: the weapon switch d-pad
+    Shoulder,    ///< 256x256: L1 R1 L2 R2 (the game's mask cuts the button's outline): the label in the middle
 };
 struct Picture {
     u64 hash;
@@ -115,6 +116,21 @@ const Picture pictures[] = {
     {0xe8a2f49b992621fcull, 256, HudDPad, LitUp, {206, 185, 156}, "Uncharted 3 weapon d-pad"},
     {0x94d741f6b51815eeull, 512, Puck, Circle, {222, 32, 32}, "Uncharted 3 circle tapping prompt"},
     {0x93b46ba81469882cull, 512, PressedPuck, Circle, {222, 32, 32}, "Uncharted 3 circle hold prompt"},
+    /* (issue #27: pictures the list lacked, by their first mip, the same on 1.00 and 1.02; BilalReloaded's gow3_prompts table,
+     * antikmewzik's port draws them for the keyboard and Xbox, these for the Nintendo style) */
+    {0x9edd4f2f0f64f6e5ull, 256, RoundButton, Square, {214, 124, 184}, "square prompt"},
+    {0x2bf5d90eb864162full, 256, RoundButton, Cross, {110, 150, 230}, "Uncharted 1/2 cross prompt"},
+    {0x305c2c731ec227e6ull, 256, RoundButton, Cross, {110, 150, 230}, "Uncharted 3 cross prompt"},
+    {0x4181f3ae6bd1efffull, 512, PressedPuck, Triangle, {55, 216, 104}, "Uncharted 3 triangle hold prompt (pressed)"},
+    {0x07ff3d0e4090be85ull, 512, Puck, Triangle, {55, 216, 104}, "Uncharted 3 triangle hold prompt"},
+    {0xb88838d137123548ull, 256, Shoulder, L1, {200, 200, 200}, "Uncharted 1/2 L1 prompt"},
+    {0x4999c8b20a45cd6dull, 256, Shoulder, R1, {200, 200, 200}, "Uncharted 1/2 R1 prompt"},
+    {0x539b560401a1ac83ull, 256, Shoulder, L2, {200, 200, 200}, "Uncharted 1/2 L2 prompt"},
+    {0xe2c351d65c6a63f1ull, 256, Shoulder, R2, {200, 200, 200}, "Uncharted 1/2 R2 prompt"},
+    {0x6c3fc301ede4114aull, 256, Shoulder, L1, {200, 200, 200}, "Uncharted 3 L1 prompt"},
+    {0xbd74a617a879f120ull, 256, Shoulder, R1, {200, 200, 200}, "Uncharted 3 R1 prompt"},
+    {0x2e8ae3386e2a91ddull, 256, Shoulder, L2, {200, 200, 200}, "Uncharted 3 L2 prompt"},
+    {0x784278339a5a55bfull, 256, Shoulder, R2, {200, 200, 200}, "Uncharted 3 R2 prompt"},
 };
 
 struct Bindings {
@@ -755,6 +771,23 @@ void DrawRoundButton(Canvas& up, const Font& font, const std::string& key, int x
     DrawLabel(up, font, key, cx, cy, 2 * radius - 34.0f, 80.0f, 1.0f);
 }
 
+/// A shoulder button (L1 R1 L2 R2): the game's mask cuts its outline, so the picture is the button's colour all over (dark to
+/// darker downwards) with the label (L R ZL ZR, LB..., or the bound key) in the middle.
+void DrawShoulder(Canvas& up, const Font& font, const std::string& key, int xbox = -1) {
+    const float cx = 128.0f, cy = 128.0f;
+    for (u32 y = 0; y < up.height; ++y) {
+        for (u32 x = 0; x < up.width; ++x) {
+            const float t = (y + 0.5f) / float(up.height);
+            up.Blend(x, y, Mix(cap_top, cap_bottom, t), 1.0f);
+        }
+    }
+    if (xbox >= 0) {
+        DrawGlyphFit(up, xbox, cx, cy, 150.0f, 110.0f, 1.0f, false);
+        return;
+    }
+    DrawLabel(up, font, key, cx, cy, 160.0f, 90.0f, 1.0f);
+}
+
 /// The tapping prompt's raised button (a puck seen from above at an angle) or the hold prompt's
 /// pressed one, as a key with the label lying on its face.
 void DrawPuck(Canvas& up, const Font& font, const std::string& key, bool pressed, int xbox = -1) {
@@ -847,6 +880,9 @@ std::vector<Patch> BuildPicture(const Picture& picture, u32 levels, Style style)
         break;
     case HudDPad:
         DrawHudDPad(up, font, bindings, picture.icon);
+        break;
+    case Shoulder:
+        DrawShoulder(up, font, bindings.keys[picture.icon], xbox);
         break;
     }
     // Upside down like the game's pictures.
