@@ -1028,6 +1028,16 @@ static void u2_list_update(uint64_t self, uint64_t image) {
  * selected row in its data source (+0x18; vtable +0 get, +8 set, +0x38 minimum, +0x40 maximum); +0x184 rows seen, +0x188 first row seen,
  * +0x16c the selection the view last followed (told the new one for a hover: the view stays). Noted in u2_lists (top = first row seen).
  * which: 0 (the 1.02 site; EU 1.00's list function is not located yet: 0x1a3050 / 0x1b03f0 were not it). */
+/* Treasures, the 3D model (antikmewzik's u2_model_hook / u3_model_hook): the scene (menutreasurescene) keeps two angular speeds at
+ * +0x70 (around the vertical) and +0x74 that the right stick adds to and the game clamps to +-2 rad/s and lets die down; each frame
+ * the model's matrix turns by speed x dt. A hook after the second clamp's store, before the turn, sets the speeds from the mouse while
+ * the left button is held on the model (pressed right of the list), then lets them coast down after the release. U3's list hover
+ * also tells the scene which model to show (u3_note_*: the call the list makes itself when it follows a selection). */
+static volatile uint64_t model_us;            /* the scene's update ran lately: the model is on screen */
+static volatile int model_drag;               /* the left button went down on the model and is still held */
+static volatile float model_ax, model_ay;     /* the cursor's motion since the scene's last frame, radians */
+static volatile uint64_t u3_scene;            /* U3: the scene (rdi at its update's start; r15 at the hook, a register the thunk does not keep) */
+static volatile int u3_note_pending; static volatile int32_t u3_note_value; static volatile uint64_t u3_note_ds, u3_note_fn, u3_note_queue;
 static void u3_list_update(uint64_t self, uint64_t image, int which) {
     uint64_t ds=0, vt=0, f0=0, f8=0, fmin=0, fmax=0; float rc[4]={0,0,0,0};
     if (self<0x10000 || !safe_read(rc,self+0x90,16) || rc[3]<100.0f) return;
@@ -1053,6 +1063,11 @@ static void u3_list_update(uint64_t self, uint64_t image, int which) {
         const int32_t first_pre=first;
         ((guest_set_fn)(uintptr_t)f8)(ds,v);
         if (u2_set_keep) { const int32_t w=v; safe_write(self+0x16c,&w,4); safe_write(self+0x188,&first_pre,4); }   /* the view stays */
+        if (u2_set_keep && model_us && now_us()-model_us<200000) {   /* Treasures: the model follows only when the list tells the scene (it does so when it follows a selection itself): the same call, from the scene's update */
+            uint64_t vt2=0, fn48=0, q=0; uint8_t on=0, flags=0;
+            if (safe_read(&on,self+8,1) && on && safe_read(&flags,self+0xa8,1) && (flags & 0x40) && safe_read(&vt2,ds,8) && safe_read(&fn48,vt2+0x48,8) &&
+                safe_read(&q,self+0x178,8) && q>0x10000 && fn48>=lo_code && fn48<hi_code) { u3_note_ds=ds; u3_note_fn=fn48; u3_note_queue=q+0x10; u3_note_value=v; u3_note_pending=1; }
+        }
         u2_set_pending=0;
         if (mouse_debug()) printf("Menu mouse: U3 list set(%d) (was %d, range %d..%d, rows %d..%d seen)\n",v,cur,lo,hi,first,first+vis-1);
         cur=v;
@@ -1435,6 +1450,16 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         for (int i=0;i<16;++i) { const U2List *l=&u2_lists[i]; if (l->us && now-l->us<150000 && l->vis>=3 && l->rh>=70.0f) { ++lists; if (l->focused) ++focused; } }   /* (a settings row's selector is a control of one row, 34 tall: not a list) */
         pthread_mutex_unlock(&u3_lock);
         if (lists && !focused) have_hov=0;
+    }
+    {   /* Treasures: the model's panel (the list's rectangle runs under it): no hover there; a press on it turns the model while held */
+        static float mlast_x, mlast_y;
+        const int model=model_us && now-model_us<200000 && model_us<=now+1000000;
+        const int over=model && !dialog && (u3m ? ux>=736.0f && ux<=1046.0f && uy>=102.0f && uy<=490.0f : ux>=712.0f && uy>=130.0f && uy<=600.0f);
+        if (!left || !model) model_drag=0;
+        else if (clicked && over) { model_drag=1; if (mouse_debug()) puts("Menu mouse: Treasures model grabbed"); }
+        if (model_drag) { model_ax+=(ux-mlast_x)*0.006f; model_ay+=(uy-mlast_y)*0.006f; }
+        mlast_x=ux; mlast_y=uy;
+        if (over || model_drag) have_hov=0;
     }
     /* U2's chapter carousel (antikmewzik's): the rows behind it are left alone; a click on its panel left of the pictures presses
      * left, right of them right, on the picture in the middle cross (choose) */
@@ -2081,6 +2106,63 @@ uint32_t runtime_menumouse_filter(uint32_t buttons, int keyboard) {
     return buttons;
 }
 
+/* Treasures model (see model_us): the speeds written after the game's clamp are not limited, so the model follows the mouse one to
+ * one; after the release they decay (BB_MODEL_COAST seconds, default 0.5; 0: stop at once). dt: the game's frame time global. */
+static void model_turn(uint64_t image, uint64_t scene, uint64_t dt_at) {
+    model_us=now_us();
+    static float sx, sy;
+    static float coast=-1.0f;
+    if (coast<0.0f) { const char *e=getenv("BB_MODEL_COAST"); coast=e && atof(e)>=0.0 ? (float)atof(e) : 0.5f; }
+    if (scene<0x10000) return;
+    float dt=0.0f;
+    if (!safe_read(&dt,image+dt_at,4) || !(dt>0.0005f) || dt>0.2f) dt=1.0f/30.0f;
+    float vx, vy;
+    if (model_drag) {
+        const float ax=model_ax, ay=model_ay;
+        model_ax-=ax; model_ay-=ay;
+        vx=ax/dt; vy=-ay/dt;
+        vx=vx>60.0f ? 60.0f : vx<-60.0f ? -60.0f : vx;   /* (a sanity limit only) */
+        vy=vy>60.0f ? 60.0f : vy<-60.0f ? -60.0f : vy;
+        const float a=1.0f-expf(-dt/0.06f);   /* the speed of the last 60 ms of the gesture, for the coast */
+        sx+=a*(vx-sx); sy+=a*(vy-sy);
+    } else {
+        model_ax=model_ay=0.0f;
+        if (coast<=0.0f || fabsf(sx)+fabsf(sy)<0.05f) { sx=sy=0.0f; return; }
+        const float k=expf(-dt/coast);
+        sx*=k; sy*=k; vx=sx; vy=sy;
+    }
+    const float v[2]={vx,vy};
+    safe_write(scene+0x70,v,8);
+}
+typedef uint64_t (__attribute__((sysv_abi)) *guest_fn3)(uint64_t,uint64_t,uint64_t);
+typedef uint64_t (__attribute__((sysv_abi)) *guest_fn6)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+static const unsigned char u3_notify_102_code[]={0x55,0x48,0x89,0xe5,0x53,0x50,0x48,0x85,0xf6,0x74,0x17,0x80,0x3e,0x00,0x74,0x12};
+static const unsigned char u3_notify_100_code[]={0x48,0x85,0xf6,0x74,0x11,0x80,0x3e,0x00,0x74,0x0c,0x48,0x8b,0x7f,0x60,0x0f,0xb6};
+static void u3_model(uint64_t image, uint64_t notify, const unsigned char *notify_code, size_t notify_n, uint64_t dt_at) {
+    if (u3_note_pending) {   /* the hover's new selection: the scene is told which model to show (the item's text, queued) */
+        u3_note_pending=0;
+        if (code_is(notify,notify_code,notify_n)) {
+            const uint64_t str=((guest_fn3)(uintptr_t)u3_note_fn)(u3_note_ds,(uint64_t)(uint32_t)u3_note_value,7);
+            if (str) ((guest_fn6)(uintptr_t)(image+notify))(u3_note_queue,str,1,0,0xffffffffu,0xffffffffu);
+            if (mouse_debug()) printf("Menu mouse: U3 Treasures scene told: item %d\n",(int)u3_note_value);
+        }
+    }
+    model_turn(image,u3_scene,dt_at);
+}
+CB(u2_model_102_cb) { (void)rdi; (void)rsi; (void)regs; if (u2m) model_turn(base,r14,0x111628cu); }   /* (r14 is the scene) */
+CB(u2_model_100_cb) { (void)rdi; (void)rsi; (void)regs; if (u2m) model_turn(base,r14,0xebd5ccu); }
+CB(u3_scene_cb) { (void)rsi; (void)base; (void)r14; (void)regs; u3_scene=rdi; }
+CB(u3_model_102_cb) { (void)rdi; (void)rsi; (void)r14; (void)regs; if (u3m) u3_model(base,0x63c5c0,u3_notify_102_code,sizeof(u3_notify_102_code),0x17b4bacu); }
+CB(u3_model_100_cb) { (void)rdi; (void)rsi; (void)r14; (void)regs; if (u3m) u3_model(base,0x1d4fd0,u3_notify_100_code,sizeof(u3_notify_100_code),0x142ffc4u); }
+/* after the second clamp: vmovss xmm0, [rbp-x] (the dt kept by the update); vmulss xmm0, xmm0, [scene+0x70] */
+static const unsigned char u2_model_102_code[]={0xc5,0xfa,0x10,0x85,0x70,0xfd,0xff,0xff,0xc4,0xc1,0x7a,0x59,0x46,0x70,0xc5,0xfa};
+static const unsigned char u2_model_100_code[]={0xc5,0xfa,0x10,0x85,0x10,0xfe,0xff,0xff,0xc4,0xc1,0x7a,0x59,0x46,0x70,0xc5,0xfa};
+static const unsigned char u3_model_102_code[]={0xc5,0xfa,0x10,0x85,0x80,0xfc,0xff,0xff,0xc4,0xc1,0x7a,0x59,0x47,0x70,0xc5,0xfa};
+static const unsigned char u3_model_100_code[]={0xc5,0xfa,0x10,0x85,0xcc,0xfd,0xff,0xff,0xc4,0xc1,0x7a,0x59,0x47,0x70,0xc5,0xfa};
+/* the U3 scene update's start (push rbp; mov rbp, rsp; push r15 moved; then r15 = rdi) */
+static const unsigned char u3_scene_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x98,0x03,0x00,0x00,0x49,0x89,0xf6,0x49,0x89,0xff};
+static const unsigned char u3_scene_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x48,0x02,0x00,0x00,0x48,0x89,0xf3,0x49,0x89,0xff};
+
 #define U1_SITES_102 \
     SITE("U1 1.02 compare-with-friends prompt (hook) (menu mouse)",0x128f64,u1_compare_code,5,u1_compare_cb), \
     PATCH("U1 1.02 compare-with-friends prompt (skip 1) (menu mouse)",0x128f69,u1_compare_je_code,u1_compare_je_patch), \
@@ -2093,16 +2175,22 @@ uint32_t runtime_menumouse_filter(uint32_t buttons, int keyboard) {
     SITE("U1 1.00 prompt bar flags (menu mouse)",0x128b3a,u1_bar_flags_code,10,u1_bar_flags_cb),     PATCH("U1 1.00 options without the photo mode row (1) (menu mouse)",0x144a36,u1_photo_100_1_code,u1_photo_100_1_patch),     PATCH("U1 1.00 options without the photo mode row (2) (menu mouse)",0x144ccf,u1_photo_100_2_code,u1_photo_100_2_patch),     PATCH("U1 1.00 options without the photo mode row (3) (menu mouse)",0x144ee6,u1_photo_100_3_code,u1_photo_100_3_patch)
 #define U2_SITES_102 \
     SITE("U2 1.02 compare-with-friends prompt (hook) (menu mouse)",0x5a54c7,u2_compare_102_code,5,u2_compare_cb), \
-    PATCH("U2 1.02 compare-with-friends prompt (skip) (menu mouse)",0x5a54cc,u2_compare_jz_102_code,u2_compare_jz_102_patch)
+    PATCH("U2 1.02 compare-with-friends prompt (skip) (menu mouse)",0x5a54cc,u2_compare_jz_102_code,u2_compare_jz_102_patch), \
+    SITE("U2 1.02 Treasures model (menu mouse)",0x5d7c05,u2_model_102_code,8,u2_model_102_cb)
 #define U2_SITES_100 \
     SITE("U2 1.00 compare-with-friends prompt (hook) (menu mouse)",0x282001,u2_compare_100_code,5,u2_compare_cb), \
-    PATCH("U2 1.00 compare-with-friends prompt (skip) (menu mouse)",0x282006,u2_compare_jz_100_code,u2_compare_jz_100_patch)
+    PATCH("U2 1.00 compare-with-friends prompt (skip) (menu mouse)",0x282006,u2_compare_jz_100_code,u2_compare_jz_100_patch), \
+    SITE("U2 1.00 Treasures model (menu mouse)",0x2ad8ea,u2_model_100_code,8,u2_model_100_cb)
 #define U3_SITES_102 \
     PATCH("U3 1.02 compare-with-friends prompt (skip) (menu mouse)",0x627d65,u3_compare_102_code,u3_compare_102_patch), \
-    SITE("U3 1.02 prompt bar flags (menu mouse)",0x6277e8,u3_bar_flags_102_code,6,u3_bar_flags_102_cb)
+    SITE("U3 1.02 prompt bar flags (menu mouse)",0x6277e8,u3_bar_flags_102_code,6,u3_bar_flags_102_cb), \
+    SITE("U3 1.02 Treasures scene (menu mouse)",0x65f010,u3_scene_102_code,6,u3_scene_cb), \
+    SITE("U3 1.02 Treasures model (menu mouse)",0x65f6b0,u3_model_102_code,8,u3_model_102_cb)
 #define U3_SITES_100 \
     PATCH("U3 1.00 compare-with-friends prompt (skip) (menu mouse)",0x1c7191,u3_compare_100_code,u3_compare_100_patch), \
-    SITE("U3 1.00 prompt bar flags (menu mouse)",0x1c6ecb,u3_bar_flags_100_code,6,u3_bar_flags_100_cb)
+    SITE("U3 1.00 prompt bar flags (menu mouse)",0x1c6ecb,u3_bar_flags_100_code,6,u3_bar_flags_100_cb), \
+    SITE("U3 1.00 Treasures scene (menu mouse)",0x1f6e10,u3_scene_100_code,6,u3_scene_cb), \
+    SITE("U3 1.00 Treasures model (menu mouse)",0x1f74f8,u3_model_100_code,8,u3_model_100_cb)
 
 static const RuntimeGuestCallback u1_more_102[]={U1_SITES_102}, u1_more_100[]={U1_SITES_100};
 static const RuntimeGuestCallback u2_more_102[]={U2_SITES_102}, u2_more_100[]={U2_SITES_100};
