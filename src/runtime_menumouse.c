@@ -11,6 +11,7 @@
  * changes, the probes (F7/F8/F9). BB_MENU_MOUSE=0: off. */
 #include "runtime_menumouse.h"
 #include "gpu/bbgpu.h"
+extern float runtime_ultrawide_scale;   /* runtime_ultrawide.c: the UI squeeze (< 0: Vert+, the vertical share) */
 #include <math.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -506,7 +507,11 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
         SDL_GetMouseState(&mx,&my);
         SDL_GetWindowSize(w,&ww,&wh);
         if (ww<=0 || wh<=0) return 0;
-        if (bbgpu_frame_fills_window()) { ux=mx/(float)ww*UI_WIDTH; uy=my/(float)wh*UI_HEIGHT; }   /* port: a widened play frame, stretched */
+        if (bbgpu_frame_fills_window()) {   /* a play frame over the whole window */
+            ux=mx/(float)ww*UI_WIDTH; uy=my/(float)wh*UI_HEIGHT;
+            /* (16:10, Vert+: its UI is squeezed back to 16:9 vertically, runtime_ultrawide_scale < 0: the UI's height is that share of the window's) */
+            if (runtime_ultrawide_scale<0.0f) { const float sv=-runtime_ultrawide_scale; uy=(my-(float)wh*(1.0f-sv)*0.5f)/((float)wh*sv)*UI_HEIGHT; }
+        }
         else {
             const float scale=fminf((float)ww/UI_WIDTH,(float)wh/UI_HEIGHT);
             ux=(mx-((float)ww-UI_WIDTH*scale)*0.5f)/scale; uy=(my-((float)wh-UI_HEIGHT*scale)*0.5f)/scale;
@@ -1312,7 +1317,11 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         SDL_GetMouseState(&mx,&my);
         SDL_GetWindowSize(w,&ww,&wh);
         if (ww<=0 || wh<=0) return 0;
-        if (bbgpu_frame_fills_window()) { ux=mx/(float)ww*UI_WIDTH; uy=my/(float)wh*UI_HEIGHT; }   /* a widened play frame, stretched */
+        if (bbgpu_frame_fills_window()) {   /* a play frame over the whole window */
+            ux=mx/(float)ww*UI_WIDTH; uy=my/(float)wh*UI_HEIGHT;
+            /* (16:10, Vert+: its UI is squeezed back to 16:9 vertically, runtime_ultrawide_scale < 0: the UI's height is that share of the window's) */
+            if (runtime_ultrawide_scale<0.0f) { const float sv=-runtime_ultrawide_scale; uy=(my-(float)wh*(1.0f-sv)*0.5f)/((float)wh*sv)*UI_HEIGHT; }
+        }
         else {
             const float scale=fminf((float)ww/UI_WIDTH,(float)wh/UI_HEIGHT);
             ux=(mx-((float)ww-UI_WIDTH*scale)*0.5f)/scale; uy=(my-((float)wh-UI_HEIGHT*scale)*0.5f)/scale;

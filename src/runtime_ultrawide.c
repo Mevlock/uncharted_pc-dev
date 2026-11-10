@@ -216,7 +216,8 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     unsigned render_w, render_h;
     if (render_resolution(code, size, image_end, &render_w, &render_h)) {
         c = (float)render_w / (float)render_h / (16.0f / 9.0f);
-        if (c < 1.0f) c = 1.0f; /* narrower buffers: not handled (letterboxed by the game?) */
+        /* (narrower buffers, 16:10: c < 1 brings the game's camera, which keeps the horizontal view and shows more height, back to
+         * the 16:9 one too; the taller view comes from k below) */
     }
     unsigned width = 1920, height = 1080;
     if (off || !output_size(&width, &height)) {
@@ -229,8 +230,12 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     if (fov_pct < 60 || fov_pct > 150) fov_pct = 100;
     const float aspect = (float)width / (float)height;
     const int wide = aspect > 16.0f / 9.0f + 0.01f;
-    if (!wide && fov_pct == 100 && c == 1.0f) return;
-    const float k = wide ? (16.0f / 9.0f) / aspect : 1.0f, fov = fov_pct / 100.0f;
+    /* Narrower than 16:9 (16:10, 4:3): Vert+, the horizontal view stays the 16:9 one and the vertical one grows: the inverse aspect is
+     * scaled by (16/9) / aspect (> 1) and the zoom not; gameplay frames fill the window, their UI is squeezed back to 16:9 vertically. */
+    const int narrow = aspect < 16.0f / 9.0f - 0.01f;
+    if (!wide && !narrow && fov_pct == 100 && c == 1.0f) return;
+    const float k = wide || narrow ? (16.0f / 9.0f) / aspect : 1.0f, fov = fov_pct / 100.0f;
+    const float kz = wide ? k : 1.0f;   /* the zoom's factor: Hor+ widens the horizontal view, Vert+ keeps it */
 
     uint64_t persp[MAX_ANCHORS], ortho[MAX_ANCHORS];
     int np = string_refs(code, size, "CreatePerspectiveProjectionZoom", persp, MAX_ANCHORS / 2);
@@ -322,8 +327,8 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     wide_constants[1] = 1.0f / (k * c);
     narrow_constants[0] = c;
     narrow_constants[1] = 1.0f / c;
-    wide_constants[2] = k / fov;
-    wide_constants[3] = fov / k;
+    wide_constants[2] = kz / fov;
+    wide_constants[3] = fov / kz;
     float *constants = alloc_near(code, size);
     if (constants) {
         for (int i = 0; i < 4; ++i) constants[i] = narrow_constants[i];
@@ -411,8 +416,9 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
         memcpy(site + 1, &rel, 4);
         memcpy(site + 5, nops[len - 5], len - 5u);
     }
-    runtime_ultrawide_fill = wide;
-    runtime_ultrawide_scale = k;
+    runtime_ultrawide_fill = wide || narrow;
+    /* the UI squeeze: k on x (Hor+), or minus the vertical factor aspect / (16/9) (Vert+: y; emit_spirv_special.cpp) */
+    runtime_ultrawide_scale = narrow ? -(aspect / (16.0f / 9.0f)) : k;
     if (constants != (float *)(code + cave)) switch_constants = constants;
     printf("Ultrawide: %d camera reads widened for %ux%u (field %#x), field of view %u%%%s, render aspect "
            "correction %.3f\n",

@@ -241,15 +241,18 @@ static void EmitVertexCheck(EmitContext& ctx) {
 // (full-screen quads, bars) stay there.
 static void EmitUiSqueeze(EmitContext& ctx) {
     const Id f32_type = ctx.F32[1];
-    const float k = std::bit_cast<float>(ctx.runtime_info.hw.vs.ui_squeeze_bits);
+    const float bits = std::bit_cast<float>(ctx.runtime_info.hw.vs.ui_squeeze_bits);
+    // (negative: Vert+, a screen narrower than 16:9 (16:10): y *= -bits, the top and bottom edges stay)
+    const u32 axis = bits < 0.0f ? 1u : 0u;
+    const float k = bits < 0.0f ? -bits : bits;
     const Id position = ctx.OpLoad(ctx.F32[4], ctx.output_position);
-    const Id x = ctx.OpCompositeExtract(f32_type, position, 0);
+    const Id x = ctx.OpCompositeExtract(f32_type, position, axis);
     const Id w = ctx.OpCompositeExtract(f32_type, position, 3);
     const Id edge = ctx.OpFMul(f32_type, ctx.OpFAbs(f32_type, w), ctx.Constant(f32_type, 0.999f));
     const Id inside = ctx.OpFOrdLessThan(ctx.U1[1], ctx.OpFAbs(f32_type, x), edge);
     const Id squeezed = ctx.OpSelect(f32_type, inside,
                                      ctx.OpFMul(f32_type, x, ctx.Constant(f32_type, k)), x);
-    ctx.OpStore(ctx.output_position, ctx.OpCompositeInsert(ctx.F32[4], squeezed, position, 0));
+    ctx.OpStore(ctx.output_position, ctx.OpCompositeInsert(ctx.F32[4], squeezed, position, axis));
 }
 
 void EmitEpilogue(EmitContext& ctx) {
