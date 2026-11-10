@@ -1915,6 +1915,9 @@ static const RuntimeGuestCallback u1_sites[]={
 };
 /* (6 bytes moved: push rbp; mov rbp, rsp; push r15) */
 
+/* (EU 1.00 = US 1.00: 0x199e40, located 2026-11-10 like U2's: the code reading +0x16c / +0x184 / +0x188 together sits just before
+ * it, as before 1.02's 0x5e3e60) */
+static const unsigned char u3_list_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x98,0x0f,0x00,0x00,0x49,0x89,0xd7};
 static const unsigned char u3_list_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x68,0x0b,0x00,0x00};
 CB(u3_list_cb) { (void)rsi; (void)r14; (void)regs; if (u3m) u3_list_update(rdi,base,0); }
 static const RuntimeGuestCallback u3_sites[]={
@@ -1923,6 +1926,7 @@ static const RuntimeGuestCallback u3_sites[]={
     SITE("U3 1.02 list control draw (menu mouse)",0x5e3e60,u3_list_102_code,8,u3_list_cb),
     SITE("U3 1.00 menu text (menu mouse)",0x1d6060,u3_text_100_code,6,u3_text_cb),
     SITE("U3 1.00 menu page update (menu mouse)",0x1c5000,u3_page_100_code,6,u3_page_cb),
+    SITE("U3 1.00 list control draw (menu mouse)",0x199e40,u3_list_100_code,8,u3_list_cb),
 };
 /* (EU 1.00 = US 1.00: the same function at 0x267f60, located 2026-11-10 by its scroll call: the value stored to +0x228 and +0x22c, then
  * vtable +0x68 with it in esi and edx; the same widget fields, other registers) */
@@ -1940,7 +1944,7 @@ static const RuntimeGuestCallback u2_sites[]={
 const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
     /* only the sites of the code found */
     if (u1m) { *count=sizeof(u1_sites)/sizeof(*u1_sites)/2; return u1m==&u1_menu_codes[0] ? u1_sites : u1_sites+*count; }
-    if (u3m) { if (u3m==&u3_menu_codes[0]) { *count=3; return u3_sites; } *count=2; return u3_sites+3; }
+    if (u3m) { *count=3; return u3m==&u3_menu_codes[0] ? u3_sites : u3_sites+3; }
     if (u2m) { *count=2; return u2m==&u2_menu_codes[0] ? u2_sites : u2_sites+2; }
     *count=0;
     return u1_sites;
