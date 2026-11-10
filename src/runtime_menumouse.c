@@ -1707,16 +1707,17 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         if (mouse_debug()) printf("Menu mouse: U3 gallery arrow: %s\n",gallery_stick_dir<0 ? "left" : "right");
     }
     /* U2's art gallery viewer: no rows at all (the picture and its < > are images), the < > where U3 has them; a click there presses
-     * left / right on the d-pad (the arrow keys page there). Not on the other row-less screens: the controller picture, the chapter
-     * carousel, the credits */
+     * left / right on the d-pad (the arrow keys page there). Not on the controller picture or the chapter carousel (the credits
+     * flag is no test: the gallery's picture is as tall as the credits) */
     static uint64_t u2_gal_until; static int u2_gal_dir;
     if (clicked && !picked && u2m && !have_sel && !have_hov && !dialog && uy>=596.0f && uy<=664.0f &&
         ((ux>=92.0f && ux<=146.0f) || (ux>=1134.0f && ux<=1188.0f)) &&
-        !(u2_layout_us && now-u2_layout_us<1000000) && !(u2_popup_us && now-u2_popup_us<1000000) &&
-        !(menu_credits_us && now-menu_credits_us<1000000)) {
+        !(u2_layout_us && now-u2_layout_us<1000000) && !(u2_popup_us && now-u2_popup_us<1000000)) {
         u2_gal_dir=ux<640.0f ? BTN_LEFT : BTN_RIGHT; u2_gal_until=now+80000; picked=1;
         if (mouse_debug()) printf("Menu mouse: U2 gallery arrow: %s\n",ux<640.0f ? "left" : "right");
-    }
+    } else if (clicked && u2m && mouse_debug() && uy>=596.0f && uy<=664.0f && ((ux>=92.0f && ux<=146.0f) || (ux>=1134.0f && ux<=1188.0f)))
+        printf("Menu mouse: U2 gallery arrow spot, not taken: picked %d sel %d hov %d dialog %d layout %d popup %d\n",picked,have_sel,have_hov,dialog,
+               u2_layout_us && now-u2_layout_us<1000000,u2_popup_us && now-u2_popup_us<1000000);
     if (now<u2_gal_until) out|=u2_gal_dir;
     /* U3 Chapter select, the opened carousel: its < > sit outside its rectangle (4 to 55 left / right of it, away from its top and bottom
      * 60): a click there sets the chapter one down / up (antikmewzik's) */
