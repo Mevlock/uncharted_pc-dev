@@ -1706,6 +1706,18 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         gallery_stick_dir=ux<640.0f ? -1 : 1; gallery_stick_until=now+150000; picked=1;
         if (mouse_debug()) printf("Menu mouse: U3 gallery arrow: %s\n",gallery_stick_dir<0 ? "left" : "right");
     }
+    /* U2's art gallery viewer: no rows at all (the picture and its < > are images), the < > where U3 has them; a click there presses
+     * left / right on the d-pad (the arrow keys page there). Not on the other row-less screens: the controller picture, the chapter
+     * carousel, the credits */
+    static uint64_t u2_gal_until; static int u2_gal_dir;
+    if (clicked && !picked && u2m && !have_sel && !have_hov && !dialog && uy>=596.0f && uy<=664.0f &&
+        ((ux>=92.0f && ux<=146.0f) || (ux>=1134.0f && ux<=1188.0f)) &&
+        !(u2_layout_us && now-u2_layout_us<1000000) && !(u2_popup_us && now-u2_popup_us<1000000) &&
+        !(menu_credits_us && now-menu_credits_us<1000000)) {
+        u2_gal_dir=ux<640.0f ? BTN_LEFT : BTN_RIGHT; u2_gal_until=now+80000; picked=1;
+        if (mouse_debug()) printf("Menu mouse: U2 gallery arrow: %s\n",ux<640.0f ? "left" : "right");
+    }
+    if (now<u2_gal_until) out|=u2_gal_dir;
     /* U3 Chapter select, the opened carousel: its < > sit outside its rectangle (4 to 55 left / right of it, away from its top and bottom
      * 60): a click there sets the chapter one down / up (antikmewzik's) */
     const int car_on=u3m && u3_car.us && now-u3_car.us<150000 && u3_car.rc[3]>200.0f && u3_car.hi>u3_car.lo;
