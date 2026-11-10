@@ -1120,7 +1120,7 @@ static void u3_text(const uint64_t *regs) {
     if (!safe_read(r,regs[4],16)) return;
     const uint64_t now=now_us();
     if (fabsf(r[0]-358.0f)<2.0f && fabsf(r[2]-564.0f)<3.0f && r[3]>=150.0f) u3_info_us=now;   /* (his: the box of a locked reward) */
-    if (u2m && fabsf(r[0]-298.1f)<1.5f && fabsf(r[1]-156.2f)<1.5f && fabsf(r[2]-683.8f)<2.0f && fabsf(r[3]-318.8f)<2.0f) u2_popup_us=now;
+    if (u2m && fabsf(r[0]-298.1f)<1.5f && fabsf(r[1]-156.2f)<1.5f && fabsf(r[2]-683.8f)<2.0f && r[3]>=280.0f && r[3]<=330.0f) u2_popup_us=now;   /* (318.8 tall, 293.6 on some chapters) */
     if ((u2m || u3m) && r[2]>=400.0f && r[2]<=800.0f && r[3]>=150.0f && r[3]<=400.0f) {
         pthread_mutex_lock(&u3_lock);
         int slot=0;
@@ -1778,6 +1778,9 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             if (mouse_debug()) printf("Menu mouse: U3 carousel arrow %s -> %d\n",left_a ? "left" : "right",v);
         }
     }
+    if (clicked && u3m && !picked && mouse_debug() && u3_car.us)
+        printf("Menu mouse: U3 carousel not taken: seen %lld ms ago, rect %.0f %.0f %.0fx%.0f, values %d..%d (now %d), dialog %d\n",
+               (long long)((now-u3_car.us)/1000),u3_car.rc[0],u3_car.rc[1],u3_car.rc[2],u3_car.rc[3],u3_car.lo,u3_car.hi,u3_car.cur,dialog);
     if (clicked && have_hov && !picked) { h.click=1; h.click_deadline=now+1500000; h.active=1; }
     else if (clicked && !have_sel && !picked) h.click_until=now+150000;   /* no rows (the title's "press a button"): a click presses cross */
     if (h.click && now>h.click_deadline) h.click=0;
