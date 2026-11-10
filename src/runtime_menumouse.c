@@ -1047,6 +1047,10 @@ static struct { uint64_t w, ds, us; int cur, lo, hi; float rc[4]; } u3_car;
  * BB_U3_DIALOG_JUMP=0: the d-pad steps to the choice instead (as before). */
 static struct { uint64_t w, ds, us; int cur, lo, hi; float rc[4]; } u3_dlg;
 static int u3_dialog_jump_on(void) { static int on=-1; if (on<0) { const char *e=getenv("BB_U3_DIALOG_JUMP"); on=!(e && e[0]=='0'); } return on; }
+/* U2's controller picture (Options > Controls > Controller, antikmewzik): it has no menu rows, so the menu mode would go off there and
+ * the right / side button would not go back. It draws its labels through the game's text lookup (1.02 0xcddc00, 1.00 0x633460)
+ * every frame: the last time one of its own texts was asked for says it is up. */
+static volatile uint64_t u2_layout_us;
 static void u3_list_update(uint64_t self, uint64_t image, int which) {
     uint64_t ds=0, vt=0, f0=0, f8=0, fmin=0, fmax=0; float rc[4]={0,0,0,0};
     if (self<0x10000 || !safe_read(rc,self+0x90,16) || rc[3]<100.0f) return;
@@ -1348,6 +1352,7 @@ static int u3_menu_open(uint64_t now) {
     static uint64_t seen;   /* (the highlight fades from row to row: the menu stays on for a moment without a lit row) */
     int lit=u3_page_us && now-u3_page_us<150000 && u3_page_us<=now+1000000;
     if (u2_popup_us && now-u2_popup_us<300000 && u2_popup_us<=now+1000000) lit=1;   /* (U2's chapter carousel has no lit row) */
+    if (u2_layout_us && now-u2_layout_us<300000 && u2_layout_us<=now+1000000) lit=1;   /* (U2's controller picture: no rows) */
     if (u3_gallery_us && now-u3_gallery_us<300000 && u3_gallery_us<=now+1000000) lit=1;   /* (U3's art gallery viewer: no lit row) */
     if (menu_credits_us && now-menu_credits_us<300000 && menu_credits_us<=now+1000000) lit=1;   /* (the credits: no lit row either) */
     /* (a list on screen is a menu: dragging its scroll bar can take every lit row out of view, US 1.02's Skins) */
@@ -2282,6 +2287,14 @@ CB(u3_dialog_cb) {
 static const unsigned char u3_dialog_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xf8,0x04,0x00,0x00,0x48,0x89,0x95,0x38,0xfb,0xff,0xff,0x49,0x89,0xf4};
 static const unsigned char u3_dialog_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x68,0x05,0x00,0x00,0x48,0x89,0xd3,0x48,0x89,0x9d,0xc8,0xfa,0xff,0xff};
 
+/* U2's text lookup (table, text id): "Reset camera", "Photo mode", "Swap shoulder when aiming" are only on the controller picture */
+CB(u2_text_lookup_cb) {
+    (void)rdi; (void)base; (void)r14; (void)regs;
+    const uint32_t k=(uint32_t)rsi;
+    if (u2m && (k==0x4158a30du || k==0x9ef63173u || k==0x36fc7ed5u)) u2_layout_us=now_us();
+}
+static const unsigned char u2_text_lookup_code[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x89,0xf3,0x49,0x89,0xfe,0x49,0x8b,0x7e,0x58,0x48,0x85,0xff,0x74};   /* (both codes) */
+
 #define U1_SITES_102 \
     SITE("U1 1.02 compare-with-friends prompt (hook) (menu mouse)",0x128f64,u1_compare_code,5,u1_compare_cb), \
     PATCH("U1 1.02 compare-with-friends prompt (skip 1) (menu mouse)",0x128f69,u1_compare_je_code,u1_compare_je_patch), \
@@ -2295,11 +2308,13 @@ static const unsigned char u3_dialog_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0
 #define U2_SITES_102 \
     SITE("U2 1.02 compare-with-friends prompt (hook) (menu mouse)",0x5a54c7,u2_compare_102_code,5,u2_compare_cb), \
     PATCH("U2 1.02 compare-with-friends prompt (skip) (menu mouse)",0x5a54cc,u2_compare_jz_102_code,u2_compare_jz_102_patch), \
-    SITE("U2 1.02 Treasures model (menu mouse)",0x5d7c05,u2_model_102_code,8,u2_model_102_cb)
+    SITE("U2 1.02 Treasures model (menu mouse)",0x5d7c05,u2_model_102_code,8,u2_model_102_cb), \
+    SITE("U2 1.02 text lookup (controller picture) (menu mouse)",0xcddc00,u2_text_lookup_code,6,u2_text_lookup_cb)
 #define U2_SITES_100 \
     SITE("U2 1.00 compare-with-friends prompt (hook) (menu mouse)",0x282001,u2_compare_100_code,5,u2_compare_cb), \
     PATCH("U2 1.00 compare-with-friends prompt (skip) (menu mouse)",0x282006,u2_compare_jz_100_code,u2_compare_jz_100_patch), \
-    SITE("U2 1.00 Treasures model (menu mouse)",0x2ad8ea,u2_model_100_code,8,u2_model_100_cb)
+    SITE("U2 1.00 Treasures model (menu mouse)",0x2ad8ea,u2_model_100_code,8,u2_model_100_cb), \
+    SITE("U2 1.00 text lookup (controller picture) (menu mouse)",0x633460,u2_text_lookup_code,6,u2_text_lookup_cb)
 #define U3_SITES_102 \
     PATCH("U3 1.02 compare-with-friends prompt (skip) (menu mouse)",0x627d65,u3_compare_102_code,u3_compare_102_patch), \
     SITE("U3 1.02 prompt bar flags (menu mouse)",0x6277e8,u3_bar_flags_102_code,6,u3_bar_flags_102_cb), \
