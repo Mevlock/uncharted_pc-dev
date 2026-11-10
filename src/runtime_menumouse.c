@@ -1337,7 +1337,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         pthread_mutex_lock(&u3_lock);
         for (int i=0;i<8 && have_hov;++i) {
             const U3Row *p=&u2_panels[i];
-            if (p->us && now-p->us<150000 && p->w>=690.0f && p->w<=710.0f && p->h>=150.0f && p->h<=400.0f && fabsf(p->x+p->w*0.5f-640.0f)<10.0f) have_hov=0;   /* (Rewards > Categories has a panel 600-646 wide of its own) */
+            if (p->us && now-p->us<150000 && p->w>=690.0f && p->w<=710.0f && p->h>=200.0f && p->h<=250.0f && fabsf(p->x+p->w*0.5f-640.0f)<3.0f) have_hov=0;   /* (Rewards > Categories has a panel 600-646 wide of its own, Skins one of 700 x 305 at x 294) */
         }
         pthread_mutex_unlock(&u3_lock);
     }
