@@ -1042,6 +1042,11 @@ static volatile int u3_note_pending; static volatile int32_t u3_note_value; stat
  * get +0, set +8, minimum +0x38, maximum +0x40, as the sliders); opened it is 289 tall with the pictures. The wheel over it and a click
  * on its arrows (drawn outside its rectangle) set the chapter by value (u2_set_*, applied in its draw on the game's thread). */
 static struct { uint64_t w, ds, us; int cur, lo, hi; float rc[4]; } u3_car;
+/* U3's Yes/No boxes (antikmewzik's u3_dialog_hook; 1.02 0x5e0de0, 1.00 0x197fc0): the choices are drawn by a control with a data
+ * source (as the sliders); the choice under the cursor is set by value, a click sets it, then presses the cross once it is there.
+ * BB_U3_DIALOG_JUMP=0: the d-pad steps to the choice instead (as before). */
+static struct { uint64_t w, ds, us; int cur, lo, hi; float rc[4]; } u3_dlg;
+static int u3_dialog_jump_on(void) { static int on=-1; if (on<0) { const char *e=getenv("BB_U3_DIALOG_JUMP"); on=!(e && e[0]=='0'); } return on; }
 static void u3_list_update(uint64_t self, uint64_t image, int which) {
     uint64_t ds=0, vt=0, f0=0, f8=0, fmin=0, fmax=0; float rc[4]={0,0,0,0};
     if (self<0x10000 || !safe_read(rc,self+0x90,16) || rc[3]<100.0f) return;
@@ -1496,6 +1501,42 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     static struct { uint32_t dir, press_dir; float cy; uint64_t until, seen, press_until; } ch;
     uint32_t picked=0;
     float picked_cy=0.0f;
+    {   /* U3's Yes/No by value (see u3_dlg): its choices are texts 512 x 32 at x 384, 42 apart (the bar behind the chosen one 40 tall);
+         * the one under the cursor is set, a click sets it and presses the cross once it is the choice. The d-pad steps do not run then. */
+        static struct { int want; uint64_t t, cross_until; } dj={-1,0,0};
+        if (u3m && u3_dialog_jump_on() && u3_dlg.us && now-u3_dlg.us<150000 && u3_dlg.hi>u3_dlg.lo && u3_dlg.hi-u3_dlg.lo<=8) {
+            float ys[8]; int n=0, hovi=-1;
+            pthread_mutex_lock(&u3_lock);
+            for (int i=0;i<U3_ROWS && n<8;++i) {
+                const U3Row *r=&u3_rows[i];
+                if (!r->us || now-r->us>=150000 || fabsf(r->x-384.0f)>2.0f || fabsf(r->w-512.0f)>2.0f || fabsf(r->h-32.0f)>2.0f) continue;
+                int dup=0; for (int k=0;k<n;++k) if (fabsf(ys[k]-r->y)<1.0f) dup=1;
+                if (!dup) ys[n++]=r->y;
+            }
+            pthread_mutex_unlock(&u3_lock);
+            for (int a=0;a<n;++a) for (int b=a+1;b<n;++b) if (ys[b]<ys[a]) { const float t=ys[a]; ys[a]=ys[b]; ys[b]=t; }
+            for (int i=0;i<n;++i) if (ux>=380.0f && ux<=900.0f && uy>=ys[i]-5.0f && uy<ys[i]+37.0f) hovi=i;
+            if (n>=2 && n==u3_dlg.hi-u3_dlg.lo+1) {
+                if (hovi>=0) {
+                    const int want=u3_dlg.lo+hovi;
+                    if (u2_set_pending && now-u2_set_us>300000) u2_set_pending=0;
+                    if (want!=u3_dlg.cur && !u2_set_pending && (moved || clicked)) {
+                        u2_set_ds=u3_dlg.ds; u2_set_val=want; u2_set_keep=0; u2_set_us=now; u2_set_pending=1;
+                        if (mouse_debug()) printf("Menu mouse: U3 Yes/No choice %d -> %d\n",u3_dlg.cur,want);
+                    }
+                    if (clicked) { dj.want=want; dj.t=now; }
+                }
+                if (clicked) picked=1;
+                menu_hover=hovi>=0;
+                have_hov=0; h.click=0; h.active=0;   /* (no steps, no page jump) */
+            }
+        }
+        if (dj.want>=0) {
+            if (u3_dlg.us && now-u3_dlg.us<150000 && u3_dlg.cur==dj.want) { dj.cross_until=now+120000; dj.want=-1; if (mouse_debug()) puts("Menu mouse: U3 Yes/No click: cross"); }
+            else if (now-dj.t>600000) dj.want=-1;
+        }
+        if (now<dj.cross_until) out|=BTN_CROSS;
+    }
     if (clicked && mouse_debug()) printf("Menu mouse: click at %.0f %.0f: cursor row %s %.0f %.0f %.0fx%.0f, dialog %d\n",ux,uy,have_hov ? "yes" : "no",hov.x,hov.y,hov.w,hov.h,dialog);
     if (clicked && u3m && !dialog) {   /* U3: a click on a row's < > (antikmewzik's U3 arrow click): left of the second text "left" */
         pthread_mutex_lock(&u3_lock);
@@ -2216,6 +2257,31 @@ CB(u3_carousel_cb) {
 static const unsigned char u3_carousel_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0x07,0x00,0x00,0x49,0x89,0xd7,0x49,0x89,0xf4,0x48,0x89,0xf9};
 static const unsigned char u3_carousel_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x18,0x0a,0x00,0x00,0x49,0x89,0xd4,0x49,0x89,0xf7,0x49,0x89,0xfd};
 
+/* U3 Yes/No choices draw (see u3_dlg): a pending choice set, the control noted */
+CB(u3_dialog_cb) {
+    (void)rsi; (void)r14; (void)regs;
+    if (!u3m || rdi<0x10000) return;
+    uint64_t ds=0, vt=0, f0=0, f8=0, fmin=0, fmax=0; float rc[4]={0,0,0,0};
+    if (!safe_read(&ds,rdi+0x18,8) || ds<0x10000 || !safe_read(&vt,ds,8) || vt<0x10000) return;
+    if (!safe_read(&f0,vt,8) || !safe_read(&f8,vt+8,8) || !safe_read(&fmin,vt+0x38,8) || !safe_read(&fmax,vt+0x40,8)) return;
+    const uint64_t lo_code=base, hi_code=base+0x2000000;
+    if (f0<lo_code || f0>=hi_code || f8<lo_code || f8>=hi_code || fmin<lo_code || fmin>=hi_code || fmax<lo_code || fmax>=hi_code) return;
+    int cur=(int)(int32_t)((guest_vcall_fn)(uintptr_t)f0)(ds);
+    const int lo=(int)(int32_t)((guest_vcall_fn)(uintptr_t)fmin)(ds), hi=(int)(int32_t)((guest_vcall_fn)(uintptr_t)fmax)(ds);
+    if (u2_set_pending && u2_set_ds==ds) {
+        int v=u2_set_val; if (v<lo) v=lo; if (v>hi) v=hi;
+        ((guest_set_fn)(uintptr_t)f8)(ds,v);
+        u2_set_pending=0;
+        if (mouse_debug()) printf("Menu mouse: U3 Yes/No set(%d) (was %d, range %d..%d)\n",v,cur,lo,hi);
+        cur=v;
+    }
+    safe_read(rc,rdi+0x90,16);
+    if (mouse_debug() && (u3_dlg.w!=rdi || now_us()-u3_dlg.us>1000000)) printf("Menu mouse: U3 Yes/No control %#llx: choice %d of %d..%d, rect %.0f %.0f %.0fx%.0f\n",(unsigned long long)rdi,cur,lo,hi,rc[0],rc[1],rc[2],rc[3]);
+    u3_dlg.w=rdi; u3_dlg.ds=ds; u3_dlg.cur=cur; u3_dlg.lo=lo; u3_dlg.hi=hi; memcpy(u3_dlg.rc,rc,sizeof(rc)); u3_dlg.us=now_us();
+}
+static const unsigned char u3_dialog_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xf8,0x04,0x00,0x00,0x48,0x89,0x95,0x38,0xfb,0xff,0xff,0x49,0x89,0xf4};
+static const unsigned char u3_dialog_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x68,0x05,0x00,0x00,0x48,0x89,0xd3,0x48,0x89,0x9d,0xc8,0xfa,0xff,0xff};
+
 #define U1_SITES_102 \
     SITE("U1 1.02 compare-with-friends prompt (hook) (menu mouse)",0x128f64,u1_compare_code,5,u1_compare_cb), \
     PATCH("U1 1.02 compare-with-friends prompt (skip 1) (menu mouse)",0x128f69,u1_compare_je_code,u1_compare_je_patch), \
@@ -2239,13 +2305,15 @@ static const unsigned char u3_carousel_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57
     SITE("U3 1.02 prompt bar flags (menu mouse)",0x6277e8,u3_bar_flags_102_code,6,u3_bar_flags_102_cb), \
     SITE("U3 1.02 Treasures scene (menu mouse)",0x65f010,u3_scene_102_code,6,u3_scene_cb), \
     SITE("U3 1.02 Treasures model (menu mouse)",0x65f6b0,u3_model_102_code,8,u3_model_102_cb), \
-    SITE("U3 1.02 chapter carousel draw (menu mouse)",0x5eccb0,u3_carousel_102_code,8,u3_carousel_cb)
+    SITE("U3 1.02 chapter carousel draw (menu mouse)",0x5eccb0,u3_carousel_102_code,8,u3_carousel_cb), \
+    SITE("U3 1.02 Yes/No choices draw (menu mouse)",0x5e0de0,u3_dialog_102_code,8,u3_dialog_cb)
 #define U3_SITES_100 \
     PATCH("U3 1.00 compare-with-friends prompt (skip) (menu mouse)",0x1c7191,u3_compare_100_code,u3_compare_100_patch), \
     SITE("U3 1.00 prompt bar flags (menu mouse)",0x1c6ecb,u3_bar_flags_100_code,6,u3_bar_flags_100_cb), \
     SITE("U3 1.00 Treasures scene (menu mouse)",0x1f6e10,u3_scene_100_code,6,u3_scene_cb), \
     SITE("U3 1.00 Treasures model (menu mouse)",0x1f74f8,u3_model_100_code,8,u3_model_100_cb), \
-    SITE("U3 1.00 chapter carousel draw (menu mouse)",0x1a0490,u3_carousel_100_code,8,u3_carousel_cb)
+    SITE("U3 1.00 chapter carousel draw (menu mouse)",0x1a0490,u3_carousel_100_code,8,u3_carousel_cb), \
+    SITE("U3 1.00 Yes/No choices draw (menu mouse)",0x197fc0,u3_dialog_100_code,8,u3_dialog_cb)
 
 static const RuntimeGuestCallback u1_more_102[]={U1_SITES_102}, u1_more_100[]={U1_SITES_100};
 static const RuntimeGuestCallback u2_more_102[]={U2_SITES_102}, u2_more_100[]={U2_SITES_100};
