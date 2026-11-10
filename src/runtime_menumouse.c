@@ -1298,7 +1298,9 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     /* dragging a slider (antikmewzik's fallback, from the drawn rail on both codes): a click on a rail selects its row (no cross);
      * while the button is held, one left / right press per tenth of the rail the cursor moves, once the row is the selected one */
     static struct { int on; uint32_t dir; float last, acc, w, cy; uint64_t next, press_until; } dr;
-    if (clicked && !picked && !dialog) {
+    static int drag_on=-1;   /* off until it is as good as the arrows (user 2026-11-10): BB_MENU_SLIDER_DRAG=1 turns it on */
+    if (drag_on<0) { const char *e=getenv("BB_MENU_SLIDER_DRAG"); drag_on=e && e[0]=='1'; }
+    if (clicked && !picked && !dialog && drag_on) {
         pthread_mutex_lock(&u3_lock);
         for (int i=0;i<8;++i) {
             const U3Row *sl=&u3_sliders[i];
