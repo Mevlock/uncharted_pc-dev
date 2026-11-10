@@ -1299,6 +1299,8 @@ static int u3_menu_open(uint64_t now) {
     static uint64_t seen;   /* (the highlight fades from row to row: the menu stays on for a moment without a lit row) */
     int lit=u3_page_us && now-u3_page_us<150000 && u3_page_us<=now+1000000;
     if (u2_popup_us && now-u2_popup_us<300000 && u2_popup_us<=now+1000000) lit=1;   /* (U2's chapter carousel has no lit row) */
+    /* (a list on screen is a menu: dragging its scroll bar can take every lit row out of view, US 1.02's Skins) */
+    for (int i=0;i<16 && !lit && (u2m || u3m);++i) { const U2List *l=&u2_lists[i]; if (l->us && now-l->us<300000 && l->vis>=3 && l->rh>=70.0f && l->focused) lit=1; }
     pthread_mutex_lock(&u3_lock);
     for (int i=0;i<U3_ROWS && !lit;++i) if (u3_rows[i].us && now-u3_rows[i].us<300000 && u3_rows[i].sel>=0.5f) lit=1;
     pthread_mutex_unlock(&u3_lock);
