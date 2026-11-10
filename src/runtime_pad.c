@@ -515,8 +515,8 @@ static void load_input(void) {
         set_keys(a,actions[a].keys);
         if (a<16) input.pad[a]=parse_pad(actions[a].pad);
     }
-    input.mouse_look=1; input.mouse_sensitivity=1.0f;
-    input.mouse_aim_sensitivity=1.0f; input.mouse_vertical=1.0f; input.mouse_camera_vertical=1.0f;
+    input.mouse_look=1; input.mouse_sensitivity=2.8f;   /* (0.3.6.51 defaults: the old mouse look's feel, see the launcher) */
+    input.mouse_aim_sensitivity=0.6f; input.mouse_vertical=1.0f; input.mouse_camera_vertical=2.0f;
     input.pad_vibration=1; input.pad_vibration_strength=100; input.walk_speed=65;
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;

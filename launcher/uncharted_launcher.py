@@ -224,7 +224,7 @@ TK_KEYS = {'space': 'Space', 'Return': 'Return', 'Escape': 'Escape', 'Tab': 'Tab
 # Tk on Windows names numpad keys like the main ones ("8", "plus"), only the keycode tells them apart (#224).
 WIN_NUMPAD = {**{0x60 + n: f'Keypad {n}' for n in range(10)},
               0x6A: 'Keypad *', 0x6B: 'Keypad +', 0x6D: 'Keypad -', 0x6E: 'Keypad .', 0x6F: 'Keypad /'}
-MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (the game's default pace is 1)
+MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (default 2.8: the old mouse look's feel; 1 = Bilal's pace)
 # Times the sensitivity while aiming, and for up and down (1 = the same as looking / sideways).
 MOUSE_RATIO_MIN, MOUSE_RATIO_MAX = 0.25, 4.0
 CAMERA_VERTICAL_MAX = 8.0   # the normal camera's up / down (its arc is 1.3-5x slower than sideways)
@@ -238,8 +238,8 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
                 'shader_preparation': 'before', 'preparation_speed': 'all',
-                'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
-                'mouse_aim_sensitivity': '1.0', 'mouse_vertical': '1.0', 'mouse_camera_vertical': '1.0',
+                'mouse_look': True, 'mouse_sensitivity': '2.8', 'mouse_invert_y': False,
+                'mouse_aim_sensitivity': '0.6', 'mouse_vertical': '1.0', 'mouse_camera_vertical': '2.0',
                 'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '65', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
@@ -555,7 +555,7 @@ def mouse_sensitivity(s):
     try:
         return f"{min(MOUSE_SENS_MAX, max(MOUSE_SENS_MIN, float(s.get('mouse_sensitivity')))):.2f}"
     except (TypeError, ValueError):
-        return '1.00'
+        return '2.80'
 
 
 def mouse_ratio(s, key, top=MOUSE_RATIO_MAX):
@@ -960,12 +960,32 @@ TROPHY_COLORS = {'P': '#9fd0f5', 'G': GOLD, 'S': '#cfd3da', 'B': '#cf8548'}
 RUST, RUST_HI = GOLD, GOLD_HI
 
 
+def load_settings():
+    """The saved settings over the defaults. Settings from before 0.3.6.51 (no 'mouse_camera_vertical' yet) had the old
+    mouse look, whose camera turned about 2.8 times as far per count: their sensitivity is scaled to keep that feel,
+    the aiming multiplier by 0.6 so aiming stays as it was, and the normal camera's up and down gets 2.0 (the new
+    defaults: 2.8, 0.6, 2.0)."""
+    saved = load_json(CONFIG_FILE, {})
+    if saved and 'mouse_camera_vertical' not in saved:
+        def scaled(key, factor, low, high):
+            try:
+                return f"{min(high, max(low, float(saved[key]) * factor)):.2f}"
+            except (KeyError, TypeError, ValueError):
+                return None
+        if (value := scaled('mouse_sensitivity', 2.8, 0.1, 10.0)) is not None:
+            saved['mouse_sensitivity'] = value
+        if (value := scaled('mouse_aim_sensitivity', 0.6, MOUSE_RATIO_MIN, MOUSE_RATIO_MAX)) is not None:
+            saved['mouse_aim_sensitivity'] = value
+        saved['mouse_camera_vertical'] = '2.0'
+    return {**APP_DEFAULTS, **saved}
+
+
 class Launcher:
     def __init__(self, root, tk, ttk, filedialog, messagebox):
         global UI_LANGUAGE
         self.tk, self.ttk, self.filedialog, self.messagebox = tk, ttk, filedialog, messagebox
         self.root = root
-        self.app = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+        self.app = load_settings()
         UI_LANGUAGE = uncharted_i18n.language_code(self.app.get('ui_language', ''))
         self.vars = {}
         self.process = self.job = None
@@ -3270,7 +3290,7 @@ def main():
         sys.exit(install_update(args[1], args[2]))
     if FROZEN and UPDATE_DIR not in PORT_DIR.parents:
         shutil.rmtree(UPDATE_DIR, ignore_errors=True)  # what a finished update left behind
-    settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+    settings = load_settings()
     if '--play' in args:
         # --play u1|u2|u3 (front ends such as Playnite: one entry per game) for this start only;
         # /u2, -u2 and --u2 work as well.
