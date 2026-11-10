@@ -1020,7 +1020,7 @@ static void u2_list_update(uint64_t self, uint64_t image) {
 /* U3's list (antikmewzik's u3_list_hook, 1.02 0x5e3e60; Bonus > Cutscenes, Treasures, Statistics): one control draws all the rows and keeps the
  * selected row in its data source (+0x18; vtable +0 get, +8 set, +0x38 minimum, +0x40 maximum); +0x184 rows seen, +0x188 first row seen,
  * +0x16c the selection the view last followed (told the new one for a hover: the view stays). Noted in u2_lists (top = first row seen).
- * which: 0 the 1.02 site; 1, 2 the EU 1.00 candidates (logged with BB_MOUSE_DEBUG=1 until one is confirmed; not used). */
+ * which: 0 (the 1.02 site; EU 1.00's list function is not located yet: 0x1a3050 / 0x1b03f0 were not it). */
 static void u3_list_update(uint64_t self, uint64_t image, int which) {
     uint64_t ds=0, vt=0, f0=0, f8=0, fmin=0, fmax=0; float rc[4]={0,0,0,0};
     if (self<0x10000 || !safe_read(rc,self+0x90,16) || rc[3]<100.0f) return;
@@ -1916,19 +1916,13 @@ static const RuntimeGuestCallback u1_sites[]={
 /* (6 bytes moved: push rbp; mov rbp, rsp; push r15) */
 
 static const unsigned char u3_list_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x68,0x0b,0x00,0x00};
-static const unsigned char u3_listc1_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x68,0x08,0x00,0x00,0x49,0x89,0xd4};
-static const unsigned char u3_listc2_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x08,0x09,0x00,0x00,0x49,0x89,0xd7};
 CB(u3_list_cb) { (void)rsi; (void)r14; (void)regs; if (u3m) u3_list_update(rdi,base,0); }
-CB(u3_listc1_cb) { (void)rsi; (void)r14; (void)regs; if (u3m && mouse_debug()) u3_list_update(rdi,base,1); }
-CB(u3_listc2_cb) { (void)rsi; (void)r14; (void)regs; if (u3m && mouse_debug()) u3_list_update(rdi,base,2); }
 static const RuntimeGuestCallback u3_sites[]={
     SITE("U3 1.02 menu text (menu mouse)",0x63d6f0,u3_text_102_code,6,u3_text_cb),
     SITE("U3 1.02 menu page update (menu mouse)",0x6253f0,u3_page_102_code,6,u3_page_cb),
     SITE("U3 1.02 list control draw (menu mouse)",0x5e3e60,u3_list_102_code,8,u3_list_cb),
     SITE("U3 1.00 menu text (menu mouse)",0x1d6060,u3_text_100_code,6,u3_text_cb),
     SITE("U3 1.00 menu page update (menu mouse)",0x1c5000,u3_page_100_code,6,u3_page_cb),
-    SITE("U3 1.00 list candidate 1 (menu mouse, debug)",0x1a3050,u3_listc1_100_code,8,u3_listc1_cb),
-    SITE("U3 1.00 list candidate 2 (menu mouse, debug)",0x1b03f0,u3_listc2_100_code,8,u3_listc2_cb),
 };
 /* (EU 1.00 = US 1.00: the same function at 0x267f60, located 2026-11-10 by its scroll call: the value stored to +0x228 and +0x22c, then
  * vtable +0x68 with it in esi and edx; the same widget fields, other registers) */
@@ -1946,7 +1940,7 @@ static const RuntimeGuestCallback u2_sites[]={
 const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
     /* only the sites of the code found */
     if (u1m) { *count=sizeof(u1_sites)/sizeof(*u1_sites)/2; return u1m==&u1_menu_codes[0] ? u1_sites : u1_sites+*count; }
-    if (u3m) { if (u3m==&u3_menu_codes[0]) { *count=3; return u3_sites; } *count=4; return u3_sites+3; }
+    if (u3m) { if (u3m==&u3_menu_codes[0]) { *count=3; return u3_sites; } *count=2; return u3_sites+3; }
     if (u2m) { *count=2; return u2m==&u2_menu_codes[0] ? u2_sites : u2_sites+2; }
     *count=0;
     return u1_sites;
