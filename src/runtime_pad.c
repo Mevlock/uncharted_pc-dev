@@ -670,7 +670,13 @@ static void mouse_stick(PadData *d, float dx, float dy, int captured, int keys_x
     const float aim=aim_held && input.mouse_aim_sensitivity>0.0f ? input.mouse_aim_sensitivity : 1.0f;
     const float sensitivity=(input.mouse_sensitivity>0.0f ? input.mouse_sensitivity : 1.0f)*aim;
     const float vertical=input.mouse_vertical>0.0f ? input.mouse_vertical : 1.0f;
-    float sx=vx*sensitivity*0.08f, sy=vy*sensitivity*0.08f*(input.mouse_invert_y ? -1.0f : 1.0f)*vertical;
+    /* The gain (stick deflection per count/ms before the shape): Bilal's 0.08 left the turrets and vehicles (U2's convoy
+     * turret) far slower than our old stick mapping; 0.37 matches the old one (0.15 deg/pixel through the U1 camera's
+     * response) at the same turn per count (sensitivity 1.00 = 2.4x less than the old 1.00): slow and fast moves within
+     * a few percent. BB_MOUSE_STICK_GAIN=<gain> for tests. */
+    static float gain=-1.0f;
+    if (gain<0.0f) { const char *e=getenv("BB_MOUSE_STICK_GAIN"); gain=e && atof(e)>0.0 ? (float)atof(e) : 0.37f; }
+    float sx=vx*sensitivity*gain, sy=vy*sensitivity*gain*(input.mouse_invert_y ? -1.0f : 1.0f)*vertical;
     const float magnitude=sqrtf(sx*sx+sy*sy);
     if (magnitude<0.002f) { runtime_mouselook_trace_pad(0,0.0f,0.0f); return; }
     const float shaped=powf(magnitude>1.0f ? 1.0f : magnitude,2.0f/3.0f);
