@@ -487,7 +487,11 @@ static ABI int32_t playgo_init(const void *params) {
     (void)params;
     int fd=(int)runtime_file_open("/app0/sce_sys/playgo-chunk.dat",0,0);
     unsigned char header[12];
-    playgo_chunks=1;
+    /* Without the package's chunk table (some dumps leave sce_sys/playgo-chunk.dat out), the count
+       the Uncharted package lists: 100 (the US, Russian and Spanish tables). A count of 1 reads to the
+       games as a stub package ("stub pkg installed with 1 chunks"): U2 then never mounts its art
+       gallery's uiextra.psarc and the gallery shows no pictures. */
+    playgo_chunks=100;
     if (fd>=0) {
         if (runtime_file_read(fd,header,sizeof(header))==sizeof(header)) playgo_chunks=header[10]|header[11]<<8;
         runtime_file_close(fd);
