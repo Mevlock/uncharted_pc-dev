@@ -899,6 +899,12 @@ static U3Row u3_arrows[16];
 /* U2/U3: the rails of the sliders (sensitivity, volumes): a text whose picture is 100+ (U3: 60+) wide and at most 12 tall, laid out
  * in a row's rectangle (antikmewzik's u2_slider_note / u3_slider_note); x, y and h of the row, w = the rail's width (u3_lock) */
 static U3Row u3_sliders[8];
+/* U3's ghost rows (antikmewzik): a row whose label text is empty (its picture 0 wide) in the left column (x 96), drawn but not meant to
+ * be chosen (Audio output, under "Front"): the hover skips them. And the credits (U2 / U3): text 700-800 tall, never highlighted:
+ * the menu mode stays on while they show (Esc / back still work). */
+static float u3_ghost_y[8];
+static uint64_t u3_ghost_us[8];
+static volatile uint64_t menu_credits_us;
 static pthread_mutex_t u3_lock=PTHREAD_MUTEX_INITIALIZER;
 static volatile uint64_t u3_page_us;     /* the last update of a focused menu page */
 static volatile uint64_t u3_info_us;     /* an information box (a locked reward) is over the menu */
@@ -1098,8 +1104,17 @@ static void u3_text(const uint64_t *regs) {
                    s9[0],s9[1],s9[2],s9[3],s9[4],s9[5],s9[6],s9[7],s9[8]);
         }
     }
+    if (r[3]>=700.0f && r[3]<=800.0f && r[2]>=40.0f) menu_credits_us=now;
     {   /* a slider's rail (the size of its picture: the text object, rcx, +0x3c) */
         float sz[2];
+        if (u3m && safe_read(sz,regs[6]+0x3c,8) && sz[0]<0.5f && fabsf(r[0]-96.0f)<3.0f && r[3]>=24.0f && r[3]<=42.0f) {
+            pthread_mutex_lock(&u3_lock);
+            int slot=-1, oldest=0;
+            for (int i=0;i<8;++i) { if (fabsf(u3_ghost_y[i]-r[1])<0.5f) { slot=i; break; } if (u3_ghost_us[i]<u3_ghost_us[oldest]) oldest=i; }
+            if (slot<0) slot=oldest;
+            u3_ghost_y[slot]=r[1]; u3_ghost_us[slot]=now;
+            pthread_mutex_unlock(&u3_lock);
+        }
         if (safe_read(sz,regs[6]+0x3c,8) && sz[1]>0.0f && sz[1]<=12.0f &&
             ((u2m && sz[0]>=100.0f && r[3]>=24.0f && r[3]<=42.0f) || (u3m && sz[0]>=60.0f && r[3]>=20.0f && r[3]<=44.0f))) {
             pthread_mutex_lock(&u3_lock);
@@ -1301,6 +1316,7 @@ static int u3_menu_open(uint64_t now) {
     static uint64_t seen;   /* (the highlight fades from row to row: the menu stays on for a moment without a lit row) */
     int lit=u3_page_us && now-u3_page_us<150000 && u3_page_us<=now+1000000;
     if (u2_popup_us && now-u2_popup_us<300000 && u2_popup_us<=now+1000000) lit=1;   /* (U2's chapter carousel has no lit row) */
+    if (menu_credits_us && now-menu_credits_us<300000 && menu_credits_us<=now+1000000) lit=1;   /* (the credits: no lit row either) */
     /* (a list on screen is a menu: dragging its scroll bar can take every lit row out of view, US 1.02's Skins) */
     for (int i=0;i<16 && !lit && (u2m || u3m);++i) { const U2List *l=&u2_lists[i]; if (l->us && now-l->us<300000 && l->vis>=3 && l->rh>=70.0f && l->focused) lit=1; }
     pthread_mutex_lock(&u3_lock);
@@ -1349,16 +1365,23 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             const int bar=!u2m && u3_in_bar(r,now);
             if (!have_sel || bar>sel_bar || (bar==sel_bar && (r->sel>sel.sel+0.01f || (fabsf(r->sel-sel.sel)<=0.01f && r->w>sel.w)))) { sel=*r; have_sel=1; sel_bar=bar; }
         }
+        if (u3m && r->w>750.0f && !(fabsf(r->x-380.0f)<1.0f && fabsf(r->w-520.0f)<1.0f)) continue;   /* (antik) a wide banner above the menu is not a row */
         if (ux>=r->x && ux<=r->x+r->w && uy>=r->y && uy<=r->y+r->h && 
             (!have_hov || r->front>hov.front || (r->front==hov.front && r->w*r->h<hov.w*hov.h))) { hov=*r; have_hov=1; }   /* U2: the rows faded behind a Yes/No lose to its choices */
     }
+    if (have_hov && u3m)
+        for (int i=0;i<8;++i)
+            if (u3_ghost_us[i] && now-u3_ghost_us[i]<300000 && fabsf(u3_ghost_y[i]-hov.y)<1.0f) { have_hov=0; break; }   /* a ghost row: not a target */
     /* the cursor over no text but level with a row (between a setting's name and its value: U3 draws its < > there, on the
      * selected row only): the nearest text of that line, within 300 of the cursor */
     if (!have_hov) {
         float best_dx=300.0f;
         for (int i=0;i<U3_ROWS;++i) {
             const U3Row *r=&u3_rows[i];
-            if (!r->us || now-r->us>=100000 || uy<r->y || uy>r->y+r->h || r->h>42.0f) continue;
+            if (!r->us || now-r->us>=100000 || uy<r->y || uy>r->y+r->h || r->h>42.0f || (u3m && r->w>750.0f)) continue;
+            int ghost=0;
+            for (int g=0;g<8 && u3m;++g) if (u3_ghost_us[g] && now-u3_ghost_us[g]<300000 && fabsf(u3_ghost_y[g]-r->y)<1.0f) ghost=1;
+            if (ghost) continue;
             const float dx=ux<r->x ? r->x-ux : ux>r->x+r->w ? ux-(r->x+r->w) : 0.0f;
             if (dx<best_dx) { best_dx=dx; hov=*r; have_hov=1; }
         }
