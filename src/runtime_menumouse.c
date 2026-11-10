@@ -2041,6 +2041,20 @@ static const unsigned char u3_bar_flags_102_code[]={0x44,0x89,0xca,0x83,0xe2,0x0
 static const unsigned char u3_bar_flags_100_code[]={0x8b,0xbd,0x50,0xfd,0xff,0xff,0xc4,0xe3,0x79,0x21,0x05};   /* mov edi, [rbp-0x2b0]; vinsertps */
 static const unsigned char u3_bar_100_frame[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xe8,0x02,0x00,0x00};   /* 0x1c6c30: the frame the 1.00 hook relies on */
 #define PATCH(name,at,sig,p) {name,at,sig,sizeof(sig),sizeof(p),NULL,p}
+/* U1 Options > Game: the photo mode row (text 0xa3da9f13) is made by three blocks of the options builder (one per menu that holds it);
+ * each ends with the add-to-menu call (1.02 0x132f00, 1.00 0x132d70), here made a 5-byte nop: the row is built and never added. */
+static const unsigned char u1_photo_102_1_code[]={0x4c,0x89,0xf7,0x4c,0x89,0xee,0xe8,0xba,0xe0,0xfe,0xff};   /* mov rdi,r14; mov rsi,r13; call 0x132f00 */
+static const unsigned char u1_photo_102_1_patch[]={0x4c,0x89,0xf7,0x4c,0x89,0xee,0x0f,0x1f,0x44,0x00,0x00};
+static const unsigned char u1_photo_102_2_code[]={0x48,0x8b,0xbd,0x10,0xff,0xff,0xff,0x48,0x89,0xde,0xe8,0x1d,0xde,0xfe,0xff};
+static const unsigned char u1_photo_102_2_patch[]={0x48,0x8b,0xbd,0x10,0xff,0xff,0xff,0x48,0x89,0xde,0x0f,0x1f,0x44,0x00,0x00};
+static const unsigned char u1_photo_102_3_code[]={0x48,0x8b,0xbd,0x08,0xff,0xff,0xff,0x48,0x89,0xde,0xe8,0x06,0xdc,0xfe,0xff};
+static const unsigned char u1_photo_102_3_patch[]={0x48,0x8b,0xbd,0x08,0xff,0xff,0xff,0x48,0x89,0xde,0x0f,0x1f,0x44,0x00,0x00};
+static const unsigned char u1_photo_100_1_code[]={0x4c,0x89,0xff,0x4c,0x89,0xee,0xe8,0x2f,0xe3,0xfe,0xff};   /* mov rdi,r15; mov rsi,r13; call 0x132d70 */
+static const unsigned char u1_photo_100_1_patch[]={0x4c,0x89,0xff,0x4c,0x89,0xee,0x0f,0x1f,0x44,0x00,0x00};
+static const unsigned char u1_photo_100_2_code[]={0x48,0x8b,0xbd,0x18,0xff,0xff,0xff,0x48,0x89,0xde,0xe8,0x92,0xe0,0xfe,0xff};
+static const unsigned char u1_photo_100_2_patch[]={0x48,0x8b,0xbd,0x18,0xff,0xff,0xff,0x48,0x89,0xde,0x0f,0x1f,0x44,0x00,0x00};
+static const unsigned char u1_photo_100_3_code[]={0x48,0x8b,0xbd,0x10,0xff,0xff,0xff,0x48,0x89,0xde,0xe8,0x7b,0xde,0xfe,0xff};
+static const unsigned char u1_photo_100_3_patch[]={0x48,0x8b,0xbd,0x10,0xff,0xff,0xff,0x48,0x89,0xde,0x0f,0x1f,0x44,0x00,0x00};
 /* the cross held back on a statistic (the pad read, every input; see runtime_menumouse_filter) */
 static int u3_stat_selected(uint64_t now) {
     U3Row sel={0}; int have=0;
@@ -2071,12 +2085,12 @@ uint32_t runtime_menumouse_filter(uint32_t buttons, int keyboard) {
     SITE("U1 1.02 compare-with-friends prompt (hook) (menu mouse)",0x128f64,u1_compare_code,5,u1_compare_cb), \
     PATCH("U1 1.02 compare-with-friends prompt (skip 1) (menu mouse)",0x128f69,u1_compare_je_code,u1_compare_je_patch), \
     PATCH("U1 1.02 compare-with-friends prompt (skip 2) (menu mouse)",0x128f76,u1_compare_jmp_code,u1_compare_jmp_patch), \
-    SITE("U1 1.02 prompt bar flags (menu mouse)",0x128c8a,u1_bar_flags_code,10,u1_bar_flags_cb)
+    SITE("U1 1.02 prompt bar flags (menu mouse)",0x128c8a,u1_bar_flags_code,10,u1_bar_flags_cb),     PATCH("U1 1.02 options without the photo mode row (1) (menu mouse)",0x144e3b,u1_photo_102_1_code,u1_photo_102_1_patch),     PATCH("U1 1.02 options without the photo mode row (2) (menu mouse)",0x1450d4,u1_photo_102_2_code,u1_photo_102_2_patch),     PATCH("U1 1.02 options without the photo mode row (3) (menu mouse)",0x1452eb,u1_photo_102_3_code,u1_photo_102_3_patch)
 #define U1_SITES_100 \
     SITE("U1 1.00 compare-with-friends prompt (hook) (menu mouse)",0x128e14,u1_compare_code,5,u1_compare_cb), \
     PATCH("U1 1.00 compare-with-friends prompt (skip 1) (menu mouse)",0x128e19,u1_compare_je_code,u1_compare_je_patch), \
     PATCH("U1 1.00 compare-with-friends prompt (skip 2) (menu mouse)",0x128e26,u1_compare_jmp_code,u1_compare_jmp_patch), \
-    SITE("U1 1.00 prompt bar flags (menu mouse)",0x128b3a,u1_bar_flags_code,10,u1_bar_flags_cb)
+    SITE("U1 1.00 prompt bar flags (menu mouse)",0x128b3a,u1_bar_flags_code,10,u1_bar_flags_cb),     PATCH("U1 1.00 options without the photo mode row (1) (menu mouse)",0x144a36,u1_photo_100_1_code,u1_photo_100_1_patch),     PATCH("U1 1.00 options without the photo mode row (2) (menu mouse)",0x144ccf,u1_photo_100_2_code,u1_photo_100_2_patch),     PATCH("U1 1.00 options without the photo mode row (3) (menu mouse)",0x144ee6,u1_photo_100_3_code,u1_photo_100_3_patch)
 #define U2_SITES_102 \
     SITE("U2 1.02 compare-with-friends prompt (hook) (menu mouse)",0x5a54c7,u2_compare_102_code,5,u2_compare_cb), \
     PATCH("U2 1.02 compare-with-friends prompt (skip) (menu mouse)",0x5a54cc,u2_compare_jz_102_code,u2_compare_jz_102_patch)
