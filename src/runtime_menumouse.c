@@ -337,6 +337,11 @@ static int menu_list_find_ex(uint64_t now, ListInfo *info, int need_highlight) {
     pthread_mutex_unlock(&menu_text_lock);
     return found;
 }
+/* a value text (right of the label column) on the line of label t (menu_text_lock held) */
+static int line_has_value(const MenuText *t, uint64_t item, float colx, uint64_t now) {
+    for (int i=0;i<menu_text_count;++i) { const MenuText *v=&menu_texts[i]; if (v->item==item && now-v->us<=100000 && v->ordinal>=1 && v->x>colx+300.0f && v->h<30.0f && v->w>0.5f && fabsf(v->y-t->y)<2.0f) return 1; }
+    return 0;
+}
 /* ---- the mouse in the menus (U1) ------------------------------------------------------------
  * The game's menu texts are laid out in a 1280x720 space (measured: a 5-row menu has its rows at x 367.5, width
  * 600, height 33.6 and a pitch of 33.6, which matches the screenshots at 1125 lines). The cursor, put in that
@@ -666,7 +671,7 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
             const MenuText *t=&menu_texts[i];
             if (t->item!=list.item || now-t->us>100000 || t->ordinal<1) continue;
             if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) ++nvals;
-            if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]<0.7f && t->style[5]<2.5f) ++titles;   /* (a section title, dim) */
+            if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]<0.7f && t->style[5]<2.5f && !line_has_value(t,list.item,list.colx,now)) ++titles;   /* (a section title: dim, no value on its line) */
             if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]>=0.7f) bright_label=1;   /* (Récompenses: every label, the highlighted one too, is at style[1] 0.5) */
             if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && uy>=t->y-2.0f && uy<t->y+list.pitch-2.0f) label=i;
         }
@@ -699,7 +704,7 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
             if (t->x>list.colx+300.0f && t->w>0.5f && t->h<30.0f) ++nvals;
             if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]>=0.7f) bright_label=1;
             if (fabsf(t->x-list.colx)<1.0f && t->h>=22.0f && t->h<=29.0f && t->style[5]>2.5f) sl=t;
-            if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]<0.7f && t->style[5]<2.5f) ++titles;
+            if (t->h>=22.0f && t->h<=29.0f && fabsf(t->x-list.colx)<1.0f && t->style[1]<0.7f && t->style[5]<2.5f && !line_has_value(t,list.item,list.colx,now)) ++titles;
         }
         stats=nvals>=3 && bright_label && titles;
         if (sl) for (int i=0;i<menu_text_count;++i) {
