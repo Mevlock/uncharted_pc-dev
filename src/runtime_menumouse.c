@@ -885,7 +885,7 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
  * wheel goes up and down, the right or side button goes back. Both game codes: 1.02 (US/EU 1.02) and 1.00 (EU/US 1.00, compiled
  * differently: the two functions located by their code and the page layout; their arguments are the same). Not taken yet: his
  * sliders by position, the long lists' scroll bars, the chapter carousel and the treasure models (their 1.00 code is not located). */
-typedef struct { float x, y, w, h, sel; uint64_t us; } U3Row;
+typedef struct { float x, y, w, h, sel; uint64_t us; int front; } U3Row;   /* front: U2 text drawn emphasised (style[5] 3: the lit row, a Yes/No's choices) */
 #define U3_ROWS 192
 static U3Row u3_rows[U3_ROWS];
 static pthread_mutex_t u3_lock=PTHREAD_MUTEX_INITIALIZER;
@@ -966,7 +966,7 @@ static void u3_text(const uint64_t *regs) {
         if (u3_rows[i].us<u3_rows[oldest].us) oldest=i;
     }
     if (slot<0) slot=oldest;
-    u3_rows[slot]=(U3Row){r[0],r[1],r[2],r[3],mark,now};
+    u3_rows[slot]=(U3Row){r[0],r[1],r[2],r[3],mark,now,u2m && st[5]>=2.9f};
     pthread_mutex_unlock(&u3_lock);
 }
 /* A focused page (rows or not: the controller picture has none) keeps the menu mode on; the page holding the row under the cursor moves
@@ -1038,6 +1038,7 @@ static void u3_page(uint64_t self, uint64_t image) {
  * focused child, the child drawn under the cursor (its middle within 10 of the cursor's row, the cursor's x inside it) takes the
  * focus. Hidden pages are updated too: requiring the cursor inside the child keeps a page behind a dialog from taking it. */
 static volatile uint64_t u2_host;
+static volatile uint64_t u2_nopage_us;   /* the last jump found no focused page (a Yes/No over the menu): the d-pad steps for a second */
 void runtime_menumouse_u2_host(uint64_t host) {
     if (host!=u2_host) printf("Menu mouse: Uncharted 2 menu host %#llx (direct jump to the row under the cursor)\n",(unsigned long long)host);
     u2_host=host;
@@ -1088,7 +1089,7 @@ static void u2_jump(uint64_t image) {
             if (d<10.0f && d<best) { best=d; best_ch[0]=ch[focus]; best_vt[0]=vt[focus]; best_ch[1]=ch[k]; best_vt[1]=vt[k]; found=1; }
         }
     }
-    if (!found) { if (mouse_debug()) printf("Menu mouse: U2 jump: no row at %.0f %.0f (%d pages)\n",cx,cy,pages); u3_jump_done=-2; return; }
+    if (!found) { if (!pages) u2_nopage_us=now_us(); if (mouse_debug()) printf("Menu mouse: U2 jump: no row at %.0f %.0f (%d pages)\n",cx,cy,pages); u3_jump_done=-2; return; }
     if (best_ch[0]!=best_ch[1]) {
         uint64_t f0=0, f1=0;
         if (!safe_read(&f0,best_vt[0]+0x30,8) || !safe_read(&f1,best_vt[1]+0x30,8) || f0<image || f0>=image+0x2000000 || f1<image || f1>=image+0x2000000) {
@@ -1111,7 +1112,7 @@ static int u3_menu_open(uint64_t now) {
     return seen && now-seen<800000;
 }
 static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
-    static struct { float last_x, last_y, req_cy, step_cy, step_cx; int last_left, active, click, steps, step_dir; uint64_t click_until, click_deadline, req_us, step_until, next_step; float nojump_cy, nojump_cx; int nojump; } h={-1e9f,-1e9f,-1.0f,-1.0f,-1.0f,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    static struct { float last_x, last_y, req_cy, step_cy, step_cx; int last_left, active, click, steps, step_dir; uint64_t click_until, click_deadline, req_us, step_until, next_step; float nojump_cy, nojump_cx; int nojump; float step_sel_cy, step_sel_cx; } h={-1e9f,-1e9f,-1.0f,-1.0f,-1.0f,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
     uint32_t out=0;
     float ux=0, uy=0;
     if (scripted_cursor) { ux=scripted_ux*UI_WIDTH; uy=scripted_uy*UI_HEIGHT; }
@@ -1144,7 +1145,25 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             const int bar=!u2m && u3_in_bar(r,now);
             if (!have_sel || bar>sel_bar || (bar==sel_bar && (r->sel>sel.sel+0.01f || (fabsf(r->sel-sel.sel)<=0.01f && r->w>sel.w)))) { sel=*r; have_sel=1; sel_bar=bar; }
         }
-        if (ux>=r->x && ux<=r->x+r->w && uy>=r->y && uy<=r->y+r->h && (!have_hov || r->w*r->h<hov.w*hov.h)) { hov=*r; have_hov=1; }
+        if (ux>=r->x && ux<=r->x+r->w && uy>=r->y && uy<=r->y+r->h && 
+            (!have_hov || r->front>hov.front || (r->front==hov.front && r->w*r->h<hov.w*hov.h))) { hov=*r; have_hov=1; }   /* U2: the rows faded behind a Yes/No lose to its choices */
+    }
+    /* U2's Yes/No: a box spanning both choices (520 wide, behind them) holds the cursor in the gap and at the choices' edges; it is
+     * not a row of its own: a choice on its line within 20 of the cursor counts (when it holds two or more emphasised texts there);
+     * the middle of the gap is no row */
+    if (have_hov && !hov.front) {
+        const float hcy=hov.y+hov.h*0.5f;
+        U3Row closest={0};
+        int inner=0;
+        float best=1e9f;
+        for (int i=0;i<U3_ROWS;++i) {
+            const U3Row *r=&u3_rows[i];
+            if (!r->us || now-r->us>=100000 || !r->front || fabsf(r->y+r->h*0.5f-hcy)>2.0f || r->x<hov.x-0.5f || r->x+r->w>hov.x+hov.w+0.5f) continue;
+            ++inner;
+            const float d=ux<r->x ? r->x-ux : ux>r->x+r->w ? ux-(r->x+r->w) : 0.0f;   /* to the choice's box */
+            if (d<best) { best=d; closest=*r; }
+        }
+        if (inner>=2) { if (best<=20.0f) hov=closest; else have_hov=0; }
     }
     /* U3's Yes/No: the lit choice in the bar and another lit choice of its size in the same column. The jump cannot move it (it
      * would move the pause page behind it): the d-pad steps to the choice under the cursor (its bar's size counts), as on U2. */
@@ -1176,18 +1195,23 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     const float hov_cx0=hov.x+hov.w*0.5f;
     if (h.nojump && (fabsf(hov_cy-h.nojump_cy)>1.0f || fabsf(hov_cx0-h.nojump_cx)>1.0f)) h.nojump=0;
     if (u2m && !u3_jump_req && u3_jump_done<0 && have_hov && fabsf(hov_cy-h.req_cy)<=1.0f) { h.nojump=1; h.nojump_cy=hov_cy; h.nojump_cx=hov_cx0; u3_jump_done=0; }
-    const int step_mode=dialog || (u2m && (h.nojump || !u2_host));
+    const int step_mode=dialog || (u2m && (h.nojump || !u2_host || (u2_nopage_us && now-u2_nopage_us<1000000)));
     if (step_mode && have_hov && have_sel && !same && (h.active || h.click)) {
         /* U2: one d-pad press every 110 ms towards the row under the cursor; a row the presses never reach (a section title) is given up
          * after as many presses as rows between them and two more, until the cursor moves to another row */
         const float hov_cx=hov.x+hov.w*0.5f, sel_cx=sel.x+sel.w*0.5f;
         if (fabsf(hov_cy-h.step_cy)>1.0f || fabsf(hov_cx-h.step_cx)>1.0f) { h.step_cy=hov_cy; h.step_cx=hov_cx; h.steps=0; }
         const int budget=(int)ceilf(fabsf(hov_cy-sel_cy)/fmaxf(hov.h,20.0f))+2;
-        if (now>=h.next_step && h.steps<budget) {
+        /* the next press once the highlight has left the row of the last one (its fade takes a while: pressing on a timer overshot), or
+         * after 250 ms if it has not moved */
+        const int moved_on=h.steps>0 && now>=h.step_until+20000 && (fabsf(sel_cy-h.step_sel_cy)>1.0f || fabsf(sel_cx-h.step_sel_cx)>1.0f);
+        if ((now>=h.next_step || moved_on) && h.steps<budget) {
             h.step_dir=hov_cy>sel_cy+1.5f ? BTN_DOWN : hov_cy<sel_cy-1.5f ? BTN_UP : hov_cx>sel_cx ? BTN_RIGHT : BTN_LEFT;
-            h.step_until=now+50000; h.next_step=now+110000; ++h.steps;
+            h.step_until=now+50000; h.next_step=now+250000; ++h.steps;
+            h.step_sel_cy=sel_cy; h.step_sel_cx=sel_cx;
+            if (mouse_debug()) printf("Menu mouse: step %d/%d dir %#x: cursor row %.0f %.0f, lit row %.0f %.0f (%.2f)%s\n",h.steps,budget,(unsigned)h.step_dir,hov_cx,hov_cy,sel_cx,sel_cy,sel.sel,moved_on ? " (the highlight moved)" : "");
         }
-        if (h.steps>=budget && now>=h.next_step) { h.active=0; h.click=0; }
+        if (h.steps>=budget && now>=h.next_step) { h.active=0; h.click=0; if (mouse_debug()) printf("Menu mouse: steps given up: cursor row %.0f %.0f, lit row %.0f %.0f (%.2f)\n",hov_cx,hov_cy,sel_cx,sel_cy,sel.sel); }
     }
     if (now<h.step_until) out|=(uint32_t)h.step_dir;
     if (!step_mode && have_hov && !same && (h.active || h.click) && !u3_jump_req) {
@@ -1198,7 +1222,18 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         }
     }
     if (u3_jump_req && now-h.req_us>300000) u3_jump_req=0;   /* no page took it (the page was changing): asked again later */
-    if (same) {
+    /* stepping (a Yes/No): the cursor's choice counts as reached once the highlight has settled there; mid-fade the old choice can
+     * still look the most lit, and stopping then left the highlight on the other choice until the mouse moved again */
+    if (mouse_debug()) {   /* the hover's state while the cursor moves (5 a second at most) */
+        static uint64_t shown;
+        if (moved && now-shown>200000) {
+            shown=now;
+            printf("Menu mouse: at %.0f %.0f: cursor row %s %.0f %.0f %.0fx%.0f front %d, lit row %s %.0f %.0f (%.2f), same %d, active %d click %d, step mode %d (dialog %d nojump %d), steps %d\n",
+                   ux,uy,have_hov ? "yes" : "no",hov.x,hov.y,hov.w,hov.h,hov.front,have_sel ? "yes" : "no",sel.x+sel.w*0.5f,sel_cy,sel.sel,same,h.active,h.click,
+                   step_mode,dialog,h.nojump,h.steps);
+        }
+    }
+    if (same && (!step_mode || sel.sel>=0.95f)) {
         h.active=0;
         if (h.click) { h.click=0; h.click_until=now+120000; }
     }
