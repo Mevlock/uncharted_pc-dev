@@ -57,6 +57,8 @@ void bbgpu_mouse_configure(int look);
  * it is; 0 before the first frame with a known camera. */
 int bbgpu_camera_yaw(float *yaw_degrees, double *age_seconds);
 int bbgpu_mouse_sample(float *dx, float *dy, uint32_t *buttons, int *wheel);
+/* The mouse motion only (BB_MOUSE_HOOK_TAKE=1): a camera hook takes it at its own update. */
+int bbgpu_mouse_take_motion(float *dx, float *dy);
 /* The game window is in front (Windows; 1 without a window): the controller is read only then. */
 int bbgpu_window_foreground(void);
 /* 1 while the Enter of an Alt+Enter (window <-> fullscreen) is still held: the game must not see it. */

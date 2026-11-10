@@ -628,8 +628,27 @@ static int mouse_debug(void) {
     if (on<0) on=getenv("BB_MOUSE_DEBUG")!=NULL;
     return on;
 }
+/* BB_MOUSE_HOOK_TAKE=1 (test, from the 11-10 study of BilalReloaded's port): a camera hook takes the mouse
+ * motion of the moment it runs instead of what the last pad read queued. The pad read and the camera update
+ * drift against each other, so a steady mouse turned the camera unevenly per frame (the beat the paced take
+ * smooths with a 50 ms window and its lag). The motion goes where the last pad read sent it (its flags,
+ * kept below), and only while every axis of it goes to a camera directly: the stick fallback keeps its share. */
+static int mouse_hook_take(void) {
+    static int on=-1;
+    if (on<0) { const char *e=getenv("BB_MOUSE_HOOK_TAKE"); on=e && e[0]=='1'; }
+    return on;
+}
+static int hook_take_feed;  /* bits: 1 follow/joypad/cover queues fed, 2 raw aim queue fed, 4 aim kept, 8 all direct */
+static void hook_take_motion(void) {
+    float mdx=0.0f, mdy=0.0f;
+    if (!(hook_take_feed&8) || !bbgpu_mouse_take_motion(&mdx,&mdy) || (mdx==0.0f && mdy==0.0f)) return;
+    if (hook_take_feed&1) for (int q=0;q<2;++q) { camera_dx[q]+=mdx; camera_dy[q]+=mdy; }
+    if (hook_take_feed&2) { camera_dx[2]+=mdx; camera_dy[2]+=mdy; }
+    if (hook_take_feed&4) { aim_dx+=mdx; aim_dy+=mdy; }
+}
 static int camera_take(int queue, float *dx, float *dy) {
     pthread_mutex_lock(&camera_lock);
+    if (mouse_hook_take()) hook_take_motion();
     *dx=camera_dx[queue]; *dy=camera_dy[queue];
     camera_dx[queue]=camera_dy[queue]=0;
     pthread_mutex_unlock(&camera_lock);
@@ -967,6 +986,7 @@ static void raw_aim(const char *game, uint64_t controller, const uint64_t *regs,
     if (aim_off) return;
     const uint64_t now=now_us();
     pthread_mutex_lock(&camera_lock);
+    if (mouse_hook_take()) hook_take_motion(); /* camera_lock is held */
     const float dx=aim_dx, dy=aim_dy;
     aim_dx=aim_dy=0.0f;
     pthread_mutex_unlock(&camera_lock);
@@ -2113,6 +2133,11 @@ static void sample_host(PadData *d) {
     const int direct_x=joypad || aiming || raw_aiming || (cover && !aim_held) || (following && !aim_held && follow_direct);
     const int direct_y=joypad || aiming || raw_aiming || (cover && !aim_held) ||
                        (following && !aim_held && follow_direct && follow_has_arc);
+    pthread_mutex_lock(&camera_lock);
+    hook_take_feed=(captured && (following || joypad || cover) ? 1 : 0) |
+                   (captured && aim_held && raw_aim_enabled() ? 2 : 0) | (captured && raw_aim_armed(now) ? 4 : 0) |
+                   (captured && direct_x && direct_y ? 8 : 0);
+    pthread_mutex_unlock(&camera_lock);
     if (captured && direct_x && direct_y) {
         mouse_vx=mouse_vy=0; mouse_last_us=0;
     } else if (captured) {

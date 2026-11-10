@@ -97,6 +97,16 @@ extern "C" void bbgpu_mouse_rate(double window_s, float* rate_x, float* rate_y) 
     *rate_y = static_cast<float>((mouse_cum_y - base_y) / window_s);
 }
 
+/// bbport (BB_MOUSE_HOOK_TAKE=1, test): the mouse motion only, for a camera hook taking it at its own update;
+/// buttons and the wheel stay for the pad read. 0 when the mouse is not captured.
+extern "C" int bbgpu_mouse_take_motion(float* dx, float* dy) {
+    std::scoped_lock lock{mouse_mutex};
+    *dx = mouse_dx;
+    *dy = mouse_dy;
+    mouse_dx = mouse_dy = 0.0f;
+    return mouse_captured ? 1 : 0;
+}
+
 extern "C" int bbgpu_mouse_sample(float* dx, float* dy, uint32_t* buttons, int* wheel) {
     std::scoped_lock lock{mouse_mutex};
     *dx = mouse_dx;
