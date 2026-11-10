@@ -227,6 +227,7 @@ WIN_NUMPAD = {**{0x60 + n: f'Keypad {n}' for n in range(10)},
 MOUSE_SENS_MIN, MOUSE_SENS_MAX = 0.1, 10.0  # the Controls page slider (the game's default pace is 1)
 # Times the sensitivity while aiming, and for up and down (1 = the same as looking / sideways).
 MOUSE_RATIO_MIN, MOUSE_RATIO_MAX = 0.25, 4.0
+CAMERA_VERTICAL_MAX = 8.0   # the normal camera's up / down (its arc is 1.3-5x slower than sideways)
 # Insert opens the in-game settings menu; Left Alt frees the mouse cursor.
 RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
@@ -238,7 +239,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '1.0', 'mouse_invert_y': False,
-                'mouse_aim_sensitivity': '1.0', 'mouse_vertical': '1.0',
+                'mouse_aim_sensitivity': '1.0', 'mouse_vertical': '1.0', 'mouse_camera_vertical': '1.0',
                 'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '65', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
@@ -557,10 +558,10 @@ def mouse_sensitivity(s):
         return '1.00'
 
 
-def mouse_ratio(s, key):
+def mouse_ratio(s, key, top=MOUSE_RATIO_MAX):
     """A saved multiplier of the sensitivity (aiming, vertical) as the game reads it: in the slider's range."""
     try:
-        return f"{min(MOUSE_RATIO_MAX, max(MOUSE_RATIO_MIN, float(s.get(key)))):.2f}"
+        return f"{min(top, max(MOUSE_RATIO_MIN, float(s.get(key)))):.2f}"
     except (TypeError, ValueError):
         return '1.00'
 
@@ -778,6 +779,7 @@ def write_input_ini(s):
              f"mouse_sensitivity={mouse_sensitivity(s)}",
              f"mouse_aim_sensitivity={mouse_ratio(s, 'mouse_aim_sensitivity')}",
              f"mouse_vertical={mouse_ratio(s, 'mouse_vertical')}",
+             f"mouse_camera_vertical={mouse_ratio(s, 'mouse_camera_vertical', CAMERA_VERTICAL_MAX)}",
              f"mouse_invert_y={1 if s.get('mouse_invert_y') else 0}",
              f"pad_invert_y={1 if s.get('pad_invert_y') else 0}",
              f"pad_vibration={1 if s.get('pad_vibration', True) else 0}",
@@ -1938,6 +1940,12 @@ class Launcher:
                         0.05, COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
                  _('Times the sensitivity for moving the mouse up and down, looking and aiming: 1.00 is the '
                    'same as sideways.'))
+        self.row(f, _('Camera up and down'),
+                 Slider(self.tk, self.target(f), self.var('mouse_camera_vertical'), MOUSE_RATIO_MIN, CAMERA_VERTICAL_MAX,
+                        0.05, COLORS, self.px, self.font_ui_md, width=300, log=True, entry=True),
+                 _('Times the up and down speed of the normal camera only (not while aiming). That camera moves '
+                   'up and down along the game’s own arc, as with the right stick, which is slower than turning '
+                   'sideways; 2 to 4 brings it close. The in-game menu (Insert) changes it while you play.'))
         self.check(f, 'mouse_invert_y', _('Invert the mouse vertically'))
 
         self.section(f, _('Button pictures'))

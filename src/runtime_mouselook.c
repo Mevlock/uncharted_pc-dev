@@ -125,6 +125,7 @@ static float look_scale(void) {
     return base*s*aim;
 }
 static float look_invert(void) { return settings_invert_y ? -1.0f : 1.0f; }
+float runtime_mouse_camera_vertical(void);   /* runtime_pad.c: "Camera up and down", the cameras that move along the game's arc */
 /* The movement with the up/down speed applied. */
 static int take_mouse(float *dx, float *dy) {
     if (!take_raw(dx,dy)) return 0;
@@ -610,7 +611,7 @@ static void u3_camera_input(unsigned char *camera, float *look, uint64_t *regs) 
         const float yaw_full=f[0x7578/4]*f[0x7604/4]*0.017453292f; /* rad/s at full stick */
         const float pitch_full=f[0x7588/4]*f[0x7608/4];             /* curve units/s */
         if (yaw_full>1e-4f && pitch_full>0.0f && isfinite(yaw_full) && isfinite(pitch_full)) {
-            const float delta=dy*per_count*look_invert()*(pitch_full/yaw_full);
+            const float delta=dy*per_count*look_invert()*runtime_mouse_camera_vertical()*(pitch_full/yaw_full);
             float *pitch=(float *)(camera+0x7874);
             const float next=((U3PitchStep)(image+u3->pitch))(camera+0x7750,*pitch,delta);
             if (isfinite(next)) *pitch=next;
@@ -650,7 +651,7 @@ static void u2_camera_input(unsigned char *camera, float *look, uint64_t *regs) 
         const float yaw_full=tune[0x70/4]*f[0x9fa8/4]*0.017453292f;
         const float pitch_full=tune[0x80/4]*f[0x9fac/4];
         if (yaw_full>1e-4f && pitch_full>0.0f && isfinite(yaw_full) && isfinite(pitch_full)) {
-            const float delta=dy*per_count*look_invert()*(pitch_full/yaw_full);
+            const float delta=dy*per_count*look_invert()*runtime_mouse_camera_vertical()*(pitch_full/yaw_full);
             const float next=((U2PitchStep)(image+u2->pitch))(camera,delta);
             if (isfinite(next)) *(float *)(camera+0x9e60)=next;
         }
@@ -832,7 +833,7 @@ static void u1_follow_turn(unsigned char *camera, float *dir, const float *tune,
         const float yaw_full=tune[0x5c/4]*f[0x13d0/4]*0.017453292f;
         const float arc_full=tune[0x6c/4]*f[0x13d4/4];
         if (yaw_full>1e-4f && arc_full>0.0f && isfinite(yaw_full) && isfinite(arc_full)) {
-            const float delta=dy*per_count*look_invert()*(arc_full/yaw_full);
+            const float delta=dy*per_count*look_invert()*runtime_mouse_camera_vertical()*(arc_full/yaw_full);
             const float next=((U1ArcStep)(image+u1->arc))(camera,delta);
             if (isfinite(next) && next>=0.0f && next<=1.0f) *(float *)(camera+0x12bc)=next;
         }
@@ -1008,7 +1009,7 @@ static void u1_cover_camera_input(unsigned char *camera, unsigned char *params) 
     const float yaw_full=tune[0x20/4]*0.017453292f, pitch_full=tune[0x30/4];
     if (dy!=0.0f && yaw_full>1e-4f && pitch_full>0.0f && isfinite(yaw_full) && isfinite(pitch_full)) {
         float *pitch=(float *)(camera+0x230);
-        float next=*pitch-dy*per_count*look_invert()*(pitch_full/yaw_full);
+        float next=*pitch-dy*per_count*look_invert()*runtime_mouse_camera_vertical()*(pitch_full/yaw_full);
         if (next<-tune[0xc/4]) next=-tune[0xc/4];
         if (next>tune[0x8/4]) next=tune[0x8/4];
         if (isfinite(next)) *pitch=next;

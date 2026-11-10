@@ -465,6 +465,9 @@ static struct {
     /* Times the sensitivity while aiming (L2), and for up and down (looking and aiming). The in-game
      * menu changes all three while the game runs (runtime_mouse_set, another thread: plain floats). */
     volatile float mouse_aim_sensitivity, mouse_vertical;
+    /* Times the up / down speed of the cameras that move up and down along the game's own arc (the normal
+     * camera; U1 cover), on top of mouse_vertical; not while aiming. */
+    volatile float mouse_camera_vertical;
 } input;
 
 /* Whether `name` is one of the keys in `defaults` ("Escape|Return"). */
@@ -513,7 +516,7 @@ static void load_input(void) {
         if (a<16) input.pad[a]=parse_pad(actions[a].pad);
     }
     input.mouse_look=1; input.mouse_sensitivity=1.0f;
-    input.mouse_aim_sensitivity=1.0f; input.mouse_vertical=1.0f;
+    input.mouse_aim_sensitivity=1.0f; input.mouse_vertical=1.0f; input.mouse_camera_vertical=1.0f;
     input.pad_vibration=1; input.pad_vibration_strength=100; input.walk_speed=65;
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
@@ -529,6 +532,7 @@ static void load_input(void) {
             else if (!strcmp(key,"mouse_sensitivity")) input.mouse_sensitivity=(float)atof(value);
             else if (!strcmp(key,"mouse_aim_sensitivity")) input.mouse_aim_sensitivity=(float)atof(value);
             else if (!strcmp(key,"mouse_vertical")) input.mouse_vertical=(float)atof(value);
+            else if (!strcmp(key,"mouse_camera_vertical")) input.mouse_camera_vertical=(float)atof(value);
             else if (!strcmp(key,"mouse_invert_y")) input.mouse_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"pad_invert_y")) input.pad_invert_y=atoi(value)!=0;
             else if (!strcmp(key,"pad_vibration")) input.pad_vibration=atoi(value)!=0;
@@ -549,6 +553,7 @@ static void load_input(void) {
     if (input.mouse_sensitivity<=0.0f) input.mouse_sensitivity=1.0f;
     if (input.mouse_aim_sensitivity<=0.0f) input.mouse_aim_sensitivity=1.0f;
     if (input.mouse_vertical<=0.0f) input.mouse_vertical=1.0f;
+    if (!(input.mouse_camera_vertical>0.0f)) input.mouse_camera_vertical=1.0f;
     if (input.pad_vibration_strength<0) input.pad_vibration_strength=0;
     if (input.pad_vibration_strength>100) input.pad_vibration_strength=100;
     bbgpu_mouse_configure(input.mouse_look);
@@ -619,6 +624,8 @@ void runtime_mouse_get(float *look, float *aim, float *vertical) {
     if (aim) *aim=input.mouse_aim_sensitivity;
     if (vertical) *vertical=input.mouse_vertical;
 }
+float runtime_mouse_camera_vertical(void) { return input.mouse_camera_vertical>0.0f ? input.mouse_camera_vertical : 1.0f; }
+void runtime_mouse_camera_vertical_set(float v) { if (v>0.0f) input.mouse_camera_vertical=v; }
 void runtime_mouse_set(float look, float aim, float vertical) {
     if (look>0.0f) input.mouse_sensitivity=look;
     if (aim>0.0f) input.mouse_aim_sensitivity=aim;

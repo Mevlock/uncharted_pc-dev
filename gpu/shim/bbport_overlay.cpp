@@ -103,6 +103,8 @@ extern "C" const unsigned char bb_font_ja_ttf_end[];
 extern "C" void runtime_restart(void); // bb-probe (probe.c)
 extern "C" void runtime_mouse_get(float* look, float* aim, float* vertical); // runtime_pad.c
 extern "C" void runtime_mouse_set(float look, float aim, float vertical);
+extern "C" float runtime_mouse_camera_vertical(void);
+extern "C" void runtime_mouse_camera_vertical_set(float v);
 
 namespace BbOverlay {
 
@@ -837,8 +839,13 @@ void Menu() {
         if (ImGui::SliderFloat(TI("Vertical sensitivity"), &vertical, 0.25f, 4.0f, "%.2f", log)) {
             runtime_mouse_set(0.0f, 0.0f, vertical);
         }
+        float camera = runtime_mouse_camera_vertical();
+        if (ImGui::SliderFloat(TI("Camera up and down"), &camera, 0.25f, 8.0f, "%.2f", log)) {
+            runtime_mouse_camera_vertical_set(camera);
+        }
         Hint(T("Aiming: times the mouse sensitivity while aiming (1.00 the same as looking around). Vertical: "
-               "times it for up and down. Ctrl+click to type a value."));
+               "times it for up and down. Camera up and down: the normal camera's up and down only (it moves along "
+               "the game's arc, slower than sideways). Ctrl+click to type a value."));
     }
 
     ImGui::SeparatorText(T("Other"));
