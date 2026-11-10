@@ -995,6 +995,7 @@ static void u2_list_update(uint64_t self, uint64_t image) {
         int t=u2_scroll_top;
         if (vis>=1 && vis<=32) { if (t>hi+1-vis) t=hi+1-vis; if (t<lo) t=lo; const int32_t w=t; safe_write(self+0x248,&w,4); top=t; }
         u2_scroll_pending=0;
+        if (mouse_debug()) printf("Menu mouse: U2 list view scrolled to row %d\n",t);
     }
     const uint64_t now=now_us();
     float rc[4]={0,0,0,0};
@@ -1047,6 +1048,7 @@ static void u3_list_update(uint64_t self, uint64_t image, int which) {
         int t=u2_scroll_top; if (t>hi+1-vis) t=hi+1-vis; if (t<lo) t=lo;
         const int32_t w=t; safe_write(self+0x188,&w,4); first=t;
         u2_scroll_pending=0;
+        if (mouse_debug()) printf("Menu mouse: U3 list view scrolled to row %d\n",t);
     }
     uint8_t fl=0;
     safe_read(&fl,self+8,1);
@@ -1054,7 +1056,7 @@ static void u3_list_update(uint64_t self, uint64_t image, int which) {
     pthread_mutex_lock(&u3_lock);
     int slot=-1, oldest=0;
     for (int i=0;i<16;++i) { if (u2_lists[i].w==self) { slot=i; break; } if (u2_lists[i].us<u2_lists[oldest].us) oldest=i; }
-    if (slot<0) { slot=oldest; if (mouse_debug()) printf("Menu mouse: U3 list control %#llx: values %d..%d (now %d), rows %d..%d seen\n",(unsigned long long)self,lo,hi,cur,first,first+vis-1); }
+    if (slot<0) { slot=oldest; if (mouse_debug()) printf("Menu mouse: U3 list control %#llx: values %d..%d (now %d), rows %d..%d seen, rect %.0f %.0f %.0fx%.0f\n",(unsigned long long)self,lo,hi,cur,first,first+vis-1,rc[0],rc[1],rc[2],rc[3]); }
     u2_lists[slot]=(U2List){self,ds,cur,lo,hi,first>=lo ? first : lo,vis,now,rc[0],rc[1],rc[2],rc[3],fl};
     pthread_mutex_unlock(&u3_lock);
 }
@@ -1416,6 +1418,12 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     if (now<car.until) out|=car.dir;
     menu_hover=have_hov;
     const float hov_cy=hov.y+hov.h*0.5f, sel_cy=sel.y+sel.h*0.5f;
+    int dialog_side=0;   /* U2: a Yes/No side by side on screen (two emphasised choices on one line): the wheel goes left / right */
+    if (u2m && have_sel && sel.front) {
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<U3_ROWS && !dialog_side;++i) { const U3Row *r=&u3_rows[i]; if (r->us && now-r->us<100000 && r->front && fabsf(r->y+r->h*0.5f-sel_cy)<2.0f && fabsf(r->x-sel.x)>20.0f && r->h<=42.0f) dialog_side=1; }
+        pthread_mutex_unlock(&u3_lock);
+    }
     /* the same row: the same line, and (two columns: U2's main menu) overlapping in x */
     const int same=have_hov && have_sel && fabsf(hov_cy-sel_cy)<1.5f && hov.x<sel.x+sel.w && sel.x<hov.x+hov.w;
     if (moved) h.active=1;
@@ -1593,14 +1601,27 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     if (h.nojump && (fabsf(hov_cy-h.nojump_cy)>1.0f || fabsf(hov_cx0-h.nojump_cx)>1.0f)) h.nojump=0;
     static int u3_timeouts;   /* U3: jump requests for this row no page answered (a page the jump does not know: Chapter select's) */
     if (((u2m && u3_jump_done<0) || (u3m && u3_jump_done==-3)) && !u3_jump_req && have_hov && fabsf(hov_cy-h.req_cy)<=1.0f) { h.nojump=1; h.nojump_cy=hov_cy; h.nojump_cx=hov_cx0; u3_jump_done=0; }
-    const int step_mode=dialog || (u3m && h.nojump) || (u2m && (h.nojump || !u2_host || (u2_nopage_us && now-u2_nopage_us<1000000)));
+    /* the cursor over a list (a focused list control holding it: U2 Rewards, U3 Cutscenes / Treasures / Statistics): the list's own
+     * value jumps (below), no page jump requests and no d-pad steps (U3 only got there after two unanswered page requests, then
+     * stepped as well) */
+    int in_list=0;
+    U2List over_list={0};
+    if ((u2m || u3m) && !dialog) {
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<16 && !in_list;++i) {
+            const U2List *l=&u2_lists[i];
+            if (l->us && now-l->us<150000 && l->focused && l->vis>=3 && l->rh>=70.0f && ux>=l->rx-30.0f && ux<=l->rx+l->rw && uy>=l->ry && uy<=l->ry+l->rh) { in_list=1; over_list=*l; }
+        }
+        pthread_mutex_unlock(&u3_lock);
+    }
+    const int step_mode=in_list || dialog || (u3m && h.nojump) || (u2m && (h.nojump || !u2_host || (u2_nopage_us && now-u2_nopage_us<1000000)));
     /* U2 1.02, a list (no page holds its rows): the value of the list is set to the row under the cursor at once (rows counted from the lit
      * one, by the rows' pitch) instead of d-pad steps */
     /* U2 1.02, the scroll bar of a long list (antikmewzik's): a drawing left of the list's rows (70 to 12 left of them), as tall as the
      * rows seen. A click on it, then a drag, puts the first row seen where the cursor is along it (the selection stays). The list and its
      * column come from the drawn rows: the column holding most rows 24-31 tall, the fresh list control with more values than rows seen. */
     static struct { int drag; uint64_t w; } sb;
-    if (u2m && !dialog) {
+    if ((u2m || u3m) && !dialog) {
         float xs[16]; int cnt[16], nx=0;
         pthread_mutex_lock(&u3_lock);
         for (int i=0;i<U3_ROWS;++i) {
@@ -1627,7 +1648,8 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         if (clicked && mouse_debug()) printf("Menu mouse: scroll bar check: column x %.0f (%d rows, %.0f..%.0f), list %s (%d seen)\n",col>=0 ? xs[col] : -1.0f,col>=0 ? cnt[col] : 0,top_cy,bot_cy,have ? "yes" : "no",have ? l.vis : 0);
         if (have && cnt[col]>=2) {
             const float pitch=(bot_cy-top_cy)/(float)(cnt[col]-1), top=top_cy-pitch*0.5f, rail_h=pitch*(float)l.vis, rowx=xs[col];
-            const int in_rail=ux>=rowx-70.0f && ux<=rowx-12.0f && uy>=top && uy<=top+rail_h;
+            /* (U2: a drawing 70 to 12 left of the rows; U3: the list's own left edge, antikmewzik's lx-8 .. lx+22) */
+            const int in_rail=(u2m ? ux>=rowx-70.0f && ux<=rowx-12.0f : ux>=l.rx-8.0f && ux<=l.rx+22.0f) && uy>=top && uy<=top+rail_h;
             if (clicked && in_rail && !picked) {
                 sb.drag=1; sb.w=l.w; picked=1;
                 if (mouse_debug()) printf("Menu mouse: U2 scroll bar grabbed (list of %d, %d seen)\n",l.hi-l.lo+1,l.vis);
@@ -1711,7 +1733,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     /* U2 steps only between a Yes/No's two emphasised choices: its pages and lists jump directly, and steps towards anything else (a
      * list's title, a heading) pressed Up past the first row and wrapped the list round to its end */
     const int u2_choice=hov.front && sel.front;
-    if (step_mode && !list_jump && !sb_quiet && (!u2m || u2_choice) && have_hov && have_sel && !same && (h.active || h.click)) {
+    if (step_mode && !list_jump && !in_list && !sb_quiet && (!u2m || u2_choice) && have_hov && have_sel && !same && (h.active || h.click)) {
         /* U2: one d-pad press every 110 ms towards the row under the cursor; a row the presses never reach (a section title) is given up
          * after as many presses as rows between them and two more, until the cursor moves to another row */
         const float hov_cx=hov.x+hov.w*0.5f, sel_cx=sel.x+sel.w*0.5f;
@@ -1763,9 +1785,25 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         if (h.click) { h.click=0; h.click_until=now+120000; }
     }
     if (now<h.click_until) out|=BTN_CROSS;
-    if (!info) {
-        if (now<wheel_until_us[0]) out|=BTN_UP;
-        if (now<wheel_until_us[1]) out|=BTN_DOWN;
+    /* the wheel (antikmewzik's per-screen wheel): over a list longer than its rows seen it scrolls the view three rows a notch (the
+     * selection stays); on a Yes/No side by side (U2) it goes left / right; elsewhere a d-pad row */
+    static uint64_t wheel_seen[2];
+    int wheel_done=0;
+    if (in_list && over_list.hi-over_list.lo+1>over_list.vis) {
+        for (int i=0;i<2;++i) {
+            if (wheel_until_us[i]==wheel_seen[i]) continue;
+            wheel_seen[i]=wheel_until_us[i];
+            int t=(u2_scroll_pending && u2_scroll_w==over_list.w ? u2_scroll_top : over_list.top)+(i==0 ? -3 : 3);
+            if (t>over_list.hi+1-over_list.vis) t=over_list.hi+1-over_list.vis;
+            if (t<over_list.lo) t=over_list.lo;
+            u2_scroll_w=over_list.w; u2_scroll_top=t; u2_scroll_pending=1;
+        }
+        wheel_done=1;
+    } else { wheel_seen[0]=wheel_until_us[0]; wheel_seen[1]=wheel_until_us[1]; }
+    if (!info && !wheel_done) {
+        const int across=u2m && dialog_side;
+        if (now<wheel_until_us[0]) out|=across ? BTN_LEFT : BTN_UP;
+        if (now<wheel_until_us[1]) out|=across ? BTN_RIGHT : BTN_DOWN;
     }
     return out;
 }
