@@ -136,7 +136,9 @@ static int take_mouse(float *dx, float *dy) {
 /* (Bilal) While aiming the aim cameras take the mouse (their own hooks below); the follow camera keeps
  * still (a turn of it would only show after aiming). It neither takes the movement nor counts as a hook
  * call then, so the pad's direct mode while aiming means an aim hook took the mouse at every pad read. */
+static volatile uint64_t look_camera_ms;   /* the last call of a follow / cover camera hook (take_look) */
 static int take_look(float *dx, float *dy) {
+    look_camera_ms=now_ms();
     if (runtime_pad_aim_held()) { *dx=*dy=0.0f; return 0; }
     return take_mouse(dx,dy);
 }
@@ -670,8 +672,15 @@ static void u2_camera_input(unsigned char *camera, float *look, uint64_t *regs) 
  * *(camera + 0x1290)) by the stick with a ramp too; the mouse turns both the same way. */
 static LookCheck u3_aim={.name="U3 aim"}, u2_aim={.name="U2 aim"};
 static LookCheck u3_cover_look={.name="U3 cover"}, u2_cover_look={.name="U2 cover"};
+/* U2 / U3: the aim camera takes the mouse while aiming, and also where it is the only camera running: a mounted gun
+ * (U2's convoy turret runs the aim camera all the time and no follow camera; the mouse as the right stick there turned it
+ * at the game's slow stick speed, the old mouse code turned the aim directly). On foot the follow camera runs every
+ * frame (its hook is called while aiming too): there aiming still needs the aim button. */
+static int aim_active(void) {
+    return runtime_pad_aim_held() || now_ms()-look_camera_ms>250;
+}
 static int aim_take(LookCheck *s, const int *flags, float *dx, float *dy) {
-    if (!runtime_pad_aim_held() || !take_mouse(dx,dy) || (*dx==0.0f && *dy==0.0f)) return 0;
+    if (!aim_active() || !take_mouse(dx,dy) || (*dx==0.0f && *dy==0.0f)) return 0;
     s->taken[0]+=*dx;
     s->taken[1]+=*dy;
     game_invert(flags,dx,dy);
@@ -680,7 +689,7 @@ static int aim_take(LookCheck *s, const int *flags, float *dx, float *dy) {
 static void aim_input(const char *hook, LookCheck *s, int enabled, unsigned char *camera, float *dir, const int *flags,
                       float lo, float hi) {
     const float heading=dir_heading(dir), pitch=dir_pitch(dir);
-    if (!enabled || !runtime_pad_aim_held()) {
+    if (!enabled || !aim_active()) {
         s->camera=NULL;
         mouse_trace(hook,camera,1,heading,pitch,0.0f,0.0f,!enabled ? 'o' : 'r');
         return;
