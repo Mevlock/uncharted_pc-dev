@@ -5,6 +5,16 @@ mouse buttons bound in `input.ini` while the keyboard or mouse was used last, as
 input from an Xbox (or any other non-PlayStation) controller, and gives the game's own pictures
 back after PlayStation controller input. It also makes the bindings follow the keyboard layout.
 
+**Since 0.3.6.51 the pictures are antikmewzik's** (`gpu/shim/bbport_keyicons.cpp`, from his
+[uncharted_pc_controls_qol](https://github.com/antikmewzik/uncharted_pc_controls_qol)): key caps and mice drawn from his
+templates with the legends in the game's own font, his hand-drawn Xbox buttons with halos in the button's colour, and the
+in-world prompts (the interact button and its press frames, the quick-time pucks, the d-pad, the journal, the stick prompts,
+the Controls screen's pad). He knows the textures by the hash of the whole texture (1.02 data); the 1.00 data (EU CUSA02343
+1.00, US 1.00) has other small mips, so its textures are mapped to their 1.02 twins. The port added the square, the U1/U2
+cross and circle and the L1 L2 R1 R2 pictures of all three games in his style (issue #27); each logs
+`KeyIcons: first draw of the ... picture` once. The tables below are the older pictures (`button_prompts.cpp`), still used
+for the Nintendo buttons and for any picture his tables don't know; `BB_KEY_ICONS=0` uses only them.
+
 | | |
 |---|---|
 | ![U3 title: Press SPACE](screenshots/keyboard-prompts-u3-title.webp) | ![U1: mouse buttons to aim and shoot](screenshots/keyboard-prompts-u1-mouse-aim-shoot.webp) |
