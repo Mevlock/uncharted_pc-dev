@@ -1706,7 +1706,10 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             }
         }
     }
-    if (step_mode && !list_jump && !sb_quiet && have_hov && have_sel && !same && (h.active || h.click)) {
+    /* U2 steps only between a Yes/No's two emphasised choices: its pages and lists jump directly, and steps towards anything else (a
+     * list's title, a heading) pressed Up past the first row and wrapped the list round to its end */
+    const int u2_choice=hov.front && sel.front;
+    if (step_mode && !list_jump && !sb_quiet && (!u2m || u2_choice) && have_hov && have_sel && !same && (h.active || h.click)) {
         /* U2: one d-pad press every 110 ms towards the row under the cursor; a row the presses never reach (a section title) is given up
          * after as many presses as rows between them and two more, until the cursor moves to another row */
         const float hov_cx=hov.x+hov.w*0.5f, sel_cx=sel.x+sel.w*0.5f;
