@@ -1351,6 +1351,14 @@ static void sample_host(PadData *d) {
     const int pad_used=g && (d->buttons || d->l2>60 || d->r2>60 || abs(d->left_x-128)>64 ||
                              abs(d->left_y-128)>64 || abs(d->right_x-128)>64 || abs(d->right_y-128)>64);
     int keys_used=mouse || wheel || (captured && SDL_fabsf(mdx)+SDL_fabsf(mdy)>3.0f);
+    if (menu) {   /* in a menu the cursor is free (no relative motion): its moves count as the mouse in use */
+        static float last_x=-1.0f, last_y=-1.0f;
+        float x=0.0f, y=0.0f;
+        SDL_GetMouseState(&x,&y);
+        if (last_x>=0.0f && SDL_fabsf(x-last_x)+SDL_fabsf(y-last_y)>3.0f) keys_used=1;
+        last_x=x; last_y=y;
+        keys_used|=menu_buttons!=0 || menu_wheel!=0;
+    }
     for (int a=0;a<ACTIONS && !keys_used;++a) keys_used=action_down(a,k,mouse,now);
     static int prompts_device=-1;
     if (pad_used!=keys_used) {
@@ -1380,7 +1388,8 @@ static void sample_host(PadData *d) {
             if (lx) d->left_x=(uint8_t)(lx<0 ? 0 : 255);
             if (ly) d->left_y=(uint8_t)(ly<0 ? 0 : 255);
         }
-        if (menu) d->buttons|=runtime_menumouse_buttons(k,menu_buttons,menu_wheel,0,0.0f,0.0f);
+        /* (a controller used last: the cursor resting over a row must not pull the highlight back from the pad's moves) */
+        if (menu && keyboard_in_use) d->buttons|=runtime_menumouse_buttons(k,menu_buttons,menu_wheel,0,0.0f,0.0f);
         host_rotate=action_down(A_ROT_CW,k,mouse,now)-action_down(A_ROT_CCW,k,mouse,now);
         rx=action_down(A_RS_RIGHT,k,mouse,now)-action_down(A_RS_LEFT,k,mouse,now);
         ry=action_down(A_RS_DOWN,k,mouse,now)-action_down(A_RS_UP,k,mouse,now);
