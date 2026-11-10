@@ -945,18 +945,22 @@ typedef void (__attribute__((sysv_abi)) *guest_set_fn)(uint64_t, int);
  * maximum); +0x248 is the first row seen, +0x244 the rows seen, +0x22c / +0x228 the value it followed last. A hover on a list row
  * sets the value by the game's own call here, on its thread (EU 1.00's control is compiled differently: not found yet, the d-pad
  * steps there). */
-typedef struct { uint64_t w, ds; int cur, lo, hi, top, vis; uint64_t us; } U2List;
+typedef struct { uint64_t w, ds; int cur, lo, hi, top, vis; uint64_t us; float rx, ry, rw, rh; } U2List;   /* r*: the control's rectangle (+0x90) */
 static U2List u2_lists[16];
 static volatile uint64_t u2_set_ds;
 static volatile int u2_set_val, u2_set_pending, u2_set_keep;
 static volatile uint64_t u2_set_us;   /* (a request no list took: dropped after 300 ms) */
-static int u2_list_pick(uint64_t now, U2List *out) {   /* the list on screen: a fresh widget with more values than rows seen, the widest */
+/* the scroll bar (antikmewzik's): it moves the view only (the first row seen, +0x248), written here on the game's thread */
+static volatile uint64_t u2_scroll_w;
+static volatile int u2_scroll_top, u2_scroll_pending;
+static int __attribute__((unused)) u2_list_pick(uint64_t now, float ux, float uy, U2List *out) {   /* the list under the cursor: a fresh control holding it, the smallest */
     int best=-1;
     pthread_mutex_lock(&u3_lock);
     for (int i=0;i<16;++i) {
         const U2List *l=&u2_lists[i];
-        if (!l->us || now-l->us>150000 || l->vis<2 || l->hi-l->lo+1<l->vis || l->cur<l->lo || l->cur>l->hi) continue;
-        if (best<0 || l->hi-l->lo>u2_lists[best].hi-u2_lists[best].lo) best=i;
+        if (!l->us || now-l->us>150000 || l->hi-l->lo<1 || l->cur<l->lo || l->cur>l->hi) continue;   /* (short lists too: all their rows seen) */
+        if (ux<l->rx || ux>l->rx+l->rw || uy<l->ry || uy>l->ry+l->rh) continue;
+        if (best<0 || l->rw*l->rh<u2_lists[best].rw*u2_lists[best].rh) best=i;
     }
     if (best>=0) *out=u2_lists[best];
     pthread_mutex_unlock(&u3_lock);
@@ -983,12 +987,19 @@ static void u2_list_update(uint64_t self, uint64_t image) {
         if (mouse_debug()) printf("Menu mouse: U2 list set(%d) (was %d, range %d..%d, rows %d..%d seen)\n",v,cur,lo,hi,top,top+vis-1);
         cur=v;
     }
+    if (u2_scroll_pending && u2_scroll_w==self) {
+        int t=u2_scroll_top;
+        if (vis>=1 && vis<=32) { if (t>hi+1-vis) t=hi+1-vis; if (t<lo) t=lo; const int32_t w=t; safe_write(self+0x248,&w,4); top=t; }
+        u2_scroll_pending=0;
+    }
     const uint64_t now=now_us();
+    float rc[4]={0,0,0,0};
+    safe_read(rc,self+0x90,16);
     pthread_mutex_lock(&u3_lock);
     int slot=-1, oldest=0;
     for (int i=0;i<16;++i) { if (u2_lists[i].w==self) { slot=i; break; } if (u2_lists[i].us<u2_lists[oldest].us) oldest=i; }
-    if (slot<0) slot=oldest;
-    u2_lists[slot]=(U2List){self,ds,cur,lo,hi,top,vis,now};
+    if (slot<0) { slot=oldest; if (mouse_debug()) printf("Menu mouse: U2 list control %#llx: values %d..%d (now %d), rows %d..%d seen\n",(unsigned long long)self,lo,hi,cur,top,top+vis-1); }
+    u2_lists[slot]=(U2List){self,ds,cur,lo,hi,top,vis,now,rc[0],rc[1],rc[2],rc[3]};
     pthread_mutex_unlock(&u3_lock);
 }
 
@@ -1485,27 +1496,96 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     const int step_mode=dialog || (u3m && h.nojump) || (u2m && (h.nojump || !u2_host || (u2_nopage_us && now-u2_nopage_us<1000000)));
     /* U2 1.02, a list (no page holds its rows): the value of the list is set to the row under the cursor at once (rows counted from the lit
      * one, by the rows' pitch) instead of d-pad steps */
-    int list_jump=0;
-    if (u2m && step_mode && !dialog && have_hov && have_sel && !same && (h.active || h.click) && fabsf(hov.x-sel.x)<1.0f) {
-        U2List l;
-        if (u2_list_pick(now,&l)) {
-            float pitch=1e9f;
-            pthread_mutex_lock(&u3_lock);
-            for (int i=0;i<U3_ROWS;++i) for (int j=0;j<U3_ROWS;++j) {
-                const U3Row *a=&u3_rows[i], *b=&u3_rows[j];
-                if (!a->us || !b->us || now-a->us>=100000 || now-b->us>=100000 || fabsf(a->x-sel.x)>=1.0f || fabsf(b->x-sel.x)>=1.0f) continue;
-                const float d=(b->y+b->h*0.5f)-(a->y+a->h*0.5f);
-                if (d>12.0f && d<pitch) pitch=d;
+    /* U2 1.02, the scroll bar of a long list (antikmewzik's): a drawing left of the list's rows (70 to 12 left of them), as tall as the
+     * rows seen. A click on it, then a drag, puts the first row seen where the cursor is along it (the selection stays). The list and its
+     * column come from the drawn rows: the column holding most rows 24-31 tall, the fresh list control with more values than rows seen. */
+    static struct { int drag; uint64_t w; } sb;
+    if (u2m && !dialog) {
+        float xs[16]; int cnt[16], nx=0;
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<U3_ROWS;++i) {
+            const U3Row *a=&u3_rows[i];
+            if (!a->us || now-a->us>=100000 || a->h<24.0f || a->h>31.0f) continue;
+            int k=0; while (k<nx && fabsf(xs[k]-a->x)>=1.0f) ++k;
+            if (k==nx) { if (nx>=16) continue; xs[nx]=a->x; cnt[nx]=0; ++nx; }
+            ++cnt[k];
+        }
+        int col=-1; for (int k=0;k<nx;++k) if (col<0 || cnt[k]>cnt[col]) col=k;
+        float top_cy=1e9f, bot_cy=-1e9f;
+        if (col>=0) for (int i=0;i<U3_ROWS;++i) {
+            const U3Row *a=&u3_rows[i];
+            if (!a->us || now-a->us>=100000 || a->h<24.0f || a->h>31.0f || fabsf(a->x-xs[col])>=1.0f) continue;
+            const float c=a->y+a->h*0.5f; if (c<top_cy) top_cy=c; if (c>bot_cy) bot_cy=c;
+        }
+        U2List l={0}; int have=0;
+        for (int i=0;i<16 && col>=0;++i) {
+            const U2List *c=&u2_lists[i];
+            if (!c->us || now-c->us>150000 || c->vis<2 || c->hi-c->lo+1<=c->vis || abs(c->vis-cnt[col])>1) continue;
+            if (!have || c->hi-c->lo>l.hi-l.lo) { l=*c; have=1; }
+        }
+        pthread_mutex_unlock(&u3_lock);
+        if (have && cnt[col]>=2) {
+            const float pitch=(bot_cy-top_cy)/(float)(cnt[col]-1), top=top_cy-pitch*0.5f, rail_h=pitch*(float)l.vis, rowx=xs[col];
+            const int in_rail=ux>=rowx-70.0f && ux<=rowx-12.0f && uy>=top && uy<=top+rail_h;
+            if (clicked && in_rail && !picked) {
+                sb.drag=1; sb.w=l.w; picked=1;
+                if (mouse_debug()) printf("Menu mouse: U2 scroll bar grabbed (list of %d, %d seen)\n",l.hi-l.lo+1,l.vis);
             }
-            pthread_mutex_unlock(&u3_lock);
-            if (pitch<100.0f) {
-                list_jump=1;
-                const int want=l.cur+(int)lroundf((hov_cy-sel_cy)/pitch);
-                if (u2_set_pending && now-u2_set_us>300000) u2_set_pending=0;
-                if (!u2_set_pending && (fabsf(hov_cy-h.req_cy)>1.0f || now-h.req_us>150000)) {
-                    u2_set_ds=l.ds; u2_set_val=want; u2_set_keep=1; u2_set_us=now; u2_set_pending=1;
-                    h.req_cy=hov_cy; h.req_us=now;
-                }
+            if (sb.drag && left && sb.w==l.w && !u2_scroll_pending) {
+                const int n=l.hi-l.lo+1;
+                float th=rail_h*(float)l.vis/(float)n; if (th<12.0f) th=12.0f;
+                float f=(uy-th*0.5f-top)/(rail_h-th); f=f<0.0f ? 0.0f : f>1.0f ? 1.0f : f;
+                const int t=l.lo+(int)(f*(float)(n-l.vis)+0.5f);
+                if (t!=l.top) { u2_scroll_w=l.w; u2_scroll_top=t; u2_scroll_pending=1; }
+            }
+        }
+    }
+    if (!left) sb.drag=0;
+    if (sb.drag) h.active=0;   /* (dragging the bar: no hover jumps meanwhile) */
+    int list_jump=0;
+    /* U2 1.02, a list (no page holds its rows): its value is set to the row under the cursor at once. The list's rows are the texts in
+     * the hovered row's column (24-31 tall); the list control is the fresh one whose rows seen match their count; the row's place counts
+     * from its first row seen (the top of the column). No drawn highlight is read: it fades after a jump (counting from it overshot), and
+     * some lists draw other lit texts (Skins). A hover never scrolls the list. */
+    if (u2m && step_mode && !dialog && have_hov && hov.h>=24.0f && hov.h<=31.0f && (h.active || h.click)) {
+        float pitch=1e9f, top_cy=1e9f, ys[32];
+        int n=0;
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<U3_ROWS;++i) {
+            const U3Row *a=&u3_rows[i];
+            if (!a->us || now-a->us>=100000 || fabsf(a->x-hov.x)>=1.0f || a->h<24.0f || a->h>31.0f) continue;
+            const float acy=a->y+a->h*0.5f;
+            int dup=0;
+            for (int k=0;k<n;++k) if (fabsf(ys[k]-acy)<2.0f) dup=1;
+            if (dup || n>=32) continue;
+            ys[n++]=acy;
+            if (acy<top_cy) top_cy=acy;
+        }
+        pthread_mutex_unlock(&u3_lock);
+        for (int a=0;a<n;++a) for (int b=0;b<n;++b) { const float d=ys[b]-ys[a]; if (d>12.0f && d<pitch) pitch=d; }
+        U2List l, best={0};
+        int have=0, bestd=1000;
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<16;++i) {
+            l=u2_lists[i];
+            if (!l.us || now-l.us>150000 || l.hi-l.lo<1 || l.cur<l.lo || l.cur>l.hi || l.vis<1) continue;
+            const int rows=l.hi-l.lo+1<l.vis ? l.hi-l.lo+1 : l.vis;   /* (a short list: all its values seen) */
+            const int d=abs(rows-n);
+            if (d<bestd || (d==bestd && l.hi-l.lo>best.hi-best.lo)) { bestd=d; best=l; have=1; }
+        }
+        pthread_mutex_unlock(&u3_lock);
+        if (have && bestd<=1 && n>=2 && pitch<100.0f) {
+            l=best;
+            list_jump=1;
+            int want=l.top+(int)lroundf((hov_cy-top_cy)/pitch);
+            if (want<l.top) want=l.top;
+            if (want>l.top+l.vis-1) want=l.top+l.vis-1;
+            if (want>l.hi) want=l.hi;
+            if (want==l.cur) { h.req_cy=hov_cy; h.req_us=now; }   /* (there already: nothing to ask) */
+            if (u2_set_pending && now-u2_set_us>300000) u2_set_pending=0;
+            if (!u2_set_pending && (fabsf(hov_cy-h.req_cy)>1.0f || now-h.req_us>150000)) {
+                u2_set_ds=l.ds; u2_set_val=want; u2_set_keep=1; u2_set_us=now; u2_set_pending=1;
+                h.req_cy=hov_cy; h.req_us=now;
             }
         }
     }
