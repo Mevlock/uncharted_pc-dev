@@ -943,8 +943,7 @@ typedef void (__attribute__((sysv_abi)) *guest_set_fn)(uint64_t, int);
 /* U2 1.02's list control update (0x57e410, antikmewzik's u2_widget_hook): FUN_0057e410(widget, frame) runs every frame for each
  * selector / list. The widget's value is in a data source at widget+0x18 (vtable +0 get, +8 set(value), +0x30 minimum, +0x38
  * maximum); +0x248 is the first row seen, +0x244 the rows seen, +0x22c / +0x228 the value it followed last. A hover on a list row
- * sets the value by the game's own call here, on its thread (EU 1.00's control is compiled differently: not found yet, the d-pad
- * steps there). */
+ * sets the value by the game's own call here, on its thread (EU 1.00: the same function at 0x267f60). */
 typedef struct { uint64_t w, ds; int cur, lo, hi, top, vis; uint64_t us; float rx, ry, rw, rh; int focused; } U2List;   /* focused: the control's flag at +8 (as a page's children) */   /* r*: the control's rectangle (+0x90) */
 static U2List u2_lists[16];
 static volatile uint64_t u2_set_ds;
@@ -1768,6 +1767,10 @@ static const RuntimeGuestCallback u3_sites[]={
     SITE("U3 1.00 menu text (menu mouse)",0x1d6060,u3_text_100_code,6,u3_text_cb),
     SITE("U3 1.00 menu page update (menu mouse)",0x1c5000,u3_page_100_code,6,u3_page_cb),
 };
+/* (EU 1.00 = US 1.00: the same function at 0x267f60, located 2026-11-10 by its scroll call: the value stored to +0x228 and +0x22c, then
+ * vtable +0x68 with it in esi and edx; the same widget fields, other registers) */
+static const unsigned char u2_list_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x50,0x49,0x89,0xf6,0x49,0x89,0xfc,
+                                                0x41,0x80,0xbc,0x24,0x30,0x02,0x00,0x00,0x00};
 static const unsigned char u2_list_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x18,0x49,0x89,0xf7,0x49,0x89,0xfe,
                                                 0x41,0x80,0xbe,0x30,0x02,0x00,0x00,0x00};
 CB(u2_list_cb) { (void)rsi; (void)r14; (void)regs; if (u2m) u2_list_update(rdi,base); }
@@ -1775,12 +1778,13 @@ static const RuntimeGuestCallback u2_sites[]={
     SITE("U2 1.02 menu text (menu mouse)",0x5b56d0,u2_text_102_code,6,u3_text_cb),
     SITE("U2 1.02 list control update (menu mouse)",0x57e410,u2_list_102_code,8,u2_list_cb),
     SITE("U2 1.00 menu text (menu mouse)",0x28ddf0,u2_text_100_code,6,u3_text_cb),
+    SITE("U2 1.00 list control update (menu mouse)",0x267f60,u2_list_100_code,8,u2_list_cb),
 };
 const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
     /* only the sites of the code found */
     if (u1m) { *count=sizeof(u1_sites)/sizeof(*u1_sites)/2; return u1m==&u1_menu_codes[0] ? u1_sites : u1_sites+*count; }
     if (u3m) { *count=2; return u3m==&u3_menu_codes[0] ? u3_sites : u3_sites+2; }
-    if (u2m) { if (u2m==&u2_menu_codes[0]) { *count=2; return u2_sites; } *count=1; return u2_sites+2; }
+    if (u2m) { *count=2; return u2m==&u2_menu_codes[0] ? u2_sites : u2_sites+2; }
     *count=0;
     return u1_sites;
 }
