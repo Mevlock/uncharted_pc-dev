@@ -16,6 +16,8 @@
 
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <thread>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -60,6 +62,21 @@ void ProcessIO(const std::stop_token& stoken, u32 index) {
             io.requests.pop();
         }
         if (request.valid()) {
+            // bbport (issue #30): on a disk where one write takes over a second (an antivirus scanning each
+            // new file, or a hard drive), four writers kept it busy while the game loaded its level from it and
+            // the loading screen crawled for minutes. From the first such write on, one write at a time with a
+            // short pause after it: the game's reads get the disk, the cache still fills behind the game (each
+            // file keeps its writer, so its writes stay in order). BB_CACHE_SLOW_DISK=0: as before.
+            static std::atomic<bool> slow_disk{false};
+            static std::mutex slow_lane;
+            static const bool slow_allowed = [] {
+                const char* env = std::getenv("BB_CACHE_SLOW_DISK");
+                return !(env && env[0] == '0');
+            }();
+            std::unique_lock<std::mutex> lane{slow_lane, std::defer_lock};
+            if (slow_allowed && slow_disk.load(std::memory_order_relaxed)) {
+                lane.lock();
+            }
             const auto start = std::chrono::steady_clock::now();
             request();
             request.get_future().wait();
@@ -70,6 +87,13 @@ void ProcessIO(const std::stop_token& stoken, u32 index) {
             if (ms > 1000) {
                 std::printf("Shader cache: one write took %lld ms (writer %u, %u queued)\n",
                             static_cast<long long>(ms), index, num_requests.load());
+                if (slow_allowed && !slow_disk.exchange(true)) {
+                    std::printf("Shader cache: the disk is slow: one write at a time from now on, behind the game "
+                                "(BB_CACHE_SLOW_DISK=0: off). Excluding the game folder from the antivirus helps.\n");
+                }
+            }
+            if (lane.owns_lock()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
         }
         --num_requests;
