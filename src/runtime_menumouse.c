@@ -1534,7 +1534,10 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         const int gal=arrows && ((u3m && u3_gallery_us && now-u3_gallery_us<4000000) ||
                                  (u2m && !have_sel && !have_hov && !dialog && !(u2_layout_us && now-u2_layout_us<1000000) && !carousel));
         const int car_hover=carousel && ux>=298.0f && ux<=980.0f && uy>=156.0f && uy<=475.0f;
-        menu_hover=have_hov || win_hover || gal || car_hover;
+        const float *cr=u3_car.rc;
+        const int car3=u3m && u3_car.us && now-u3_car.us<150000 && cr[3]>200.0f && u3_car.hi>u3_car.lo && !dialog &&
+                       ((ux>=cr[0]-55.0f && ux<=cr[0]-4.0f) || (ux>=cr[0]+cr[2]+4.0f && ux<=cr[0]+cr[2]+55.0f)) && uy>=cr[1]+60.0f && uy<=cr[1]+cr[3]-60.0f;
+        menu_hover=have_hov || win_hover || gal || car_hover || car3;
     }
     const float hov_cy=hov.y+hov.h*0.5f, sel_cy=sel.y+sel.h*0.5f;
     int dialog_side=0;   /* U2: a Yes/No side by side on screen (two emphasised choices on one line): the wheel goes left / right */
@@ -1656,7 +1659,9 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     }
     /* U2, a page with < > rows (Chapter select): a click just left or right of a big picture (within 70 of its edge, at its height) is
      * its big < >: left or right is pressed at once. Any language: only the page's own picture and arrows are read. */
-    if (clicked && (u2m || u3m) && !picked && !dialog && !have_hov && !carousel) {
+    /* (U3 with its carousel control seen: the chapter is set exactly below, no press the game may drop while the pictures slide) */
+    const int u3_car_live=u3m && u3_car.us && now-u3_car.us<150000 && u3_car.rc[3]>200.0f && u3_car.hi>u3_car.lo;
+    if (clicked && (u2m || u3m) && !picked && !dialog && !have_hov && !carousel && !u3_car_live) {
         pthread_mutex_lock(&u3_lock);
         int arrows=0;
         for (int i=0;i<16 && u3m && !arrows;++i) {   /* U3: its < > texts (10-20 wide) */
