@@ -1332,6 +1332,15 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     }
     pthread_mutex_unlock(&u3_lock);
     if (info) have_hov=0;   /* an information box: the menu below is left alone */
+    if (u2m) {   /* U2's information boxes (a locked reward or skin: a panel 600-800 wide centred on the screen, 700 x 220-245 at x 290): the list
+                  * below is left alone while one is open (the Chapter select picture, 520 wide, is not one) */
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<8 && have_hov;++i) {
+            const U3Row *p=&u2_panels[i];
+            if (p->us && now-p->us<150000 && p->w>=600.0f && p->w<=800.0f && p->h>=150.0f && p->h<=400.0f && fabsf(p->x+p->w*0.5f-640.0f)<40.0f) have_hov=0;
+        }
+        pthread_mutex_unlock(&u3_lock);
+    }
     /* U2's chapter carousel (antikmewzik's): the rows behind it are left alone; a click on its panel left of the pictures presses
      * left, right of them right, on the picture in the middle cross (choose) */
     static struct { uint32_t dir; uint64_t until; } car;
@@ -1548,11 +1557,24 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     const int sb_quiet=sb.drag || (sb_released && now-sb_released<400000);
     if (sb_quiet) { h.active=0; h.click=0; }
     int list_jump=0;
+    static struct { int on, want; uint64_t ds, until, landed, cross_until; } lc;   /* a click on a list row (antikmewzik's u2_ls_cross) */
+    if (lc.on) {
+        U2List cl={0}; int found=0;
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<16 && !found;++i) if (u2_lists[i].us && u2_lists[i].ds==lc.ds && now-u2_lists[i].us<150000) { cl=u2_lists[i]; found=1; }
+        pthread_mutex_unlock(&u3_lock);
+        if (now>lc.until || !found) lc.on=0;
+        else if (cl.cur==lc.want) {
+            if (!lc.landed) lc.landed=now;
+            else if (now-lc.landed>=120000) { lc.on=0; lc.cross_until=now+120000; if (mouse_debug()) printf("Menu mouse: U2 list click: cross on value %d\n",lc.want); }
+        } else lc.landed=0;
+    }
+    if (now<lc.cross_until) out|=BTN_CROSS;
     /* U2 1.02, a list (no page holds its rows): its value is set to the row under the cursor at once. The list's rows are the texts in
      * the hovered row's column (24-31 tall); the list control is the fresh one whose rows seen match their count; the row's place counts
      * from its first row seen (the top of the column). No drawn highlight is read: it fades after a jump (counting from it overshot), and
      * some lists draw other lit texts (Skins). A hover never scrolls the list. */
-    if (u2m && step_mode && !dialog && !sb_quiet && have_hov && hov.h>=24.0f && hov.h<=31.0f && (h.active || h.click)) {
+    if (u2m && step_mode && !dialog && !sb_quiet && have_hov && hov.h>=24.0f && hov.h<=31.0f && (h.active || h.click || clicked)) {
         float pitch=1e9f, top_cy=1e9f, ys[32];
         int n=0;
         pthread_mutex_lock(&u3_lock);
@@ -1587,6 +1609,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             if (want>l.top+l.vis-1) want=l.top+l.vis-1;
             if (want>l.hi) want=l.hi;
             if (want==l.cur) { h.req_cy=hov_cy; h.req_us=now; }   /* (there already: nothing to ask) */
+            if (clicked) { lc.on=1; lc.ds=l.ds; lc.want=want; lc.until=now+1500000; lc.landed=0; h.click=0; }   /* cross once the list is there */
             if (u2_set_pending && now-u2_set_us>300000) u2_set_pending=0;
             if (!u2_set_pending && (fabsf(hov_cy-h.req_cy)>1.0f || now-h.req_us>150000)) {
                 u2_set_ds=l.ds; u2_set_val=want; u2_set_keep=1; u2_set_us=now; u2_set_pending=1;
