@@ -64,15 +64,17 @@ typedef struct {
     const char *version;
     uint64_t item_begin1, item_end1, item_begin2, item_end2, text_draw, menu_event, credits, select_index;
     CodeRef frame_time;   /* the game's frame time (0 while paused) */
-    uint64_t volumes;     /* the four volume floats of the Options (0: not known, those sliders go by steps) */
+    CodeRef audio;        /* the lea of the audio object: its volume floats are at +0x3db20, in the order of the rows */
+    uint64_t volume_set;  /* the volume setter's store "vmovss [rdi+rax*4+0x3db20], xmm0" (checked) */
 } U1MenuCode;
 static const U1MenuCode u1_menu_codes[]={
-    {"1.02",0x133fbc,0x133fc8,0x133feb,0x133ff7,0x13acf0,0x1336c0,0x3b41e0,0x1335a0,{0x860b,{0x48,0x8d,0x05}},0xcc3db8},
-    {"1.00",0x133e2c,0x133e38,0x133e5b,0x133e67,0x13aa70,0x133530,0x576a30,0x133410,{0x860b,{0x48,0x8d,0x05}},0},
+    {"1.02",0x133fbc,0x133fc8,0x133feb,0x133ff7,0x13acf0,0x1336c0,0x3b41e0,0x1335a0,{0x860b,{0x48,0x8d,0x05}},{0x3583df,{0x48,0x8d,0x05}},0x3584ee},   /* (volumes 0xc86298+0x3db20 = 0xcc3db8, antikmewzik's) */
+    {"1.00",0x133e2c,0x133e38,0x133e5b,0x133e67,0x13aa70,0x133530,0x576a30,0x133410,{0x860b,{0x48,0x8d,0x05}},{0x51c66f,{0x48,0x8d,0x05}},0x51c77e},   /* (located 2026-11-10: 0x10fddf8+0x3db20 = 0x113b918) */
 };
 static const U1MenuCode *u1m;           /* the code found, NULL: none (the menus stay as they are) */
 static uint64_t u1_image;               /* port: the image base once a code matched (his name) */
 static const volatile float *u1_frame_time;
+static uint64_t u1_volumes;   /* the image offset of the four volume floats (0: not known, those sliders go by steps) */
 static unsigned char *mm_image;
 static uint64_t mm_image_size;
 /* The original bytes at each site (the moved instructions first). */
@@ -756,7 +758,7 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
                     else if (vp>=2 && vp<=64) {                       /* the volumes: the number of steps; the four values are floats 0..1 */
                         uint32_t slot=99;                               /* in an array of the data segment (1.02), in the order of the rows */
                         h.sl_steps=(int)vp;
-                        if (u1_image && u1m->volumes && safe_read(&slot,model+0x14,4) && slot<4) h.sl_vp=u1_image+u1m->volumes+4u*slot;   /* port: by game code */
+                        if (u1_image && u1_volumes && safe_read(&slot,model+0x14,4) && slot<4) h.sl_vp=u1_image+u1_volumes+4u*slot;   /* port: by game code */
                     }
                 }
                 (void)steps;
@@ -1982,6 +1984,12 @@ void runtime_menumouse_prepare(unsigned char *image, uint64_t image_size) {
         if (!bad && !ft) bad="frame time";
         if (bad) { printf("Menu mouse: Uncharted 1 %s: the %s code differs: menus without the mouse\n",c->version,bad); break; }
         u1_frame_time=(const volatile float *)ft;
+        {   /* the volumes: the audio object's floats, where its setter stores them */
+            static const unsigned char set[]={0x48,0x63,0xc6,0xc5,0xfa,0x11,0x84,0x87,0x20,0xdb,0x03,0x00,0xc3};
+            const unsigned char *audio=code_ref(&c->audio);
+            if (audio && code_is(c->volume_set-3,set,sizeof(set))) u1_volumes=(uint64_t)(audio-image)+0x3db20u;
+            else printf("Menu mouse: Uncharted 1 %s: the volume code differs: the volume sliders go by steps\n",c->version);
+        }
         u1_image=(uint64_t)(uintptr_t)image;
         u1m=c;
         printf("Menu mouse: Uncharted 1 (game code %s): menus follow the mouse\n",c->version);
