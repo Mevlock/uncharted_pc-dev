@@ -37,11 +37,12 @@ int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 int bbgpu_overlay_captures_input(void);
 /* The game's save list (sceSaveDataDialog list mode), shown by the overlay (ported from BilalReloaded's port, PR #349
  * by the-best-is-best). begin: `count` UTF-8 labels (a line break between lines), pictures (PNG paths, NULL = none), the
- * focused entry, and the first entry that can be deleted (-1 none); 0 when no window can show it. poll: -1 still
- * open, -2 cancelled, <= -3 delete entry -3 - n (the list is closed: begin again), else the chosen entry. cancel:
- * the game closed the dialog. */
-int bbgpu_choice_begin(const char *title, const char *const *labels, const char *const *pictures, int count, int focus,
-                       int deletable_from);
+ * focused entry, and the first entry that can be deleted (-1 none); 0 when no window can show it. sections (NULL =
+ * none): a heading drawn above an entry (NULL or "" = none), starting a group. An entry's first line is its name
+ * (drawn brighter), the lines after it its details. poll: -1 still open, -2 cancelled, <= -3 delete entry -3 - n
+ * (the list is closed: begin again), else the chosen entry. cancel: the game closed the dialog. */
+int bbgpu_choice_begin(const char *title, const char *const *labels, const char *const *pictures,
+                       const char *const *sections, int count, int focus, int deletable_from);
 int bbgpu_choice_poll(void);
 void bbgpu_choice_cancel(void);
 /* Save pictures (bbport_thumbnail.cpp): writes the last picture of the game in play to `path` as PNG; 1 written,

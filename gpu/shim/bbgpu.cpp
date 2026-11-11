@@ -502,12 +502,13 @@ extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {
 // port (gow3gpu_choice_begin/poll, PR #349 by the-best-is-best; GPL-2.0-or-later). The pictures are read here, on
 // the game's thread, before the list is shown.
 extern "C" int bbgpu_choice_begin(const char* title, const char* const* labels, const char* const* pictures,
-                                  int count, int focus, int deletable_from) {
+                                  const char* const* sections, int count, int focus, int deletable_from) {
     if (!g_window || count <= 0 || !labels) return 0;
-    std::vector<std::string> items(static_cast<size_t>(count));
+    std::vector<std::string> items(static_cast<size_t>(count)), headings(static_cast<size_t>(count));
     std::vector<std::vector<unsigned char>> pngs(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i) {
         items[i] = labels[i] ? labels[i] : "";
+        headings[i] = sections && sections[i] ? sections[i] : "";
         if (!pictures || !pictures[i]) continue;
         if (FILE* f = std::fopen(pictures[i], "rb")) {
             std::fseek(f, 0, SEEK_END);
@@ -523,7 +524,10 @@ extern "C" int bbgpu_choice_begin(const char* title, const char* const* labels, 
     if (title && std::strcmp(title, "Save game") == 0) {
         BbThumbnail::NoteSaveList();
     }
-    return BbOverlay::BeginChoice(title ? title : "", std::move(items), std::move(pngs), focus, deletable_from) ? 1 : 0;
+    return BbOverlay::BeginChoice(title ? title : "", std::move(items), std::move(pngs), std::move(headings), focus,
+                                  deletable_from)
+               ? 1
+               : 0;
 }
 
 extern "C" int bbgpu_choice_poll(void) {

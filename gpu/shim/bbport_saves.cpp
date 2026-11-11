@@ -961,16 +961,19 @@ extern "C" int bbport_saves_list_entry(int index, char* label, size_t label_size
         if (!s.used) {
             return;
         }
+        // Name; the game's progress text; where (chapter and checkpoint, not the task's inner name); when.
         const std::string name = index == BbSaves::StorySlot ? std::string(T("Story save"))
                                  : index == BbSaves::UndoSlot
-                                     ? std::string(T("Before the last load"))
+                                     ? std::string(T("Undo last load - back to your save from before it"))
                                      : fmt::format(fmt::runtime(T("Slot {}")), index + 1);
         std::string text = name;
-        if (s.checkpoint.known) {
-            text += "\n" + BbSaves::Describe(s.checkpoint);
-        }
         if (!s.progress.empty()) {
             text += "\n" + s.progress;
+        }
+        if (s.checkpoint.known) {
+            const BbSaves::Checkpoint& c = s.checkpoint;
+            text += "\n" + fmt::format(fmt::runtime(T("Chapter {}")), c.chapter) + " " + c.chapter_title + " \xC2\xB7 " +
+                    (c.number ? fmt::format(fmt::runtime(T("Checkpoint {}")), c.number) : std::string(T("Cutscene")));
         }
         if (!s.date.empty()) {
             text += "\n" + fmt::format(fmt::runtime(T("Saved {}")), s.date);

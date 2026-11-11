@@ -1249,6 +1249,7 @@ constexpr int ChoicePictureW = 456, ChoicePictureH = 256; // a save picture (bbp
 std::atomic<bool> choice_active{false};
 std::string choice_title;
 std::vector<std::string> choice_items;
+std::vector<std::string> choice_sections; // a heading above an entry (empty = none)
 int choice_index = 0;
 std::atomic<int> choice_result{-1}; // -1 open, -2 cancelled, <= -3 delete -3 - index, else the chosen index
 int choice_deletable = -1, choice_delete_armed = -1; // entries from choice_deletable on can be deleted
@@ -1353,10 +1354,14 @@ void ChoiceBox() {
     // The entries scroll in a child of their own height (up to what fits): the help below stays on screen.
     const ImGuiStyle& style = ImGui::GetStyle();
     float rows_height = 0.0f;
-    for (const std::string& item : choice_items) {
+    for (size_t i = 0; i < choice_items.size(); ++i) {
+        const std::string& item = choice_items[i];
         const float lines = float(1 + std::count(item.begin(), item.end(), '\n'));
         rows_height += std::max(pictures ? picture_size.y : 0.0f, lines * ImGui::GetTextLineHeight()) +
                        style.ItemSpacing.y;
+        if (i < choice_sections.size() && !choice_sections[i].empty()) {
+            rows_height += ImGui::GetTextLineHeightWithSpacing() + style.ItemSpacing.y;
+        }
     }
     const float footer_height = ImGui::GetFrameHeightWithSpacing() + ImGui::GetTextLineHeightWithSpacing() * 3.0f +
                                 style.ItemSpacing.y * 3.0f;
@@ -1370,6 +1375,11 @@ void ChoiceBox() {
     int clicked = -1;
     for (int i = 0; i < count; ++i) {
         const bool selected = i == choice_index;
+        if (i < int(choice_sections.size()) && !choice_sections[i].empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.72f, 0.45f, 1.0f));
+            ImGui::SeparatorText(choice_sections[i].c_str());
+            ImGui::PopStyleColor();
+        }
         ImGui::PushID(i);
         ImGui::BeginGroup();
         ImTextureData* tex = i < int(choice_textures.size()) && i < int(choice_pictures.size()) &&
@@ -1393,10 +1403,23 @@ void ChoiceBox() {
         if (pictures) {
             ImGui::SameLine();
         }
-        if (selected) {
-            ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.55f, 1.0f), "> %s", ChoiceLabel(choice_items[i]));
-        } else {
-            ImGui::Text("  %s", ChoiceLabel(choice_items[i]));
+        // The first line is the entry's name (bright, gold when selected), the lines after it its details (dimmer).
+        {
+            const std::string label = ChoiceLabel(choice_items[i]);
+            const size_t cut = label.find('\n');
+            ImGui::BeginGroup();
+            ImGui::TextColored(selected ? ImVec4(1.0f, 0.9f, 0.55f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s %s",
+                               selected ? ">" : " ", label.substr(0, cut).c_str());
+            if (cut != std::string::npos) {
+                // in line with the name (the group starts beside the picture, so no Indent)
+                std::string details = "  " + label.substr(cut + 1);
+                for (size_t at = details.find('\n'); at != std::string::npos; at = details.find('\n', at + 3)) {
+                    details.insert(at + 1, "  ");
+                }
+                ImGui::TextColored(selected ? ImVec4(0.92f, 0.85f, 0.65f, 1.0f) : ImVec4(0.72f, 0.72f, 0.72f, 1.0f),
+                                   "%s", details.c_str());
+            }
+            ImGui::EndGroup();
         }
         ImGui::EndGroup();
         // The mouse: moving over an entry selects it, a click picks it.
@@ -2085,7 +2108,9 @@ bool CapturesInput() {
 }
 
 bool BeginChoice(const std::string& title, std::vector<std::string> items,
-                 std::vector<std::vector<unsigned char>> pngs, int focus, int deletable_from) {
+                 std::vector<std::vector<unsigned char>> pngs, std::vector<std::string> sections, int focus,
+                 int deletable_from) {
+    sections.resize(items.size());
     // The pictures are decoded on the caller's thread; the present thread uploads them.
     std::vector<ChoicePicture> pictures(items.size());
     for (size_t i = 0; i < items.size() && i < pngs.size(); ++i) {
@@ -2104,6 +2129,7 @@ bool BeginChoice(const std::string& title, std::vector<std::string> items,
     choice_uploads = true;
     choice_title = title;
     choice_items = std::move(items);
+    choice_sections = std::move(sections);
     const int count = int(choice_items.size());
     choice_index = focus >= 0 && focus < count ? focus : 0;
     choice_deletable = deletable_from >= 0 && deletable_from < count ? deletable_from : -1;
