@@ -35,6 +35,10 @@ using Clock = std::chrono::steady_clock;
 std::mutex mutex;
 std::vector<unsigned char> picture; // RGB8, Width x Height: the newest picture of play; empty: none yet
 std::string picture_game;           // the campaign save in play when it was taken ("SAVEDATA031")
+// The newest clean picture outside play (a cutscene, a scripted camera as in U3's opening fight): a save of a game
+// with no picture of play yet gets this one.
+std::vector<unsigned char> scene;
+std::string scene_game;
 Clock::time_point clean_at{};       // the newest clean picture's time (a frame picture then waits its turn)
 Clock::time_point last_request{}, last_clean_request{};
 // The camera hooks keep running behind the pause menu, so frame pictures go on being taken there (with the menu in
@@ -164,8 +168,7 @@ bool WantedClean() {
         return false;
     }
     const auto now = Clock::now();
-    // In play only (a follow / cover camera, also behind the pause menu): not a cutscene or a loading screen.
-    if (now - last_clean_request < std::chrono::seconds(1) || !InPlay()) {
+    if (now - last_clean_request < std::chrono::seconds(1)) {
         return false;
     }
     last_clean_request = now;
@@ -178,9 +181,15 @@ void StoreClean(const unsigned char* rgba) {
         return; // a fade (the frame picture is black then too, and not kept either)
     }
     const std::string game = GameInPlay();
+    const bool in_play = InPlay(); // a follow / cover / aim camera (also behind the pause menu)
     std::scoped_lock lock{mutex};
-    picture = std::move(rgb);
-    picture_game = game;
+    if (in_play) {
+        picture = std::move(rgb);
+        picture_game = game;
+    } else {
+        scene = std::move(rgb);
+        scene_game = game;
+    }
     clean_at = Clock::now();
 }
 
@@ -223,6 +232,8 @@ extern "C" int bbgpu_thumbnail_save(const char* path) {
             rgb = before_pause;
         } else if (!picture.empty() && mine(picture_game)) {
             rgb = picture;
+        } else if (!scene.empty() && mine(scene_game)) {
+            rgb = scene; // no picture of play of this game yet: the newest scene of it
         } else {
             return 0; // no picture of this game's play yet: it keeps the one it has
         }
