@@ -1616,17 +1616,30 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
          * the one under the cursor is set, a click sets it and presses the cross once it is the choice. The d-pad steps do not run then. */
         static struct { int want; uint64_t t, cross_until; } dj={-1,0,0};
         if (u3m && u3_dialog_jump_on() && u3_dlg.us && now-u3_dlg.us<150000 && u3_dlg.hi>u3_dlg.lo && u3_dlg.hi-u3_dlg.lo<=8) {
-            float ys[8]; int n=0, hovi=-1;
+            float ys[8], cx[16], cw[16], cy[16]; int n=0, nc=0, hovi=-1;
             pthread_mutex_lock(&u3_lock);
-            for (int i=0;i<U3_ROWS && n<8;++i) {
+            for (int i=0;i<U3_ROWS;++i) {
                 const U3Row *r=&u3_rows[i];
-                if (!r->us || now-r->us>=150000 || fabsf(r->x-384.0f)>2.0f || fabsf(r->w-512.0f)>2.0f || fabsf(r->h-32.0f)>2.0f) continue;
-                int dup=0; for (int k=0;k<n;++k) if (fabsf(ys[k]-r->y)<1.0f) dup=1;
-                if (!dup) ys[n++]=r->y;
+                /* (the choices: texts 32 tall and at least 200 wide inside the control's rectangle: Quit's at x 384, 512 wide; the
+                 * difficulty window's OK / Cancel at x 344, 592 wide; any layout) */
+                const float *q=u3_dlg.rc;
+                if (!r->us || now-r->us>=150000 || fabsf(r->h-32.0f)>2.0f || r->w<200.0f) continue;
+                if (q[2]>40.0f ? (r->x<q[0]-6.0f || r->x+r->w>q[0]+q[2]+6.0f || r->y<q[1]-6.0f || r->y+r->h>q[1]+q[3]+6.0f)
+                               : (fabsf(r->x-384.0f)>2.0f || fabsf(r->w-512.0f)>2.0f)) continue;
+                int dup=0; for (int k=0;k<nc;++k) if (fabsf(cy[k]-r->y)<1.0f && fabsf(cx[k]-r->x)<1.0f) dup=1;
+                if (!dup && nc<16) { cx[nc]=r->x; cw[nc]=r->w; cy[nc]=r->y; ++nc; }
             }
             pthread_mutex_unlock(&u3_lock);
+            /* (the choices share their x and width: the message lines inside the window do not) */
+            const int need=u3_dlg.hi-u3_dlg.lo+1;
+            for (int a=0;a<nc && n==0;++a) {
+                int same=0; for (int b=0;b<nc;++b) if (fabsf(cx[b]-cx[a])<1.0f && fabsf(cw[b]-cw[a])<1.0f) ++same;
+                if (same!=need) continue;
+                for (int b=0;b<nc && n<8;++b) if (fabsf(cx[b]-cx[a])<1.0f && fabsf(cw[b]-cw[a])<1.0f) ys[n++]=cy[b];
+            }
             for (int a=0;a<n;++a) for (int b=a+1;b<n;++b) if (ys[b]<ys[a]) { const float t=ys[a]; ys[a]=ys[b]; ys[b]=t; }
-            for (int i=0;i<n;++i) if (ux>=380.0f && ux<=900.0f && uy>=ys[i]-5.0f && uy<ys[i]+37.0f) hovi=i;
+            const float qx0=u3_dlg.rc[2]>40.0f ? u3_dlg.rc[0] : 380.0f, qx1=u3_dlg.rc[2]>40.0f ? u3_dlg.rc[0]+u3_dlg.rc[2] : 900.0f;
+            for (int i=0;i<n;++i) if (ux>=qx0 && ux<=qx1 && uy>=ys[i]-5.0f && uy<ys[i]+37.0f) hovi=i;
             if (n>=2 && n==u3_dlg.hi-u3_dlg.lo+1) {
                 if (hovi>=0) {
                     const int want=u3_dlg.lo+hovi;
