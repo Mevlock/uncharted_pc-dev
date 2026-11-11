@@ -233,7 +233,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0',
+                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
@@ -879,6 +879,10 @@ def game_environment(s, start=None):
     if job_threads != 'auto':
         env['BB_JOB_SLEEP'] = '0' if job_threads == 'spin' else '1'
     env['BB_ANISO'] = str(s.get('anisotropy') or '0')
+    if s.get('full_res_textures', False):
+        env['BB_FULL_RES_TEXTURES'] = '1'
+    if s.get('hires_shadows', False):
+        env['BB_HIRES_SHADOWS'] = '1'
     env['BB_FSR1'] = '1' if s.get('scaler', 'fsr1') == 'fsr1' else '0'
     sharpening = str(s.get('sharpening') or 'off')
     env['BB_RCAS'] = '0' if sharpening == 'off' else '1'
@@ -1882,6 +1886,13 @@ class Launcher:
         self.row(f, _('Texture filtering'), self.choice(f, 'anisotropy', ANISOTROPY, 34),
                  _('Anisotropic filtering: floors, roads and walls seen at a shallow angle stay sharp '
                    'into the distance. In Uncharted 3 with DLSS it makes the picture softer, so it is off by default.'))
+        self.check(f, 'full_res_textures', _('Full resolution textures'),
+                   _('Uncharted 2 and 3 (version 1.02): every texture at its full size from the start, as the developers’ '
+                     'debug switch does, instead of the smaller versions the games stream in first: trees, leaves and far '
+                     'buildings stay sharp. Uses more video memory; about 1% slower. From BilalReloaded’s port.'))
+        self.check(f, 'hires_shadows', _('Hi-res lamp and flashlight shadows'),
+                   _('Uncharted 2 and 3 (version 1.02): a bigger shadow map for lamps and the flashlight, sharper shadow '
+                     'edges (the developers’ debug switch). From BilalReloaded’s port.'))
         self.check(f, 'bloom', _('Bloom'),
                    _('The soft glow around bright lights and glints (all three games share the effect); '
                      'turn it off for a crisper, flatter picture.'))

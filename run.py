@@ -248,6 +248,8 @@ def main():
         # Unlock all rewards (launcher Game page, BB_UNLOCK_REWARDS=1): every game, code patches + kept switches.
         enabled = [c for c in env['BB_CHEATS'].split(',') if c] + (['rewards'] if env.get('BB_UNLOCK_REWARDS') == '1'
                                                                      else [])
+        # Extra quality (launcher Display): Uncharted 2 and 3's full-resolution textures and hi-res local shadow switches
+        enabled += (['fullres'] if env.get('BB_FULL_RES_TEXTURES') == '1' else []) +                    (['hiresshadow'] if env.get('BB_HIRES_SHADOWS') == '1' else [])
         patches = cheats.build(game / exe, out, enabled)
         env['BB_KEEP_BYTES'] = cheats.keep_bytes(game / exe, enabled)
         env['BB_RESTART_COMMAND'] = subprocess.list2cmdline([sys.executable, *this, '--after', str(os.getpid()), *args])

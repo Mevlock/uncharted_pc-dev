@@ -140,19 +140,85 @@ def reward_switches(data, code):
     return offsets
 
 
+# Extra quality (launcher Display: Full resolution textures, Hi-res lamp and flashlight shadows; BB_FULL_RES_TEXTURES=1,
+# BB_HIRES_SHADOWS=1): Uncharted 2 and 3's debug-menu render switches "Force Full Resolution Textures" (every texture at its full
+# size, none of the streamed smaller versions; off on the PS4) and "Enable Hires Local Shadow Buffer" (a bigger shadow map for
+# lamps and the flashlight), kept set like the cheats (BilalReloaded's QUALITY_POKES: render-settings block + 0x7c0 / + 0x1c4,
+# measured ~1% / ~0% FPS). Found from the menu items in every build (his addresses are US 1.02's): the full-resolution item
+# loads the block (lea reg, [rip + block]) and stores the switch's address (lea rax, [reg + 0x7c0]); the shadow item's
+# address is lea rax, [r12 + 0x1c4] with the same block in r12.
+QUALITY_LABELS = {'fullres': b'Force Full Resolution Textures', 'hiresshadow': b'Enable Hires Local Shadow Buffer'}
+
+
+def quality_switches(data, names):
+    """{name: image offset} of the extra-quality switches asked for whose menu code is as expected; the rest reported."""
+    elf, _header, program_headers, _segments, _missing = prepare.parse_self(data)
+    loads = [p for p in program_headers if p['type'] in (1, 0x61000010) and p['filesz']]
+    def address_of(text):
+        for p in loads:
+            at = bytes(elf[p['offset']:p['offset'] + p['filesz']]).find(text + bytes(1))
+            if at >= 0:
+                return p['vaddr'] + at
+        return None
+    code = next((p for p in loads if p['flags'] & 1), None)
+    if code is None:
+        return {}
+    text = bytes(elf[code['offset']:code['offset'] + code['filesz']])
+    def label_leas(target):
+        found = []
+        for i in range(len(text) - 7):
+            if text[i] in (0x48, 0x4c) and text[i + 1] == 0x8d and (text[i + 2] & 0xc7) == 0x05:
+                if code['vaddr'] + i + 7 + struct.unpack_from('<i', text, i + 3)[0] == target:
+                    found.append(i)
+        return found
+    result = {}
+    full = address_of(QUALITY_LABELS['fullres'])
+    block = None
+    for i in label_leas(full) if full is not None else []:
+        window = text[i:i + 0x60]
+        # lea r13, [rip + block] (4c 8d 2d) followed by lea rax, [r13 + 0x7c0] (49 8d 85 c0 07 00 00)
+        j = window.find(bytes.fromhex('498d85c0070000'))
+        k = window.find(bytes.fromhex('4c8d2d'))
+        if j > 0 and 0 <= k < j:
+            block = code['vaddr'] + i + k + 7 + struct.unpack_from('<i', window, k + 3)[0]
+            break
+    if block is None:
+        # Uncharted 3 1.02 (EU and US share the code): r13 holds the block from further up; BilalReloaded's address 0x18c6280,
+        # taken when this build's full-resolution item stores [r13 + 0x7c0] right after its label
+        if full is not None and any(text[i:i + 0x60].find(bytes.fromhex('498d85c0070000')) > 0 for i in label_leas(full)) and                 any(code['vaddr'] + i == 0xe127f1 for i in label_leas(full)):
+            block = 0x18c6280
+    if block is None:
+        print('Extra quality: the render-settings block was not found in this build; not applied')
+        return {}
+    if 'fullres' in names:
+        result['fullres'] = block + 0x7c0
+    if 'hiresshadow' in names:
+        shadow = address_of(QUALITY_LABELS['hiresshadow'])
+        ok = any(text[i:i + 0x50].find(bytes.fromhex('498d8424c4010000')) > 0 for i in label_leas(shadow)) if shadow else False
+        if ok:
+            result['hiresshadow'] = block + 0x1c4
+        else:
+            print('Extra quality: the hi-res shadow switch was not found in this build; not applied')
+    return result
+
+
 def keep_bytes(path, cheats):
     """BB_KEEP_BYTES ("offset=1,...") for the enabled switch cheats of one executable; '' when none applies."""
-    if not any(c in ('noreload', 'onehit', 'rewards') for c in cheats):
+    if not any(c in ('noreload', 'onehit', 'rewards', 'fullres', 'hiresshadow') for c in cheats):
         return ''
     try:
         data = Path(path).read_bytes()
         code = code_hash(data)
         table = KEEP.get(code, {})
         rewards = reward_switches(data, code) if 'rewards' in cheats else []
+        quality = quality_switches(data, [c for c in cheats if c in QUALITY_LABELS]) if any(c in QUALITY_LABELS for c in cheats) else {}
     except (OSError, ValueError, KeyError, IndexError, struct.error) as error:
         print(f'Cheats: switches not kept ({error})')
         return ''
     keep = []
+    for name, offset in quality.items():
+        keep.append(f'{offset:x}=1')
+        print(f'Extra quality: {"full resolution textures" if name == "fullres" else "hi-res local shadows"} on ({offset:#x})')
     for name in cheats:
         for offset in table.get(name, []):
             keep.append(f'{offset:x}=1')
