@@ -357,6 +357,9 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
             regs.clipper_control.clip_space == AmdGpu::ClipSpace::MinusWToW;
         info.hw.vs.clip_disable = regs.IsClipDisabled();
         info.hw.vs.motion_vectors = sel.motion;
+        // Screen-space draws (clipping off) are never jittered.
+        info.hw.vs.clip_jitter =
+            Shader::ClipJitter::enabled && !info.hw.vs.clip_disable ? Shader::ClipJitter::Version : 0;
         info.hw.vs.ui_squeeze_bits =
             sel.ui_squeeze ? std::bit_cast<u32>(runtime_ultrawide_scale) : 0u;
         break;
@@ -1717,6 +1720,11 @@ const GraphicsPipeline* PipelineCache::GetBatchedGraphicsPipeline(const Graphics
         auto& info = variant.infos[k];
         info = std::make_unique<Shader::Info>(hw, sw, params);
         auto runtime_info = BuildRuntimeInfo(bsel, hw, sw);
+        // The jitter as the normal variant does it (one loaded from an older cache has none): the
+        // draws take their push data offsets from it.
+        if (hw == HwStage::Vertex) {
+            runtime_info.hw.vs.clip_jitter = base->UsesClipJitter() ? Shader::ClipJitter::Version : 0;
+        }
         t_profile_override = &batched_graphics_profile;
         modules[u32(sw)] =
             TranslateModule(*info, runtime_info, params.code, 0xBA7D, binding, pools, spv);

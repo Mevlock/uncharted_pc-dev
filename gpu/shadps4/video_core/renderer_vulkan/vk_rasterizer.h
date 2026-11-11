@@ -489,6 +489,7 @@ private:
     u64 motion_geometry{};    ///< vertex-stream identity of the current direct draw
     bool gbuffer_draw = false;
     std::unique_ptr<TemporalUpscaler> upscaler; // bbport: FSR (docs/upscaler.md)
+    void ClipJitterPush(const GraphicsPipeline* pipeline);
     std::array<float, 2> draw_jitter{};         ///< viewport offset of the current draw, pixels
     /// The upscaler's jitter for a draw with depth buffer `depth`: whole for the scene depth,
     /// halved for a depth buffer of exactly half its size, none otherwise.

@@ -156,6 +156,16 @@ public:
         return key;
     }
 
+    /// bbport: the vertex shader adds the upscaler jitter (runtime_info.h, ClipJitter): the draw puts it in the
+    /// push data offsets and leaves the viewport unshifted. Set from the vertex stage's runtime info; for a
+    /// pipeline loaded from the cache (built without runtime infos) from its stored variant.
+    bool UsesClipJitter() const {
+        return clip_jitter;
+    }
+    void SetClipJitter(bool on) {
+        clip_jitter = on;
+    }
+
     /// bbport (draw batching, BB_DRAW_BATCH=1): the batched variant (Profile::batched_graphics),
     /// built on the GPU command thread the first time this pipeline draws; null when it has none.
     mutable std::atomic<const GraphicsPipeline*> batch_variant{nullptr};
@@ -163,6 +173,11 @@ public:
     /// Of the variant: per stage (fragment, vertex), whether its flat buffer was added (one more
     /// binding after the stage's buffers than the normal variant has).
     std::array<bool, 2> batch_added_flatbuf{};
+
+private:
+    bool clip_jitter{};
+
+public:
 
     /// Gets the attributes and bindings for vertex inputs.
     template <typename Attribute, typename Binding>

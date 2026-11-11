@@ -2386,6 +2386,7 @@ void PipelineCache::WarmUpThread() {
         std::array<vk::ShaderModule, MaxShaderStages> modules{};
         std::optional<Shader::Gcn::FetchShaderData> fetch_shader;
         std::array<u32, MaxShaderStages> starts{}, counts{};
+        bool clip_jitter = false;
         for (u32 stage = 0; stage < MaxShaderStages; ++stage) {
             const auto hash = entry.gkey.stage_hashes[stage];
             if (!hash) {
@@ -2407,6 +2408,16 @@ void PipelineCache::WarmUpThread() {
             modules[stage] = it->second->module;
             starts[stage] = it->second->spec.start.unified;
             const auto& own_spec = it->second->spec;
+            clip_jitter |= own_spec.runtime_info.hw_stage == Shader::HwStage::Vertex &&
+                           own_spec.runtime_info.hw.vs.clip_jitter != 0;
+            // (runtime_info.h, ClipJitter) A stored vertex shader from before the jitter moved into the shaders: left
+            // to the game, which builds it with the jitter code. Mixed with new ones, the depth pre-pass and the main
+            // pass of the same geometry would take the jitter two ways and could miss each other's depth.
+            if (Shader::ClipJitter::enabled && own_spec.runtime_info.hw_stage == Shader::HwStage::Vertex &&
+                !own_spec.runtime_info.hw.vs.clip_disable && own_spec.runtime_info.hw.vs.clip_jitter == 0) {
+                ++stale_no_stage;
+                return;
+            }
             counts[stage] = u32(own_spec.buffers.size() + own_spec.images.size() + own_spec.samplers.size());
             if (it->second->fetch_shader) {
                 fetch_shader = it->second->fetch_shader;
@@ -2465,6 +2476,7 @@ void PipelineCache::WarmUpThread() {
             return;
         }
         pipeline->RebindStages(program_infos);
+        pipeline->SetClipJitter(clip_jitter);
         bool added = false;
         {
             std::unique_lock lock{pipelines_mutex};

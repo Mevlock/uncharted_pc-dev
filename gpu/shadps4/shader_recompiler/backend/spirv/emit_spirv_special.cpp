@@ -255,6 +255,30 @@ static void EmitUiSqueeze(EmitContext& ctx) {
     ctx.OpStore(ctx.output_position, ctx.OpCompositeInsert(ctx.F32[4], squeezed, position, axis));
 }
 
+// bbport (runtime_info.h, ClipJitter; from eFMann's shadPS4 Bloodborne fork): the upscaler jitter, clip x/y moved by
+// the draw's push data offsets (NDC) times w: the same image shift the viewport offset gave, with the viewport left on
+// whole pixels. After the motion code, which keeps the unjittered position.
+static void EmitClipJitter(EmitContext& ctx) {
+    const Id f32_type = ctx.F32[1];
+    const Id position = ctx.OpLoad(ctx.F32[4], ctx.output_position);
+    const auto push = [&](u32 index) {
+        return ctx.OpLoad(f32_type, ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, f32_type),
+                                                       ctx.push_data_block, ctx.ConstU32(index)));
+    };
+    const std::array<Id, 2> offset{push(PushData::XOffsetIndex), push(PushData::YOffsetIndex)};
+    const Id w = ctx.OpCompositeExtract(f32_type, position, 3u);
+    Id result = position;
+    for (u32 c = 0; c < 2; ++c) {
+        const Id product = ctx.OpFMul(f32_type, offset[c], w);
+        const Id sum = ctx.OpFAdd(f32_type, ctx.OpCompositeExtract(f32_type, position, c), product);
+        // The same result in every pipeline drawing with this shader (depth passes and the main pass).
+        ctx.Decorate(product, spv::Decoration::NoContraction);
+        ctx.Decorate(sum, spv::Decoration::NoContraction);
+        result = ctx.OpCompositeInsert(ctx.F32[4], sum, result, c);
+    }
+    ctx.OpStore(ctx.output_position, result);
+}
+
 void EmitEpilogue(EmitContext& ctx) {
     if (ctx.VertexCheck() && Sirit::ValidId(ctx.output_position)) {
         EmitVertexCheck(ctx);
@@ -268,6 +292,10 @@ void EmitEpilogue(EmitContext& ctx) {
     if (ctx.hw_stage == HwStage::Vertex &&
         ctx.runtime_info.hw.vs.emulate_depth_negative_one_to_one) {
         ConvertDepthMode(ctx);
+    }
+    if (ctx.hw_stage == HwStage::Vertex && ctx.runtime_info.hw.vs.clip_jitter &&
+        !ctx.runtime_info.hw.vs.clip_disable && Sirit::ValidId(ctx.output_position)) {
+        EmitClipJitter(ctx);
     }
     if (ctx.hw_stage == HwStage::Vertex && ctx.runtime_info.hw.vs.clip_disable) {
         ConvertPositionToClipSpace(ctx);
