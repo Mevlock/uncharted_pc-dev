@@ -107,6 +107,17 @@ struct VertexCheck {
     static constexpr u32 RecordWords = 8;
 };
 
+/// bbport (from eFMann's shadPS4 Bloodborne fork, 2.1.0-pre.4): the temporal upscaler's jitter added
+/// to the vertex shader's clip position (push data xoffset / yoffset, in NDC, times w) instead of
+/// offsetting the viewport. With a fractional viewport edge AMD's drivers leave out the last column
+/// and row of the image when the jitter is negative, and the upscaler smears that in as thin white
+/// lines along the right and bottom edges (FSR 4 on RDNA4). Clip-enabled vertex shaders only: the
+/// push data offsets are used only by clip-disabled ones (ConvertPositionToClipSpace).
+struct ClipJitter {
+    static constexpr u8 Version = 1;    ///< bump when the jitter code changes
+    static inline bool enabled = false; ///< fixed at startup (not NVIDIA, or BB_CLIP_JITTER=1)
+};
+
 struct HwLocalRuntimeInfo {
     u32 ls_stride;
 
@@ -127,6 +138,8 @@ struct HwVertexRuntimeInfo {
     u32 user_clip_plane_mask{};
     /// bbport: object motion vectors (G-buffer draws), see MotionVectors below.
     bool motion_vectors{};
+    /// bbport: ClipJitter above: 0 = off, else its Version (fills padding: earlier caches read 0).
+    u8 clip_jitter{};
     /// bbport: ultrawide UI (runtime_ultrawide.c): the horizontal clip position is multiplied by
     /// this factor (float bits; 0 = off), except at the screen edges, so the UI drawn over a
     /// widened frame keeps its 16:9 layout in the middle.

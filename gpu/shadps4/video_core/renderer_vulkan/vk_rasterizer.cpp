@@ -696,6 +696,15 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
     // Object motion first: it fixes the buffer addresses the motion shader variants embed.
     object_motion = std::make_unique<ObjectMotion>(instance, scheduler);
+    // bbport: the upscaler jitter in the vertex shaders (runtime_info.h, ClipJitter) on every driver but NVIDIA's,
+    // whose shader variants (and the players' prepared caches) stay as they were; fixed before any shader is
+    // translated. BB_CLIP_JITTER=0 / 1: off / on everywhere.
+    {
+        const char* env = std::getenv("BB_CLIP_JITTER");
+        Shader::ClipJitter::enabled = env && *env ? env[0] != '0'
+                                                  : instance.GetDriverID() != vk::DriverId::eNvidiaProprietary;
+        std::printf("Upscaler jitter: %s\n", Shader::ClipJitter::enabled ? "in the vertex shaders" : "viewport offset");
+    }
     // bbport: from here the stored pipelines load on background threads (the motion shaders
     // among them need the buffer addresses fixed just above).
     pipeline_cache.StartWarmUp();
@@ -4156,6 +4165,19 @@ static bool SkipShader(u64 hash) {
     return SkipDepthOfField(hash);
 }
 
+// bbport (runtime_info.h, ClipJitter): a pipeline whose vertex shader adds the jitter gets it in the push data
+// offsets (NDC: pixels over the half viewport size, which push xscale / yscale hold for clip-enabled draws, also
+// flipped), 0 when the draw is not jittered (the offsets otherwise hold the game's viewport offset, which only
+// clip-disabled shaders read), and the viewport stays on whole pixels.
+void Rasterizer::ClipJitterPush(const GraphicsPipeline* pipeline) {
+    if (!pipeline->UsesClipJitter()) {
+        return;
+    }
+    push_data.xoffset = draw_jitter[0] != 0.f && push_data.xscale != 0.f ? draw_jitter[0] / push_data.xscale : 0.f;
+    push_data.yoffset = draw_jitter[1] != 0.f && push_data.yscale != 0.f ? draw_jitter[1] / push_data.yscale : 0.f;
+    draw_jitter = {};
+}
+
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
     if (GuestSync::On()) {
@@ -4742,12 +4764,38 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             });
         }
     }
-    if (!batch_variant) {
-        pipeline->BindResources(set_writes, push_data, set1_first_write);
-    }
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
+    // A draw of up to 6 indices is usually a full-screen quad (not jittered), but a quad that
+    // writes depth or tests it for equality is scene geometry: U3's chateau wall panels are single
+    // quads. Left unjittered, they sat a fraction of a pixel off their jittered neighbours and the
+    // seams opened into pinholes showing the scene colour's clear (0, 0, 1, 0): rows of bright
+    // blue dots, only with an upscaler on. BB_JITTER_SMALL=0: off.
+    static const bool jitter_small = [] {
+        const char* env = std::getenv("BB_JITTER_SMALL");
+        return !(env && env[0] == '0');
+    }();
+    const auto small_scene_geometry = [&] {
+        if (!jitter_small || !regs.depth_control.depth_enable) {
+            return false;
+        }
+        // Full-screen depth copies and resolves write depth with an always-passing test: not these.
+        const auto func = LiverpoolToVK::CompareOp(regs.depth_control.depth_func);
+        return func != vk::CompareOp::eAlways &&
+               (bool(regs.depth_control.depth_write_enable) || func == vk::CompareOp::eEqual);
+    };
+    if (upscaler->Enabled() && db_desc.first &&
+        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1 || small_scene_geometry())) {
+        draw_jitter = SceneJitterFor(db_desc.first);
+    } else if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+               ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash)) {
+        draw_jitter = upscaler->Jitter();
+    }
+    ClipJitterPush(pipeline);
+    if (!batch_variant) {
+        pipeline->BindResources(set_writes, push_data, set1_first_write);
+    }
     // bbport diagnosis (BB_JITTER_DIAG=1): depth-tested draws jittered, drawn before the scene
     // depth was known, or into another depth buffer, every 5 s.
     if (static const bool jitter_diag = std::getenv("BB_JITTER_DIAG") != nullptr;
@@ -4788,31 +4836,6 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             scene_mrts.clear();
             window = now;
         }
-    }
-    // A draw of up to 6 indices is usually a full-screen quad (not jittered), but a quad that
-    // writes depth or tests it for equality is scene geometry: U3's chateau wall panels are single
-    // quads. Left unjittered, they sat a fraction of a pixel off their jittered neighbours and the
-    // seams opened into pinholes showing the scene colour's clear (0, 0, 1, 0): rows of bright
-    // blue dots, only with an upscaler on. BB_JITTER_SMALL=0: off.
-    static const bool jitter_small = [] {
-        const char* env = std::getenv("BB_JITTER_SMALL");
-        return !(env && env[0] == '0');
-    }();
-    const auto small_scene_geometry = [&] {
-        if (!jitter_small || !regs.depth_control.depth_enable) {
-            return false;
-        }
-        // Full-screen depth copies and resolves write depth with an always-passing test: not these.
-        const auto func = LiverpoolToVK::CompareOp(regs.depth_control.depth_func);
-        return func != vk::CompareOp::eAlways &&
-               (bool(regs.depth_control.depth_write_enable) || func == vk::CompareOp::eEqual);
-    };
-    if (upscaler->Enabled() && db_desc.first &&
-        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1 || small_scene_geometry())) {
-        draw_jitter = SceneJitterFor(db_desc.first);
-    } else if (const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-               ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash)) {
-        draw_jitter = upscaler->Jitter();
     }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
@@ -5072,7 +5095,6 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     push_data.xoffset *= target_scale[0];
     push_data.yscale *= target_scale[1];
     push_data.yoffset *= target_scale[1];
-    pipeline->BindResources(set_writes, push_data, set1_first_write);
     draw_jitter = {};
     if (upscaler->Enabled() && db_desc.first) {
         draw_jitter = SceneJitterFor(db_desc.first);
@@ -5080,6 +5102,8 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
                ps && upscaler->Enabled() && JitterFullScreenPass(ps->pgm_hash)) {
         draw_jitter = upscaler->Jitter();
     }
+    ClipJitterPush(pipeline);
+    pipeline->BindResources(set_writes, push_data, set1_first_write);
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     FullBarrierBeforeDraw(scheduler);
@@ -9179,6 +9203,39 @@ void Rasterizer::UpdateViewportScissorState() const {
                 .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
                 .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
             });
+        }
+    }
+
+    // bbport diagnosis (BB_JITTER_EDGE_SIM=1): what AMD's drivers do with a fractional viewport edge, on any GPU: the
+    // implicit viewport scissor ends at int(x + width) / int(y + height), so a viewport shifted left or up by the
+    // jitter leaves out its last column / row (runtime_info.h, ClipJitter).
+    static const bool edge_sim = [] {
+        const char* env = std::getenv("BB_JITTER_EDGE_SIM");
+        return env && env[0] == '1';
+    }();
+    if (edge_sim) {
+        for (size_t i = 0; i < viewports.size() && i < scissors.size(); ++i) {
+            const auto& v = viewports[i];
+            auto& r = scissors[i];
+            static u64 cut = 0, seen = 0;
+            const u32 w0 = r.extent.width, h0 = r.extent.height;
+            if (v.width > 0.f) {
+                const s32 right = s32(v.x + v.width);
+                r.extent.width = u32(std::max(0, std::min(r.offset.x + s32(r.extent.width), right) - r.offset.x));
+            }
+            if (v.height != 0.f) { // (a flipped viewport, negative height, ends at y)
+                const s32 bottom = s32(std::max(v.y, v.y + v.height));
+                r.extent.height = u32(std::max(0, std::min(r.offset.y + s32(r.extent.height), bottom) - r.offset.y));
+            }
+            ++seen;
+            if (r.extent.width != w0 || r.extent.height != h0) {
+                if (++cut % 20000 == 1) {
+                    std::printf("Jitter edge sim: %llu of %llu viewports cut (viewport %.2f %.2f %.2fx%.2f, scissor %ux%u -> "
+                                "%ux%u)\n",
+                                (unsigned long long)cut, (unsigned long long)seen, v.x, v.y, v.width, v.height, w0, h0,
+                                r.extent.width, r.extent.height);
+                }
+            }
         }
     }
 

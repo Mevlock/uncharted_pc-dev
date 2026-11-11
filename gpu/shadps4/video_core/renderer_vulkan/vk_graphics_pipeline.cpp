@@ -45,6 +45,9 @@ GraphicsPipeline::GraphicsPipeline(
       fetch_shader{std::move(fetch_shader_)} {
     const vk::Device device = instance.GetDevice();
     std::ranges::copy(infos, stages.begin());
+    for (const auto& rt : runtime_infos) {
+        clip_jitter |= rt.hw_stage == Shader::HwStage::Vertex && rt.hw.vs.clip_jitter != 0;
+    }
     BuildDescSetLayout(preloading);
     const auto debug_str = GetDebugString();
 
