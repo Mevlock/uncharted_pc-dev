@@ -171,6 +171,7 @@ void __attribute__((ms_abi)) runtime_exit_menu_u1_us_handler(uint64_t rdi, uint6
 #define DC_PAUSE_PAGE 0xf05cd578u
 #define DC_LOADGAME_ID 0xf7a5b490u
 #define DC_GAMEROOT_QUIT_ID 0xfdcd24dfu
+#define DC_SPEEDRUN_QUIT_ID 0x44ff3436u
 #define DC_YESNO_PAGE 0x960d2b9du
 #define DC_YES_TEXT 0x260a263u
 #define DC_NO_TEXT 0x75bc82du
@@ -283,14 +284,86 @@ static void dc_drop_photo_row(const DcLayout *l, unsigned char *menu) {
     if (!dropped && !told++) printf("Exit menu: %s: no photo mode row found in the menus\n",l->name);
 }
 
+/* BB_EXIT_MENU_PAGES=1 (diagnosis): every page of the menu data that holds the game's own "Quit to Main Menu"
+ * (0xfdcd24df) or Load Game (0xf7a5b490), with its items' ids, once per lookup. */
+static void dc_list_pages(const DcLayout *l, unsigned char *menu) {
+    const char *e=getenv("BB_EXIT_MENU_PAGES");
+    if (!e || e[0]!='1') return;
+    uint32_t pages;
+    unsigned char *page_array;
+    memcpy(&pages,menu,4);
+    memcpy(&page_array,menu+8,sizeof(page_array));
+    if (!page_array || pages>4096) return;
+    printf("Exit menu: %s: menu data %p, %u pages\n",l->name,(void *)menu,pages);
+    for (uint32_t p=0;p<pages;++p) {
+        unsigned char *page=page_array+(size_t)p*l->page_stride, *header;
+        uint32_t sid, count;
+        unsigned char *items;
+        memcpy(&sid,page+8,4);
+        memcpy(&header,page+l->page_items,sizeof(header));
+        if (!header) continue;
+        memcpy(&count,header,4);
+        memcpy(&items,header+8,sizeof(items));
+        if (!items || count==0 || count>256) continue;
+        int interesting=0;
+        for (uint32_t i=0;i<count;++i) {
+            uint32_t id;
+            memcpy(&id,items+(size_t)i*l->item_stride+8,4);
+            interesting|=id==DC_GAMEROOT_QUIT_ID || id==DC_LOADGAME_ID || id==DC_QUIT_ID || id==DC_PAUSE_QUIT_ID;
+        }
+        if (!interesting) continue;
+        char line[1200];
+        int n=snprintf(line,sizeof(line),"Exit menu: %s: page %08x (%u items):",l->name,sid,count);
+        for (uint32_t i=0;i<count && n<(int)sizeof(line)-40;++i) {
+            uint32_t id, label;
+            const char *name;
+            memcpy(&id,items+(size_t)i*l->item_stride+8,4);
+            memcpy(&label,items+(size_t)i*l->item_stride+0x28,4);
+            memcpy(&name,items+(size_t)i*l->item_stride,sizeof(name));
+            n+=snprintf(line+n,sizeof(line)-n," %08x(%.24s)",id,name ? name : "?");
+            (void)label;
+        }
+        printf("%s\n",line);
+    }
+}
+
 static void dc_add_quit(const DcLayout *l, unsigned char *menu) {
     if (!menu) return;
+    dc_list_pages(l,menu);
     dc_drop_photo_row(l,menu);
     /* Main menu: closes the game at once (nothing to lose there). */
     dc_add_item(l,menu,DC_PROFILE_PAGE,DC_LOADGAME_ID,"BUTTON_QUIT_GAME",DC_QUIT_ID,0,"main menu");
-    /* Pause menu: opens the game's Yes/No page, set up by the handler hook below. */
-    dc_add_item(l,menu,DC_PAUSE_PAGE,DC_GAMEROOT_QUIT_ID,"BUTTON_QUIT_DESKTOP",DC_PAUSE_QUIT_ID,DC_YESNO_PAGE,
-                "pause menu");
+    /* Pause menus: opens the game's Yes/No page, set up by the handler hook below. Every page that ends in one of the
+     * game's two "Quit to Main Menu" items gets it, not only the usual pause page (f05cd578): the games also have a
+     * pause page with the speed run's Quit to Main Menu (50a120f8, BP_BUTTON_SPEEDRUN_QUIT), and U3 a short one
+     * (b8c303dc: Options, Restart, Quit to Main Menu). On those our Quit was missing, until the game showed the usual
+     * page again (a player's U2: gone, back after a checkpoint restart). */
+    uint32_t pages;
+    unsigned char *page_array;
+    memcpy(&pages,menu,4);
+    memcpy(&page_array,menu+8,sizeof(page_array));
+    if (!page_array || pages>4096) return;
+    for (uint32_t p=0;p<pages;++p) {
+        unsigned char *page=page_array+(size_t)p*l->page_stride, *header;
+        uint32_t sid, count;
+        unsigned char *items;
+        memcpy(&sid,page+8,4);
+        memcpy(&header,page+l->page_items,sizeof(header));
+        if (!header || sid==DC_PROFILE_PAGE) continue;
+        memcpy(&count,header,4);
+        memcpy(&items,header+8,sizeof(items));
+        if (!items || count==0 || count>256) continue;
+        uint32_t template_id=0;
+        for (uint32_t i=0;i<count;++i) {
+            uint32_t id;
+            memcpy(&id,items+(size_t)i*l->item_stride+8,4);
+            if (id==DC_GAMEROOT_QUIT_ID || id==DC_SPEEDRUN_QUIT_ID) template_id=id;
+        }
+        if (!template_id) continue;
+        char where[40];
+        snprintf(where,sizeof(where),"pause menu %08x",sid);
+        dc_add_item(l,menu,sid,template_id,"BUTTON_QUIT_DESKTOP",DC_PAUSE_QUIT_ID,DC_YESNO_PAGE,where);
+    }
 }
 
 /* The pause menu's Quit was picked: the handler goes on to open the Yes/No page (the item's target page); its
