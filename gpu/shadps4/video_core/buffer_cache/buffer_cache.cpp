@@ -641,6 +641,10 @@ void BufferCache::WaitSideDownload(SideTicket& ticket) {
     slot->staging.Invalidate(0, ticket.total);
 }
 
+static bool PrefetchEnabled();
+static std::atomic<u64> prefetch_served{0}, prefetch_missed{0}, prefetch_copied_pages{0},
+    prefetch_copied_bytes{0};
+
 bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     // bbport: with accurate GPU memory (U2) a guest write to a page holding GPU data waited for
     // the GPU command thread to take its read back: the command waited until that thread came
@@ -735,9 +739,33 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     if (strict && !semaphore.IsFree(fault_tick)) {
         return false;
     }
-    semaphore.Wait(fault_tick);
+    // bbport (BB_PREFETCH_READBACK=1): every page's GPU bytes already copied at the end of a command buffer that
+    // finished after its last GPU write (recurring read-backs, PrefetchRecurringPages): those copies are stored
+    // below instead of a side queue round trip (~5 us instead of ~75). Stored under the same region lock and checks.
+    std::unique_lock<std::mutex> prefetch_lock;
+    boost::container::small_vector<PrefetchRef, 16> prefetched;
+    if (PrefetchEnabled()) {
+        prefetch_lock = std::unique_lock{prefetch_mutex};
+        for (const auto& candidate : pages) {
+            const auto it = prefetch_latest.find(candidate.at);
+            if (it == prefetch_latest.end() || it->second.batch->tick < candidate.tick ||
+                !scheduler.IsFree(it->second.batch->tick)) {
+                prefetched.clear();
+                break;
+            }
+            prefetched.push_back(it->second);
+        }
+        if (prefetched.empty()) {
+            prefetch_lock.unlock();
+        }
+    }
+    const bool from_prefetch = !prefetched.empty();
     boost::container::small_vector<vk::BufferCopy, 16> copies;
     u64 total = 0;
+    auto& side = *side_queue;
+    SideQueue::Slot* slot = nullptr;
+    if (!from_prefetch) {
+    semaphore.Wait(fault_tick);
     for (const auto& candidate : pages) {
         gpu_modified_ranges.ForEachInRange(
             candidate.at, TRACKER_BYTES_PER_PAGE, [&](VAddr start, VAddr end) {
@@ -760,8 +788,6 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     if (total > SideQueue::StagingSize) {
         return false;
     }
-    auto& side = *side_queue;
-    SideQueue::Slot* slot = nullptr;
     if (total != 0) {
         slot = side.Acquire();
         if (!slot) {
@@ -804,6 +830,7 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
         Vulkan::Check(side.device.resetFences(*slot->fence));
         slot->staging.Invalidate(0, total);
     }
+    } // !from_prefetch
     // bbport: the copy is stored per page, under the region lock, and only on pages that are still
     // the GPU's with the write tick seen at the start (as FinishSideDownload). The wait above can be
     // long: meanwhile the GPU command thread may have read a neighbour back and handed it to the
@@ -811,6 +838,29 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
     // unchecked and with a plain store, U3's pub stopped at a Havok spherecastMain assertion on a
     // rigid body handle within seconds (2026-10-26).
     const auto store_page = [&](VAddr at) {
+        if (from_prefetch) {
+            for (size_t i = 0; i < pages.size(); ++i) {
+                if (pages[i].at != at) {
+                    continue;
+                }
+                PrefetchBatch* batch = prefetched[i].batch;
+                if (!batch->invalidated) {
+                    batch->staging.Invalidate(0, PrefetchBatch::StagingSize);
+                    batch->invalidated = true;
+                }
+                const auto& entry = batch->entries[prefetched[i].entry];
+                const u8* staging = batch->staging.mapped_data.data();
+                u64 offset = entry.offset;
+                for (const auto& [start, end] : entry.parts) {
+                    // Only the bytes that are still the GPU's (as TryPrefetched).
+                    gpu_modified_ranges.ForEachInRange(start, end - start, [&](VAddr s, VAddr e) {
+                        WriteBackGpuData(std::bit_cast<u8*>(s), staging + offset + (s - start), e - s);
+                    });
+                    offset += Common::AlignUp(end - start, 16);
+                }
+            }
+            return;
+        }
         if (!slot) {
             return;
         }
@@ -865,6 +915,17 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
         });
     if (slot) {
         side.Release(slot);
+    }
+    if (from_prefetch) {
+        for (const auto& candidate : pages) {
+            prefetch_latest.erase(candidate.at);
+            auto& hits = prefetch_hits[candidate.at];
+            hits = static_cast<u8>(std::min<u32>(hits + 1u, 8u));
+        }
+        prefetch_served.fetch_add(pages.size(), std::memory_order_relaxed);
+        prefetch_lock.unlock();
+    } else if (settled && PrefetchEnabled()) {
+        NotePrefetchCandidate(page, length); // recurring: copied ahead from now on
     }
     if (!settled) {
         return false;
@@ -1086,16 +1147,18 @@ bool BufferCache::FinishSideDownload(SideTicket& ticket, VAddr fault_page, u64 f
     return fault_ok;
 }
 
+// bbport: on by default since perf12 (BB_PREFETCH_READBACK=0: off). U3 Caravan horse ride (the game's
+// bone matrix copy rewrites its compute skinning ring, ~6.5k read-backs/s served from the prefetch,
+// ~19 us instead of ~95 per fault): +4.2% mean on a fast CPU, +19.5% mean and +14.1% lowest 20 s on
+// 8 threads at 60%; market route +1.4% / +0.5%.
 static bool PrefetchEnabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_PREFETCH_READBACK");
-        return env && env[0] == '1';
+        return !(env && env[0] == '0');
     }();
     return enabled;
 }
 
-static std::atomic<u64> prefetch_served{0}, prefetch_missed{0}, prefetch_copied_pages{0},
-    prefetch_copied_bytes{0};
 
 /// GPU thread, after a side queue read-back of these pages: they count as recurring once seen
 /// twice within a few seconds.

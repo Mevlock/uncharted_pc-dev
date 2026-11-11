@@ -7,6 +7,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
+#include <x86intrin.h>
 #include <cpuid.h>
 #include "runtime.h"
 #include "gpu/bbgpu.h"
@@ -990,7 +991,8 @@ static unsigned char *near_image_memory(size_t size) {
 #define CALLBACK_THUNK_BYTES 16384 /* ~170 bytes per thunk (saves, red-zone step, xmm spills): about 90 hooks */
 static unsigned char *callback_thunks;
 static size_t callback_thunks_used;
-static int callback_thunk(unsigned char *f, size_t moved, const void *callback) {
+/* `resume` (or NULL: f + moved): where the thunk jumps back to. */
+static int callback_thunk_to(unsigned char *f, size_t moved, const void *callback, unsigned char *resume) {
     if (!callback_thunks && !(callback_thunks=near_image_memory(CALLBACK_THUNK_BYTES))) {
         printf("Callbacks: no thunk memory\n");
         return 0;
@@ -1033,12 +1035,16 @@ static int callback_thunk(unsigned char *f, size_t moved, const void *callback) 
                                           0x5a,0x59,0x58,0x9d,0x48,0x8d,0xa4,0x24,0x80,0x00,0x00,0x00};
     memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
     memcpy(t+k,f,moved); k+=moved;                              /* the moved instructions */
-    int32_t back=(int32_t)((int64_t)(uintptr_t)(f+moved)-(int64_t)(uintptr_t)(t+k+5));
+    int32_t back=(int32_t)((int64_t)(uintptr_t)(resume ? resume : f+moved)-(int64_t)(uintptr_t)(t+k+5));
     t[k++]=0xe9; memcpy(t+k,&back,4); k+=4;
     int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(f+5));
-    f[0]=0xe9; memcpy(f+1,&to,4); memset(f+5,0x90,moved-5);
+    f[0]=0xe9; memcpy(f+1,&to,4);
+    if (moved>5) memset(f+5,0x90,moved-5);
     callback_thunks_used+=(k+15)&~(size_t)15;
     return 1;
+}
+static int callback_thunk(unsigned char *f, size_t moved, const void *callback) {
+    return callback_thunk_to(f,moved,callback,NULL);
 }
 static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t image_size) {
     size_t count=0, look_count=0, menu_count=0;
@@ -1217,6 +1223,26 @@ static void install_job_idle_yield(uint64_t image_size) {
  * first run, an upscaler starting) and the game stopped right after U1's first cutscene. The
  * assertion's branch is found through its message, in any version of the three games, and the
  * failed check now waits (pause, check again) instead. */
+/* BB_EOP_WAIT_STATS=1 (diagnosis): FrameBegin's EOP tick wait goes through here once per spin: consecutive calls
+ * under 1 ms apart are one wait. Every 5 s: waits per second and the time spent waiting. */
+static void eop_wait_spin(void) {
+    static uint64_t last, window_tsc, waits, wait_ticks;
+    static struct timespec window_wall;
+    const uint64_t now=__rdtsc();
+    if (!window_tsc) { window_tsc=now; timespec_get(&window_wall,TIME_UTC); }
+    if (now-last>4000000ull) ++waits; else wait_ticks+=now-last;  /* ~1 ms at 4 GHz */
+    last=now;
+    __builtin_ia32_pause();
+    if (now-window_tsc>20000000000ull) {                             /* ~5 s */
+        struct timespec wall; timespec_get(&wall,TIME_UTC);
+        const double seconds=(double)(wall.tv_sec-window_wall.tv_sec)+(wall.tv_nsec-window_wall.tv_nsec)*1e-9;
+        const double ticks_per_ms=(double)(now-window_tsc)/(seconds*1000.0);
+        printf("EOP tick waits: %.0f/s, %.1f ms/s waiting (%.2f ms each)\n",waits/seconds,
+               wait_ticks/ticks_per_ms/seconds,waits ? wait_ticks/ticks_per_ms/(double)waits : 0.0);
+        fflush(stdout);
+        window_tsc=now; window_wall=wall; waits=0; wait_ticks=0;
+    }
+}
 static void patch_eop_tick_wait(uint64_t image_size) {
     static const char message[]="GetRenderFrameParams(frameToFreeInstancesFor)->m_gfxEopTick";
     unsigned char *text=NULL;
@@ -1253,8 +1279,13 @@ static void patch_eop_tick_wait(uint64_t image_size) {
             unsigned char *path=jne ? after : target;
             if (jne ? target<=trap : target<=c) continue;
             if (path<c || path+7>trap+2) continue;
-            const int32_t back=(int32_t)(c-(path+7));
-            path[0]=0xf3; path[1]=0x90; path[2]=0xe9; memcpy(path+3,&back,4);
+            const char *eop_stats=getenv("BB_EOP_WAIT_STATS");
+            if (eop_stats && eop_stats[0]=='1' && callback_thunk_to(path,0,(const void *)eop_wait_spin,c)) {
+                printf("Frame pacing: EOP tick waits measured (BB_EOP_WAIT_STATS=1)\n");
+            } else {
+                const int32_t back=(int32_t)(c-(path+7));
+                path[0]=0xf3; path[1]=0x90; path[2]=0xe9; memcpy(path+3,&back,4);
+            }
             printf("Frame pacing: the EOP tick check at %#" PRIx64 " waits for the GPU\n",(uint64_t)(c-image));
             ++patched;
             break;
