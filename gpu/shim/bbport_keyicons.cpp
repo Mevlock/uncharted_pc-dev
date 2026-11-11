@@ -25,6 +25,8 @@
 
 #include <miniz.h>
 
+#include "bbport_xbox_bilal.h"
+
 // stb_truetype from Dear ImGui, private to this file (static functions).
 #define STBTT_STATIC
 #define STB_TRUETYPE_IMPLEMENTATION
@@ -2438,6 +2440,14 @@ static bool XBlitTile(const XPic& dst, uint32_t id, float cx, float cy) {
 /// The atlas (the game's original in rgba) with the Xbox glyphs: A B X Y on the face buttons, LB RB, LT RT, LS RS, MENU for Options,
 /// View for the touchpad. The sticks' own icons ("L", "R"), the d-pad frames and everything around the glyphs are the game's.
 static bool PaintAtlasXbox(uint8_t* rgba) {
+    if (BbXboxBilal::Active()) { // port: BilalReloaded's Xbox buttons in the atlas cells (BB_XBOX_STYLE=antik: the pictures below)
+        const bool painted = BbXboxBilal::PaintAtlas(rgba);
+        if (painted) {
+            std::printf("KeyIcons: atlas with Xbox buttons drawn as BilalReloaded's port draws them\n");
+            RequestHintPatch();
+        }
+        return painted;
+    }
     const Font& font = GetFont();
     if (!font.ok) {
         return false;
@@ -3538,6 +3548,25 @@ bool PatchXboxHud(const KeyTarget& t, Role role, uint8_t* data, size_t size, uin
     std::vector<uint8_t> level(size_t(t.width) * size_t(t.height) * 4);
     DecodeBc1(data, t.width, t.height, level.data());
     const XPic pic{level.data(), t.width, t.height};
+    // port: BilalReloaded's look (the default; BB_XBOX_STYLE=antik keeps the pictures below): the game's face button with its
+    // symbol replaced by the Xbox letter and the glow in the button's colour, U3's dark shoulders lettered LB RB LT RT. U1's and
+    // U2's grey shoulders (his port leaves them) and the journal keep the drawing below.
+    if (BbXboxBilal::Active() && !journal && (!shoulder || t.bc1_masks)) {
+        const char* label = shoulder ? (!std::strcmp(shoulder, "LB") ? "#LB" : !std::strcmp(shoulder, "RB") ? "#RB"
+                                        : !std::strcmp(shoulder, "LT") ? "#LT" : "#RT")
+                            : triangle                           ? "#Y"
+                            : !std::strcmp(t.action, "cross")    ? "#A"
+                            : !std::strcmp(t.action, "circle")   ? "#B"
+                                                                 : "#X";
+        const bool drawn = shoulder ? BbXboxBilal::RedrawShoulderPicture(level.data(), t.width, t.height, true, label)
+                                    : BbXboxBilal::RedrawFacePicture(level.data(), t.width, t.height, true, label);
+        if (drawn) {
+            ReencodeChain(std::move(level), t.width, t.height, Codec::Bc1, layout, data, 0.0f, 0.0f, float(t.width), float(t.height));
+            std::printf("KeyIcons: HUD button %s redrawn as %s, BilalReloaded's look (%dx%d)\n", t.action, label + 1, t.width, t.height);
+            return true;
+        }
+        std::printf("KeyIcons: HUD button %s: BilalReloaded's redraw found no button, antikmewzik's drawing\n", t.action);
+    }
     if (shoulder) {
         // (U3: cream lettering on the dark button; U1 and U2 letter it dark on grey: their buttons stay the game's)
         const int x0 = int(t.cx) - 66, x1 = int(t.cx) + 66, y0 = int(t.cy) - 40, y1 = int(t.cy) + 44;
