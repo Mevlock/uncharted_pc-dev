@@ -1594,28 +1594,33 @@ static int dev_menu_name_at(uintptr_t base, size_t size, uintptr_t at, const cha
  * switch in the developer-mode patch (scripts/cheats.py: eb 05 = into the text block, 66 90 = past it), at the
  * image address BB_DEV_TEXT_SWITCH (run.py). Swapped in one locked write, so the game's thread runs one form or the
  * other, never half of each. */
-static unsigned char *dev_text_switch(void) {
-    static int checked;
+/* Looked up until found: the window and the controllers (F7) start before the game's code is loaded and patched.
+ * `report`: say why there is none (on F7). */
+static unsigned char *dev_text_switch(int report) {
+    static int parsed;
+    static uintptr_t offset;
     static unsigned char *at;
-    if (!checked) {
-        checked=1;
+    if (!parsed) {
+        parsed=1;
         const char *e=getenv("BB_DEV_TEXT_SWITCH");
+        offset=e && *e ? (uintptr_t)strtoull(e,NULL,16) : 0;
+    }
+    if (!at && offset) {
         const uintptr_t base=runtime_image_base();
-        const uintptr_t offset=e && *e ? (uintptr_t)strtoull(e,NULL,16) : 0;
-        unsigned char *p=offset && base && offset+2<=runtime_image_size() ? (unsigned char *)(base+offset) : NULL;
+        unsigned char *p=base && offset+2<=runtime_image_size() ? (unsigned char *)(base+offset) : NULL;
         if (p && ((p[0]==0xeb && p[1]==0x05) || (p[0]==0x66 && p[1]==0x90))) at=p;
-        else if (offset) printf("Runtime: developer text switch not found at %#llx: F7 does nothing\n",
-                                (unsigned long long)offset);
+        else if (report) printf("Runtime: developer text switch not found at %#llx (%s): F7 does nothing\n",
+                                (unsigned long long)offset, p ? "other code there" : "the game is not loaded yet");
     }
     return at;
 }
 /* 1 shown, 0 hidden, -1 no developer mode (the overlay's FPS counter shows DEV MODE while it is hidden). */
 int runtime_dev_text_shown(void) {
-    const unsigned char *p=dev_text_switch();
+    const unsigned char *p=dev_text_switch(0);
     return p ? p[0]==0xeb : -1;
 }
 static void dev_text_toggle(void) {
-    unsigned char *p=dev_text_switch();
+    unsigned char *p=dev_text_switch(1);
     if (!p) return;
     const uint16_t on=0xeb|0x05<<8, off=0x66|0x90<<8, now=p[0]==0xeb ? on : off;
     if (runtime_code_swap16(p,now,now==on ? off : on)) printf("Runtime: developer text switch could not be changed\n");
