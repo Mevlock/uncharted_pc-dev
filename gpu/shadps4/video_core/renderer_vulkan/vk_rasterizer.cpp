@@ -937,6 +937,13 @@ inline AmdGpu::CbDbExtent Rasterizer::DbExtent() const {
 }
 
 namespace {
+/// A tile mode the GPU has (0-26, 31): a T# with another (27-30) is garbage, a resource table read before the
+/// game filled it (it reached GetArrayMode's unreachable and stopped the game: tile mode 28, 2026-11-11).
+bool IsKnownTileMode(AmdGpu::TileMode mode) {
+    const u32 value = static_cast<u32>(mode);
+    return value <= static_cast<u32>(AmdGpu::TileMode::Thick3DXThick) ||
+           mode == AmdGpu::TileMode::DisplayLinearGeneral;
+}
 /// magic_enum::enum_contains, from a table: it scans every enumerator (per texture per draw).
 bool IsKnownFormat(AmdGpu::DataFormat data_fmt, AmdGpu::NumberFormat num_fmt) {
     static const auto tables = [] {
@@ -6059,7 +6066,7 @@ bool Rasterizer::TexturesBindableOnHelper(const Shader::Info& stage,
         const auto num_fmt = tsharp.GetNumberFmt();
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid ||
             !memory->IsValidGpuMapping(tsharp.Address(), 0) ||
-            !IsKnownFormat(data_fmt, num_fmt)) {
+            !IsKnownFormat(data_fmt, num_fmt) || !IsKnownTileMode(tsharp.GetTileMode())) {
             continue; // null descriptor
         }
         const auto& entry =
@@ -7678,7 +7685,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         }
 
         if (!memory->IsValidGpuMapping(tsharp.Address(), 0) ||
-            !IsKnownFormat(data_fmt, num_fmt)) {
+            !IsKnownFormat(data_fmt, num_fmt) || !IsKnownTileMode(tsharp.GetTileMode())) {
             LOG_WARNING(Render_Vulkan,
                         "Rejecting invalid T# address={:#x}, pitch={}, width={}, "
                         "data_format={}, num_format={}",
