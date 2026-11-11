@@ -1576,15 +1576,17 @@ static void replay_sample(PadData *d) {
 /* BB_DEV_MENU=1 (experiment, all three games 1.02, EU and US): F11 opens and closes Naughty Dog's developer menu,
  * which the retail games build but give no way to open: the menu's "open" byte (the game's code checks it) is
  * flipped. Per build, the root pointers of the menus, where their names lie (the names tell which build this
- * is; any other game or release is left alone) and the open byte. Uncharted 1 has no Quick Menu (quick_name 0).
+ * is; any other game or release is left alone) and the open byte. Uncharted 1's Quick Menu (Invincible Player,
+ * Infinite Ammo, ...) is built by a function of its own right after the Dev Menu (EU 0x2a3da0, US 0x2a4390), the
+ * same menu class (0xb0 bytes, open byte +0x88), its name copied from a packed string table.
  * US = CUSA02320 / CUSA02344 (one executable per game). */
 static const struct { uintptr_t dev_name, quick_name, dev_root, quick_root; unsigned open; } dev_menu_builds[]={
     {0xf60a72,0xfacfe0,0x142ee88,0x196cdd0,0x90},   /* Uncharted 3 EU CUSA02343 */
     {0x1458d8a,0x1470aa3,0x17b4a38,0x1ae9ef8,0x90}, /* Uncharted 3 US */
     {0xb4eeab,0xb9700b,0xebbdc8,0xfaf1c0,0x90},     /* Uncharted 2 EU */
     {0xe7cf5c,0xe96390,0x11160c8,0x1161ef8,0x90},   /* Uncharted 2 US */
-    {0x79eaf5,0,0xa8dbf0,0,0x88},                   /* Uncharted 1 EU */
-    {0x7962c5,0,0xa51af0,0,0x88},                   /* Uncharted 1 US */
+    {0x79eaf5,0x7d2020,0xa8dbf0,0xaf7920,0x88},     /* Uncharted 1 EU */
+    {0x7962c5,0x7c97f0,0xa51af0,0xabb820,0x88},     /* Uncharted 1 US */
 };
 static int dev_menu_name_at(uintptr_t base, size_t size, uintptr_t at, const char *name) {
     const size_t n=strlen(name)+1;
