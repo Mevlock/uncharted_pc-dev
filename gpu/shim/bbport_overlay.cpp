@@ -1352,12 +1352,19 @@ void ChoiceBox() {
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSizeConstraints(ImVec2(viewport->WorkSize.x * 0.36f, 0.0f),
                                         ImVec2(viewport->WorkSize.x * 0.8f, viewport->WorkSize.y * 0.8f));
-    ImGui::SetNextWindowBgAlpha(0.94f);
+    ImGui::SetNextWindowBgAlpha(0.96f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f * s);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f * s, 14.0f * s));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f * s);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.55f, 0.45f, 0.28f, 0.9f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.09f, 0.08f, 0.07f, 1.0f));
     ImGui::Begin("##save_list", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoSavedSettings);
-    ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.45f, 1.0f), "%s", T(choice_title.c_str()));
-    ImGui::Separator();
+    ImGui::SetWindowFontScale(1.3f);
+    ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.50f, 1.0f), "%s", T(choice_title.c_str()));
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::Dummy(ImVec2(0.0f, 2.0f * s));
     const int count = int(choice_items.size());
     bool pictures = false;
     for (int i = 0; i < count && i < int(choice_pictures.size()); ++i) {
@@ -1380,41 +1387,67 @@ void ChoiceBox() {
                                 style.ItemSpacing.y * 3.0f;
     const float title_height = ImGui::GetCursorPosY();
     const float room = viewport->WorkSize.y * 0.8f - title_height - footer_height - style.WindowPadding.y * 2.0f;
+    // The rows' own padding keeps every card's frame inside the scrolled area (drawn outside an entry, the selected
+    // frame was cut off at the edges and on the first and last rows).
+    const float card_pad = 8.0f * s, card_round = 6.0f * s;
+    rows_height += count * (card_pad * 2.0f + 4.0f * s) + card_pad * 2.0f;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(card_pad, card_pad));
     ImGui::BeginChild("##save_list_rows",
                       ImVec2(0.0f, std::max(pictures ? picture_size.y : ImGui::GetTextLineHeight(),
                                             std::min(rows_height, room))),
-                      ImGuiChildFlags_AutoResizeX, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav);
+                      ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_AlwaysUseWindowPadding,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav);
+    ImGui::PopStyleVar();
     const bool mouse_moved = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f;
     int clicked = -1;
+    // Every entry is a card of the same width: the widest entry's, found on the frame before (cards that grow with
+    // their text looked ragged).
+    static float card_width = 0.0f;
+    float widest = 0.0f;
+    ImDrawList* draw = ImGui::GetWindowDrawList();
     for (int i = 0; i < count; ++i) {
         const bool selected = i == choice_index;
         if (i < int(choice_sections.size()) && !choice_sections[i].empty()) {
+            if (i) {
+                ImGui::Dummy(ImVec2(0.0f, 4.0f * s));
+            }
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.72f, 0.45f, 1.0f));
             ImGui::SeparatorText(T(choice_sections[i].c_str()));
             ImGui::PopStyleColor();
         }
         ImGui::PushID(i);
+        // The card's background goes behind its contents (channel 0), drawn once its size is known.
+        draw->ChannelsSplit(2);
+        draw->ChannelsSetCurrent(1);
+        const ImVec2 card_min = ImGui::GetCursorScreenPos();
+        ImGui::SetCursorScreenPos(ImVec2(card_min.x + card_pad, card_min.y + card_pad));
         ImGui::BeginGroup();
         ImTextureData* tex = i < int(choice_textures.size()) && i < int(choice_pictures.size()) &&
                                      choice_pictures[i].shown
                                  ? choice_textures[i]
                                  : nullptr;
-        if (tex) {
-            const ChoicePicture& p = choice_pictures[i];
-            // the picture fills the 228x128 box (a smaller icon keeps its shape, centred)
-            const float fit = std::min(picture_size.x / float(p.w), picture_size.y / float(p.h));
-            const ImVec2 size(float(p.w) * fit, float(p.h) * fit);
+        if (pictures) {
             const ImVec2 at = ImGui::GetCursorScreenPos();
             ImGui::Dummy(picture_size);
-            const ImVec2 min(at.x + (picture_size.x - size.x) * 0.5f, at.y + (picture_size.y - size.y) * 0.5f);
-            ImGui::GetWindowDrawList()->AddImage(tex->GetTexRef(), min, ImVec2(min.x + size.x, min.y + size.y),
-                                                 ImVec2(0.0f, 0.0f),
-                                                 ImVec2(float(p.w) / ChoicePictureW, float(p.h) / ChoicePictureH));
-        } else if (pictures) {
-            ImGui::Dummy(picture_size);
-        }
-        if (pictures) {
-            ImGui::SameLine();
+            const ImVec2 box_max(at.x + picture_size.x, at.y + picture_size.y);
+            // a dark box behind every picture (a smaller icon sits centred in it; no picture: the box says so)
+            draw->AddRectFilled(at, box_max, IM_COL32(18, 16, 14, 255), 4.0f * s);
+            if (tex) {
+                const ChoicePicture& p = choice_pictures[i];
+                const float fit = std::min(picture_size.x / float(p.w), picture_size.y / float(p.h));
+                const ImVec2 size(float(p.w) * fit, float(p.h) * fit);
+                const ImVec2 min(at.x + (picture_size.x - size.x) * 0.5f, at.y + (picture_size.y - size.y) * 0.5f);
+                draw->AddImageRounded(tex->GetTexRef(), min, ImVec2(min.x + size.x, min.y + size.y), ImVec2(0.0f, 0.0f),
+                                      ImVec2(float(p.w) / ChoicePictureW, float(p.h) / ChoicePictureH),
+                                      IM_COL32_WHITE, 4.0f * s);
+            } else {
+                const char* none = T("No picture");
+                const ImVec2 text = ImGui::CalcTextSize(none);
+                draw->AddText(ImVec2(at.x + (picture_size.x - text.x) * 0.5f, at.y + (picture_size.y - text.y) * 0.5f),
+                              IM_COL32(110, 104, 96, 255), none);
+            }
+            draw->AddRect(at, box_max, IM_COL32(70, 62, 50, 255), 4.0f * s, 0, 1.0f * s);
+            ImGui::SameLine(0.0f, 12.0f * s);
         }
         // The first line is the entry's name (bright, gold when selected), the lines after it its details (dimmer).
         {
@@ -1435,9 +1468,30 @@ void ChoiceBox() {
             ImGui::EndGroup();
         }
         ImGui::EndGroup();
+        // The card: the contents plus its padding, as wide as the widest card; the hover and click below use it.
+        const ImVec2 content_max = ImGui::GetItemRectMax();
+        widest = std::max(widest, content_max.x - card_min.x + card_pad);
+        const ImVec2 card_max(card_min.x + std::max(card_width, content_max.x - card_min.x + card_pad),
+                              content_max.y + card_pad);
+        ImGui::SetCursorScreenPos(card_min);
+        ImGui::InvisibleButton("##card", ImVec2(card_max.x - card_min.x, card_max.y - card_min.y));
+        const bool card_hovered = ImGui::IsItemHovered();
+        draw->ChannelsSetCurrent(0);
+        const bool lit = selected || (choice_mouse_seen && card_hovered);
+        draw->AddRectFilled(card_min, card_max,
+                            selected ? IM_COL32(74, 60, 34, 235) : lit ? IM_COL32(50, 45, 38, 220)
+                                                                      : IM_COL32(38, 34, 30, 200),
+                            card_round);
+        if (selected) {
+            draw->AddRect(card_min, card_max, IM_COL32(255, 214, 120, 255), card_round, 0, 2.0f * s);
+        } else {
+            draw->AddRect(card_min, card_max, IM_COL32(64, 58, 50, 255), card_round, 0, 1.0f * s);
+        }
+        draw->ChannelsMerge();
+        ImGui::Dummy(ImVec2(0.0f, 4.0f * s)); // the gap to the next card
         // The mouse: resting on an entry selects it (0.15 s: passing over entries on the way to the OK or Delete
         // button below leaves the selection alone), a click picks it at once.
-        if (choice_mouse_seen && ImGui::IsItemHovered()) {
+        if (choice_mouse_seen && card_hovered) {
             // (once per arrival: keys that move the selection while the mouse rests keep it)
             static int hover_entry = -1;
             static double hover_since = 0.0;
@@ -1459,24 +1513,26 @@ void ChoiceBox() {
                 clicked = i;
             }
         }
-        if (selected) {
-            const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
-            const float pad = 3.0f * s;
-            ImGui::GetWindowDrawList()->AddRect(ImVec2(min.x - pad, min.y - pad), ImVec2(max.x + pad, max.y + pad),
-                                                IM_COL32(255, 230, 140, 255), 0.0f, 0, 2.0f * s);
-            if (choice_scroll) {
-                ImGui::SetScrollHereY();
-                choice_scroll = false;
-            }
+        if (selected && choice_scroll) {
+            // the selected card into view (its middle)
+            ImGui::SetScrollFromPosY(0.5f * (card_min.y + card_max.y) - ImGui::GetWindowPos().y, 0.5f);
+            choice_scroll = false;
         }
         ImGui::PopID();
     }
+    card_width = widest;
     ImGui::EndChild();
-    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, 2.0f * s));
     const bool can_delete = choice_deletable >= 0 && choice_index >= choice_deletable && choice_index < count;
-    bool ok = ImGui::Button(T("OK"));
+    const ImVec2 button(110.0f * s, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f * s);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f * s, 5.0f * s));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.42f, 0.18f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.68f, 0.53f, 0.24f, 1.0f));
+    bool ok = ImGui::Button(T("OK"), button);
+    ImGui::PopStyleColor(2);
     ImGui::SameLine();
-    const bool cancel = ImGui::Button(T("Cancel"));
+    const bool cancel = ImGui::Button(T("Cancel"), button);
     bool erase = false;
     if (can_delete) {
         ImGui::SameLine();
@@ -1484,11 +1540,13 @@ void ChoiceBox() {
         if (armed) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.18f, 0.14f, 1.0f));
         }
-        erase = ImGui::Button(armed ? T("Delete: press again") : T("Delete"));
+        erase = ImGui::Button(armed ? T("Delete: press again") : T("Delete"), ImVec2(armed ? 0.0f : button.x, 0.0f));
         if (armed) {
             ImGui::PopStyleColor();
         }
     }
+    ImGui::PopStyleVar(2);
+    ImGui::Dummy(ImVec2(0.0f, 2.0f * s));
     TextGrey(T("Up/Down or D-pad: choose   Enter or Cross (A): OK   Esc or Circle (B): cancel"));
     TextGrey(T("Mouse: point to choose, click = OK, right button = cancel"));
     if (choice_delete_armed >= 0 && choice_delete_armed == choice_index) {
@@ -1500,6 +1558,8 @@ void ChoiceBox() {
         TextGrey(T("Select a save, then Delete or Triangle (Y) to delete it"));
     }
     ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
     if (clicked >= 0) {
         choice_index = clicked;
         ok = true;
