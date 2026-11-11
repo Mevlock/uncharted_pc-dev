@@ -467,6 +467,10 @@ static void save_list(const unsigned char *param) {
            save_dialog.pick<0 ? "nothing to choose, cancelled" : save_dialog.pick ? "focused " : "new save data",
            save_dialog.pick>0 ? save_dialog.dir : "");
     if (!save_list_enabled()) return;
+    /* Only to load. Where to save (Chapter Select, a new game: "New save" or the save there is) stays the entry the
+     * game focuses, as before the list: a second campaign save (New save: SAVEDATA031) would leave the save slots,
+     * the story save and "Current save" on the first one while the game plays on in the other. */
+    if (type==1) return;
     /* The list: the slots that exist (as on the console), the focused one selected. */
     memset(&save_choice,0,sizeof(save_choice));
     bbport_saves_list_cancel();   /* a slot picked in an earlier list the game did not go on with */
