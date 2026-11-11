@@ -32,6 +32,7 @@
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "shader_recompiler/specialization.h"
+#include "bbport_vblank.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -932,9 +933,16 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     const bool fast_vblank = EmulatorSettings.GetVblankFrequency() > 60;
     constexpr std::chrono::nanoseconds movie_period{1000000000 / 60};
     auto next_movie_vblank = std::chrono::steady_clock::now();
+    // bbport (GitHub #26): the vblank on the display's own refresh when it refreshes at this rate (bbport_vblank.h):
+    // each tick then starts at the display's vblank instead of the timer's (a timer started afresh there keeps the
+    // "draw too fast" check below working); a tick the display does not answer falls back to the timer.
+    const bool vblank_sync = BbVblank::Start(vblank_period);
 
     while (!token.stop_requested()) {
         BbThreads::SampleCore(BbThreads::CorePresent);
+        if (vblank_sync && BbVblank::Wait()) {
+            timer = Common::AccurateTimer{vblank_period};
+        }
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
 
