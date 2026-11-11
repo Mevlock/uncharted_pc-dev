@@ -98,8 +98,8 @@ def dev_text_switch(path):
 KEEP = {
     US['big2-ps4_Shipping.elf']: {'noreload': [0x104f84b]},
     EU['big2-ps4_Shipping.elf']: {'noreload': [0xe654bb]},
-    US['big3-ps4_Shipping.elf']: {'noreload': [0x17faa93], 'onehit': [0x17fab94]},
-    EU['big3-ps4_Shipping.elf']: {'noreload': [0x14c0923], 'onehit': [0x14c0a24]},
+    US['big3-ps4_Shipping.elf']: {'noreload': [0x17faa93], 'onehit': [0x17fab94], 'grenades': [0x17faa92]},
+    EU['big3-ps4_Shipping.elf']: {'noreload': [0x14c0923], 'onehit': [0x14c0a24], 'grenades': [0x14c0922]},
 }
 
 
@@ -270,7 +270,7 @@ def quality_switches(data, names):
 
 def keep_bytes(path, cheats):
     """BB_KEEP_BYTES ("offset=1,...") for the enabled switch cheats of one executable; '' when none applies."""
-    if not any(c in ('noreload', 'onehit', 'rewards', 'fullres', 'hiresshadow', 'nodof') for c in cheats):
+    if not any(c in ('noreload', 'onehit', 'grenades', 'rewards', 'fullres', 'hiresshadow', 'nodof') for c in cheats):
         return ''
     try:
         data = Path(path).read_bytes()

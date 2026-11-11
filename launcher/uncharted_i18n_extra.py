@@ -199,6 +199,7 @@ EXTRA_TRANSLATIONS = {
         'Infinite Ammo': 'Unendliche Munition',
         'No Reload': 'Kein Nachladen',
         'One-Hit Kills': 'Tod mit einem Treffer',
+        'Infinite Grenades': 'Unendlich Granaten',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Entwicklermodus: Debug-Text von Naughty Dog; F11 Dev Menu, F8 Quick Menu',
         'Show the debug text (FPS, timings, memory) in developer mode; F7 in play':
@@ -615,6 +616,7 @@ EXTRA_TRANSLATIONS = {
         'Infinite Ammo': 'Munizioni infinite',
         'No Reload': 'Nessuna ricarica',
         'One-Hit Kills': 'Uccisioni con un colpo',
+        'Infinite Grenades': 'Granate infinite',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Modalità sviluppatore: testo di debug di Naughty Dog; F11 Dev Menu, F8 Quick Menu',
         'Show the debug text (FPS, timings, memory) in developer mode; F7 in play':
@@ -1030,6 +1032,7 @@ EXTRA_TRANSLATIONS = {
         'Infinite Ammo': '弾薬無限',
         'No Reload': 'リロード不要',
         'One-Hit Kills': '一撃必殺',
+        'Infinite Grenades': 'グレネード無限',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         '開発者モード: Naughty Dog のデバッグ表示、F11 Dev Menu、F8 Quick Menu',
         'Show the debug text (FPS, timings, memory) in developer mode; F7 in play':
@@ -1341,6 +1344,7 @@ EXTRA_TRANSLATIONS = {
         'Infinite Ammo': 'Munición infinita',
         'No Reload': 'Sin recargar',
         'One-Hit Kills': 'Muertes de un golpe',
+        'Infinite Grenades': 'Granadas infinitas',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Modo desarrollador: texto de depuración de Naughty Dog; F11 Dev Menu, F8 Quick Menu',
         'Show the debug text (FPS, timings, memory) in developer mode; F7 in play':
@@ -1655,6 +1659,7 @@ EXTRA_TRANSLATIONS = {
         'Infinite Ammo': 'Munição infinita',
         'No Reload': 'Sem recarregar',
         'One-Hit Kills': 'Mortes com um golpe',
+        'Infinite Grenades': 'Granadas infinitas',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Modo desenvolvedor: texto de depuração da Naughty Dog; F11 Dev Menu, F8 Quick Menu',
         'Show the debug text (FPS, timings, memory) in developer mode; F7 in play':
@@ -1970,6 +1975,7 @@ EXTRA_TRANSLATIONS = {
         'Infinite Ammo': 'Munitions infinies',
         'No Reload': 'Pas de rechargement',
         'One-Hit Kills': 'Tué en un coup',
+        'Infinite Grenades': 'Grenades infinies',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Mode développeur : texte de débogage de Naughty Dog ; F11 Dev Menu, F8 Quick Menu',
         'Show the debug text (FPS, timings, memory) in developer mode; F7 in play':
@@ -2580,5 +2586,6 @@ EXTRA_TRANSLATIONS = {
         '{}: shaders prepared.': '{}: шейдеры подготовлены.',
         'No Reload': 'Без перезарядки',
         'One-Hit Kills': 'Убийство с одного удара',
+        'Infinite Grenades': 'Бесконечные гранаты',
     },
 }

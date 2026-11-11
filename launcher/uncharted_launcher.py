@@ -56,8 +56,8 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
 # Naughty Dog's debug-menu switches the runtime keeps set (scripts/cheats.py KEEP; after BilalReloaded): the games
 # that have them.
-SWITCH_CHEATS = {'u2': ('noreload',), 'u3': ('noreload', 'onehit')}
-SWITCH_CHEAT_TITLES = {'noreload': 'No Reload', 'onehit': 'One-Hit Kills'}
+SWITCH_CHEATS = {'u2': ('noreload',), 'u3': ('noreload', 'onehit', 'grenades')}
+SWITCH_CHEAT_TITLES = {'noreload': 'No Reload', 'onehit': 'One-Hit Kills', 'grenades': 'Infinite Grenades'}
 GAMES = [
     ('u1', "Drake's Fortune", 'Uncharted 1 · 2007', 'eboot.bin'),
     ('u2', 'Among Thieves', 'Uncharted 2 · 2009', 'big2-ps4_Shipping.elf'),
