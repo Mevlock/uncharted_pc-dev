@@ -99,6 +99,11 @@ static void u1_add_to_page(const U1Build *b, uint64_t image, unsigned char *page
     memcpy(&text,label+8,4);
     for (size_t s=0;s<sizeof(u1_spots)/sizeof(*u1_spots);++s) {
         U1Spot *spot=&u1_spots[s];
+        if (spot->added && id==spot->after_id && text==spot->after_text) {
+            static int told[2];
+            if (told[s]++<5) printf("Exit menu: Uncharted 1: the %s is built again (page %p): no Quit added this time\n",
+                                    spot->where,(void *)page);
+        }
         if (spot->added || spot->page || id!=spot->after_id || text!=spot->after_text) continue;
         spot->page=page;
         memcpy(&spot->owner,item+0xa0,sizeof(spot->owner));
