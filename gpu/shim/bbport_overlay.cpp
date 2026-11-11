@@ -2348,9 +2348,24 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
         .pColorAttachments = &attachment,
     });
     {
-        // Font atlas uploads submit to the graphics queue themselves.
+        // Texture uploads (new font glyphs, save pictures, trophy icons) submit to the graphics queue themselves and
+        // wait for it: the queue's own lock too, as the async submits and sparse binds take only that one
+        // (vk_scheduler.cpp). Without it an upload could run at the same moment as one of them and be lost: glyphs
+        // of the font, once drawn, stayed blank for the session (letters missing in the save list), a picture
+        // black. Same order as Scheduler::SubmitExecution (submit lock, then queue lock).
+        ImDrawData* draw_data = ImGui::GetDrawData();
+        bool uploads = false;
+        if (draw_data && draw_data->Textures) {
+            for (const ImTextureData* tex : *draw_data->Textures) {
+                uploads = uploads || tex->Status != ImTextureStatus_OK;
+            }
+        }
         std::scoped_lock submit_lock{Vulkan::Scheduler::submit_mutex};
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdbuf);
+        std::unique_lock<std::mutex> queue_lock;
+        if (uploads) {
+            queue_lock = std::unique_lock{Vulkan::g_graphics_queue_mutex};
+        }
+        ImGui_ImplVulkan_RenderDrawData(draw_data, cmdbuf);
     }
     cmdbuf.endRendering();
 }
