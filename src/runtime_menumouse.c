@@ -1503,11 +1503,14 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
      * right of that row's label. The cursor there picks the value (the page behind is left alone: its hidden "On" took the click) */
     static struct { int on, want; uint64_t ds; } dd;
     dd.on=0;
-    if (u2m && have_sel && !dialog) {
+    /* (U3's difficulty choice too: a focused list showing all of its 2-8 values, 424 116 208x143 for five; its last rows are no texts the
+     * hooks see, and its two lit items in the bar read as a Yes/No) */
+    if ((u2m && have_sel && !dialog) || u3m) {
         pthread_mutex_lock(&u3_lock);
         for (int k=0;k<16 && !dd.on;++k) {
             const U2List *l=&u2_lists[k];
-            if (!l->us || now-l->us>=150000 || !l->focused || l->w!=u2_dropdown_w || l->vis<2 || l->vis>8) continue;
+            if (!l->us || now-l->us>=150000 || !l->focused || l->vis<2 || l->vis>8) continue;
+            if (u2m ? l->w!=u2_dropdown_w : (l->hi-l->lo+1!=l->vis || l->rw<40.0f || l->rh<20.0f*(float)l->vis)) continue;
             /* its rectangle once it is open (650 278 250x146: 5 rows of 29.2); while it opens, level with the lit row */
             const int rect=l->rw>40.0f && l->rh>=20.0f*(float)l->vis;
             const float pitch=rect ? l->rh/(float)l->vis : 29.2f, top=rect ? l->ry : sel.y+sel.h*0.5f-pitch*0.5f;
@@ -1517,7 +1520,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             dd.on=1; dd.want=v; dd.ds=l->ds;
         }
         pthread_mutex_unlock(&u3_lock);
-        if (dd.on) have_hov=0;
+        if (dd.on) { have_hov=0; dialog=0; }
     }
     if (u2m) {   /* a window over U2's lists (a locked reward or skin): the lists on screen (controls with 3+ rows seen) have all lost the focus
                   * to it (their flag at +8): the lists below are left alone until it closes (the game's own state, any size or language) */
