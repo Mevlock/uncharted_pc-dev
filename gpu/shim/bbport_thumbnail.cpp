@@ -98,6 +98,17 @@ std::vector<unsigned char> ToRgb(const unsigned char* rgba) {
     return rgb;
 }
 
+// A frame of a fade or a loading screen: (almost) all black. The game writes a save right after a load and at
+// checkpoints, during the fade, so such a picture would become the save's; it is not kept (the last picture of play
+// stays). A dark scene with any light in it (a torch, a lit window) has more than 1 in 100 pixels above it.
+bool Blank(const std::vector<unsigned char>& rgb) {
+    size_t lit = 0;
+    for (size_t i = 0; i + 2 < rgb.size(); i += 3) {
+        lit += rgb[i] > 32 || rgb[i + 1] > 32 || rgb[i + 2] > 32;
+    }
+    return lit * 100 < rgb.size() / 3;
+}
+
 // "SAVEDATA031" from ".../SAVEDATA031.sce_sys/thumb.png"; empty for no save folder.
 std::string SaveOf(const std::string& path) {
     const size_t at = path.rfind("SAVEDATA");
@@ -136,6 +147,9 @@ bool Wanted() {
 
 void Store(const unsigned char* rgba) {
     std::vector<unsigned char> rgb = ToRgb(rgba);
+    if (Blank(rgb)) {
+        return;
+    }
     const std::string game = GameInPlay();
     std::scoped_lock lock{mutex};
     if (Clock::now() - clean_at <= std::chrono::seconds(3)) {
@@ -150,7 +164,8 @@ bool WantedClean() {
         return false;
     }
     const auto now = Clock::now();
-    if (now - last_clean_request < std::chrono::seconds(1)) {
+    // In play only (a follow / cover camera, also behind the pause menu): not a cutscene or a loading screen.
+    if (now - last_clean_request < std::chrono::seconds(1) || !InPlay()) {
         return false;
     }
     last_clean_request = now;
@@ -159,6 +174,9 @@ bool WantedClean() {
 
 void StoreClean(const unsigned char* rgba) {
     std::vector<unsigned char> rgb = ToRgb(rgba);
+    if (Blank(rgb)) {
+        return; // a fade (the frame picture is black then too, and not kept either)
+    }
     const std::string game = GameInPlay();
     std::scoped_lock lock{mutex};
     picture = std::move(rgb);
