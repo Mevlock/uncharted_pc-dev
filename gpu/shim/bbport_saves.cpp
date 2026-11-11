@@ -447,17 +447,43 @@ bool StartPractice(std::string& message) {
             message = T("The game is saving: try again in a moment.");
             return false;
         }
-        // The practice copy starts as the campaign save; from now until the game restarts the game saves there.
+        // The practice copies start as the game's campaign saves; from now until the game restarts the game saves
+        // there. Every campaign save (SAVEDATA0<game>0 to 9, runtime_savedata.c practice_redirect), not only the
+        // first: the game also plays on a second one (0.3.6.52's Chapter Select made SAVEDATA0<game>1, and Continue
+        // picks the newest), and the jumps were written into that one, the player's own save.
         std::error_code ec;
         const fs::path practice = GameBackups(game) / "practice";
-        std::string error;
-        if (fs::exists(SavesDir() / SlotName(game) / "USR-DATA", ec)) {
-            if (!CopySave(SavesDir(), practice, SlotName(game), error)) {
-                message = fmt::format(fmt::runtime(T("Could not start practice mode: {}")), error);
-                return false;
+        const fs::path temp = practice.parent_path() / "practice.new";
+        fs::remove_all(temp, ec);
+        fs::create_directories(temp, ec);
+        std::string error = ec ? ec.message() : "";
+        for (int n = 0; n <= 9 && error.empty(); ++n) {
+            const std::string name = "SAVEDATA0" + std::to_string(game) + std::to_string(n);
+            if (!fs::exists(SavesDir() / name / "USR-DATA", ec)) {
+                continue;
             }
-        } else {
-            fs::remove_all(practice, ec);  // no campaign save: an old session's practice copy must not come back
+            for (const std::string& dir : {name, name + ".sce_sys"}) {
+                if (fs::exists(SavesDir() / dir, ec)) {
+                    fs::copy(SavesDir() / dir, temp / dir, fs::copy_options::recursive, ec);
+                    if (ec) {
+                        error = ec.message();
+                        break;
+                    }
+                }
+            }
+        }
+        if (error.empty()) {
+            // An old session's practice copies go (none must come back for a save that is gone).
+            fs::remove_all(practice, ec);
+            fs::rename(temp, practice, ec);
+            if (ec) {
+                error = ec.message();
+            }
+        }
+        if (!error.empty()) {
+            fs::remove_all(temp, ec);
+            message = fmt::format(fmt::runtime(T("Could not start practice mode: {}")), error);
+            return false;
         }
         fs::create_directories(practice, ec);
         runtime_checkpoint_set_practice(1);

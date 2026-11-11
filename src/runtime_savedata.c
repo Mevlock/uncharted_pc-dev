@@ -354,17 +354,19 @@ int runtime_savedata_mounted(void) {
     pthread_mutex_unlock(&lock);
     return n;
 }
-/* Practice mode (checkpoint jumps, runtime_checkpoint.c): the campaign save of the running game (SAVEDATA0<game>0)
- * is the practice copy the overlay made before the first jump, for mounting and for deleting alike (a game deleting
- * its campaign save, on New Game say, must not delete the player's own). */
+/* Practice mode (checkpoint jumps, runtime_checkpoint.c): each campaign save of the running game (SAVEDATA0<game>0
+ * to 9) is the practice copy the overlay made before the first jump (BbSaves::StartPractice), for mounting and for
+ * deleting alike (a game deleting its campaign save, on New Game say, must not delete the player's own). Not only
+ * the first: a game playing on its second campaign save (0.3.6.52's Chapter Select made one; Continue picks the
+ * newest) wrote the jumps into the player's save there. The profile saves (SAVEDATA0<game>P, CC) stay as they are. */
 static void practice_redirect(const char *base, const char *name, char *host, size_t host_size, char *meta,
                               size_t meta_size) {
     if (!runtime_checkpoint_practice()) return;
     const char *exe=getenv("BB_EXE");
     const int game=!exe ? 0 : strstr(exe,"big3") ? 3 : strstr(exe,"big2") ? 2 : !strcmp(exe,"eboot.bin") ? 1 : 0;
     char campaign[16];
-    snprintf(campaign,sizeof(campaign),"SAVEDATA0%d0",game);
-    if (game && !strcmp(name,campaign)) {
+    snprintf(campaign,sizeof(campaign),"SAVEDATA0%d",game);
+    if (game && strlen(name)==11 && !strncmp(name,campaign,10) && name[10]>='0' && name[10]<='9') {
         snprintf(host,host_size,"%s.backups/u%d/practice/%s",base,game,name);
         snprintf(meta,meta_size,"%s.backups/u%d/practice/%s.sce_sys",base,game,name);
     }
