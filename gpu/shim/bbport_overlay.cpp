@@ -2114,6 +2114,11 @@ bool BeginChoice(const std::string& title, std::vector<std::string> items,
     if (!choice_active) {
         choice_mouse_seen = false;
         ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+        // ...and with no button held: a release that went to the game (the right button whose press closed the
+        // last list) would leave ImGui's button down, and the next click would not count as one.
+        for (int button = 0; button < 3; ++button) {
+            ImGui::GetIO().AddMouseButtonEvent(button, false);
+        }
     }
     choice_active = true;
     ImGui::GetIO().MouseDrawCursor = true;
