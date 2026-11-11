@@ -1,6 +1,7 @@
 #include "bbport_write_log.h"
 // bbport: glue between the C loader and the vendored shadPS4 video core.
 #include "bbport_overlay.h"
+#include "bbport_thumbnail.h"
 #include "bbport_settings.h"
 #include "bbport_copy.h"
 #ifndef _WIN32
@@ -495,6 +496,42 @@ extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {
     if (!g_window) return 0;
     g_window->BeginTextInput(initial ? initial : "", prompt ? prompt : "Text");
     return 1;
+}
+
+// The game's save list (sceSaveDataDialog, runtime_services.c), shown by the overlay. Ported from BilalReloaded's
+// port (gow3gpu_choice_begin/poll, PR #349 by the-best-is-best; GPL-2.0-or-later). The pictures are read here, on
+// the game's thread, before the list is shown.
+extern "C" int bbgpu_choice_begin(const char* title, const char* const* labels, const char* const* pictures,
+                                  int count, int focus, int deletable_from) {
+    if (!g_window || count <= 0 || !labels) return 0;
+    std::vector<std::string> items(size_t(count));
+    std::vector<std::vector<unsigned char>> pngs(size_t(count));
+    for (int i = 0; i < count; ++i) {
+        items[i] = labels[i] ? labels[i] : "";
+        if (!pictures || !pictures[i]) continue;
+        if (FILE* f = std::fopen(pictures[i], "rb")) {
+            std::fseek(f, 0, SEEK_END);
+            const long size = std::ftell(f);
+            std::fseek(f, 0, SEEK_SET);
+            if (size > 0 && size < (8l << 20)) {
+                pngs[i].resize(size_t(size));
+                if (std::fread(pngs[i].data(), 1, pngs[i].size(), f) != pngs[i].size()) pngs[i].clear();
+            }
+            std::fclose(f);
+        }
+    }
+    if (title && std::strcmp(title, "Save game") == 0) {
+        BbThumbnail::NoteSaveList();
+    }
+    return BbOverlay::BeginChoice(title ? title : "", std::move(items), std::move(pngs), focus, deletable_from) ? 1 : 0;
+}
+
+extern "C" int bbgpu_choice_poll(void) {
+    return BbOverlay::PollChoice();
+}
+
+extern "C" void bbgpu_choice_cancel(void) {
+    BbOverlay::CancelChoice();
 }
 
 extern "C" int bbgpu_text_input_poll(char* out, uint64_t size) {

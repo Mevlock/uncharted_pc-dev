@@ -324,14 +324,77 @@ enum { SAVE_LIST=1, SAVE_USER_MSG=2, SAVE_SYSTEM_MSG=3, SAVE_ERROR_CODE=4, SAVE_
 #define SAVE_PARAM_SIZE 1328 /* OrbisSaveDataParam */
 static struct { uint32_t mode; int waits, pick; void *user_data; char dir[32]; unsigned char param[SAVE_PARAM_SIZE]; } save_dialog;
 /* List mode: SaveDialogItems {userId, pad, titleId*, dirName*, dirNameNum, pad, newItem*,
- * focusPos, pad, focusPosDirName*, ...}; dispType 1 save, 2 load, 3 delete. The entry the
- * dialog focuses is taken, as when the player confirms at once: focusPos 0 list head (the new
+ * focusPos, pad, focusPosDirName*, ...}; dispType 1 save, 2 load, 3 delete. focusPos 0 list head (the new
  * save entry comes first), 1 list tail, 2 first slot, 3 last slot, 4 latest, 5 oldest, 6 named.
- * pick: 1 existing slot, 0 the new save entry (empty name: the game names it), -1 cancelled. */
+ * pick: 1 existing slot, 0 the new save entry (empty name: the game names it), -1 cancelled.
+ * The save list (ported from BilalReloaded's port, PR #349 by the-best-is-best; GPL-2.0-or-later): the overlay
+ * shows the list (New save first when offered, then the saves that exist, with their pictures) and the dialog
+ * runs until the player picks one, cancels, or deletes one (moved to savedata-deleted; the list shows again).
+ * BB_SAVE_LIST=0, scripted runs (BB_PAD_FILE, unless BB_SAVE_LIST=1) or no window: the entry the dialog focuses
+ * is taken at once, as when the player confirms at once (the port's behaviour before). */
+#define SAVE_LIST_MAX 32
+static struct {
+    int choosing, offer_new, count, user;
+    const char *heading;
+    char title[16], dirs[SAVE_LIST_MAX][32];
+} save_choice;
+static char save_choice_labels[SAVE_LIST_MAX+1][768], save_choice_icons[SAVE_LIST_MAX+1][720];
+static int save_list_enabled(void) {
+    static int on=-1;
+    if (on<0) {
+        const char *env=getenv("BB_SAVE_LIST"), *pad=getenv("BB_PAD_FILE");
+        on=env && *env ? env[0]!='0' : !(pad && *pad);
+        printf("Runtime: save list %s\n",on ? "on: the game's save dialog is shown in the overlay"
+                                           : "off: the save dialog takes the focused entry (BB_SAVE_LIST=0 or a scripted run)");
+    }
+    return on;
+}
+static void save_choice_finish(int entry) {
+    save_choice.choosing=0;
+    memset(save_dialog.dir,0,sizeof(save_dialog.dir));
+    const int dir=entry-save_choice.offer_new;
+    if (entry<0) save_dialog.pick=-1;
+    else if (dir<0) save_dialog.pick=0;
+    else {
+        const char (*one)[32]=(const char (*)[32])save_choice.dirs[dir];
+        save_dialog.pick=runtime_savedata_pick(save_choice.user,save_choice.title,one,1,0,NULL,save_dialog.dir,
+                                               save_dialog.param);
+        if (save_dialog.pick<0 && save_choice.offer_new) save_dialog.pick=0;
+    }
+    printf("Runtime: SaveDataDialog list: %s%.32s\n",save_dialog.pick<0 ? "cancelled" : save_dialog.pick ? "chose " : "new save data",
+           save_dialog.pick>0 ? save_dialog.dir : "");
+    dialogs[2].status=3;
+}
+/* Shows the list with `focus` (an entry); 0 when there is nothing to show or no window. */
+static int save_choice_show(int focus) {
+    const char *labels[SAVE_LIST_MAX+1], *icons[SAVE_LIST_MAX+1];
+    int n=0;
+    if (save_choice.offer_new) {
+        snprintf(save_choice_labels[n],sizeof(save_choice_labels[n]),"New save");
+        labels[n]=save_choice_labels[n]; icons[n]=NULL; ++n;
+    }
+    for (int i=0;i<save_choice.count;++i) {
+        runtime_savedata_label(save_choice.user,save_choice.title,save_choice.dirs[i],save_choice_labels[n],
+                               sizeof(save_choice_labels[n]));
+        labels[n]=save_choice_labels[n];
+        icons[n]=runtime_savedata_icon(save_choice.user,save_choice.title,save_choice.dirs[i],save_choice_icons[n],
+                                       sizeof(save_choice_icons[n])) ? NULL : save_choice_icons[n];
+        ++n;
+    }
+    if (!n) return 0;
+    if (focus>=n) focus=n-1;
+    if (focus<0) focus=0;
+    if (!bbgpu_choice_begin(save_choice.heading,labels,icons,n,focus,save_choice.count ? save_choice.offer_new : -1))
+        return 0;
+    printf("Runtime: SaveDataDialog list (%s): %d entries shown\n",save_choice.heading,n);
+    save_choice.choosing=1;
+    return 1;
+}
 static void save_list(const unsigned char *param) {
     uint32_t type; const unsigned char *items;
     memcpy(&type,param+56,4); memcpy(&items,param+72,8);
     save_dialog.pick=-1;
+    save_choice.choosing=0;
     memset(save_dialog.dir,0,sizeof(save_dialog.dir));
     if (!items || type==3) return;
     int32_t user; const char *title, *focus; const char (*names)[32]; uint32_t count, focus_pos;
@@ -346,11 +409,51 @@ static void save_list(const unsigned char *param) {
                                                 focus,save_dialog.dir,save_dialog.param);
     if (save_dialog.pick<0 && offer_new) save_dialog.pick=0;
     printf("Runtime: SaveDataDialog list (%s, %u slots, focus %u): %s%.32s\n",type==1 ? "save" : "load",count,focus_pos,
-           save_dialog.pick<0 ? "nothing to choose, cancelled" : save_dialog.pick ? "chose " : "new save data",
+           save_dialog.pick<0 ? "nothing to choose, cancelled" : save_dialog.pick ? "focused " : "new save data",
            save_dialog.pick>0 ? save_dialog.dir : "");
+    if (!save_list_enabled()) return;
+    /* The list: the slots that exist (as on the console), the focused one selected. */
+    memset(&save_choice,0,sizeof(save_choice));
+    save_choice.user=user;
+    snprintf(save_choice.title,sizeof(save_choice.title),"%.9s",title ? title : "");
+    save_choice.offer_new=offer_new;
+    save_choice.heading=type==1 ? "Save game" : "Load game";
+    int focus_entry=0;
+    for (uint32_t i=0;names && i<count && save_choice.count<SAVE_LIST_MAX;++i) {
+        char name[33]; memcpy(name,names[i],32); name[32]=0;
+        if (!name[0] || !runtime_savedata_exists(user,save_choice.title,name)) continue;
+        if (save_dialog.pick>0 && !strncmp(name,save_dialog.dir,32)) focus_entry=save_choice.count+offer_new;
+        memcpy(save_choice.dirs[save_choice.count++],name,32);
+    }
+    if (!save_choice_show(focus_entry)) {
+        printf("Runtime: SaveDataDialog list: %s; the focused entry is taken\n",
+               save_choice.count || offer_new ? "no window" : "no saves");
+        save_choice.choosing=0;
+    }
+}
+/* Game thread (the dialog's status): the player's answer, once there is one. */
+static void save_choice_update(void) {
+    if (!save_choice.choosing) return;
+    const int choice=bbgpu_choice_poll();
+    if (choice==-1) return;
+    if (choice<=-3) {
+        /* Deleted from the list: the save leaves it (moved to savedata-deleted), and the list shows again. */
+        const int entry=-3-choice, dir=entry-save_choice.offer_new;
+        if (dir>=0 && dir<save_choice.count && !runtime_savedata_trash(save_choice.user,save_choice.title,save_choice.dirs[dir])) {
+            memmove(save_choice.dirs[dir],save_choice.dirs[dir+1],(size_t)(save_choice.count-dir-1)*32);
+            --save_choice.count;
+        }
+        save_choice.choosing=0;
+        if (!save_choice_show(entry)) save_choice_finish(-1);
+        return;
+    }
+    save_choice_finish(choice<0 ? -1 : choice);
 }
 static ABI int32_t save_init(void) { return dialog_init(2); }
-static ABI int32_t save_term(void) { return dialog_term(2); }
+static ABI int32_t save_term(void) {
+    if (save_choice.choosing) { bbgpu_choice_cancel(); save_choice_finish(-1); }
+    return dialog_term(2);
+}
 static ABI int32_t save_open(const unsigned char *param) {
     if (!dialogs[2].initialized) return DIALOG_NOT_INITIALIZED;
     if (!param) return (int32_t)0x80B80006; /* ARG_NULL */
@@ -370,6 +473,7 @@ static ABI int32_t save_open(const unsigned char *param) {
     return 0;
 }
 static ABI int32_t save_status(void) {
+    if (save_choice.choosing) { save_choice_update(); return dialogs[2].status; }   /* RUNNING until the player answers */
     if (dialogs[2].status==2 && !save_dialog.waits) dialogs[2].status=3;
     return dialogs[2].status;
 }
@@ -395,6 +499,7 @@ static ABI int32_t save_ready(void) { return 1; }
 static ABI int32_t save_progress(int32_t target,uint32_t rate) { (void)target; (void)rate; return 0; }
 static ABI int32_t save_close(const void *param) {
     (void)param;
+    if (save_choice.choosing) { bbgpu_choice_cancel(); save_choice_finish(-1); }   /* the game closed the list */
     if (dialogs[2].status==2) dialogs[2].status=3;
     return 0;
 }

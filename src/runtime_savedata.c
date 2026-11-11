@@ -6,6 +6,7 @@
  * Metadata lives beside the directory so the guest's own files are untouched. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "gpu/bbgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,7 +66,7 @@ _Static_assert(sizeof(SearchCond)==64 && sizeof(SearchResult)==56,"dir name sear
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized;
 static char title_id[16]="UNKNOWN";
-static struct { int used; char host[700], meta[700]; } slots[SLOTS];
+static struct { int used, writable; char host[700], meta[700]; } slots[SLOTS];
 static char memory_path[720];
 static uint64_t memory_size;
 static size_t mounts_done, memory_writes;
@@ -394,6 +395,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     if (!exists && (make_dirs(host) || make_dirs(meta))) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; }
     if (!exists) { Param empty={0}; write_param(meta,&empty); }
     slots[slot].used=1;
+    slots[slot].writable=!(mode & MODE_RDONLY);
     snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
     snprintf(slots[slot].meta,sizeof(slots[slot].meta),"%s",meta);
     memset(result,0,sizeof(*result));
@@ -430,9 +432,19 @@ static ABI int32_t save_umount(const MountPoint *point) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     pthread_mutex_lock(&lock);
     int slot=slot_of(point);
-    char host[700]="";
-    if (slot>=0) { runtime_file_unmount(point->data); slots[slot].used=0; snprintf(host,sizeof(host),"%s",slots[slot].host); }
+    char host[700]="", picture[720]="";
+    if (slot>=0) {
+        runtime_file_unmount(point->data); slots[slot].used=0; snprintf(host,sizeof(host),"%s",slots[slot].host);
+        /* (BilalReloaded, PR #349 by the-best-is-best) a save the game wrote gets the last picture of the game in
+         * play as thumb.png beside its param, shown in the save list (bbport_thumbnail.cpp). */
+        if (slots[slot].writable) snprintf(picture,sizeof(picture),"%s/thumb.png",slots[slot].meta);
+    }
     pthread_mutex_unlock(&lock);
+    if (picture[0]) {
+        const int written=bbgpu_thumbnail_save(picture);
+        if (written==2) remove(picture); /* an older picture of this save would show another place meanwhile */
+        if (written) printf("Runtime: save picture %s (%s)\n",written==1 ? "written" : "waits for play to go on",picture);
+    }
     /* A save closed: its files with data are backed up (save auto-repair), and the overlay's story save
      * follows the game's campaign saves (bbport_saves.cpp). */
     if (slot>=0) save_backup(host);
@@ -517,6 +529,120 @@ int runtime_savedata_pick(int32_t user, const char *title, const char (*names)[3
     memcpy(out,names[best],32);
     if (param_out) memcpy(param_out,&best_param,sizeof(best_param));
     return 1;
+}
+/* ---- The save list (runtime_services.c, the overlay's list for sceSaveDataDialog), ported from BilalReloaded's
+ * port (PR #349 by the-best-is-best; GPL-2.0-or-later): a save's host folders as the game would mount them (the
+ * practice copy in practice mode), its picture, its label, and a delete that moves it to a trash folder. ---- */
+static void list_paths(int32_t user, const char *title, const char *dir, char *base, size_t base_size, char host[640],
+                       char meta[680]) {
+    root(user,title,base,base_size);
+    snprintf(host,640,"%s/%s",base,dir);
+    snprintf(meta,680,"%s/%s.sce_sys",base,dir);
+    practice_redirect(base,dir,host,640,meta,680);
+}
+int runtime_savedata_exists(int32_t user, const char *title, const char *dir) {
+    if (!valid_name(dir,32)) return 0;
+    char base[600], host[640], meta[680];
+    list_paths(user,title,dir,base,sizeof(base),host,meta);
+    struct stat st;
+    return !stat(host,&st) && S_ISDIR(st.st_mode);
+}
+/* Host path of a save's picture: thumb.png (the game in play when it was written) when there is one, else the
+ * game's icon0.png; -1 when neither. */
+int runtime_savedata_icon(int32_t user, const char *title, const char *dir, char *out, size_t size) {
+    if (!valid_name(dir,32)) return -1;
+    char base[600], host[640], meta[680];
+    list_paths(user,title,dir,base,sizeof(base),host,meta);
+    struct stat st;
+    snprintf(out,size,"%s/thumb.png",meta);
+    if (!stat(out,&st) && st.st_size>0) return 0;
+    snprintf(out,size,"%s/icon0.png",meta);
+    return !stat(out,&st) && st.st_size>0 ? 0 : -1;
+}
+/* A param text field, at most `max` bytes, cut at a whole UTF-8 character (a cut inside one showed U+FFFD and
+ * swallowed the line break after it). Arabic titles come in presentation forms (U+FE70..U+FEFF, already in display
+ * order) with '_' for some spaces: those show as spaces. Trailing line breaks go. (the-best-is-best, PR #349) */
+static void list_text(char *out, size_t size, const char *field, size_t max) {
+    size_t n=strnlen(field,max);
+    if (n>=size) n=size-1;
+    if (n<strnlen(field,max+1)) {
+        size_t start=n;
+        while (start>0 && ((unsigned char)field[start-1]&0xc0)==0x80) --start;
+        if (start>0) {
+            const unsigned char lead=(unsigned char)field[start-1];
+            const size_t need=lead>=0xf0 ? 4 : lead>=0xe0 ? 3 : lead>=0xc0 ? 2 : 1;
+            if (n-(start-1)<need) n=start-1;
+        }
+    }
+    memcpy(out,field,n);
+    out[n]=0;
+    int arabic=0;
+    for (size_t i=0;i+1<n;++i)
+        if ((unsigned char)out[i]==0xef && (unsigned char)out[i+1]>=0xb9 && (unsigned char)out[i+1]<=0xbb) { arabic=1; break; }
+    if (arabic) for (size_t i=0;i<n;++i) if (out[i]=='_') out[i]=' ';
+    while (n && (out[n-1]=='\n' || out[n-1]=='\r' || out[n-1]==' ')) out[--n]=0;
+}
+/* Title, subtitle (chapter and progress), detail (play time, treasures) and the date on lines of their own. */
+void runtime_savedata_label(int32_t user, const char *title_in, const char *dir, char *out, size_t size) {
+    char base[600], host[640], meta[680];
+    Param p;
+    if (!valid_name(dir,32)) { snprintf(out,size,"?"); return; }
+    list_paths(user,title_in,dir,base,sizeof(base),host,meta);
+    if (read_param(meta,&p)) { snprintf(out,size,"%s",dir); return; }
+    time_t t=(time_t)p.mtime; struct tm tm;
+#ifdef _WIN32
+    localtime_s(&tm,&t);
+#else
+    localtime_r(&t,&tm);
+#endif
+    char when[32]; strftime(when,sizeof(when),"%Y-%m-%d %H:%M",&tm);
+    char title[128], subtitle[128], detail[320];
+    list_text(title,sizeof(title),p.title,127);
+    list_text(subtitle,sizeof(subtitle),p.subtitle,127);
+    list_text(detail,sizeof(detail),p.detail,1023);
+    snprintf(out,size,"%s\n%s%s%s%s%s",title[0] ? title : dir,subtitle,subtitle[0] ? "\n" : "",detail,
+             detail[0] ? "\n" : "",when);
+}
+/* Deleting a save from the save list: its folders (and its auto backup) move to
+ * <user dir>/savedata-deleted/<user>/<title>/<dir>-<time>, never removed, so a mistake can be undone by moving them
+ * back. 0 when moved; an open (mounted) save is refused. */
+int runtime_savedata_trash(int32_t user, const char *title, const char *dir) {
+    if (!valid_name(dir,32)) return -1;
+    char base[600], host[640], meta[680], backup[800], trash[760], to[840];
+    list_paths(user,title,dir,base,sizeof(base),host,meta);
+    {
+        const char *slash=strrchr(host,'/');
+        char hbase[700]; snprintf(hbase,sizeof(hbase),"%.*s",slash ? (int)(slash-host) : 0,host);
+        backup_path(hbase,dir,backup,sizeof(backup));
+    }
+    pthread_mutex_lock(&lock);
+    for (int i=0;i<SLOTS;++i)
+        if (slots[i].used && !strcmp(slots[i].host,host)) {
+            pthread_mutex_unlock(&lock);
+            printf("Runtime: save data '%s' is open: not deleted\n",dir);
+            return -1;
+        }
+    char stamp[32]; time_t now=time(NULL); struct tm tm;
+#ifdef _WIN32
+    localtime_s(&tm,&now);
+#else
+    localtime_r(&now,&tm);
+#endif
+    strftime(stamp,sizeof(stamp),"%Y%m%d-%H%M%S",&tm);
+    snprintf(trash,sizeof(trash),"%s/savedata-deleted/%d/%s/%s-%s",runtime_file_user_dir(),user,
+             title && *title ? title : title_id,dir,stamp);
+    struct stat st;
+    int r=stat(host,&st) || make_dirs(trash) ? -1 : 0;
+    if (!r) { snprintf(to,sizeof(to),"%s/%s",trash,dir); r=rename(host,to) ? -1 : 0; }
+    if (!r && !stat(meta,&st)) { snprintf(to,sizeof(to),"%s/%s.sce_sys",trash,dir); rename(meta,to); }
+    pthread_mutex_unlock(&lock);
+    if (!r) {
+        pthread_mutex_lock(&backup_lock);
+        if (!stat(backup,&st)) { snprintf(to,sizeof(to),"%s/backup",trash); rename(backup,to); }
+        pthread_mutex_unlock(&backup_lock);
+    }
+    printf("Runtime: save data '%s' %s %s\n",dir,r ? "could not be moved to" : "moved to",trash);
+    return r;
 }
 /* SQL-LIKE pattern: % any run, _ one character. */
 static int like(const char *s, const char *p) {

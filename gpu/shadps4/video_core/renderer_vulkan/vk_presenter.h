@@ -168,6 +168,22 @@ private:
     Frame hudless_frame{};
     std::chrono::steady_clock::time_point last_game_present{};
     std::atomic<double> game_frame_ms{16.7}; ///< written by the present thread
+
+    /// bbport: the save list's picture of the game (bbport_thumbnail.h; from BilalReloaded's port, PR #349 by
+    /// the-best-is-best): a game frame scaled down into `image`, copied to the mapped `buffer` and read once that
+    /// frame's present has finished.
+    struct Thumbnail {
+        vk::Image image{};
+        VmaAllocation image_allocation{};
+        vk::Buffer buffer{};
+        VmaAllocation buffer_allocation{};
+        void* mapped = nullptr;
+        vk::Fence pending{}; ///< present_done of the frame that copied it; null: nothing to read
+        bool failed = false; ///< not supported or not created: no pictures
+    } thumbnail;
+    bool thumbnail_game_frame = false; ///< the image PresentImage shows is the game's own new frame
+    void CaptureThumbnail(vk::CommandBuffer cmdbuf, const Frame* frame);
+    void ReadThumbnail();
 };
 
 /// bbport (BB_PREPARE_ONLY, the launcher's Prepare shaders button): prepares the shader list without a window and
