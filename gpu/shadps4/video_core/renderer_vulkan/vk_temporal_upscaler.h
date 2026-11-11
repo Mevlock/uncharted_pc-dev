@@ -208,6 +208,19 @@ private:
     /// Records DLSS into `cmdbuf` (output in General). `hdr`: linear scene color input.
     /// bbport: true while DLSS's history should be reset for a fade in (see the .cpp).
     bool FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource& color, bool reset);
+    /// bbport: the save picture from the scene before the UI (bbport_thumbnail.h): ui_image scaled down into a small
+    /// image and copied to host memory about once a second; read back once the GPU has run it.
+    void CaptureCleanPicture(vk::CommandBuffer cmdbuf, vk::Image source, u32 width, u32 height);
+    void ReadCleanPicture();
+    struct {
+        vk::Image image{};
+        VmaAllocation image_allocation{};
+        vk::Buffer buffer{};
+        VmaAllocation buffer_allocation{};
+        void* mapped = nullptr;
+        u64 tick = 0;
+        bool pending = false, failed = false;
+    } clean_picture;
     bool RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
                     const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh, float frame_ms,
                     bool hdr);

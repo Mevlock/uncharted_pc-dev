@@ -1,12 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// bbport: save pictures (bbport_thumbnail.h). Ported from BilalReloaded's port (gow3_thumbnail.cpp, PR #349 by
-// the-best-is-best); "in play" here is the port's camera hooks (runtime_mouselook_camera_recent) or, with mouse look
-// off, any game frame.
+// bbport: save pictures (bbport_thumbnail.h). First ported from BilalReloaded's port (gow3_thumbnail.cpp, PR #349 by
+// the-best-is-best).
+//
+// A save's picture is the last picture of play of that same game (that campaign save), taken when the game writes
+// the save; nothing waits for later play. Pictures come from two places:
+//   clean   the upscaler's image of the scene before the game's UI (vk_temporal_upscaler.cpp): no HUD, no
+//           subtitles, no pause menu, so it is taken behind the pause menu too (a save from it shows where it was
+//           made); about once a second.
+//   frame   the frame as shown (vk_presenter.cpp), while a follow / cover camera runs (not in a menu or a
+//           cutscene): when there is no clean picture (no upscaler in use).
+// Each picture belongs to the game in play when it was taken (bbport_saves_active_name); a save of another game, or
+// one with no picture of its game yet this session, keeps the picture it has.
 #include "bbport_thumbnail.h"
 #include "../bbgpu.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -15,30 +25,30 @@
 
 extern "C" int runtime_mouselook_camera_recent(void); // runtime_mouselook.c: a follow / cover camera ran lately
 extern "C" int runtime_mouselook_enabled(void);
+extern "C" void bbport_saves_active_name(char* out, size_t size); // bbport_saves.cpp: the campaign save in play
 
 namespace BbThumbnail {
 namespace {
 
 using Clock = std::chrono::steady_clock;
 std::mutex mutex;
-std::vector<unsigned char> picture; // RGB8, Width x Height; empty: none yet
-Clock::time_point picture_at{};     // when it was captured
-Clock::time_point last_request{}, playing_since{};
-// Saves written while the game was not in play (a chapter's first autosave comes after its cutscene or loading,
-// when the last picture still shows the end of the chapter before): they get the first picture taken once play has
-// gone on for a while.
-struct Pending {
-    std::string path;
-    Clock::time_point since;
-};
-std::vector<Pending> pending;
-// The camera hooks keep running behind the pause menu, so pictures go on being taken there. A save made from the
-// save list (opened from that menu) gets the picture from the moment Options was last pressed instead.
+std::vector<unsigned char> picture; // RGB8, Width x Height: the newest picture of play; empty: none yet
+std::string picture_game;           // the campaign save in play when it was taken ("SAVEDATA031")
+Clock::time_point clean_at{};       // the newest clean picture's time (a frame picture then waits its turn)
+Clock::time_point last_request{}, last_clean_request{};
+// The camera hooks keep running behind the pause menu, so frame pictures go on being taken there (with the menu in
+// them). A save made from the save list then gets the frame picture from the moment Options was last pressed.
 std::vector<unsigned char> before_pause;
+std::string before_pause_game;
 Clock::time_point save_list_at{};
-constexpr auto Fresh = std::chrono::seconds(3);   // a picture this recent shows the save's place
-constexpr auto Settled = std::chrono::seconds(2); // play this long after a break (fade-in over)
-constexpr auto GiveUp = std::chrono::minutes(10); // a waiting save keeps the game's picture
+
+bool Enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_SAVE_PICTURE");
+        return !(env && env[0] == '0');
+    }();
+    return enabled;
+}
 
 bool WritePng(const std::string& path, const std::vector<unsigned char>& rgb) {
     size_t size = 0;
@@ -63,14 +73,41 @@ bool InPlay() {
     return !runtime_mouselook_enabled() || runtime_mouselook_camera_recent();
 }
 
+std::string GameInPlay() {
+    char name[32] = {};
+    bbport_saves_active_name(name, sizeof(name));
+    return name;
+}
+
+std::vector<unsigned char> ToRgb(const unsigned char* rgba) {
+    std::vector<unsigned char> rgb(size_t(Width) * Height * 3);
+    for (size_t i = 0, n = size_t(Width) * Height; i < n; ++i) {
+        rgb[i * 3 + 0] = rgba[i * 4 + 0];
+        rgb[i * 3 + 1] = rgba[i * 4 + 1];
+        rgb[i * 3 + 2] = rgba[i * 4 + 2];
+    }
+    return rgb;
+}
+
+// "SAVEDATA031" from ".../SAVEDATA031.sce_sys/thumb.png"; empty for no save folder.
+std::string SaveOf(const std::string& path) {
+    const size_t at = path.rfind("SAVEDATA");
+    if (at == std::string::npos) {
+        return {};
+    }
+    const size_t end = path.find(".sce_sys", at);
+    return end == std::string::npos ? std::string() : path.substr(at, end - at);
+}
+
+// A campaign save (SAVEDATA0<game><digit>), not the profile (SAVEDATA0<game>P) or the collection's.
+bool IsCampaign(const std::string& save) {
+    return save.size() == 11 && save.compare(0, 9, "SAVEDATA0") == 0 && save[10] >= '0' && save[10] <= '9';
+}
+
 } // namespace
 
 bool Wanted() {
-    static const bool enabled = [] {
-        const char* env = std::getenv("BB_SAVE_PICTURE");
-        return !(env && env[0] == '0');
-    }();
-    if (!enabled) {
+    if (!Enabled()) {
         return false;
     }
     const auto now = Clock::now();
@@ -80,110 +117,87 @@ bool Wanted() {
     // A gap since the last request: play has just started again (a save list from the pause menu is over).
     if (now - last_request > std::chrono::seconds(2)) {
         std::scoped_lock lock{mutex};
-        playing_since = now;
         save_list_at = {};
     }
     last_request = now;
-    return true;
+    // While the upscaler gives clean pictures, frame pictures (with the HUD) are not needed.
+    std::scoped_lock lock{mutex};
+    return now - clean_at > std::chrono::seconds(3);
 }
 
 void Store(const unsigned char* rgba) {
-    std::vector<unsigned char> rgb(size_t(Width) * Height * 3);
-    for (size_t i = 0, n = size_t(Width) * Height; i < n; ++i) {
-        rgb[i * 3 + 0] = rgba[i * 4 + 0];
-        rgb[i * 3 + 1] = rgba[i * 4 + 1];
-        rgb[i * 3 + 2] = rgba[i * 4 + 2];
+    std::vector<unsigned char> rgb = ToRgb(rgba);
+    const std::string game = GameInPlay();
+    std::scoped_lock lock{mutex};
+    if (Clock::now() - clean_at <= std::chrono::seconds(3)) {
+        return; // a clean picture came in meanwhile
     }
-    const auto now = Clock::now();
-    std::vector<std::string> due;
-    {
-        std::scoped_lock lock{mutex};
-        picture = rgb;
-        picture_at = now;
-        if (!pending.empty() && now - playing_since >= Settled) {
-            for (const Pending& p : pending) {
-                if (now - p.since < GiveUp) {
-                    due.push_back(p.path);
-                }
-            }
-            pending.clear();
-        }
-    }
-    if (due.empty()) {
-        return;
-    }
-    // Off the present thread: encoding takes a few milliseconds.
-    std::thread([due = std::move(due), rgb = std::move(rgb)] {
-        for (const std::string& path : due) {
-            if (WritePng(path, rgb)) {
-                std::printf("GPU: save picture written once play went on (%s)\n", path.c_str());
-            }
-        }
-    }).detach();
+    picture = std::move(rgb);
+    picture_game = game;
 }
 
-void ForgetSave(const std::string& meta_name) {
-    std::scoped_lock lock{mutex};
-    std::erase_if(pending, [&](const Pending& p) { return p.path.find(meta_name) != std::string::npos; });
+bool WantedClean() {
+    if (!Enabled()) {
+        return false;
+    }
+    const auto now = Clock::now();
+    if (now - last_clean_request < std::chrono::seconds(1)) {
+        return false;
+    }
+    last_clean_request = now;
+    return true;
 }
+
+void StoreClean(const unsigned char* rgba) {
+    std::vector<unsigned char> rgb = ToRgb(rgba);
+    const std::string game = GameInPlay();
+    std::scoped_lock lock{mutex};
+    picture = std::move(rgb);
+    picture_game = game;
+    clean_at = Clock::now();
+}
+
+void ForgetSave(const std::string&) {}
 
 void NoteSaveList() {
     std::scoped_lock lock{mutex};
     save_list_at = Clock::now();
 }
 
-// The game opens one of its campaign saves (to read or to write, bbport_saves.cpp): pictures still waiting for its
-// other campaign saves go, or they would be taken in this one's play (a new game started from Chapter Select gave
-// the game saved just before its picture). The profile save's wait stays; so does the picture from before the pause
-// (a Save game list writes with it).
-void CampaignOpened(const std::string& meta_name) {
-    std::scoped_lock lock{mutex};
-    std::erase_if(pending, [&](const Pending& p) {
-        const size_t at = p.path.rfind("SAVEDATA0");
-        if (at == std::string::npos || p.path.compare(at, meta_name.size(), meta_name) == 0) {
-            return false;
-        }
-        // SAVEDATA0<game><digit>.sce_sys: another campaign save (not the profile, SAVEDATA0<game>P)
-        const char d = at + 10 < p.path.size() ? p.path[at + 10] : 0;
-        return d >= '0' && d <= '9' && p.path.compare(at + 11, 8, ".sce_sys") == 0;
-    });
-}
+void CampaignOpened(const std::string&) {}
 
-// The game opens one of its campaign saves to load it (bbport_saves.cpp): a picture still waiting for another save
-// would be taken in this one's play (another place, another game), and the picture from before the last pause
-// belongs to the play before the load. Both go; the other saves keep the pictures they have.
-void Loading(const std::string& meta_name) {
+// The game loads one of its saves: the picture from before the last pause belongs to the play before it.
+void Loading(const std::string&) {
     std::scoped_lock lock{mutex};
-    std::erase_if(pending, [&](const Pending& p) { return p.path.find(meta_name) == std::string::npos; });
     save_list_at = {};
     before_pause.clear();
+    before_pause_game.clear();
 }
 
 } // namespace BbThumbnail
 
+// runtime_savedata.c, a save the game wrote is closed: its picture. 1 written, 0 none (the save keeps the one it has).
 extern "C" int bbgpu_thumbnail_save(const char* path) {
     using namespace BbThumbnail;
-    if (!path || !*path) {
+    if (!path || !*path || !Enabled()) {
         return 0;
     }
+    const std::string save = SaveOf(path);
     std::vector<unsigned char> rgb;
     {
         std::scoped_lock lock{mutex};
         const auto now = Clock::now();
-        if (save_list_at != Clock::time_point{} && now - save_list_at < std::chrono::minutes(2) &&
-            !before_pause.empty()) {
-            // Kept while the list's pause lasts (Wanted clears it when play goes on), at most two minutes: the
-            // game may write its profile save around the chosen one.
+        const bool clean_recent = now - clean_at <= std::chrono::seconds(3);
+        const auto mine = [&](const std::string& game) { return !IsCampaign(save) || game == save; };
+        if (!clean_recent && save_list_at != Clock::time_point{} && now - save_list_at < std::chrono::minutes(2) &&
+            !before_pause.empty() && mine(before_pause_game)) {
+            // A save from the pause menu's list without clean pictures: the frame from before the pause (the menu
+            // is in the newer ones).
             rgb = before_pause;
-        } else if (picture.empty() || now - picture_at > Fresh || now - playing_since < Settled) {
-            // Not in play now: the save waits for the next picture (one entry per save).
-            std::erase_if(pending, [&](const Pending& p) { return p.path == path; });
-            if (pending.size() < 16) {
-                pending.push_back({path, now});
-            }
-            return 2;
-        } else {
+        } else if (!picture.empty() && mine(picture_game)) {
             rgb = picture;
+        } else {
+            return 0; // no picture of this game's play yet: it keeps the one it has
         }
     }
     // Off the game's thread (it is closing a save): encoding takes a few milliseconds.
@@ -198,5 +212,9 @@ extern "C" int bbgpu_thumbnail_save(const char* path) {
 extern "C" void bbgpu_thumbnail_pause(void) {
     using namespace BbThumbnail;
     std::scoped_lock lock{mutex};
-    before_pause = picture;
+    // With clean pictures the newest one is from behind the menu, without it: nothing to keep.
+    if (Clock::now() - clean_at > std::chrono::seconds(3)) {
+        before_pause = picture;
+        before_pause_game = picture_game;
+    }
 }

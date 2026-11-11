@@ -17,6 +17,10 @@ constexpr uint32_t Width = 456, Height = 256; // twice the save list's 228x128 p
 bool Wanted();
 /// Present thread: the captured picture, Width x Height RGBA8 rows top to bottom.
 void Store(const unsigned char* rgba);
+/// Upscaler (vk_temporal_upscaler.cpp): whether to capture the scene before the UI now (about once a second).
+bool WantedClean();
+/// Upscaler: the scene before the UI, Width x Height RGBA8 (sRGB-encoded) rows top to bottom.
+void StoreClean(const unsigned char* rgba);
 /// The game's save list ("Save game") was shown: the saves written before play goes on (at most two minutes) get
 /// the picture from before the pause menu (bbgpu_thumbnail_pause).
 void NoteSaveList();

@@ -19,6 +19,7 @@
 #include <vk_mem_alloc.h>
 
 #include "bbport_settings.h"
+#include "bbport_thumbnail.h"
 #include "bbport_threads.h"
 #include "common/thread.h"
 #include "bbport_toggles.h"
@@ -2196,8 +2197,151 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
     }
 }
 
+// bbport: the save picture from the scene before the UI (bbport_thumbnail.h). `source` (ui_image, General, UNORM
+// holding sRGB-encoded values) is scaled into a small UNORM image (its middle 16:9 part on a wider screen) and copied
+// to a host buffer; ReadCleanPicture hands it over once the GPU has run it. About once a second.
+void TemporalUpscaler::CaptureCleanPicture(vk::CommandBuffer cmdbuf, vk::Image source, u32 width, u32 height) {
+    using BbThumbnail::Height;
+    using BbThumbnail::Width;
+    if (clean_picture.failed || clean_picture.pending || !source || !width || !height ||
+        !BbThumbnail::WantedClean()) {
+        return;
+    }
+    const vk::Format format = vk::Format::eR8G8B8A8Unorm;
+    if (!clean_picture.image) {
+        const VkImageCreateInfo image_info = static_cast<VkImageCreateInfo>(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = format,
+            .extent = {Width, Height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc,
+        });
+        const VmaAllocationCreateInfo image_alloc{.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkImage image{};
+        if (vmaCreateImage(instance.GetAllocator(), &image_info, &image_alloc, &image,
+                           &clean_picture.image_allocation, nullptr) != VK_SUCCESS) {
+            clean_picture.failed = true;
+            return;
+        }
+        clean_picture.image = vk::Image{image};
+        const VkBufferCreateInfo buffer_info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = VkDeviceSize(Width) * Height * 4,
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        };
+        const VmaAllocationCreateInfo buffer_alloc{
+            .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+            .usage = VMA_MEMORY_USAGE_AUTO,
+        };
+        VkBuffer buffer{};
+        VmaAllocationInfo out{};
+        if (vmaCreateBuffer(instance.GetAllocator(), &buffer_info, &buffer_alloc, &buffer,
+                            &clean_picture.buffer_allocation, &out) != VK_SUCCESS ||
+            !out.pMappedData) {
+            if (buffer) {
+                vmaDestroyBuffer(instance.GetAllocator(), buffer, clean_picture.buffer_allocation);
+            }
+            clean_picture.failed = true;
+            return;
+        }
+        clean_picture.buffer = vk::Buffer{buffer};
+        clean_picture.mapped = out.pMappedData;
+    }
+    // The middle 16:9 part of a wider (ultrawide) or taller scene: the picture box is 16:9.
+    u32 sw = width, sh = height;
+    if (u64(sw) * 9 > u64(sh) * 16) {
+        sw = sh * 16 / 9;
+    } else {
+        sh = sw * 9 / 16;
+    }
+    const s32 sx = s32((width - sw) / 2), sy = s32((height - sh) / 2);
+    const vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    const vk::ImageSubresourceLayers layers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+    const std::array before{
+        vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eBlit,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = source,
+            .subresourceRange = range,
+        },
+        vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eNone,
+            .srcAccessMask = vk::AccessFlagBits2::eNone,
+            .dstStageMask = vk::PipelineStageFlagBits2::eBlit,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eTransferDstOptimal,
+            .image = clean_picture.image,
+            .subresourceRange = range,
+        },
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(before.size()), .pImageMemoryBarriers = before.data()});
+    const vk::ImageBlit blit{
+        .srcSubresource = layers,
+        .srcOffsets = std::array{vk::Offset3D{sx, sy, 0}, vk::Offset3D{sx + s32(sw), sy + s32(sh), 1}},
+        .dstSubresource = layers,
+        .dstOffsets = std::array{vk::Offset3D{0, 0, 0}, vk::Offset3D{s32(Width), s32(Height), 1}},
+    };
+    cmdbuf.blitImage(source, vk::ImageLayout::eGeneral, clean_picture.image, vk::ImageLayout::eTransferDstOptimal,
+                     blit, vk::Filter::eLinear);
+    const std::array to_copy{
+        vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eBlit,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+            .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+            .image = clean_picture.image,
+            .subresourceRange = range,
+        },
+        // the scene goes on as before (the UI is drawn over it next)
+        vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eBlit,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = source,
+            .subresourceRange = range,
+        },
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_copy.size()), .pImageMemoryBarriers = to_copy.data()});
+    const vk::BufferImageCopy copy{
+        .imageSubresource = layers,
+        .imageExtent = {Width, Height, 1},
+    };
+    cmdbuf.copyImageToBuffer(clean_picture.image, vk::ImageLayout::eTransferSrcOptimal, clean_picture.buffer, copy);
+    const vk::MemoryBarrier2 to_host{
+        .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
+    clean_picture.tick = scheduler.CurrentTick();
+    clean_picture.pending = true;
+}
+
+void TemporalUpscaler::ReadCleanPicture() {
+    if (!clean_picture.pending || !scheduler.IsFree(clean_picture.tick)) {
+        return;
+    }
+    clean_picture.pending = false;
+    vmaInvalidateAllocation(instance.GetAllocator(), clean_picture.buffer_allocation, 0, VK_WHOLE_SIZE);
+    BbThumbnail::StoreClean(static_cast<const unsigned char*>(clean_picture.mapped));
+}
+
 void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::ImageId target) {
     velocity_pending = false;
+    ReadCleanPicture();
     auto& color = texture_cache.GetImage(source);
     auto& depth = texture_cache.GetImage(velocity_depth);
     const u32 w = velocity_width, h = velocity_height, ow = target_width, oh = target_height;
@@ -2256,6 +2400,8 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
     if (!ok) {
         return;
     }
+    // the scene before the UI: the save picture (no HUD, no menu)
+    CaptureCleanPicture(cmdbuf, vk::Image(ui_image), ow, oh);
     ui_phase = true;
     velocity_ui = true;
     velocity_ui_flip = g_flips.load(std::memory_order_relaxed);
