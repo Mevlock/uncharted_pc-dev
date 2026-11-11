@@ -405,14 +405,18 @@ def shader_cache_dirs(s, key):
 
 
 def shaders_prepared(s, key):
-    """True when the game left a marker for the current list (its size in it), False when not, None with no list."""
+    """True when the game left a marker for the current list (its size in it), False when not, None with no list.
+    The marker's line may go on after the size: AMD and Intel graphics write '<size> clip-jitter <version>' (the
+    upscaler jitter in the vertex shaders changes their pipelines). Comparing the whole line, the launcher said 'not
+    prepared yet' on those cards after every preparation while the game itself found the marker."""
     lists = shader_list(key)
     if not lists:
         return None
     stamp = str(lists[0].stat().st_size)
     for folder in shader_cache_dirs(s, key):
         try:
-            if (folder / f'prepared_{lists[0].stem}').read_text().split('\n')[0].strip() == stamp:
+            words = (folder / f'prepared_{lists[0].stem}').read_text().split('\n')[0].split()
+            if words and words[0] == stamp:
                 return True
         except OSError:
             pass
