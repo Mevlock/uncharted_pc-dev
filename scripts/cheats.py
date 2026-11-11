@@ -26,17 +26,23 @@ US = {'eboot.bin': 'fd024eaeb58c4b778613b54a9e69f6fbc8615a68',
 # game code -> cheat -> (address, original bytes, replacement)
 PATCHES = {
     # health: jump to the engine's own no-damage path. ammo: the clip decrement is shared with NPC weapons, so U1/U2
-    # drop the player Fire's call to it and U3 forces its player-held branch.
+    # drop the player Fire's call to it and U3 forces its player-held branch (in U1 the clip then never goes down: no
+    # reload either). grenades (U1/U2; U3 keeps its debug switch): the same call where the player's throw takes its
+    # grenade, U1 WeaponController::PostJointUpdate (after the kGrenade handle), U2 player-fast-grenade.cpp.
     EU['eboot.bin']: {'health': (0x261edb, '7535', 'eb35'),
-                      'ammo': (0x71b003, 'e8c8acc2ff', NOP * 5)},
+                      'ammo': (0x71b003, 'e8c8acc2ff', NOP * 5),
+                      'grenades': (0x71eb08, 'e8c371c2ff', NOP * 5)},
     US['eboot.bin']: {'health': (0x26244b, '7535', 'eb35'),
-                      'ammo': (0x730f73, 'e8c854c1ff', NOP * 5)},
+                      'ammo': (0x730f73, 'e8c854c1ff', NOP * 5),
+                      'grenades': (0x734a78, 'e8c319c1ff', NOP * 5)},
     EU['big2-ps4_Shipping.elf']: {'health': (0x35de73, '0f84bc010000', 'e9cf02000090'),
-                                  'ammo': (0xa4fd8d, 'e87e8aa6ff', NOP * 5)},
+                                  'ammo': (0xa4fd8d, 'e87e8aa6ff', NOP * 5),
+                                  'grenades': (0x9bc28c, 'e87fc5afff', NOP * 5)},
     EU['big3-ps4_Shipping.elf']: {'health': (0x33f87b, '0f84ca020000', 'e96a0b000090'),
                                   'ammo': (0x46a1f9, '4c8d3dc0660501', '41b401eb729090')},
     US['big2-ps4_Shipping.elf']: {'health': (0x7f0143, '0f843c050000', 'e95f06000090'),
-                                  'ammo': (0x961ac8, 'e853851800', NOP * 5)},
+                                  'ammo': (0x961ac8, 'e853851800', NOP * 5),
+                                  'grenades': (0x802273, 'e8a87d2e00', NOP * 5)},
     US['big3-ps4_Shipping.elf']: {'health': (0x9f9295, '4180bfa7000000007436', 'e9320300009090909090'),
                                   'ammo': (0xd517ac, '4c8d257d92aa0066418b442462', '40b701e9110100009090909090')},
 }
