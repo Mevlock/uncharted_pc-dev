@@ -732,6 +732,7 @@ private:
     alignas(64) u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< bbport: extra bias of this draw's samplers
     bool material_draw = false;    ///< bbport: writes 5+ targets (G-buffer: scene materials)
+    bool aniso_draw = false;       ///< bbport: a scene draw (material_draw, or Uncharted's scene-depth draws): BB_ANISO applies
     bool scene_debug_frame = false; ///< BB_SCENE_DEBUG: this frame's passes are printed
     bool PendingWriteOverlaps(VAddr address, u64 size);
     /// Stage B: the ring bindings of the stages of the packet being recorded.

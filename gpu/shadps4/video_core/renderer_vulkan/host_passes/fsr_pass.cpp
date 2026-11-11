@@ -1,6 +1,7 @@
 //  SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 //  SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include "common/assert.h"
 #include "core/emulator_settings.h"
 #include "video_core/host_shaders/fsr_easu_comp.h"
@@ -136,9 +137,20 @@ vk::ImageView FsrPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
         DebugState.is_using_fsr = false;
         return input;
     }
+    // bbport (from BilalReloaded's port): the picture already at the window's size gets RCAS alone (the launcher's
+    // Sharpening), as it does when it is enlarged; before, sharpening only ran while upscaling (none at native 1080p in a
+    // 1080p window). BB_RCAS_NATIVE=0: as before.
+    static const bool rcas_native = [] {
+        const char* e = std::getenv("BB_RCAS_NATIVE");
+        return !(e && e[0] == '0');
+    }();
+    bool rcas_only = false;
     if (input_size.width >= output_size.width && input_size.height >= output_size.height) {
-        DebugState.is_using_fsr = false;
-        return input;
+        if (!(rcas_native && settings.use_rcas && input_size == output_size)) {
+            DebugState.is_using_fsr = false;
+            return input;
+        }
+        rcas_only = true;
     }
 
     DebugState.is_using_fsr = true;
@@ -197,7 +209,66 @@ vk::ImageView FsrPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
                (AF1)height);
     consts.Sample[0] = hdr && !settings.use_rcas ? 1 : 0;
 
-    if (settings.use_rcas) {
+    if (rcas_only) {
+        const std::array out_barrier{
+            vk::ImageMemoryBarrier2{
+                .srcStageMask = vk::PipelineStageFlagBits2::eTopOfPipe,
+                .srcAccessMask = vk::AccessFlagBits2::eNone,
+                .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+                .dstAccessMask = vk::AccessFlagBits2::eShaderStorageWrite,
+                .oldLayout = vk::ImageLayout::eUndefined,
+                .newLayout = vk::ImageLayout::eGeneral,
+                .image = img.output_image,
+                .subresourceRange = simple_subresource,
+            },
+        };
+        cmdbuf.pipelineBarrier2(vk::DependencyInfo{
+            .imageMemoryBarrierCount = out_barrier.size(),
+            .pImageMemoryBarriers = out_barrier.data(),
+        });
+        consts = {};
+        FsrRcasCon(reinterpret_cast<AU1*>(&consts.Const0), settings.rcas_attenuation);
+        consts.Sample[0] = hdr ? 1 : 0;
+        std::array<vk::DescriptorImageInfo, 3> img_info{{
+            {
+                .imageView = input,
+                .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+            },
+            {
+                .imageView = img.output_image_view.get(),
+                .imageLayout = vk::ImageLayout::eGeneral,
+            },
+            {
+                .sampler = sampler.get(),
+            },
+        }};
+        std::array<vk::WriteDescriptorSet, 3> set_writes{{
+            {
+                .dstBinding = 0,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eSampledImage,
+                .pImageInfo = &img_info[0],
+            },
+            {
+                .dstBinding = 1,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eStorageImage,
+                .pImageInfo = &img_info[1],
+            },
+            {
+                .dstBinding = 2,
+                .descriptorCount = 1,
+                .descriptorType = vk::DescriptorType::eSampler,
+                .pImageInfo = &img_info[2],
+            },
+        }};
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, rcas_pipeline.get());
+        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, pipeline_layout.get(), 0,
+                                    set_writes);
+        cmdbuf.pushConstants(pipeline_layout.get(), vk::ShaderStageFlagBits::eCompute, 0,
+                             sizeof(FSRConstants), &consts);
+        cmdbuf.dispatch(dispatch_x, dispatch_y, 1);
+    } else if (settings.use_rcas) {
 
         { // easu
             std::array<vk::DescriptorImageInfo, 3> img_info{{
