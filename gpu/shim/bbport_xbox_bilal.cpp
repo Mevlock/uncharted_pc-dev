@@ -635,11 +635,12 @@ const Canvas& AtlasCanvas() {
 
 bool Active() {
     static const bool bilal = [] {
+        // launcher Controls > Xbox button style (BB_XBOX_STYLE): antik (default, antikmewzik's pictures) or bilal
         const char* env = std::getenv("BB_XBOX_STYLE");
-        const bool antik = env && !std::strcmp(env, "antik");
+        const bool bilal = env && !std::strcmp(env, "bilal");
         std::printf("KeyIcons: Xbox buttons drawn %s (BB_XBOX_STYLE=%s)\n",
-                    antik ? "by antikmewzik's pictures" : "as BilalReloaded's port draws them", antik ? "antik" : "bilal");
-        return !antik;
+                    bilal ? "as BilalReloaded's port draws them" : "by antikmewzik's pictures", bilal ? "bilal" : "antik");
+        return bilal;
     }();
     return bilal;
 }

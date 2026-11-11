@@ -161,6 +161,7 @@ LOW_LATENCY = [('0', 'Off'), ('1', 'On'), ('2', 'On + boost (NVIDIA: GPU clocks 
 # The speaker layout the games are told (BB_SPEAKERS; from drakolordx7's upstream change, PR #392).
 SPEAKERS = [('auto', 'Automatic (the Windows speaker setup)'), ('2', 'Stereo'), ('6', '5.1 surround'),
             ('8', '7.1 surround')]
+XBOX_STYLES = [('antik', 'antikmewzik (hand-drawn, coloured halos)'), ('bilal', 'BilalReloaded (dark buttons, coloured letters)')]
 BUTTON_PROMPTS = [('auto', 'Automatic (follows the device you used last)'),
                   ('keyboard', 'Keyboard and mouse keys'), ('xbox', 'Xbox buttons'), ('nintendo', 'Nintendo buttons (B A Y X)'),
                   ('0', "PlayStation buttons (the game's own)")]
@@ -240,7 +241,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '2.8', 'mouse_invert_y': False,
                 'mouse_aim_sensitivity': '0.6', 'mouse_vertical': '1.0', 'mouse_camera_vertical': '2.0',
-                'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '65', 'button_prompts': 'auto', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
+                'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '65', 'button_prompts': 'auto', 'xbox_style': 'antik', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
                 **{f'{game}_devmode': False for game, _t, _s, _e in GAMES},
@@ -898,6 +899,7 @@ def game_environment(s, start=None):
     if str(s.get('speakers') or 'auto') != 'auto':
         env['BB_SPEAKERS'] = str(s['speakers'])
     env['BB_BUTTON_PROMPTS'] = str(s.get('button_prompts') or 'auto')
+    env['BB_XBOX_STYLE'] = 'bilal' if s.get('xbox_style') == 'bilal' else 'antik'
     # The controller also while another window is in front (runtime_pad.c; keyboard and mouse never).
     if s.get('pad_background', False):
         env['BB_PAD_BACKGROUND'] = '1'
@@ -1984,6 +1986,9 @@ class Launcher:
                  _('The pictures of buttons in menus and hints. Automatic shows your keys while you use '
                    'the keyboard or mouse, Xbox buttons after an Xbox (or other) controller, and the '
                    'PlayStation buttons after a PlayStation controller.'))
+        self.row(f, _('Xbox button style'), self.choice(f, 'xbox_style', XBOX_STYLES, 40),
+                 _("How the Xbox buttons look: antikmewzik's hand-drawn pictures with coloured halos, or "
+                   "BilalReloaded's dark buttons with coloured letters and a softer glow. Takes effect at the next start."))
 
         self.section(f, _('Keyboard and mouse buttons'))
         self.note(f, _('Click a box, then press a key or a mouse button (the wheel counts too). '
