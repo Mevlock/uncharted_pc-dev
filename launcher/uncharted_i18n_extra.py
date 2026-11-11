@@ -8,8 +8,8 @@ EXTRA_TRANSLATIONS = {
         "what's new": 'Neuerungen',
         'Close': 'Schließen',
         "Don't show this after updates": 'Nach Updates nicht mehr anzeigen',
-        'AMD RCAS after FSR 1 (only while the image is enlarged).':
-        'AMD RCAS nach FSR 1 (nur wenn das Bild vergrößert wird).',
+        'AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).':
+        'AMD RCAS auf dem fertigen Bild (nach FSR 1 beim Vergrößern, auch in nativer Größe).',
         'Anti-aliasing': 'Kantenglättung',
         'Anti-aliasing sharpness': 'Schärfe der Kantenglättung',
         'Choose the game folder (the one with eboot.bin) on the Game page.':
@@ -421,8 +421,8 @@ EXTRA_TRANSLATIONS = {
         "what's new": 'novità',
         'Close': 'Chiudi',
         "Don't show this after updates": 'Non mostrare dopo gli aggiornamenti',
-        'AMD RCAS after FSR 1 (only while the image is enlarged).':
-        "AMD RCAS dopo FSR 1 (solo quando l'immagine viene ingrandita).",
+        'AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).':
+        "AMD RCAS sull'immagine finale (dopo FSR 1 quando viene ingrandita, anche a dimensione nativa).",
         'Anti-aliasing': 'Antialiasing',
         'Anti-aliasing sharpness': "Nitidezza dell'antialiasing",
         'Choose the game folder (the one with eboot.bin) on the Game page.':
@@ -834,8 +834,8 @@ EXTRA_TRANSLATIONS = {
         "what's new": '新機能',
         'Close': '閉じる',
         "Don't show this after updates": 'アップデート後に表示しない',
-        'AMD RCAS after FSR 1 (only while the image is enlarged).':
-        'FSR 1 適用後の AMD RCAS（画像を拡大する場合のみ）。',
+        'AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).':
+        '最終画像への AMD RCAS（拡大時は FSR 1 の後、ネイティブサイズでも）。',
         'Anti-aliasing': 'アンチエイリアス',
         'Anti-aliasing sharpness': 'アンチエイリアスのシャープネス',
         'Choose the game folder (the one with eboot.bin) on the Game page.':
@@ -2194,7 +2194,7 @@ EXTRA_TRANSLATIONS = {
         'AMD FSR 3.1 (Native AA)': 'AMD FSR 3.1 (сглаживание без масштабирования)',
         'AMD FSR 4 (Native AA)': 'AMD FSR 4 (сглаживание без масштабирования)',
         'AMD FSR 4.1.1 (Native AA)': 'AMD FSR 4.1.1 (сглаживание без масштабирования)',
-        'AMD RCAS after FSR 1 (only while the image is enlarged).': 'AMD RCAS после FSR 1 (только при увеличении изображения).',
+        'AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).': 'AMD RCAS для итогового изображения (после FSR 1 при увеличении, а также в родном размере).',
         'Advanced': 'Дополнительно',
         'All': 'Все',
         'All files': 'Все файлы',

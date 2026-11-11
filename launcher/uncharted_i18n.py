@@ -85,8 +85,8 @@ TRANSLATIONS = {
         'Port nativo: el código original de PS4 se ejecuta directamente en Windows.',
         'version': 'versión', 'version {}': 'versión {}',
         '\n— the game exited (code {}) —\n': '\n— el juego terminó (código {}) —\n',
-        'AMD RCAS after FSR 1 (only while the image is enlarged).':
-        'AMD RCAS después de FSR 1 (solo cuando se amplía la imagen).',
+        'AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).':
+        'AMD RCAS sobre la imagen final (tras FSR 1 al ampliarla, también a tamaño nativo).',
         'Choose the game folder with eboot.bin.': 'Elige la carpeta del juego que contiene eboot.bin.',
         'Click a box, then press a key or a mouse button (the wheel counts too). ✕ removes a binding. Each action can have two.':
         'Haz clic en una casilla y pulsa una tecla o botón del ratón (la rueda también cuenta). ✕ elimina una asignación. Cada acción puede tener dos.',
@@ -203,8 +203,8 @@ TRANSLATIONS = {
         'Port nativo: o código original do jogo de PS4 é executado diretamente no Windows.',
         'version': 'versão', 'version {}': 'versão {}',
         '\n— the game exited (code {}) —\n': '\n— o jogo terminou (código {}) —\n',
-        'AMD RCAS after FSR 1 (only while the image is enlarged).':
-        'AMD RCAS após o FSR 1 (somente quando a imagem é ampliada).',
+        'AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).':
+        'AMD RCAS na imagem final (após o FSR 1 ao ampliar, também no tamanho nativo).',
         'Choose the game folder with eboot.bin.': 'Escolha a pasta do jogo que contém eboot.bin.',
         'Click a box, then press a key or a mouse button (the wheel counts too). ✕ removes a binding. Each action can have two.':
         'Clique em uma caixa e pressione uma tecla ou botão do mouse (a roda também conta). ✕ remove uma atribuição. Cada ação pode ter duas.',
@@ -321,8 +321,8 @@ TRANSLATIONS = {
         'Portage natif : le code original du jeu PS4 s’exécute directement sous Windows.',
         'version': 'version', 'version {}': 'version {}',
         '\n— the game exited (code {}) —\n': '\n— le jeu s’est terminé (code {}) —\n',
-        'AMD RCAS after FSR 1 (only while the image is enlarged).':
-        "AMD RCAS après FSR 1 (uniquement lorsque l’image est agrandie).",
+        'AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).':
+        'AMD RCAS sur l’image finale (après FSR 1 quand elle est agrandie, aussi en taille native).',
         'Choose the game folder with eboot.bin.': 'Choisissez le dossier du jeu contenant eboot.bin.',
         'Click a box, then press a key or a mouse button (the wheel counts too). ✕ removes a binding. Each action can have two.':
         'Cliquez sur une case, puis appuyez sur une touche ou un bouton de souris (la molette compte aussi). ✕ supprime une attribution. Chaque action peut en avoir deux.',
