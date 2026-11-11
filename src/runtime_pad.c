@@ -1594,7 +1594,8 @@ static int dev_menu_name_at(uintptr_t base, size_t size, uintptr_t at, const cha
  * switch in the developer-mode patch (scripts/cheats.py: eb 05 = into the text block, 66 90 = past it), at the
  * image address BB_DEV_TEXT_SWITCH (run.py). Swapped in one locked write, so the game's thread runs one form or the
  * other, never half of each. */
-/* Looked up until found: the window and the controllers (F7) start before the game's code is loaded and patched.
+/* Looked up once the image is ready (runtime_image_ready; reading it before faults: it is reserved, unreadable),
+ * then until found: the window and the controllers (F7, the FPS counter) start before the code is loaded.
  * `report`: say why there is none (on F7). */
 static unsigned char *dev_text_switch(int report) {
     static int parsed;
@@ -1607,7 +1608,8 @@ static unsigned char *dev_text_switch(int report) {
     }
     if (!at && offset) {
         const uintptr_t base=runtime_image_base();
-        unsigned char *p=base && offset+2<=runtime_image_size() ? (unsigned char *)(base+offset) : NULL;
+        unsigned char *p=base && runtime_image_ready() && offset+2<=runtime_image_size() ? (unsigned char *)(base+offset)
+                                                                                         : NULL;
         if (p && ((p[0]==0xeb && p[1]==0x05) || (p[0]==0x66 && p[1]==0x90))) at=p;
         else if (report) printf("Runtime: developer text switch not found at %#llx (%s): F7 does nothing\n",
                                 (unsigned long long)offset, p ? "other code there" : "the game is not loaded yet");

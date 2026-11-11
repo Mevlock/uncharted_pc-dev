@@ -84,6 +84,8 @@ void *runtime_image_map(size_t size, int prot);
 uintptr_t runtime_image_base(void);
 /* Its size in bytes (0 before it is mapped). */
 size_t runtime_image_size(void);
+/* 1 once the image is loaded, patched and protected (its code readable). */
+int runtime_image_ready(void);
 /* Two bytes of the game's code swapped in one locked write (expect -> value); 0 done. */
 int runtime_code_swap16(void *at, uint16_t expect, uint16_t value);
 /* Developer mode's debug text: 1 shown, 0 hidden, -1 no developer mode (runtime_pad.c). */

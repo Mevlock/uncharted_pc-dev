@@ -784,6 +784,9 @@ typedef struct { volatile uint64_t calls, rdi, rsi, rdx, rcx, r8, r15; uint64_t 
 static GuestHook *guest_hooks;
 static size_t guest_hook_count;
 static uint64_t guest_image_size;
+/* 1 once the image is loaded, patched and protected: its code can be read (it is reserved, unreadable, before). */
+static int image_ready;
+int runtime_image_ready(void) { return __atomic_load_n(&image_ready, __ATOMIC_ACQUIRE); }
 uintptr_t runtime_image_base(void) { return (uintptr_t)image; }
 size_t runtime_image_size(void) { return (size_t)guest_image_size; }
 #ifdef _WIN32
@@ -2343,6 +2346,7 @@ int main(int argc, char **argv) {
             executable_entry = 1;
     }
     if (!executable_entry) fail("entry is not executable");
+    __atomic_store_n(&image_ready, 1, __ATOMIC_RELEASE);
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
     printf("Guest image at %p\n", (void *)image);
     if (native_libc) {
