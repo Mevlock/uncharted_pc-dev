@@ -769,6 +769,13 @@ TRANSLATIONS = {
         'Letztes Laden rückgängig - zurück zu deinem Spielstand von davor',
         "Annulla l'ultimo caricamento - torna al salvataggio di prima",
         '最後のロードを取り消す - その前のセーブに戻る'),
+    'Undo the load of {} - back to your save from before it': L(
+        'Deshacer la carga del {} - vuelve a tu partida de antes',
+        'Desfazer o carregamento de {} - volta ao seu jogo salvo de antes',
+        'Annuler le chargement du {} - retour à ta sauvegarde d’avant',
+        'Laden vom {} rückgängig - zurück zu deinem Spielstand von davor',
+        "Annulla il caricamento del {} - torna al salvataggio di prima",
+        '{} のロードを取り消す - その前のセーブに戻る'),
     # ---- Mouse look ------------------------------------------------------------------------------------------------
     'Camera up and down': L('Cámara arriba y abajo', 'Câmera para cima e para baixo', 'Caméra haut et bas',
                             'Kamera hoch und runter', 'Telecamera su e giù', 'カメラの上下'),

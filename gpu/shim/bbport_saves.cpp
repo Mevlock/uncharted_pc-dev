@@ -964,11 +964,15 @@ extern "C" int bbport_saves_list_entry(int index, char* label, size_t label_size
         if (!s.used) {
             return;
         }
-        // Name; the game's progress text; where (chapter and checkpoint, not the task's inner name); when.
-        const std::string name = index == BbSaves::StorySlot ? std::string(T("Story save"))
-                                 : index == BbSaves::UndoSlot
-                                     ? std::string(T("Undo last load - back to your save from before it"))
-                                     : fmt::format(fmt::runtime(T("Slot {}")), index + 1);
+        // Name; the game's progress text; where (chapter and checkpoint, not the task's inner name); when. The undo
+        // copy is made at the load, so its time is the load's: in its name, so an old one is plain to see.
+        const bool undo = index == BbSaves::UndoSlot;
+        const std::string name =
+            index == BbSaves::StorySlot ? std::string(T("Story save"))
+            : undo && !s.date.empty()
+                ? fmt::format(fmt::runtime(T("Undo the load of {} - back to your save from before it")), s.date)
+            : undo ? std::string(T("Undo last load - back to your save from before it"))
+                   : fmt::format(fmt::runtime(T("Slot {}")), index + 1);
         std::string text = name;
         if (!s.progress.empty()) {
             text += "\n" + s.progress;
@@ -978,7 +982,7 @@ extern "C" int bbport_saves_list_entry(int index, char* label, size_t label_size
             text += "\n" + fmt::format(fmt::runtime(T("Chapter {}")), c.chapter) + " " + c.chapter_title + " \xC2\xB7 " +
                     (c.number ? fmt::format(fmt::runtime(T("Checkpoint {}")), c.number) : std::string(T("Cutscene")));
         }
-        if (!s.date.empty()) {
+        if (!s.date.empty() && !undo) {
             text += "\n" + fmt::format(fmt::runtime(T("Saved {}")), s.date);
         }
         std::snprintf(label, label_size, "%s", text.c_str());
