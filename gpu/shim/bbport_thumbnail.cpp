@@ -132,6 +132,16 @@ void NoteSaveList() {
     save_list_at = Clock::now();
 }
 
+// The game opens one of its campaign saves to load it (bbport_saves.cpp): a picture still waiting for another save
+// would be taken in this one's play (another place, another game), and the picture from before the last pause
+// belongs to the play before the load. Both go; the other saves keep the pictures they have.
+void Loading(const std::string& meta_name) {
+    std::scoped_lock lock{mutex};
+    std::erase_if(pending, [&](const Pending& p) { return p.path.find(meta_name) == std::string::npos; });
+    save_list_at = {};
+    before_pause.clear();
+}
+
 } // namespace BbThumbnail
 
 extern "C" int bbgpu_thumbnail_save(const char* path) {

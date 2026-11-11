@@ -23,5 +23,8 @@ void NoteSaveList();
 /// A save's folders are replaced (a slot put back, bbport_saves.cpp): its picture still waiting for play is
 /// dropped, so it does not land on the save put in its place. `meta_name`: "SAVEDATA020.sce_sys".
 void ForgetSave(const std::string& meta_name);
+/// The game loads one of its campaign saves: pictures waiting for its other saves, and the picture from before the
+/// last pause, are dropped (they would show this save's play). `meta_name`: "SAVEDATA031.sce_sys".
+void Loading(const std::string& meta_name);
 
 } // namespace BbThumbnail

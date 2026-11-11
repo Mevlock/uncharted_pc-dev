@@ -511,7 +511,9 @@ static void save_list(const unsigned char *param) {
     save_choice.user=user;
     snprintf(save_choice.title,sizeof(save_choice.title),"%.9s",title ? title : "");
     save_choice.offer_new=offer_new;
-    save_choice.heading=type==1 ? "Save game" : "Load game";
+    /* "Save game" only for the pause menu's: its save gets the picture from before the pause (bbgpu.cpp); a
+     * Chapter Select or New Game save gets the new chapter's first picture of play instead. */
+    save_choice.heading=type==1 ? (from_pause ? "Save game" : "Where to save") : "Load game";
     snprintf(save_choice.campaign,sizeof(save_choice.campaign),"%s",playing);
     save_choice.with_slots=campaigns>0;
     /* The games' entries: their campaign saves. The game's other saves (its profile) are no choice of the player's. */

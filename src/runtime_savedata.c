@@ -449,7 +449,8 @@ static ABI int32_t save_umount(const MountPoint *point) {
     pthread_mutex_unlock(&lock);
     if (picture[0]) {
         const int written=bbgpu_thumbnail_save(picture);
-        if (written==2) remove(picture); /* an older picture of this save would show another place meanwhile */
+        /* Waiting (written==2): the save keeps its older picture until the new one is taken in its play. Removed, a
+         * save whose wait was dropped (another save loaded first) had none at all. */
         if (written) printf("Runtime: save picture %s (%s)\n",written==1 ? "written" : "waits for play to go on",picture);
     }
     /* A save closed: its files with data are backed up (save auto-repair), and the overlay's story save
