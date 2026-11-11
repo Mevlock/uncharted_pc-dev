@@ -338,8 +338,11 @@ static struct { uint32_t mode; int waits, pick; void *user_data; char dir[32]; u
  * Picking a slot puts it back as the campaign save before the game opens it (the save it replaces becomes the
  * undo), so the game loads it with no restart. Index as in BbSaves (0-4 slots, 5 before
  * the last load, 6 story save). */
-#define SAVE_LIST_SLOTS 7
+#define SAVE_LIST_SLOTS 20
+#define SAVE_STORY_OF(n) (100+(n))   /* playthrough n's story save (bbport_saves.cpp) */
 int bbport_saves_game(void);
+void bbport_saves_active_name(char *out, size_t size);
+int bbport_saves_campaign_digit(const char *dir);
 int bbport_saves_list_entry(int index, char *label, size_t label_size, char *picture, size_t picture_size);
 int bbport_saves_list_pick(int index);
 void bbport_saves_list_cancel(void);
@@ -352,7 +355,9 @@ void bbport_saves_save_cancel(void);
 /* runtime_exit_menu.c: the pause menu's Save Game was just picked (taken once). */
 int runtime_exit_menu_take_save_request(void);
 static struct {
-    int choosing, offer_new, count, user, with_slots, saving, slot_count, slots[SAVE_LIST_SLOTS];
+    /* saving: Pause > Save game (the playthrough in play and slots 1-5 for a copy); choosing_game: where the game
+     * goes on (Chapter Select, New Game): its playthroughs and New save, as on the console. */
+    int choosing, offer_new, count, user, with_slots, saving, choosing_game, slot_count, slots[SAVE_LIST_SLOTS];
     const char *heading;
     char title[16], campaign[16], dirs[SAVE_LIST_MAX][32];
 } save_choice;
@@ -389,9 +394,16 @@ static void save_choice_finish(int entry) {
         /* A slot: put back as the campaign save when the game opens that next (bbport_saves_before_mount), so a
          * load the game does not go on with changes nothing. */
         if (slot<save_choice.slot_count && bbport_saves_list_pick(save_choice.slots[slot])) {
-            printf("Runtime: SaveDataDialog list: save slot %d picked: put back as %s when the game opens it\n",
-                   save_choice.slots[slot],save_choice.campaign);
-            one=(const char (*)[32])save_choice.campaign;
+            /* A playthrough's story save goes back into that playthrough, which the game then opens. */
+            static char story_dir[32];
+            const int k=save_choice.slots[slot];
+            if (k>=SAVE_STORY_OF(0) && k<=SAVE_STORY_OF(9)) {
+                memset(story_dir,0,sizeof(story_dir));
+                snprintf(story_dir,sizeof(story_dir),"SAVEDATA0%d%d",bbport_saves_game(),k-SAVE_STORY_OF(0));
+                one=(const char (*)[32])story_dir;
+            } else one=(const char (*)[32])save_choice.campaign;
+            printf("Runtime: SaveDataDialog list: save slot %d picked: put back as %.32s when the game opens it\n",
+                   k,*one);
         } else {
             printf("Runtime: SaveDataDialog list: save slot %d is empty: cancelled\n",
                    slot<save_choice.slot_count ? save_choice.slots[slot] : -1);
@@ -419,14 +431,19 @@ static int save_choice_show(int focus) {
     for (int i=0;i<save_choice.count;++i) {
         char *label=save_choice_labels[n];
         runtime_savedata_label(save_choice.user,save_choice.title,save_choice.dirs[i],label,sizeof(save_choice_labels[n]));
-        if (save_choice.with_slots) {
-            /* The campaign save: named for what it is; the game's title (its first line) is the same on every
-             * entry and goes. */
+        if (save_choice.with_slots || save_choice.choosing_game) {
+            /* A playthrough (a campaign save): "Game N", the one in play marked; the game's title (its first line)
+             * is the same on every entry and goes. */
             char details[sizeof(save_choice_labels[0])];
             const char *rest=strchr(label,'\n');
             snprintf(details,sizeof(details),"%s",rest ? rest+1 : "");
-            snprintf(label,sizeof(save_choice_labels[n]),"Current save - where Continue starts\n%s",details);
-            if (!i) sections[n]="Your game";
+            const int digit=bbport_saves_campaign_digit(save_choice.dirs[i]);
+            const int playing=!strncmp(save_choice.dirs[i],save_choice.campaign,32);
+            if (save_choice.saving) snprintf(label,sizeof(save_choice_labels[n]),"Game %d - saves here as usual\n%s",
+                                             digit+1,details);
+            else snprintf(label,sizeof(save_choice_labels[n]),"Game %d%s\n%s",digit+1,
+                          playing ? " - the one you are playing" : "",details);
+            if (!i) sections[n]=save_choice.count>1 ? "Your games" : "Your game";
         }
         labels[n]=label;
         icons[n]=runtime_savedata_icon(save_choice.user,save_choice.title,save_choice.dirs[i],save_choice_icons[n],
@@ -446,17 +463,28 @@ static int save_choice_show(int focus) {
         save_choice.slots[save_choice.slot_count++]=k;
         ++n;
     }
-    /* Slots 1-5, then "Undo last load" (the save from before the last load). The story save stays on the overlay's
-     * page, where it is explained. */
-    static const int order[]={0,1,2,3,4,5};
-    for (int k=0;save_choice.with_slots && !save_choice.saving && k<(int)(sizeof(order)/sizeof(order[0]));++k) {
+    /* Load game: each playthrough's story save (its furthest point: Chapter Select back leaves it there), the one in
+     * play first; then slots 1-5, then "Undo last load" (the save from before the last load). A story save shows
+     * only while its playthrough's save is there (the game opens that one to load it). */
+    int order[SAVE_LIST_SLOTS], orders=0;
+    const int playing_digit=bbport_saves_campaign_digit(save_choice.campaign);
+    if (playing_digit>=0) order[orders++]=SAVE_STORY_OF(playing_digit);
+    for (int i=0;i<save_choice.count && orders<SAVE_LIST_SLOTS;++i) {
+        const int d=bbport_saves_campaign_digit(save_choice.dirs[i]);
+        if (d>=0 && d!=playing_digit) order[orders++]=SAVE_STORY_OF(d);
+    }
+    for (int k=0;k<=5 && orders<SAVE_LIST_SLOTS;++k) order[orders++]=k;
+    int stories=0;
+    for (int k=0;save_choice.with_slots && !save_choice.saving && k<orders;++k) {
         if (!bbport_saves_list_entry(order[k],save_choice_labels[n],sizeof(save_choice_labels[n]),save_choice_icons[n],
                                      sizeof(save_choice_icons[n])))
             continue;
         labels[n]=save_choice_labels[n];
         icons[n]=save_choice_icons[n][0] ? save_choice_icons[n] : NULL;
-        if (order[k]==5) sections[n]="Undo";
-        else if (!save_choice.slot_count) sections[n]="Your save slots (made with Save here: Insert > Save slots)";
+        if (order[k]>=SAVE_STORY_OF(0)) { if (!stories++) sections[n]="Story saves (your furthest point in each game)"; }
+        else if (order[k]==5) sections[n]="Undo";
+        else if (!save_choice.slot_count || save_choice.slots[save_choice.slot_count-1]>=SAVE_STORY_OF(0))
+            sections[n]="Your save slots";
         save_choice.slots[save_choice.slot_count++]=order[k];
         ++n;
     }
@@ -495,41 +523,48 @@ static void save_list(const unsigned char *param) {
            save_dialog.pick<0 ? "nothing to choose, cancelled" : save_dialog.pick ? "focused " : "new save data",
            save_dialog.pick>0 ? save_dialog.dir : "");
     if (!save_list_enabled()) return;
-    /* Where to save: never a second campaign save (New save: SAVEDATA031 would leave the save slots, the story save
-     * and "Current save" on the first one while the game plays on in the other). Only after the pause menu's Save
-     * Game the list offers the campaign save and slots 1-5 for a copy; Chapter Select, New Game and the like (the
-     * game asks the same), no campaign save yet, or practice mode: the entry the game focuses is taken, no list, as
-     * in 0.3.6.52.1 (the story save keeps the playthrough when Chapter Select goes back). */
+    /* Several playthroughs, as on the console: each campaign save (SAVEDATA0<game>0 to 9) is a game of its own with
+     * its own story save (bbport_saves.cpp); the save features work on the one in play.
+     *   Pause > Save game: the game in play (saves as usual) and slots 1-5 for a copy.
+     *   Chapter Select, New Game (the game asks the same "where to save"): the games and New save, as on the
+     *     console; going back in one leaves its story save at the furthest point.
+     *   Load game: the games, each one's story save, slots 1-5 and Undo last load.
+     * Practice mode (checkpoint jumps), or no save yet: the entry the game focuses is taken, no list. */
     const int game_now=bbport_saves_game();
-    char campaign_now[16];
-    snprintf(campaign_now,sizeof(campaign_now),"SAVEDATA0%d0",game_now);
-    int campaign_listed=0;
-    for (uint32_t i=0;game_now && names && i<count;++i)
-        if (!strncmp(names[i],campaign_now,32) && runtime_savedata_exists(user,title,campaign_now)) campaign_listed=1;
-    if (type==1 && (!campaign_listed || runtime_checkpoint_practice() || !runtime_exit_menu_take_save_request()))
-        return;
+    const int from_pause=type==1 && runtime_exit_menu_take_save_request();
+    char playing[16];
+    bbport_saves_active_name(playing,sizeof(playing));
+    int campaigns=0, playing_listed=0;
+    for (uint32_t i=0;game_now && names && i<count;++i) {
+        char name[33]; memcpy(name,names[i],32); name[32]=0;
+        if (bbport_saves_campaign_digit(name)<0 || !runtime_savedata_exists(user,title,name)) continue;
+        ++campaigns;
+        if (!strcmp(name,playing)) playing_listed=1;
+    }
+    if (runtime_checkpoint_practice() || !game_now) return;
+    if (type==1 && from_pause && !playing_listed) return;    /* nothing to save over yet */
+    if (type==1 && !from_pause && !campaigns) return;        /* a first game: New save, as focused */
     /* The list: the slots that exist (as on the console), the focused one selected. */
     memset(&save_choice,0,sizeof(save_choice));
     bbport_saves_list_cancel();   /* a slot picked in an earlier list the game did not go on with */
     bbport_saves_save_cancel();
-    save_choice.saving=type==1;
-    if (save_choice.saving) offer_new=0;   /* no second campaign save */
+    save_choice.saving=from_pause;
+    save_choice.choosing_game=type==1 && !from_pause;
+    if (save_choice.saving) offer_new=0;   /* Save game goes on in the game in play */
     save_choice.user=user;
     snprintf(save_choice.title,sizeof(save_choice.title),"%.9s",title ? title : "");
     save_choice.offer_new=offer_new;
-    save_choice.heading=type==1 ? "Save game" : "Load game";
-    const int game=bbport_saves_game();
-    snprintf(save_choice.campaign,sizeof(save_choice.campaign),"SAVEDATA0%d0",game);
-    /* Not in practice mode: the game opens the practice copy then, not the save a slot would replace. */
-    for (uint32_t i=0;game && (type==2 || type==1) && !runtime_checkpoint_practice() && names && i<count;++i)
-        if (!strncmp(names[i],save_choice.campaign,32)) save_choice.with_slots=1;
-    /* With the slots the game's own entry is its campaign save alone: its other save (U2's SAVEDATA021, written
-     * beside it) looks the same in the list and is no choice of the player's. The focus then goes to the campaign
-     * save. */
+    save_choice.heading=type==1 ? (from_pause ? "Save game" : "Where to save") : "Load game";
+
+    snprintf(save_choice.campaign,sizeof(save_choice.campaign),"%s",playing);
+    save_choice.with_slots=type==2 ? campaigns>0 : from_pause;
+    /* The games' entries: their campaign saves (Save game: the one in play alone). The game's other saves (its
+     * profile) are no choice of the player's. */
     int focus_entry=0;
     for (uint32_t i=0;names && i<count && save_choice.count<SAVE_LIST_MAX;++i) {
         char name[33]; memcpy(name,names[i],32); name[32]=0;
-        if (save_choice.with_slots && strcmp(name,save_choice.campaign)) continue;
+        if (bbport_saves_campaign_digit(name)<0) continue;
+        if (save_choice.saving && strcmp(name,save_choice.campaign)) continue;
         if (!name[0] || !runtime_savedata_exists(user,save_choice.title,name)) continue;
         if (save_dialog.pick>0 && !strncmp(name,save_dialog.dir,32)) focus_entry=save_choice.count+offer_new;
         memcpy(save_choice.dirs[save_choice.count++],name,32);
