@@ -1286,7 +1286,9 @@ extern "C" void bbport_saves_before_mount(const char* dir, int read_only) {
         }
         // The playthrough the game opens is the one it plays on (Continue, a pick in its list, a new save).
         SetActiveDigit(game, digit);
-        // Opened to read: a load. Save pictures still waiting for other saves would be taken in this one's play.
+        // Save pictures still waiting for other games would be taken in this one's play; opened to read (a load),
+        // the picture from before the pause goes too.
+        BbThumbnail::CampaignOpened(std::string(dir) + ".sce_sys");
         if (read_only) {
             BbThumbnail::Loading(std::string(dir) + ".sce_sys");
         }

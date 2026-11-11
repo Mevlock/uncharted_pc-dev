@@ -132,6 +132,23 @@ void NoteSaveList() {
     save_list_at = Clock::now();
 }
 
+// The game opens one of its campaign saves (to read or to write, bbport_saves.cpp): pictures still waiting for its
+// other campaign saves go, or they would be taken in this one's play (a new game started from Chapter Select gave
+// the game saved just before its picture). The profile save's wait stays; so does the picture from before the pause
+// (a Save game list writes with it).
+void CampaignOpened(const std::string& meta_name) {
+    std::scoped_lock lock{mutex};
+    std::erase_if(pending, [&](const Pending& p) {
+        const size_t at = p.path.rfind("SAVEDATA0");
+        if (at == std::string::npos || p.path.compare(at, meta_name.size(), meta_name) == 0) {
+            return false;
+        }
+        // SAVEDATA0<game><digit>.sce_sys: another campaign save (not the profile, SAVEDATA0<game>P)
+        const char d = at + 10 < p.path.size() ? p.path[at + 10] : 0;
+        return d >= '0' && d <= '9' && p.path.compare(at + 11, 8, ".sce_sys") == 0;
+    });
+}
+
 // The game opens one of its campaign saves to load it (bbport_saves.cpp): a picture still waiting for another save
 // would be taken in this one's play (another place, another game), and the picture from before the last pause
 // belongs to the play before the load. Both go; the other saves keep the pictures they have.

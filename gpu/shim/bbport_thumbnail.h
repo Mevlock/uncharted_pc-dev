@@ -26,5 +26,8 @@ void ForgetSave(const std::string& meta_name);
 /// The game loads one of its campaign saves: pictures waiting for its other saves, and the picture from before the
 /// last pause, are dropped (they would show this save's play). `meta_name`: "SAVEDATA031.sce_sys".
 void Loading(const std::string& meta_name);
+/// The game opens one of its campaign saves (read or write): pictures waiting for its other campaign saves are
+/// dropped (they would show this one's play).
+void CampaignOpened(const std::string& meta_name);
 
 } // namespace BbThumbnail
