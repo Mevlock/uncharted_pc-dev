@@ -337,6 +337,21 @@ void TemporalUpscaler::OnSceneColor(VideoCore::ImageId color) {
 }
 
 namespace {
+/// bbport: the last DLSS evaluation had its history reset by the fade check (FadeReset): the next frame is drawn
+/// without jitter (BB_DLSS_FADE_NOJITTER=0: with it, as before). Through a fade (a load, a checkpoint restart, U3's
+/// white haze) the jitter showed the games' screen-door dither (haze, dust trails) as a blocky checkerboard band and
+/// a shimmer for ~1-2 s, at 60 FPS clearly (a player's RTX 5060 at ~68), at 144 hardly: with the history reset each
+/// frame and with it kept alike (and with preset K too). U3 #389 checkpoint restart at 60 FPS: band gone; U2 #213
+/// (the fade stripes the reset is for) stays clean (0.04, reset with jitter 0.00, no reset 1.13). DLSS only.
+bool fade_was_resetting = false;
+bool FadeNoJitter() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_DLSS_FADE_NOJITTER");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
 float Halton(u32 index, u32 base) {
     float f = 1.0f, result = 0.0f;
     for (u32 i = index; i > 0; i /= base) {
@@ -492,6 +507,9 @@ bool TemporalUpscaler::OnFrameStart() {
     jitter_flip = flip;
     jitter_index = jitter_index % phases + 1;
     jitter = {Halton(jitter_index, 2) - 0.5f, Halton(jitter_index, 3) - 0.5f};
+    if (fade_was_resetting && FadeNoJitter() && BbSettings::Get().upscaler == BbSettings::UpscalerDlss) {
+        jitter = {};
+    }
     // bbport diagnosis (BB_JITTER_DIAG=1): jitter steps per shown frame, and the distinct jitter
     // positions the upscaler was given over 5 s.
     if (static const bool diag = std::getenv("BB_JITTER_DIAG") != nullptr; diag) {
@@ -2897,6 +2915,7 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
         // Brightness: 64 pixels of the input copied to a ring of host buffers, read 4 frames later (no
         // wait). BB_DLSS_FADE_RESET=0: off.
         const bool settling = FadeReset(cmdbuf, color, reset);
+        fade_was_resetting = settling;
         ok = dlss->Evaluate(cmdbuf, {
             .color = color,
             .depth = depth,
