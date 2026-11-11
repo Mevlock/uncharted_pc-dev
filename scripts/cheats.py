@@ -59,21 +59,36 @@ DEVMODE = {
                                   '41c68424014c000000eb04551a000041c68424fc4b000001eb0584451a0000'),
 }
 
-# devmode_quiet: developer mode without the debug text. The check guards the block that draws it (FPS, ms Game/Rend/
-# GPU, memory, PlayGo, build date; all six executables): the two flags are set as above, then the jump the retail game
-# takes (the check's own je target, past the block) instead of the block. The edit's last jmp (eb 05 + 5 bytes)
-# becomes jmp rel32 + 2 nops.
-def _quiet(address, original, replacement):
+# The debug text on and off, also while the game runs. The check guards the block that draws the text (FPS, ms Game/
+# Rend/GPU, memory, PlayGo, build date; all six executables). The edit's last 7 bytes (eb 05 + 5 bytes never run)
+# become a 2-byte switch and a jmp rel32 past the block (to the check's own je target, where the retail game goes):
+#   eb 05 | e9 rel32   text on: over the jmp, into the block
+#   66 90 | e9 rel32   text off (devmode_quiet): a 2-byte nop, then past the block
+# The runtime flips the switch (F7 in developer mode, runtime_pad.c; BB_DEV_TEXT_SWITCH = its address).
+DEV_TEXT_ON, DEV_TEXT_OFF = b'\xeb\x05', b'\x66\x90'
+
+
+def _dev_text(address, original, replacement, shown):
     original, replacement = bytes.fromhex(original), bytes.fromhex(replacement)
     assert replacement[-7:-5] == b'\xeb\x05' and len(original) == len(replacement)
     past_block = address + len(original) + struct.unpack('<i', original[-4:])[0]
-    jump = past_block - (address + len(original) - 2)
-    return address, original.hex(), (replacement[:-7] + b'\xe9' + struct.pack('<i', jump) + b'\x90\x90').hex()
+    jump = past_block - (address + len(original))
+    switch = DEV_TEXT_ON if shown else DEV_TEXT_OFF
+    return address, original.hex(), (replacement[:-7] + switch + b'\xe9' + struct.pack('<i', jump)).hex()
 
 
 for _code, _patch in DEVMODE.items():
-    PATCHES[_code]['devmode'] = _patch
-    PATCHES[_code]['devmode_quiet'] = _quiet(*_patch)
+    PATCHES[_code]['devmode'] = _dev_text(*_patch, True)
+    PATCHES[_code]['devmode_quiet'] = _dev_text(*_patch, False)
+
+
+def dev_text_switch(path):
+    """Image address of the debug text switch of one executable (hex text), '' when it has no developer mode."""
+    try:
+        patch = DEVMODE.get(code_hash(Path(path).read_bytes()))
+    except OSError:
+        return ''
+    return f'{patch[0] + len(bytes.fromhex(patch[1])) - 7:x}' if patch else ''
 
 # Naughty Dog's debug-menu switches, kept set by the runtime (BB_KEEP_BYTES): bytes in memory the game creates, so no
 # patch of the file reaches them. Uncharted 3's menu has "No Reload" and "One Hit Kills" in its cheat block (Infinite

@@ -2344,7 +2344,7 @@ class Launcher:
             for cheat in SWITCH_CHEATS.get(game, ()):
                 self.check(f, f'{game}_{cheat}', _(SWITCH_CHEAT_TITLES[cheat]))
             self.check(f, f'{game}_devmode', _("Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu"))
-            self.check(f, f'{game}_devmode_text', _('Show the debug text (FPS, timings, memory) in developer mode'), indent=40)
+            self.check(f, f'{game}_devmode_text', _('Show the debug text (FPS, timings, memory) in developer mode; F7 in play'), indent=40)
 
     def build_advanced(self):
         f = self.page('advanced', _('Advanced'), _('Maintenance and options for testing.'))

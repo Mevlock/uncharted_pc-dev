@@ -252,6 +252,9 @@ def main():
         enabled += (['fullres'] if env.get('BB_FULL_RES_TEXTURES') == '1' else []) +                    (['hiresshadow'] if env.get('BB_HIRES_SHADOWS') == '1' else []) +                    (['nodof'] if env.get('BB_DOF') == '0' and env.get('BB_DOF_ENGINE', '1') != '0' else [])   # Depth of field: Off everywhere
         patches = cheats.build(game / exe, out, enabled)
         env['BB_KEEP_BYTES'] = cheats.keep_bytes(game / exe, enabled)
+        # Developer mode: where its debug text switch is (F7 turns the text on and off, runtime_pad.c).
+        env['BB_DEV_TEXT_SWITCH'] = (cheats.dev_text_switch(game / exe)
+                                     if {'devmode', 'devmode_quiet'} & set(enabled) else '')
         env['BB_RESTART_COMMAND'] = subprocess.list2cmdline([sys.executable, *this, '--after', str(os.getpid()), *args])
         command = [str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                    '--app0', str(game), '--user', str(user_dir), '--timeout', env.get('BB_TIMEOUT', '0')]

@@ -1310,3 +1310,18 @@ void runtime_memory_report(void) {
            flexible_maps, flexible_bytes, protects, queries, vma_count);
 }
 
+/* Two bytes of the game's code swapped while it runs (developer text switch, runtime_pad.c): from `expect` to
+ * `value` in one locked write (the game's thread runs the old or the new form, never half of each). 0 done. */
+int runtime_code_swap16(void *at, uint16_t expect, uint16_t value) {
+#ifdef _WIN32
+    DWORD old;
+    if (!VirtualProtect(at,2,PAGE_EXECUTE_READWRITE,&old)) return -1;
+    const SHORT was=InterlockedCompareExchange16((volatile SHORT *)at,(SHORT)value,(SHORT)expect);
+    VirtualProtect(at,2,old,&old);
+    FlushInstructionCache(GetCurrentProcess(),at,2);
+    return was==(SHORT)expect ? 0 : -1;
+#else
+    uint16_t e=expect;
+    return __atomic_compare_exchange_n((uint16_t *)at,&e,value,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST) ? 0 : -1;
+#endif
+}

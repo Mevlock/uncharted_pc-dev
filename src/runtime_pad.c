@@ -1590,11 +1590,45 @@ static int dev_menu_name_at(uintptr_t base, size_t size, uintptr_t at, const cha
     const size_t n=strlen(name)+1;
     return at && at+n<=size && !memcmp((const void *)(base+at),name,n);
 }
+/* Developer mode's debug text (FPS, ms Game/Rend/GPU, memory, PlayGo), on and off while the game runs: a 2-byte
+ * switch in the developer-mode patch (scripts/cheats.py: eb 05 = into the text block, 66 90 = past it), at the
+ * image address BB_DEV_TEXT_SWITCH (run.py). Swapped in one locked write, so the game's thread runs one form or the
+ * other, never half of each. */
+static unsigned char *dev_text_switch(void) {
+    static int checked;
+    static unsigned char *at;
+    if (!checked) {
+        checked=1;
+        const char *e=getenv("BB_DEV_TEXT_SWITCH");
+        const uintptr_t base=runtime_image_base();
+        const uintptr_t offset=e && *e ? (uintptr_t)strtoull(e,NULL,16) : 0;
+        unsigned char *p=offset && base && offset+2<=runtime_image_size() ? (unsigned char *)(base+offset) : NULL;
+        if (p && ((p[0]==0xeb && p[1]==0x05) || (p[0]==0x66 && p[1]==0x90))) at=p;
+        else if (offset) printf("Runtime: developer text switch not found at %#llx: F7 does nothing\n",
+                                (unsigned long long)offset);
+    }
+    return at;
+}
+/* 1 shown, 0 hidden, -1 no developer mode (the overlay's FPS counter shows DEV MODE while it is hidden). */
+int runtime_dev_text_shown(void) {
+    const unsigned char *p=dev_text_switch();
+    return p ? p[0]==0xeb : -1;
+}
+static void dev_text_toggle(void) {
+    unsigned char *p=dev_text_switch();
+    if (!p) return;
+    const uint16_t on=0xeb|0x05<<8, off=0x66|0x90<<8, now=p[0]==0xeb ? on : off;
+    if (runtime_code_swap16(p,now,now==on ? off : on)) printf("Runtime: developer text switch could not be changed\n");
+    else printf("Runtime: developer text %s (F7)\n",p[0]==0xeb ? "shown" : "hidden");
+}
 static void dev_menu_key(void) {
-    static int checked, on, f11_was_down, f8_was_down;
+    static int checked, on, f11_was_down, f8_was_down, f7_was_down;
     if (!checked) { const char *e=getenv("BB_DEV_MENU"); on=e && e[0]=='1'; checked=1; }
     if (!on || !sdl_ready) return;
     const bool *k=SDL_GetKeyboardState(NULL);
+    const int f7=k && k[SDL_SCANCODE_F7];
+    if (f7 && !f7_was_down) dev_text_toggle();
+    f7_was_down=f7;
     const int f11=k && k[SDL_SCANCODE_F11], f8=k && k[SDL_SCANCODE_F8];
     /* F8: the "Quick Menu" (player and actor tools: Invincible Player, Reset Actors, ...), the game's second
      * debug menu, built at the same start-up step (root pointers in dev_menu_builds). (Shift is a game

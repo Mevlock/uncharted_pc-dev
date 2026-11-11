@@ -84,6 +84,10 @@ void *runtime_image_map(size_t size, int prot);
 uintptr_t runtime_image_base(void);
 /* Its size in bytes (0 before it is mapped). */
 size_t runtime_image_size(void);
+/* Two bytes of the game's code swapped in one locked write (expect -> value); 0 done. */
+int runtime_code_swap16(void *at, uint16_t expect, uint16_t value);
+/* Developer mode's debug text: 1 shown, 0 hidden, -1 no developer mode (runtime_pad.c). */
+int runtime_dev_text_shown(void);
 /* Windows: reserves the PS4 user address range as a placeholder (no-op elsewhere). */
 void runtime_memory_reserve(void);
 uintptr_t runtime_ajm_resolve(const char *name);
