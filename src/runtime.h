@@ -145,6 +145,9 @@ void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_eu(uint64_t rdi, uint64
                                                            const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_us(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                            const uint64_t *regs);
+/* runtime_onehit.c: Uncharted 2 Npc::RespondToAttack (One Hit Kills; BB_ONEHIT_LOG=1 prints each attack). */
+void __attribute__((ms_abi)) runtime_u2_respond_to_attack(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                          const uint64_t *regs);
 int runtime_savedata_pick(int32_t user, const char *title, const char (*names)[32], uint32_t count,
                           int which, const char *focus, char out[32], void *param_out);
 /* The save list (runtime_services.c): a save as the game would mount it exists; its picture (thumb.png, else
