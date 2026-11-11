@@ -838,7 +838,8 @@ static void ApplyPendingImpl() {
     ApplyPending(game);
     std::error_code ec;
     const fs::path campaign = SavesDir() / ActiveName(game);
-    if (!ReadStory(game).exists && fs::exists(campaign / "USR-DATA", ec)) {
+    const char* story_env = std::getenv("BB_STORY_SAVES");
+    if (story_env && story_env[0] == '1' && !ReadStory(game).exists && fs::exists(campaign / "USR-DATA", ec)) {
         const BbSaves::Checkpoint now = ReadCheckpoint(game, campaign);
         std::string error;
         if (now.known && CopyCampaign(game, BbSaves::StorySlot, error)) {
@@ -864,6 +865,15 @@ static void ClosedImpl(const char* host_dir) {
     }
     std::lock_guard guard(lock);
     SetActiveDigit(game, digit);
+    // The game's lists keep it simple (as on the console: games, New save, Undo): no story saves.
+    // BB_STORY_SAVES=1: the story save follows as before (the overlay's Saves page).
+    static const bool story_saves = [] {
+        const char* env = std::getenv("BB_STORY_SAVES");
+        return env && env[0] == '1';
+    }();
+    if (!story_saves) {
+        return;
+    }
     const BbSaves::Checkpoint now = ReadCheckpoint(game, dir);
     if (!now.known) {
         return;
@@ -1057,6 +1067,52 @@ extern "C" int bbport_saves_game(void) {
     return BbSaves::Game();
 }
 
+namespace {
+constexpr int UndoOverwrite = 200;
+fs::path OverwriteDir(int game) {
+    return GameBackups(game) / "overwrite";
+}
+std::string UndoName(int game) {
+    std::ifstream f(OverwriteDir(game) / "name.txt");
+    std::string name;
+    std::error_code ec;
+    if (!(f >> name) || CampaignDigit(game, name) < 0 ||
+        !fs::exists(OverwriteDir(game) / name / "USR-DATA", ec)) {
+        return {};
+    }
+    return name;
+}
+// The undo copy and the save of the same name trade places (the game has not opened it yet).
+bool SwapUndo(int game, const std::string& name) {
+    const fs::path saves = SavesDir(), undo = OverwriteDir(game);
+    std::error_code ec;
+    for (const std::string suffix : {std::string(), std::string(".sce_sys")}) {
+        const fs::path a = saves / (name + suffix), b = undo / (name + suffix), t = saves / (name + suffix + ".bbswap");
+        fs::remove_all(t, ec);
+        const bool had = fs::exists(a, ec);
+        if (had) {
+            fs::rename(a, t, ec);
+            if (ec) {
+                return false;
+            }
+        }
+        fs::rename(b, a, ec);
+        if (ec) {
+            std::error_code ignore;
+            if (had) {
+                fs::rename(t, a, ignore);
+            }
+            return false;
+        }
+        if (had) {
+            fs::rename(t, b, ec);  // the replaced save becomes the next Undo
+        }
+    }
+    std::ofstream(undo / "saved.txt") << Now() << "\n";
+    return true;
+}
+} // namespace
+
 // The campaign save the game plays on (SAVEDATA0<game><n>), for the game's save lists.
 extern "C" void bbport_saves_active_name(char* out, size_t size) {
     std::lock_guard guard(lock);
@@ -1090,20 +1146,24 @@ extern "C" int bbport_saves_list_entry(int index, char* label, size_t label_size
         std::lock_guard guard(lock);
         const int game = BbSaves::Game();
         int digit = -1;
-        if (game && StoryOf(index, digit)) {
-            const fs::path dir = GameBackups(game) / StoryFolder(digit);
+        const bool undo_entry = game && index == UndoOverwrite && !UndoName(game).empty();
+        if (undo_entry || (game && StoryOf(index, digit))) {
+            const std::string inner = undo_entry ? UndoName(game) : SlotName(game);
+            const fs::path dir = undo_entry ? OverwriteDir(game) : GameBackups(game) / StoryFolder(digit);
             std::error_code ec;
-            if (!fs::exists(dir / SlotName(game) / "USR-DATA", ec)) {
+            if (!fs::exists(dir / inner / "USR-DATA", ec)) {
                 return;
             }
-            std::string text = digit == ActiveDigit(game)
-                                   ? std::string(T("Story save - the furthest point of this game"))
-                                   : fmt::format(fmt::runtime(T("Story save of game {}")), digit + 1);
-            const std::string progress = ReadProgress(dir / (SlotName(game) + ".sce_sys"));
+            std::string text =
+                undo_entry ? fmt::format(fmt::runtime(T("Undo - Game {} as it was before it was saved over")),
+                                         CampaignDigit(game, inner) + 1)
+                : digit == ActiveDigit(game) ? std::string(T("Story save - the furthest point of this game"))
+                                             : fmt::format(fmt::runtime(T("Story save of game {}")), digit + 1);
+            const std::string progress = ReadProgress(dir / (inner + ".sce_sys"));
             if (!progress.empty()) {
                 text += "\n" + progress;
             }
-            const BbSaves::Checkpoint c = ReadCheckpoint(game, dir / SlotName(game));
+            const BbSaves::Checkpoint c = ReadCheckpoint(game, dir / inner);
             if (c.known) {
                 text += "\n" + fmt::format(fmt::runtime(T("Chapter {}")), c.chapter) + " " + c.chapter_title +
                         " \xC2\xB7 " +
@@ -1112,12 +1172,12 @@ extern "C" int bbport_saves_list_entry(int index, char* label, size_t label_size
             std::string date;
             std::ifstream info(dir / "saved.txt");
             if (std::getline(info, date) && !date.empty()) {
-                text += "\n" + fmt::format(fmt::runtime(T("Saved {}")), date);
+                text += "\n" + fmt::format(fmt::runtime(undo_entry ? T("Kept {}") : T("Saved {}")), date);
             }
             std::snprintf(label, label_size, "%s", text.c_str());
             picture[0] = 0;
             for (const char* file : {"thumb.png", "icon0.png"}) {
-                const fs::path p = dir / (SlotName(game) + ".sce_sys") / file;
+                const fs::path p = dir / (inner + ".sce_sys") / file;
                 if (fs::file_size(p, ec) > 0 && !ec) {
                     std::snprintf(picture, picture_size, "%s", Utf8(p).c_str());
                     break;
@@ -1188,7 +1248,12 @@ extern "C" int bbport_saves_list_pick(int index) {
         const int game = BbSaves::Game();
         int digit = -1;
         std::error_code ec;
-        if (game && StoryOf(index, digit)) {
+        if (game && index == UndoOverwrite) {
+            if (!UndoName(game).empty()) {
+                list_pick = index;
+                ok = 1;
+            }
+        } else if (game && StoryOf(index, digit)) {
             if (fs::exists(GameBackups(game) / StoryFolder(digit) / SlotName(game) / "USR-DATA", ec)) {
                 list_pick = index;
                 ok = 1;
@@ -1230,6 +1295,21 @@ extern "C" void bbport_saves_before_mount(const char* dir, int read_only) {
             std::printf("Save slots: the game saves instead of loading: the slot picked in the list is not put back\n");
             return;
         }
+        // Undo: the kept game and the save of its name trade places, as the game opens it to load.
+        if (index == UndoOverwrite) {
+            const std::string name = UndoName(game);
+            if (name.empty() || name != dir || runtime_checkpoint_practice()) {
+                std::printf("Saves: Undo not applied (%s)\n", name.empty() ? "nothing kept"
+                                                              : runtime_checkpoint_practice() ? "practice mode"
+                                                                                              : "the game opened another save");
+                return;
+            }
+            BbThumbnail::ForgetSave(name + ".sce_sys");
+            std::printf("Saves: %s %s\n", name.c_str(),
+                        SwapUndo(game, name) ? "put back as it was (the save it replaced is the next Undo)"
+                                             : "could NOT be put back: the save stays as it was");
+            return;
+        }
         BbSaves::Refresh();
         // A playthrough's story save goes back into that playthrough (the game opens it: the list chose it).
         int story_digit = -1;
@@ -1259,6 +1339,45 @@ extern "C" void bbport_saves_before_mount(const char* dir, int read_only) {
         PutBack(game, folder);
         BbSaves::Refresh();
     });
+}
+
+// Undo, the one safety net of the game's lists: before the game saves over one of the player's games from
+// Chapter Select or New Game (or the pause menu's Save game onto a game other than the one in play), that game is
+// copied to <saves>.backups/u<game>/overwrite (its own name; name.txt, saved.txt). Load game offers it back
+// ("Undo"); putting it back swaps, so the save it replaces becomes the next Undo.
+
+
+// Before the game saves over `dir` (picked in its "where to save" list): a copy for Undo. 1 done.
+extern "C" int bbport_saves_keep_before_overwrite(const char* dir) {
+    int ok = 0;
+    Guarded("keep a save before it is saved over", [&] {
+        std::lock_guard guard(lock);
+        const int game = BbSaves::Game();
+        std::error_code ec;
+        if (!game || !dir || CampaignDigit(game, dir) < 0 || !fs::exists(SavesDir() / dir / "USR-DATA", ec)) {
+            return;
+        }
+        std::string error;
+        fs::create_directories(GameBackups(game), ec);
+        if (!CopySave(SavesDir(), OverwriteDir(game), dir, error)) {
+            std::printf("Saves: %s could not be kept for Undo (%s)\n", dir, error.c_str());
+            return;
+        }
+        std::ofstream(OverwriteDir(game) / "name.txt") << dir << "\n";
+        std::ofstream(OverwriteDir(game) / "saved.txt") << Now() << "\n";
+        std::printf("Saves: %s kept for Undo before the game saves over it\n", dir);
+        ok = 1;
+    });
+    return ok;
+}
+
+// The save Undo puts back (its name in `out`), 1 when there is one.
+extern "C" int bbport_saves_undo_name(char* out, size_t size) {
+    std::lock_guard guard(lock);
+    const int game = BbSaves::Game();
+    const std::string name = game ? UndoName(game) : std::string();
+    std::snprintf(out, size, "%s", name.c_str());
+    return !name.empty();
 }
 
 // Deleted in the game's save list: a slot (1..5 only) moves to <saves>.backups/u<game>/deleted/slot<n>-<time>,
