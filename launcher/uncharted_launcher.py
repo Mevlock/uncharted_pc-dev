@@ -563,7 +563,7 @@ def mouse_ratio(s, key, top=MOUSE_RATIO_MAX):
     try:
         return f"{min(top, max(MOUSE_RATIO_MIN, float(s.get(key)))):.2f}"
     except (TypeError, ValueError):
-        return '1.00'
+        return f"{float(APP_DEFAULTS.get(key, '1.0')):.2f}"
 
 
 def vibration_strength(s):

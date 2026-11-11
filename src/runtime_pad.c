@@ -550,10 +550,10 @@ static void load_input(void) {
         printf("Runtime: controls from %s (mouse look %s, sensitivity %.2f, aiming x%.2f, vertical x%.2f)\n",path,
                input.mouse_look ? "on" : "off",input.mouse_sensitivity,input.mouse_aim_sensitivity,input.mouse_vertical);
     }
-    if (input.mouse_sensitivity<=0.0f) input.mouse_sensitivity=1.0f;
-    if (input.mouse_aim_sensitivity<=0.0f) input.mouse_aim_sensitivity=1.0f;
+    if (input.mouse_sensitivity<=0.0f) input.mouse_sensitivity=2.8f;   /* (the defaults) */
+    if (input.mouse_aim_sensitivity<=0.0f) input.mouse_aim_sensitivity=0.6f;
     if (input.mouse_vertical<=0.0f) input.mouse_vertical=1.0f;
-    if (!(input.mouse_camera_vertical>0.0f)) input.mouse_camera_vertical=1.0f;
+    if (!(input.mouse_camera_vertical>0.0f)) input.mouse_camera_vertical=2.0f;
     if (input.pad_vibration_strength<0) input.pad_vibration_strength=0;
     if (input.pad_vibration_strength>100) input.pad_vibration_strength=100;
     bbgpu_mouse_configure(input.mouse_look);
@@ -624,7 +624,7 @@ void runtime_mouse_get(float *look, float *aim, float *vertical) {
     if (aim) *aim=input.mouse_aim_sensitivity;
     if (vertical) *vertical=input.mouse_vertical;
 }
-float runtime_mouse_camera_vertical(void) { return input.mouse_camera_vertical>0.0f ? input.mouse_camera_vertical : 1.0f; }
+float runtime_mouse_camera_vertical(void) { return input.mouse_camera_vertical>0.0f ? input.mouse_camera_vertical : 2.0f; }
 void runtime_mouse_camera_vertical_set(float v) { if (v>0.0f) input.mouse_camera_vertical=v; }
 void runtime_mouse_set(float look, float aim, float vertical) {
     if (look>0.0f) input.mouse_sensitivity=look;

@@ -13,6 +13,7 @@
  * "antikmewzik's other menu changes" below). BB_MENU_MOUSE=0: off. */
 #include "runtime_menumouse.h"
 #include "gpu/bbgpu.h"
+int runtime_mouselook_camera_recent(void);   /* runtime_mouselook.c: a follow / cover camera ran in the last 250 ms (gameplay) */
 extern float runtime_ultrawide_scale;   /* runtime_ultrawide.c: the UI squeeze (< 0: Vert+, the vertical share) */
 #include <math.h>
 #include <pthread.h>
@@ -1160,7 +1161,8 @@ static void u3_text(const uint64_t *regs) {
         }
     }
     if (r[3]>=700.0f && r[3]<=800.0f && r[2]>=40.0f) menu_credits_us=now;
-    if (u3m && fabsf(r[0]-100.0f)<2.0f && fabsf(r[1]-600.0f)<3.0f && fabsf(r[2]-1080.0f)<3.0f && fabsf(r[3]-60.0f)<3.0f) u3_gallery_us=now;
+    if (u3m && fabsf(r[0]-100.0f)<2.0f && fabsf(r[1]-600.0f)<3.0f && fabsf(r[2]-1080.0f)<3.0f && fabsf(r[3]-60.0f)<3.0f &&
+        !runtime_mouselook_camera_recent()) u3_gallery_us=now;   /* (not a box of that size in play: subtitles, hints) */
     {   /* a slider's rail (the size of its picture: the text object, rcx, +0x3c) */
         float sz[2];
         if (u3m && safe_read(sz,regs[6]+0x3c,8) && sz[0]<0.5f && fabsf(r[0]-96.0f)<3.0f && r[3]>=24.0f && r[3]<=42.0f) {
@@ -1501,7 +1503,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     /* U2's drop-down choice (Options > Game > Difficulty: Easy .. Brutal over the page): a focused list of a few values with no
      * rectangle of its own whose texts the menu hooks do not see. It opens level with the lit row, one value per 29.2 below,
      * right of that row's label. The cursor there picks the value (the page behind is left alone: its hidden "On" took the click) */
-    static struct { int on, want; uint64_t ds; } dd;
+    static struct { int on, want, cur; uint64_t ds; } dd;
     dd.on=0;
     /* (U3's difficulty choice too: a focused list showing all of its 2-8 values, 424 116 208x143 for five; its last rows are no texts the
      * hooks see, and its two lit items in the bar read as a Yes/No) */
@@ -1517,7 +1519,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             const float left=rect ? l->rx-10.0f : sel.x+sel.w-20.0f, right=rect ? l->rx+l->rw+10.0f : sel.x+sel.w+420.0f;
             if (ux<left || ux>right || uy<top || uy>=top+pitch*(float)l->vis) continue;
             int v=l->top+(int)((uy-top)/pitch); v=v<l->lo ? l->lo : v>l->hi ? l->hi : v;
-            dd.on=1; dd.want=v; dd.ds=l->ds;
+            dd.on=1; dd.want=v; dd.ds=l->ds; dd.cur=l->cur;
         }
         pthread_mutex_unlock(&u3_lock);
         if (dd.on) { have_hov=0; dialog=0; }
@@ -1683,7 +1685,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             }
         }
         pthread_mutex_unlock(&u3_lock);
-        if (picked) {
+        if (picked==BTN_LEFT || picked==BTN_RIGHT) {   /* (picked 1: the Yes/No by value took the click) */
             ch.dir=picked; ch.cy=picked_cy; ch.until=now+1500000; ch.seen=0; h.active=1;
             if (mouse_debug()) printf("Menu mouse: U3 click on an arrow (%s) of the row at y %.0f\n",picked==BTN_LEFT ? "left" : "right",picked_cy);
         }
@@ -1956,7 +1958,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     if (now<lc.cross_until) out|=BTN_CROSS;
     if (dd.on) {   /* (the drop-down, above) its value follows the cursor; a click presses cross once it is there */
         menu_hover=1; list_jump=1; h.click=0; h.click_until=0;
-        if (!u2_set_pending || u2_set_val!=dd.want) { u2_set_ds=dd.ds; u2_set_val=dd.want; u2_set_keep=0; u2_set_us=now; u2_set_pending=1; }
+        if (dd.want!=dd.cur && (!u2_set_pending || u2_set_val!=dd.want)) { u2_set_ds=dd.ds; u2_set_val=dd.want; u2_set_keep=0; u2_set_us=now; u2_set_pending=1; }
         if (clicked) {
             lc.on=1; lc.ds=dd.ds; lc.want=dd.want; lc.until=now+1500000; lc.landed=0;
             if (mouse_debug()) printf("Menu mouse: U2 drop-down click on value %d\n",dd.want);
@@ -2477,7 +2479,7 @@ static const unsigned char u3_dialog_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0
 CB(u2_text_lookup_cb) {
     (void)rdi; (void)base; (void)r14; (void)regs;
     const uint32_t k=(uint32_t)rsi;
-    if (u2m && (k==0x4158a30du || k==0x9ef63173u || k==0x36fc7ed5u)) u2_layout_us=now_us();
+    if (u2m && (k==0x4158a30du || k==0x9ef63173u || k==0x36fc7ed5u) && !runtime_mouselook_camera_recent()) u2_layout_us=now_us();   /* (not a HUD hint in play) */
 }
 static const unsigned char u2_text_lookup_code[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x89,0xf3,0x49,0x89,0xfe,0x49,0x8b,0x7e,0x58,0x48,0x85,0xff,0x74};   /* (both codes) */
 

@@ -6,6 +6,7 @@ an error.
 Addresses are image offsets (virtual addresses of the SELF's load segments).
 """
 import hashlib
+import re
 from pathlib import Path
 import struct
 
@@ -147,6 +148,9 @@ def reward_switches(data, code):
 # measured ~1% / ~0% FPS). Found from the menu items in every build (his addresses are US 1.02's): the full-resolution item
 # loads the block (lea reg, [rip + block]) and stores the switch's address (lea rax, [reg + 0x7c0]); the shadow item's
 # address is lea rax, [r12 + 0x1c4] with the same block in r12.
+# lea reg, [rip + disp32] (48 or 4c, 8d, a ModRM with mod 00 and r/m 101)
+LEA_RIP = re.compile(b'(?=' + re.escape(bytes([0x48])).join([b'(?:', b'|' + re.escape(bytes([0x4c])) + b')']) + re.escape(bytes([0x8d])) +
+                     b'[' + b''.join(re.escape(bytes([m])) for m in (0x05, 0x0d, 0x15, 0x1d, 0x25, 0x2d, 0x35, 0x3d)) + b'])', re.S)   # (a lookahead: overlapping candidates too)
 QUALITY_LABELS = {'fullres': b'Force Full Resolution Textures', 'hiresshadow': b'Enable Hires Local Shadow Buffer'}
 
 
@@ -164,13 +168,13 @@ def quality_switches(data, names):
     if code is None:
         return {}
     text = bytes(elf[code['offset']:code['offset'] + code['filesz']])
+    leas = {}   # rip-relative lea targets -> their offsets (one pass over the code)
+    for m in LEA_RIP.finditer(text):
+        i = m.start()
+        if i + 7 <= len(text):
+            leas.setdefault(code['vaddr'] + i + 7 + struct.unpack_from('<i', text, i + 3)[0], []).append(i)
     def label_leas(target):
-        found = []
-        for i in range(len(text) - 7):
-            if text[i] in (0x48, 0x4c) and text[i + 1] == 0x8d and (text[i + 2] & 0xc7) == 0x05:
-                if code['vaddr'] + i + 7 + struct.unpack_from('<i', text, i + 3)[0] == target:
-                    found.append(i)
-        return found
+        return leas.get(target, [])
     result = {}
     full = address_of(QUALITY_LABELS['fullres'])
     block = None
@@ -237,10 +241,15 @@ def keep_bytes(path, cheats):
         code = code_hash(data)
         table = KEEP.get(code, {})
         rewards = reward_switches(data, code) if 'rewards' in cheats else []
-        quality = quality_switches(data, [c for c in cheats if c in QUALITY_LABELS]) if any(c in QUALITY_LABELS for c in cheats) else {}
     except (OSError, ValueError, KeyError, IndexError, struct.error) as error:
         print(f'Cheats: switches not kept ({error})')
         return ''
+    quality = {}
+    if any(c in QUALITY_LABELS for c in cheats):
+        try:   # (on its own: a surprise here must not drop the cheats and rewards)
+            quality = quality_switches(data, [c for c in cheats if c in QUALITY_LABELS])
+        except (ValueError, KeyError, IndexError, struct.error) as error:
+            print(f'Extra quality: not applied ({error})')
     keep = []
     for name, offset in quality.items():
         keep.append(f'{offset:x}=1')

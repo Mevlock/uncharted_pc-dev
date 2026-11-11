@@ -491,6 +491,7 @@ typedef struct {
     uint64_t stick_until;        /* ms: the mouse is the stick until then */
     unsigned turns, kept, dropped, fallbacks;
     double taken[2];
+    int loose;   /* U2/U3 follow: more than half taken back counts, turns from 0.17 degrees checked (chase cameras); the others: 80%, 1 degree */
 } LookCheck;
 static int look_ready_check(LookCheck *s, const unsigned char *camera, float heading, uint64_t now) {
     if (s->camera==camera) {
@@ -499,7 +500,8 @@ static int look_ready_check(LookCheck *s, const unsigned char *camera, float hea
         const float from_after=fabsf(wrap_angle(heading-s->after));
         /* (more than half of the turn taken back counts: U3's chase cameras (chapter 3, young Drake on the stairs) pull
          * the direction back to their path every frame and kept ~10% of each mouse turn, which only ever read as kept) */
-        if (from_before<0.5f*turn && from_after>0.5f*turn) {
+        const float back=s->loose ? 0.5f : 0.2f, away=s->loose ? 0.5f : 0.8f;
+        if (from_before<back*turn && from_after>away*turn) {
             ++s->dropped;
             if (++s->lost>=3) {
                 s->lost=0;
@@ -530,7 +532,7 @@ static void checked_turn(LookCheck *s, const unsigned char *camera, float *dir, 
     rotate_look(dir,dx,per_count);
     ++s->turns;
     const float after=atan2f(dir[0],dir[2]);
-    if (fabsf(wrap_angle(after-before))>=0.003f) {   /* (0.17 degrees: a slow move at 144 FPS turns ~0.5 a frame) */
+    if (fabsf(wrap_angle(after-before))>=(s->loose ? 0.003f : 0.01745f)) {   /* (loose: 0.17 degrees, a slow move at 144 FPS turns ~0.5 a frame) */
         s->camera=camera;
         s->before=before;
         s->after=after;
@@ -599,7 +601,7 @@ static void u3_camera_input(unsigned char *camera, float *look, uint64_t *regs) 
     float dx=0, dy=0;
     char mode='-';
     /* the camera that takes most of each turn back (chase cameras): the mouse is the stick for a moment (LookCheck) */
-    static LookCheck check={.name="U3 follow"};
+    static LookCheck check={.name="U3 follow",.loose=1};
     const int ready=!look || look_ready_check(&check,camera,atan2f(look[0],look[2]),now_ms());
     int took=0;
     if (ready) took=frame_take(&u3_frame,camera,&dx,&dy,&mode);
@@ -640,7 +642,7 @@ static void u2_camera_input(unsigned char *camera, float *look, uint64_t *regs) 
     float dx=0, dy=0;
     char mode='-';
     /* the camera that takes most of each turn back (chase cameras): the mouse is the stick for a moment (LookCheck) */
-    static LookCheck check={.name="U2 follow"};
+    static LookCheck check={.name="U2 follow",.loose=1};
     const int ready=!look || look_ready_check(&check,camera,atan2f(look[0],look[2]),now_ms());
     int took=0;
     if (ready) took=frame_take(&u2_frame,camera,&dx,&dy,&mode);
@@ -688,8 +690,10 @@ static LookCheck u3_cover_look={.name="U3 cover"}, u2_cover_look={.name="U2 cove
  * (U2's convoy turret runs the aim camera all the time and no follow camera; the mouse as the right stick there turned it
  * at the game's slow stick speed, the old mouse code turned the aim directly). On foot the follow camera runs every
  * frame (its hook is called while aiming too): there aiming still needs the aim button. */
+/* A follow or cover camera ran in the last 250 ms: gameplay (the menu mouse keeps its gameplay-like triggers out then) */
+int runtime_mouselook_camera_recent(void) { return look_camera_ms && (int64_t)(now_ms()-look_camera_ms)<250; }
 static int aim_active(void) {
-    return runtime_pad_aim_held() || now_ms()-look_camera_ms>250;
+    return runtime_pad_aim_held() || (int64_t)(now_ms()-look_camera_ms)>250;   /* (signed: a newer stamp from another thread) */
 }
 static int aim_take(LookCheck *s, const int *flags, float *dx, float *dy) {
     if (!aim_active() || !take_mouse(dx,dy) || (*dx==0.0f && *dy==0.0f)) return 0;
@@ -751,6 +755,7 @@ static void u2_aim_camera_input(unsigned char *camera) {
  * (not while aiming), the follow camera's invert options. */
 static void cover_input(const char *hook, FrameTurn *frame, LookCheck *s, int enabled, unsigned char *camera, float *dir,
                         float *pitch, const int *flags, float lo, float hi) {
+    look_camera_ms=now_ms();   /* (a cover camera runs: not a mounted gun, see aim_active; also on its early returns) */
     const float heading=dir_heading(dir), pitch_in=*pitch;
     if (!enabled) {
         s->camera=NULL;
