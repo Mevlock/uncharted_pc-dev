@@ -6144,6 +6144,13 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // a 3440 output, bias -0.59 unused).
     const bool scene_draw = !pipeline->IsCompute() && camera_motion->VelocityMode() &&
                             db_desc.first && db_desc.first == camera_motion->Depth();
+    // (the texture filtering override too: it was gated on material_draw alone and never applied in Uncharted,
+    // whose scene has one colour target; BB_ANISO_MATERIAL_ONLY=1: as before)
+    static const bool aniso_material_only = [] {
+        const char* e = std::getenv("BB_ANISO_MATERIAL_ONLY");
+        return e && e[0] == '1';
+    }();
+    aniso_draw = material_draw || (!aniso_material_only && scene_draw);
     if ((material_draw || scene_draw) && !BbToggle::Disabled(BbToggle::SceneMipBias)) {
         sampler_lod_bias = upscaler->SceneMipBias();
         static float reported = 0.0f;
@@ -7970,7 +7977,7 @@ void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* pr
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
-        ForceAnisotropy(ssharp, sampler.is_depth, material_draw);
+        ForceAnisotropy(ssharp, sampler.is_depth, aniso_draw);
         SmoothSsaoDepth(ssharp, sampler.is_depth, stage.pgm_hash);
         const auto vk_sampler = texture_cache.GetSampler(
             ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
