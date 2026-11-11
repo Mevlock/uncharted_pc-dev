@@ -152,6 +152,10 @@ def reward_switches(data, code):
 LEA_RIP = re.compile(b'(?=' + re.escape(bytes([0x48])).join([b'(?:', b'|' + re.escape(bytes([0x4c])) + b')']) + re.escape(bytes([0x8d])) +
                      b'[' + b''.join(re.escape(bytes([m])) for m in (0x05, 0x0d, 0x15, 0x1d, 0x25, 0x2d, 0x35, 0x3d)) + b'])', re.S)   # (a lookahead: overlapping candidates too)
 QUALITY_LABELS = {'fullres': b'Force Full Resolution Textures', 'hiresshadow': b'Enable Hires Local Shadow Buffer'}
+# Depth of field off (launcher Depth of field: Off everywhere, BB_DOF=0): the engines' own "Enable Depth of Field" switch in the
+# same block (+ 0x1bd, BilalReloaded's no_dof) kept at 0: the frame stays full resolution (skipping the blur shaders alone left the
+# composite mixing in the half-size picture where the focus mask is set: soft, shimmering distance). Not a menu label of its own.
+QUALITY_EXTRA = {'nodof': (0x1bd, 0)}
 
 
 def quality_switches(data, names):
@@ -218,6 +222,9 @@ def quality_switches(data, names):
         return {}
     if 'fullres' in names:
         result['fullres'] = block + 0x7c0
+    for name, (offset, _value) in QUALITY_EXTRA.items():
+        if name in names:
+            result[name] = block + offset
     if result.pop('_100', False):   # (both switches already checked against their items)
         if 'hiresshadow' in names:
             result['hiresshadow'] = block + 0x1c4
@@ -234,7 +241,7 @@ def quality_switches(data, names):
 
 def keep_bytes(path, cheats):
     """BB_KEEP_BYTES ("offset=1,...") for the enabled switch cheats of one executable; '' when none applies."""
-    if not any(c in ('noreload', 'onehit', 'rewards', 'fullres', 'hiresshadow') for c in cheats):
+    if not any(c in ('noreload', 'onehit', 'rewards', 'fullres', 'hiresshadow', 'nodof') for c in cheats):
         return ''
     try:
         data = Path(path).read_bytes()
@@ -245,15 +252,16 @@ def keep_bytes(path, cheats):
         print(f'Cheats: switches not kept ({error})')
         return ''
     quality = {}
-    if any(c in QUALITY_LABELS for c in cheats):
+    if any(c in QUALITY_LABELS or c in QUALITY_EXTRA for c in cheats):
         try:   # (on its own: a surprise here must not drop the cheats and rewards)
-            quality = quality_switches(data, [c for c in cheats if c in QUALITY_LABELS])
+            quality = quality_switches(data, [c for c in cheats if c in QUALITY_LABELS or c in QUALITY_EXTRA])
         except (ValueError, KeyError, IndexError, struct.error) as error:
             print(f'Extra quality: not applied ({error})')
     keep = []
     for name, offset in quality.items():
-        keep.append(f'{offset:x}=1')
-        print(f'Extra quality: {"full resolution textures" if name == "fullres" else "hi-res local shadows"} on ({offset:#x})')
+        keep.append(f'{offset:x}={QUALITY_EXTRA[name][1] if name in QUALITY_EXTRA else 1}')
+        what = {'fullres': 'full resolution textures on', 'hiresshadow': 'hi-res local shadows on', 'nodof': 'depth of field off (the engine switch)'}
+        print(f'Extra quality: {what.get(name, name)} ({offset:#x})')
     for name in cheats:
         for offset in table.get(name, []):
             keep.append(f'{offset:x}=1')

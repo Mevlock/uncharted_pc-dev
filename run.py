@@ -249,7 +249,7 @@ def main():
         enabled = [c for c in env['BB_CHEATS'].split(',') if c] + (['rewards'] if env.get('BB_UNLOCK_REWARDS') == '1'
                                                                      else [])
         # Extra quality (launcher Display): Uncharted 2 and 3's full-resolution textures and hi-res local shadow switches
-        enabled += (['fullres'] if env.get('BB_FULL_RES_TEXTURES') == '1' else []) +                    (['hiresshadow'] if env.get('BB_HIRES_SHADOWS') == '1' else [])
+        enabled += (['fullres'] if env.get('BB_FULL_RES_TEXTURES') == '1' else []) +                    (['hiresshadow'] if env.get('BB_HIRES_SHADOWS') == '1' else []) +                    (['nodof'] if env.get('BB_DOF') == '0' and env.get('BB_DOF_ENGINE', '1') != '0' else [])   # Depth of field: Off everywhere
         patches = cheats.build(game / exe, out, enabled)
         env['BB_KEEP_BYTES'] = cheats.keep_bytes(game / exe, enabled)
         env['BB_RESTART_COMMAND'] = subprocess.list2cmdline([sys.executable, *this, '--after', str(os.getpid()), *args])
