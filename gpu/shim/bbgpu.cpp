@@ -21,6 +21,9 @@
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include <cstring>
 #include <mutex>
+#include <map>
+#include <unordered_map>
+#include <fmt/format.h>
 #include <string>
 #include <chrono>
 #include <thread>
@@ -366,7 +369,69 @@ extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
     return 0;
 }
 
+#ifdef _WIN32
+extern "C" uintptr_t runtime_image_base(void); // probe.c
+// bbport diagnosis (perf12): BB_FAULT_RIPS=1 — the guest code that causes handled write faults: every 5 s the 25 image
+// offsets with the most fault time, each with the 1 MiB region it wrote most, its faults per second and the time they
+// stopped it.
+static void NoteFaultRip(void* ucontext, void* address, s64 us) {
+    struct Site {
+        u64 count = 0, us = 0;
+        std::map<u64, u64> regions;
+    };
+    static std::mutex mutex;
+    static std::unordered_map<u64, Site> sites;
+    static auto window = std::chrono::steady_clock::now();
+    const auto* context = static_cast<EXCEPTION_POINTERS*>(ucontext)->ContextRecord;
+    const uintptr_t base = runtime_image_base();
+    const u64 rip = context->Rip;
+    const u64 offset = base && rip >= base && rip - base < (1ull << 32) ? rip - base : rip | (1ull << 63);
+    std::scoped_lock lock{mutex};
+    Site& site = sites[offset];
+    ++site.count;
+    site.us += u64(std::max<s64>(us, 0));
+    ++site.regions[reinterpret_cast<uintptr_t>(address) >> 20];
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(5)) {
+        return;
+    }
+    window = now;
+    std::vector<std::pair<u64, const Site*>> order;
+    for (const auto& [where, s] : sites) {
+        order.emplace_back(where, &s);
+    }
+    std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.second->us > b.second->us; });
+    std::string line;
+    for (size_t i = 0; i < order.size() && i < 25; ++i) {
+        const Site& s = *order[i].second;
+        const auto top = std::max_element(s.regions.begin(), s.regions.end(),
+                                          [](const auto& a, const auto& b) { return a.second < b.second; });
+        line += fmt::format(" {}{:#x}:{:.0f}/s,{:.1f}ms/s@{:#x}", order[i].first >> 63 ? "host:" : "",
+                            order[i].first & ~(1ull << 63), s.count / 5.0, s.us / 5000.0, top->first << 20);
+    }
+    std::printf("Fault sites (5 s, by time):%s\n", line.c_str());
+    sites.clear();
+}
+#endif
+
 extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
+#ifdef _WIN32
+    static const bool fault_rips = [] {
+        const char* env = std::getenv("BB_FAULT_RIPS");
+        return env && env[0] == '1';
+    }();
+    if (fault_rips) {
+        const auto start = std::chrono::steady_clock::now();
+        const bool handled = Core::Signals::Instance()->DispatchAccessViolation(ucontext, address);
+        if (handled) {
+            NoteFaultRip(ucontext, address,
+                         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                                               start)
+                             .count());
+        }
+        return handled ? 1 : 0;
+    }
+#endif
     // bbport diagnosis: BB_FAULT_TIMES=1 — how long handled faults stop the faulting thread,
     // as a histogram every 5 s.
     static const bool fault_times = [] {
