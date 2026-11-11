@@ -474,20 +474,20 @@ void CheckpointsPage() {
     if (BbSaves::Practising()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
         ImGui::TextWrapped("%s", T("Practice mode: the game saves to a practice copy until you restart it. Your "
-                                   "own save and story save are not touched."));
+                                   "own games are not touched."));
         ImGui::PopStyleColor();
         static bool confirm_keep = false;
         if (!confirm_keep) {
             if (ImGui::Button(TI("Keep this progress"))) {
                 confirm_keep = true;
             }
-            Hint(T("To carry on from here for real (for example past a place that does not work): the game "
-                   "restarts and Continue starts at the practice save, which becomes your save and your story "
-                   "save. Your save from before is kept in Save slots as \"Before the last load\"."));
+            Hint(T("To carry on from here for real (for example past a place that does not work): the practice "
+                   "save becomes a new game of its own, next to your other games, and the game restarts with "
+                   "Continue there. Your other games stay as they are."));
         } else {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
-            ImGui::TextWrapped("%s", T("Make the practice save your save? The game restarts and Continue starts "
-                                       "there. Your save from before is kept as \"Before the last load\"."));
+            ImGui::TextWrapped("%s", T("Keep the practice save as a new game? The game restarts and Continue "
+                                       "starts there. Your other games stay as they are."));
             ImGui::PopStyleColor();
             if (ImGui::Button(TI("Yes, keep it"))) {
                 confirm_keep = false;

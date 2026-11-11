@@ -591,13 +591,21 @@ bool KeepPractice(std::string& message) {
         message = T("The game is saving: try again in a moment.");
         return false;
     }
-    // The player's save as it was goes to "Before the last load" (undo), then the restart puts the practice save
-    // in its place and makes it the story save (bbport_saves_apply_pending).
-    if (!Store(UndoSlot, message)) {
+    // The practice save becomes a new game of its own (the next free campaign save); the player's games stay as they
+    // are. The restart copies it there before the game opens its saves (bbport_saves_apply_pending) and makes it
+    // the game in play, so Continue starts there.
+    int free_digit = -1;
+    for (int d = 0; d <= 9 && free_digit < 0; ++d) {
+        if (!fs::exists(SavesDir() / CampaignName(game, d), ec)) {
+            free_digit = d;
+        }
+    }
+    if (free_digit < 0) {
+        message = T("There is no room for another game: delete one in the game's save list first.");
         return false;
     }
     std::ofstream pending(PendingFile(game));
-    pending << "u" << game << " practice\n";
+    pending << "u" << game << " practice-new " << ActiveName(game) << " " << CampaignName(game, free_digit) << "\n";
     pending.close();
     if (!pending) {
         message = T("Could not write the request.");
@@ -636,9 +644,12 @@ bool PutBack(int game, const std::string& folder);
 void ApplyPending(int game) {
     const fs::path pending = PendingFile(game);
     std::ifstream f(pending);
-    std::string which_game, folder;
+    std::string which_game, folder, from_name, to_name;
     if (!(f >> which_game >> folder)) {
         return;
+    }
+    if (folder == "practice-new") {
+        f >> from_name >> to_name;
     }
     f.close();
     if (which_game != "u" + std::to_string(game)) {
@@ -650,6 +661,35 @@ void ApplyPending(int game) {
         // Could not be removed (antivirus, a synced or read-only folder): applied now it would be applied again at
         // every start, each time throwing away that session's progress.
         std::printf("Save slots: %s could not be removed: the load is not applied\n", Utf8(pending).c_str());
+        return;
+    }
+    if (folder == "practice-new") {
+        // Keep this progress: the practice save as a new game (copied, not moved, until the copy is complete).
+        const int to_digit = CampaignDigit(game, to_name);
+        const fs::path practice = GameBackups(game) / "practice";
+        if (to_digit < 0 || CampaignDigit(game, from_name) < 0 || fs::exists(SavesDir() / to_name, ec) ||
+            !fs::exists(practice / from_name / "USR-DATA", ec)) {
+            std::printf("Saves: the practice save could not become a new game (%s -> %s)\n", from_name.c_str(),
+                        to_name.c_str());
+            return;
+        }
+        bool ok = true;
+        for (const std::string suffix : {std::string(), std::string(".sce_sys")}) {
+            fs::copy(practice / (from_name + suffix), SavesDir() / (to_name + suffix), fs::copy_options::recursive,
+                     ec);
+            ok = ok && !ec;
+        }
+        if (!ok) {
+            std::error_code ignore;
+            fs::remove_all(SavesDir() / to_name, ignore);
+            fs::remove_all(SavesDir() / (to_name + ".sce_sys"), ignore);
+            std::printf("Saves: the practice save could not become a new game: %s\n", ec.message().c_str());
+            return;
+        }
+        SetActiveDigit(game, to_digit);
+        fs::remove_all(practice, ec);
+        std::printf("Saves: the practice save is now game %d (%s); the other games are as they were\n", to_digit + 1,
+                    to_name.c_str());
         return;
     }
     PutBack(game, folder);
