@@ -70,3 +70,37 @@ void __attribute__((ms_abi)) runtime_u2_npc_damage(uint64_t rdi, uint64_t rsi, u
     printf("OneHit: attack kind %u, damage %d, attacker %p type %08x faction %u -> npc %p type %08x faction %u\n",
            kind,damage,(const void *)attacker,type,faction,(const void *)npc,npc_type,npc_faction);
 }
+
+/* Uncharted 1 Npc::RespondToAttack (npc.cpp; EU and 1.02 both at 0x13ed0): rdi = the NPC, rsi = the attack record
+ * {+8 the attacker's record, +0x14 damage as a share of the NPC's health (float: the player's body shots 0.375, its
+ * headshots 375)}; the attacker record's +0x60 is 1 for the player (2 and 5 for the others measured 2026-11-11). With
+ * the cheat on the player's attacks do 1000 (any NPC dies at once), the others stay as they are. RespondToAttack reads
+ * the damage itself and applies it (no armor step before it, unlike Uncharted 2). BB_ONEHIT_LOG=1: the record's first
+ * 24 words and the attacker's 32. */
+void __attribute__((ms_abi)) runtime_u1_respond_to_attack(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                          const uint64_t *regs) {
+    (void)image; (void)r14; (void)regs;
+    if ((!onehit_on() && !onehit_log()) || !rsi || !rdi) return;
+    if (onehit_on()) {
+        uint64_t who; memcpy(&who,(const void *)(uintptr_t)(rsi+8),8);
+        uint32_t side=0; if (who) memcpy(&side,(const void *)(uintptr_t)(who+0x60),4);
+        float damage; memcpy(&damage,(const void *)(uintptr_t)(rsi+0x14),4);
+        if (side==1 && damage>0.0f && damage<1000.0f) {
+            const float lethal=1000.0f;
+            memcpy((void *)(uintptr_t)(rsi+0x14),&lethal,4);
+        }
+    }
+    if (!onehit_log()) return;
+    uint32_t w[24];
+    memcpy(w,(const void *)(uintptr_t)rsi,sizeof(w));
+    printf("OneHit1: npc %p attack",(const void *)(uintptr_t)rdi);
+    for (int i=0;i<24;++i) printf(" %08x",w[i]);
+    uint64_t attacker; memcpy(&attacker,(const void *)(uintptr_t)(rsi+8),8);
+    if (attacker) {
+        uint32_t o[32];
+        memcpy(o,(const void *)(uintptr_t)attacker,sizeof(o));
+        printf(" | attacker");
+        for (int i=0;i<32;++i) printf(" %08x",o[i]);
+    }
+    printf("\n");
+}
