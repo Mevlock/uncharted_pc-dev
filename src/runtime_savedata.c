@@ -344,6 +344,7 @@ static ABI int32_t save_terminate(void) {
 static int32_t last_user=1;
 void bbport_saves_apply_pending(void);
 void bbport_saves_closed(const char *host_dir);
+void bbport_saves_before_mount(const char *dir, int read_only);
 int runtime_savedata_dir(char *out, size_t size) { root(last_user,NULL,out,size); return 0; }
 int runtime_savedata_mounted(void) {
     pthread_mutex_lock(&lock);
@@ -374,6 +375,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     last_user=user;
     pthread_once(&pending_once,bbport_saves_apply_pending);
     if (!dir || !result || !valid_name(dir->data,sizeof(dir->data))) return ERR_PARAMETER;
+    bbport_saves_before_mount(dir->data,(mode & MODE_RDONLY)!=0);   /* a slot picked in the save list, put back now */
     char base[600], host[640], meta[680];
     root(user,title,base,sizeof(base));
     snprintf(host,sizeof(host),"%s/%s",base,dir->data);

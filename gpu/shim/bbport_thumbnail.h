@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace BbThumbnail {
 
@@ -16,8 +17,11 @@ constexpr uint32_t Width = 456, Height = 256; // twice the save list's 228x128 p
 bool Wanted();
 /// Present thread: the captured picture, Width x Height RGBA8 rows top to bottom.
 void Store(const unsigned char* rgba);
-/// The game's save list ("Save game") was shown: the saves written within two minutes get the picture from before
-/// the pause menu (bbgpu_thumbnail_pause).
+/// The game's save list ("Save game") was shown: the saves written before play goes on (at most two minutes) get
+/// the picture from before the pause menu (bbgpu_thumbnail_pause).
 void NoteSaveList();
+/// A save's folders are replaced (a slot put back, bbport_saves.cpp): its picture still waiting for play is
+/// dropped, so it does not land on the save put in its place. `meta_name`: "SAVEDATA020.sce_sys".
+void ForgetSave(const std::string& meta_name);
 
 } // namespace BbThumbnail

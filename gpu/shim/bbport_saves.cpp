@@ -31,6 +31,7 @@
 #include <openssl/blowfish.h>
 
 #include "bbport_i18n.h"
+#include "bbport_thumbnail.h"
 #include "video_core/renderer_vulkan/vk_vram.h"
 
 extern "C" {
@@ -566,6 +567,8 @@ bool PutBack(int game, const std::string& folder) {
     }
     const fs::path from = GameBackups(game) / folder;
     const std::string name = SlotName(game);
+    // A picture still waiting to be written for the save replaced here would land on the one put in its place.
+    BbThumbnail::ForgetSave(name + ".sce_sys");
     const fs::path saves = SavesDir();
     std::string error;
     // Both folders copied beside the campaign save first (.bbload). Then the swap: the player's folders moved aside
@@ -994,27 +997,69 @@ extern "C" int bbport_saves_list_entry(int index, char* label, size_t label_size
     return used;
 }
 
-// Picked in the game's save list: the slot becomes the campaign save now (the game opens it next), the save it
-// replaces kept as "Before the last load" (loading that one swaps back). 1 done, 0 not (saves as they were).
-extern "C" int bbport_saves_put_back(int index) {
+// Picked in the game's save list: the slot is put back as the campaign save only when the game opens that save
+// next (bbport_saves_before_mount), so a load the game does not go on with (a declined question, a new list)
+// changes nothing. The save it replaces is kept as "Before the last load" (loading that one swaps back).
+namespace {
+int list_pick = -1; // slot waiting for the game to open its campaign save; guarded by `lock`
+}
+
+// 1 when the slot holds a save and waits for the game's mount; 0 not (nothing changes).
+extern "C" int bbport_saves_list_pick(int index) {
     int ok = 0;
     Guarded("load from the save list", [&] {
         std::lock_guard guard(lock);
-        const int game = BbSaves::Game();
         BbSaves::Refresh();
-        if (!game || index < 0 || index > BbSaves::StorySlot || !BbSaves::GetSlot(index).used ||
-            runtime_savedata_mounted()) {
-            return;
+        if (BbSaves::Game() && index >= 0 && index <= BbSaves::StorySlot && BbSaves::GetSlot(index).used) {
+            list_pick = index;
+            ok = 1;
         }
-        std::string message;
-        if (index != BbSaves::UndoSlot && !BbSaves::Store(BbSaves::UndoSlot, message)) {
-            std::printf("Save slots: %s\n", message.c_str());
-            return;
-        }
-        ok = PutBack(game, SlotFolder(index));
-        BbSaves::Refresh();
     });
     return ok;
+}
+
+// A new list, or the game's dialog closed without a pick: a slot waiting for the mount is forgotten.
+extern "C" void bbport_saves_list_cancel(void) {
+    std::lock_guard guard(lock);
+    list_pick = -1;
+}
+
+// runtime_savedata.c, before the game opens a save: the slot picked in the list becomes the campaign save, when the
+// game opens the campaign save to read it (the load). Opened to write instead (the load was not gone on with and
+// play reached a checkpoint), the pick is forgotten. A failure leaves the player's save as it was (the game then
+// loads that) and says so.
+extern "C" void bbport_saves_before_mount(const char* dir, int read_only) {
+    Guarded("load from the save list", [&] {
+        std::lock_guard guard(lock);
+        const int game = BbSaves::Game();
+        if (list_pick < 0 || !game || !dir || SlotName(game) != dir) {
+            return;
+        }
+        const int index = list_pick;
+        list_pick = -1;
+        if (!read_only) {
+            std::printf("Save slots: the game saves instead of loading: the slot picked in the list is not put back\n");
+            return;
+        }
+        BbSaves::Refresh();
+        if (!BbSaves::GetSlot(index).used || runtime_checkpoint_practice()) {
+            std::printf("Save slots: the slot picked in the list is not put back (%s)\n",
+                        runtime_checkpoint_practice() ? "practice mode" : "the slot is empty");
+            return;
+        }
+        // The campaign save is not open (the game is about to open it); another save (the profile) may be, so the
+        // copy is made here rather than by Store, which waits for no save at all to be open.
+        std::string error;
+        std::error_code ec;
+        if (index != BbSaves::UndoSlot && fs::exists(SavesDir() / SlotName(game) / "USR-DATA", ec) &&
+            !CopyCampaign(game, BbSaves::UndoSlot, error)) {
+            std::printf("Save slots: the save could not be kept as Before the last load (%s): slot not put back\n",
+                        error.c_str());
+            return;
+        }
+        PutBack(game, SlotFolder(index));
+        BbSaves::Refresh();
+    });
 }
 
 // Deleted in the game's save list: a slot (1..5 only) moves to <saves>.backups/u<game>/deleted/slot<n>-<time>,

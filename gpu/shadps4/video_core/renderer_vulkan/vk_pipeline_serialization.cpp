@@ -1634,6 +1634,11 @@ void PipelineCache::WarmUpThread() {
         const std::filesystem::path list_path{ship_list};
         prepared_marker = db.Directory() / ("prepared_" + list_path.stem().string());
         prepared_stamp = std::to_string(std::filesystem::file_size(list_path, ec));
+        // The jitter in the vertex shaders (non-NVIDIA, runtime_info.h ClipJitter) changes every vertex pipeline:
+        // a cache prepared without it is prepared again once.
+        if (Shader::ClipJitter::enabled) {
+            prepared_stamp += " clip-jitter " + std::to_string(Shader::ClipJitter::Version);
+        }
     }
     // BB_PREPARE_ONLY=1 (the launcher's Prepare shaders button): no window and no game, the progress goes to the
     // launcher (PrepareShadersWithoutWindow); preparation runs at full speed as on the page.
@@ -2412,10 +2417,12 @@ void PipelineCache::WarmUpThread() {
                            own_spec.runtime_info.hw.vs.clip_jitter != 0;
             // (runtime_info.h, ClipJitter) A stored vertex shader from before the jitter moved into the shaders: left
             // to the game, which builds it with the jitter code. Mixed with new ones, the depth pre-pass and the main
-            // pass of the same geometry would take the jitter two ways and could miss each other's depth.
+            // pass of the same geometry would take the jitter two ways and could miss each other's depth. Its
+            // key goes (no use to this driver again; the preparation, run again by the stamp, builds the new ones).
             if (Shader::ClipJitter::enabled && own_spec.runtime_info.hw_stage == Shader::HwStage::Vertex &&
                 !own_spec.runtime_info.hw.vs.clip_disable && own_spec.runtime_info.hw.vs.clip_jitter == 0) {
                 ++stale_no_stage;
+                remove_key(i, removed_stale);
                 return;
             }
             counts[stage] = u32(own_spec.buffers.size() + own_spec.images.size() + own_spec.samplers.size());

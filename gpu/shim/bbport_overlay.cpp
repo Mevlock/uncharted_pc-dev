@@ -1323,6 +1323,11 @@ void ChoiceUploadPictures() {
 const char* ChoiceLabel(const std::string& item) {
     return item == "New save" ? T("New save") : item.c_str();
 }
+// The runtime's texts in the list (runtime_services.c, in English there): the heading, the group headings and the
+// name line of the campaign save, translated here (T leaves any other text, the game's own, as it is).
+[[maybe_unused]] static const char* const ChoiceRuntimeTexts[] = {
+    N_("Load game"), N_("Save game"), N_("Your game"), N_("Current save - where Continue starts"),
+    N_("Your save slots (made with Save here: Insert > Save slots)"), N_("Undo")};
 
 void ChoiceDeletePress() {
     const int count = int(choice_items.size());
@@ -1384,7 +1389,7 @@ void ChoiceBox() {
         const bool selected = i == choice_index;
         if (i < int(choice_sections.size()) && !choice_sections[i].empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.72f, 0.45f, 1.0f));
-            ImGui::SeparatorText(choice_sections[i].c_str());
+            ImGui::SeparatorText(T(choice_sections[i].c_str()));
             ImGui::PopStyleColor();
         }
         ImGui::PushID(i);
@@ -1416,7 +1421,7 @@ void ChoiceBox() {
             const size_t cut = label.find('\n');
             ImGui::BeginGroup();
             ImGui::TextColored(selected ? ImVec4(1.0f, 0.9f, 0.55f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s %s",
-                               selected ? ">" : " ", label.substr(0, cut).c_str());
+                               selected ? ">" : " ", T(label.substr(0, cut).c_str()));
             if (cut != std::string::npos) {
                 // in line with the name (the group starts beside the picture, so no Indent)
                 std::string details = "  " + label.substr(cut + 1);
@@ -1429,11 +1434,25 @@ void ChoiceBox() {
             ImGui::EndGroup();
         }
         ImGui::EndGroup();
-        // The mouse: moving over an entry selects it, a click picks it.
+        // The mouse: resting on an entry selects it (0.15 s: passing over entries on the way to the OK or Delete
+        // button below leaves the selection alone), a click picks it at once.
         if (choice_mouse_seen && ImGui::IsItemHovered()) {
-            if (mouse_moved && choice_index != i) {
-                choice_index = i;
-                choice_delete_armed = -1;
+            // (once per arrival: keys that move the selection while the mouse rests keep it)
+            static int hover_entry = -1;
+            static double hover_since = 0.0;
+            static bool hover_taken = false;
+            const double now = ImGui::GetTime();
+            if (hover_entry != i && mouse_moved) {
+                hover_entry = i;
+                hover_since = now;
+                hover_taken = false;
+            }
+            if (hover_entry == i && !hover_taken && now - hover_since >= 0.15) {
+                hover_taken = true;
+                if (choice_index != i) {
+                    choice_index = i;
+                    choice_delete_armed = -1;
+                }
             }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 clicked = i;

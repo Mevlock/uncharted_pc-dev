@@ -704,4 +704,92 @@ TRANSLATIONS = {
                          'circa {} s rimanenti', '残り約 {} 秒'),
     'a few seconds left': L('quedan unos segundos', 'faltam alguns segundos', 'encore quelques secondes',
                             'noch wenige Sekunden', 'mancano pochi secondi', '残り数秒'),
+    # ---- The game's save list (sceSaveDataDialog, the overlay's list) ------------------------------------------
+    'Load game': L('Cargar partida', 'Carregar jogo', 'Charger une partie', 'Spiel laden', 'Carica partita',
+                   'ゲームをロード'),
+    'Save game': L('Guardar partida', 'Salvar jogo', 'Sauvegarder la partie', 'Spiel speichern', 'Salva partita',
+                   'ゲームをセーブ'),
+    'New save': L('Nueva partida guardada', 'Novo jogo salvo', 'Nouvelle sauvegarde', 'Neuer Spielstand',
+                  'Nuovo salvataggio', '新規セーブ'),
+    'OK': L('Aceptar', 'OK', 'OK', 'OK', 'OK', 'OK'),
+    'Delete': L('Borrar', 'Apagar', 'Supprimer', 'Löschen', 'Elimina', '削除'),
+    'Delete: press again': L('Borrar: pulsa otra vez', 'Apagar: pressione de novo', 'Supprimer : appuie encore',
+                             'Löschen: noch einmal drücken', 'Elimina: premi di nuovo', '削除: もう一度押してください'),
+    'Up/Down or D-pad: choose   Enter or Cross (A): OK   Esc or Circle (B): cancel': L(
+        'Arriba/Abajo o cruceta: elegir   Enter o Cruz (A): aceptar   Esc o Círculo (B): cancelar',
+        'Cima/Baixo ou direcional: escolher   Enter ou X (A): OK   Esc ou Círculo (B): cancelar',
+        'Haut/Bas ou croix directionnelle : choisir   Entrée ou Croix (A) : OK   Échap ou Rond (B) : annuler',
+        'Auf/Ab oder Steuerkreuz: wählen   Enter oder Kreuz (A): OK   Esc oder Kreis (B): abbrechen',
+        'Su/Giù o croce direzionale: scegli   Invio o Croce (A): OK   Esc o Cerchio (B): annulla',
+        '上下キーまたは方向キー: 選択   Enter または × (A): OK   Esc または ○ (B): キャンセル'),
+    'Mouse: point to choose, click = OK, right button = cancel': L(
+        'Ratón: señala para elegir, clic = aceptar, botón derecho = cancelar',
+        'Mouse: aponte para escolher, clique = OK, botão direito = cancelar',
+        'Souris : pointe pour choisir, clic = OK, bouton droit = annuler',
+        'Maus: zeigen zum Wählen, Klick = OK, rechte Taste = abbrechen',
+        'Mouse: punta per scegliere, clic = OK, tasto destro = annulla',
+        'マウス: ポイントで選択、クリック = OK、右ボタン = キャンセル'),
+    'Press Delete or Triangle (Y) AGAIN to delete this save (it goes to savedata-deleted)': L(
+        'Pulsa Supr o Triángulo (Y) OTRA VEZ para borrar esta partida (va a savedata-deleted)',
+        'Pressione Delete ou Triângulo (Y) DE NOVO para apagar este jogo salvo (vai para savedata-deleted)',
+        'Appuie ENCORE sur Suppr ou Triangle (Y) pour supprimer cette sauvegarde (elle va dans savedata-deleted)',
+        'Entf oder Dreieck (Y) NOCH EINMAL drücken, um diesen Spielstand zu löschen (er kommt nach savedata-deleted)',
+        'Premi DI NUOVO Canc o Triangolo (Y) per eliminare questo salvataggio (va in savedata-deleted)',
+        'もう一度 Delete または △ (Y) を押すとこのセーブを削除します（savedata-deleted に移動）'),
+    'Delete or Triangle (Y): delete this save': L(
+        'Supr o Triángulo (Y): borrar esta partida', 'Delete ou Triângulo (Y): apagar este jogo salvo',
+        'Suppr ou Triangle (Y) : supprimer cette sauvegarde', 'Entf oder Dreieck (Y): diesen Spielstand löschen',
+        'Canc o Triangolo (Y): elimina questo salvataggio', 'Delete または △ (Y): このセーブを削除'),
+    'Select a save, then Delete or Triangle (Y) to delete it': L(
+        'Elige una partida y luego Supr o Triángulo (Y) para borrarla',
+        'Escolha um jogo salvo e depois Delete ou Triângulo (Y) para apagá-lo',
+        'Choisis une sauvegarde, puis Suppr ou Triangle (Y) pour la supprimer',
+        'Spielstand wählen, dann Entf oder Dreieck (Y) zum Löschen',
+        'Scegli un salvataggio, poi Canc o Triangolo (Y) per eliminarlo',
+        'セーブを選んで Delete または △ (Y) で削除'),
+    'Your game': L('Tu partida', 'Seu jogo', 'Ta partie', 'Dein Spiel', 'La tua partita', 'あなたのゲーム'),
+    'Current save - where Continue starts': L(
+        'Partida actual - donde empieza Continuar', 'Jogo atual - onde Continuar começa',
+        'Sauvegarde actuelle - là où Continuer reprend', 'Aktueller Spielstand - hier setzt Fortsetzen an',
+        'Salvataggio attuale - da qui riparte Continua', '現在のセーブ - 「つづきから」の開始地点'),
+    'Your save slots (made with Save here: Insert > Save slots)': L(
+        'Tus ranuras (creadas con Guardar aquí: Insert > Ranuras de guardado)',
+        'Seus slots (criados com Salvar aqui: Insert > Slots de salvamento)',
+        'Tes emplacements (créés avec Sauvegarder ici : Insert > Emplacements de sauvegarde)',
+        'Deine Speicherplätze (mit Hier speichern angelegt: Insert > Speicherplätze)',
+        'I tuoi slot (creati con Salva qui: Insert > Slot di salvataggio)',
+        'あなたのセーブスロット（ここにセーブで作成: Insert > セーブスロット）'),
+    'Undo': L('Deshacer', 'Desfazer', 'Annuler', 'Rückgängig', 'Annulla', '元に戻す'),
+    'Slot {}': L('Ranura {}', 'Slot {}', 'Emplacement {}', 'Speicherplatz {}', 'Slot {}', 'スロット {}'),
+    'Saved {}': L('Guardada {}', 'Salvo {}', 'Sauvegardée {}', 'Gespeichert {}', 'Salvato {}', 'セーブ日時 {}'),
+    'Undo last load - back to your save from before it': L(
+        'Deshacer la última carga - vuelve a tu partida de antes',
+        'Desfazer o último carregamento - volta ao seu jogo salvo de antes',
+        'Annuler le dernier chargement - retour à ta sauvegarde d’avant',
+        'Letztes Laden rückgängig - zurück zu deinem Spielstand von davor',
+        "Annulla l'ultimo caricamento - torna al salvataggio di prima",
+        '最後のロードを取り消す - その前のセーブに戻る'),
+    # ---- Mouse look ------------------------------------------------------------------------------------------------
+    'Camera up and down': L('Cámara arriba y abajo', 'Câmera para cima e para baixo', 'Caméra haut et bas',
+                            'Kamera hoch und runter', 'Telecamera su e giù', 'カメラの上下'),
+    "Aiming: times the mouse sensitivity while aiming (1.00 the same as looking around). Vertical: times it for up "
+    "and down. Camera up and down: the normal camera's up and down only (it moves along the game's arc, slower than "
+    "sideways). Ctrl+click to type a value.": L(
+        'Apuntar: multiplica la sensibilidad del ratón al apuntar (1.00 igual que al mirar). Vertical: la multiplica '
+        'arriba y abajo. Cámara arriba y abajo: solo el arriba y abajo de la cámara normal (sigue el arco del juego, '
+        'más lento que hacia los lados). Ctrl+clic para escribir un valor.',
+        'Mirar: multiplica a sensibilidade do mouse ao mirar (1.00 igual a olhar em volta). Vertical: multiplica para '
+        'cima e para baixo. Câmera para cima e para baixo: só o cima e baixo da câmera normal (segue o arco do jogo, '
+        'mais lento que para os lados). Ctrl+clique para digitar um valor.',
+        'Visée : multiplie la sensibilité de la souris en visant (1.00 comme pour regarder). Vertical : la multiplie '
+        'pour le haut et le bas. Caméra haut et bas : seulement le haut et le bas de la caméra normale (elle suit '
+        "l'arc du jeu, plus lente que sur les côtés). Ctrl+clic pour saisir une valeur.",
+        'Zielen: Faktor der Mausempfindlichkeit beim Zielen (1.00 wie beim Umsehen). Vertikal: Faktor für hoch und '
+        'runter. Kamera hoch und runter: nur hoch und runter der normalen Kamera (sie folgt dem Bogen des Spiels, '
+        'langsamer als seitwärts). Strg+Klick, um einen Wert einzugeben.',
+        "Mira: moltiplica la sensibilità del mouse mentre miri (1.00 come quando ti guardi intorno). Verticale: la "
+        "moltiplica per su e giù. Telecamera su e giù: solo su e giù della telecamera normale (segue l'arco del "
+        "gioco, più lenta che di lato). Ctrl+clic per digitare un valore.",
+        'エイム: エイム中のマウス感度の倍率（1.00 で見回しと同じ）。縦: 上下の倍率。カメラの上下: 通常カメラの上下のみ'
+        '（ゲームの弧に沿って動き、左右より遅い）。Ctrl+クリックで値を入力。'),
 }

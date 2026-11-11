@@ -341,7 +341,8 @@ static struct { uint32_t mode; int waits, pick; void *user_data; char dir[32]; u
 #define SAVE_LIST_SLOTS 7
 int bbport_saves_game(void);
 int bbport_saves_list_entry(int index, char *label, size_t label_size, char *picture, size_t picture_size);
-int bbport_saves_put_back(int index);
+int bbport_saves_list_pick(int index);
+void bbport_saves_list_cancel(void);
 int bbport_saves_trash(int index);
 static struct {
     int choosing, offer_new, count, user, with_slots, slot_count, slots[SAVE_LIST_SLOTS];
@@ -368,13 +369,14 @@ static void save_choice_finish(int entry) {
     if (entry<0) save_dialog.pick=-1;
     else if (dir<0) save_dialog.pick=0;
     else if (slot>=0) {
-        /* A slot: put back as the campaign save, which the game then opens. */
-        if (slot<save_choice.slot_count && bbport_saves_put_back(save_choice.slots[slot])) {
-            printf("Runtime: SaveDataDialog list: save slot %d put back as %s\n",save_choice.slots[slot],
-                   save_choice.campaign);
+        /* A slot: put back as the campaign save when the game opens that next (bbport_saves_before_mount), so a
+         * load the game does not go on with changes nothing. */
+        if (slot<save_choice.slot_count && bbport_saves_list_pick(save_choice.slots[slot])) {
+            printf("Runtime: SaveDataDialog list: save slot %d picked: put back as %s when the game opens it\n",
+                   save_choice.slots[slot],save_choice.campaign);
             one=(const char (*)[32])save_choice.campaign;
         } else {
-            printf("Runtime: SaveDataDialog list: save slot %d could not be put back: cancelled\n",
+            printf("Runtime: SaveDataDialog list: save slot %d is empty: cancelled\n",
                    slot<save_choice.slot_count ? save_choice.slots[slot] : -1);
             save_dialog.pick=-1;
         }
@@ -467,13 +469,15 @@ static void save_list(const unsigned char *param) {
     if (!save_list_enabled()) return;
     /* The list: the slots that exist (as on the console), the focused one selected. */
     memset(&save_choice,0,sizeof(save_choice));
+    bbport_saves_list_cancel();   /* a slot picked in an earlier list the game did not go on with */
     save_choice.user=user;
     snprintf(save_choice.title,sizeof(save_choice.title),"%.9s",title ? title : "");
     save_choice.offer_new=offer_new;
     save_choice.heading=type==1 ? "Save game" : "Load game";
     const int game=bbport_saves_game();
     snprintf(save_choice.campaign,sizeof(save_choice.campaign),"SAVEDATA0%d0",game);
-    for (uint32_t i=0;game && type==2 && names && i<count;++i)
+    /* Not in practice mode: the game opens the practice copy then, not the save a slot would replace. */
+    for (uint32_t i=0;game && type==2 && !runtime_checkpoint_practice() && names && i<count;++i)
         if (!strncmp(names[i],save_choice.campaign,32)) save_choice.with_slots=1;
     /* With the slots the game's own entry is its campaign save alone: its other save (U2's SAVEDATA021, written
      * beside it) looks the same in the list and is no choice of the player's. The focus then goes to the campaign

@@ -77,10 +77,11 @@ bool Wanted() {
     if (now - last_request < std::chrono::seconds(1) || !InPlay()) {
         return false;
     }
-    // A gap since the last request: play has just started again.
+    // A gap since the last request: play has just started again (a save list from the pause menu is over).
     if (now - last_request > std::chrono::seconds(2)) {
         std::scoped_lock lock{mutex};
         playing_since = now;
+        save_list_at = {};
     }
     last_request = now;
     return true;
@@ -121,6 +122,11 @@ void Store(const unsigned char* rgba) {
     }).detach();
 }
 
+void ForgetSave(const std::string& meta_name) {
+    std::scoped_lock lock{mutex};
+    std::erase_if(pending, [&](const Pending& p) { return p.path.find(meta_name) != std::string::npos; });
+}
+
 void NoteSaveList() {
     std::scoped_lock lock{mutex};
     save_list_at = Clock::now();
@@ -139,7 +145,8 @@ extern "C" int bbgpu_thumbnail_save(const char* path) {
         const auto now = Clock::now();
         if (save_list_at != Clock::time_point{} && now - save_list_at < std::chrono::minutes(2) &&
             !before_pause.empty()) {
-            // Kept for the two minutes: the game may write its profile save around the chosen one.
+            // Kept while the list's pause lasts (Wanted clears it when play goes on), at most two minutes: the
+            // game may write its profile save around the chosen one.
             rgb = before_pause;
         } else if (picture.empty() || now - picture_at > Fresh || now - playing_since < Settled) {
             // Not in play now: the save waits for the next picture (one entry per save).
@@ -152,7 +159,13 @@ extern "C" int bbgpu_thumbnail_save(const char* path) {
             rgb = picture;
         }
     }
-    return WritePng(path, rgb) ? 1 : 0;
+    // Off the game's thread (it is closing a save): encoding takes a few milliseconds.
+    std::thread([path = std::string(path), rgb = std::move(rgb)] {
+        if (!WritePng(path, rgb)) {
+            std::printf("GPU: save picture not written (%s)\n", path.c_str());
+        }
+    }).detach();
+    return 1;
 }
 
 extern "C" void bbgpu_thumbnail_pause(void) {
