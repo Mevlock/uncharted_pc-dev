@@ -42,6 +42,12 @@ public:
 
     void End();
 
+    // bbport: this tick's interval longer (or, negative, shorter) by `delta` (the vblank steered by the display's
+    // refresh, bbport_vblank.h).
+    void Adjust(std::chrono::nanoseconds delta) {
+        total_wait += delta;
+    }
+
     std::chrono::nanoseconds GetTotalWait() const {
         return total_wait;
     }

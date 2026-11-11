@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// bbport: the guest's vblank on the display's own refresh (bbport_vblank.h, GitHub #26).
+// bbport: the guest's vblank steered by the display's own refresh (bbport_vblank.h, GitHub #26).
 #include "bbport_vblank.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 
 #ifdef _WIN32
 #include <SDL3/SDL.h>
@@ -19,13 +21,16 @@ namespace BbVblank {
 namespace {
 
 using Clock = std::chrono::steady_clock;
-std::chrono::nanoseconds period{};
-IDXGIOutput* output = nullptr;
-HMONITOR monitor = nullptr;
-bool matches = false;              // the display on `monitor` refreshes at the vblank rate
-Clock::time_point checked{};       // when the window's monitor was last looked at
-Clock::time_point last_vblank{};
-int misses = 0;                    // display vblanks far off the expected interval, in a row
+std::chrono::nanoseconds nominal{};
+// Written by the watcher thread, read by the present thread.
+std::atomic<long long> last_vblank_ns{0};  // the display's last vblank, steady_clock ns
+std::atomic<long long> display_period_ns{0}; // its measured refresh interval (smoothed), 0 = no match
+// Where the ticks settle: this long after the display's vblank (the flip right after it is shown at the next one).
+constexpr long long PhaseNs = 1'000'000;
+
+long long Now() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count();
+}
 
 HWND Window() {
     if (!g_window || !g_window->GetSDLWindow()) {
@@ -33,14 +38,6 @@ HWND Window() {
     }
     return static_cast<HWND>(SDL_GetPointerProperty(SDL_GetWindowProperties(g_window->GetSDLWindow()),
                                                     SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
-}
-
-void Release() {
-    if (output) {
-        output->Release();
-        output = nullptr;
-    }
-    matches = false;
 }
 
 // The DXGI output of `on` (any adapter: with two GPUs the display may hang off the other one).
@@ -67,42 +64,73 @@ IDXGIOutput* FindOutput(HMONITOR on) {
     return found;
 }
 
-// The window's monitor (again, after a move): its output, and whether its refresh measures within 2% of the
-// vblank rate (20 vblanks, about a third of a second).
-void LookUp() {
-    checked = Clock::now();
-    const HWND window = Window();
-    const HMONITOR now_on = window ? MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY) : nullptr;
-    if (!now_on || (now_on == monitor && output)) {
-        return;
-    }
-    Release();
-    monitor = now_on;
-    output = FindOutput(monitor);
-    if (!output) {
-        std::printf("VideoOut: vblank on the display's refresh: this display has no DXGI output; the timer paces it\n");
-        return;
-    }
-    constexpr int Samples = 20;
-    if (FAILED(output->WaitForVBlank())) {
-        Release();
-        return;
-    }
-    const auto first = Clock::now();
-    for (int i = 0; i < Samples; ++i) {
+// The watcher: the display's vblanks, one by one, on the monitor the window is on (looked up again every 2 s).
+// The refresh interval is a smoothed average of the plausible intervals; it counts as a match within 2% of the
+// vblank rate.
+void Watch() {
+    SetThreadDescription(GetCurrentThread(), L"bb:VblankWatch");
+    const double wanted = double(nominal.count());
+    IDXGIOutput* output = nullptr;
+    HMONITOR monitor = nullptr;
+    long long checked = 0, previous = 0;
+    double period = 0.0;
+    int samples = 0;
+    bool reported = false, matching = false;
+    for (;;) {
+        const long long now = Now();
+        if (now - checked > 2'000'000'000LL || !output) {
+            checked = now;
+            const HWND window = Window();
+            const HMONITOR on = window ? MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY) : nullptr;
+            if (on && (on != monitor || !output)) {
+                if (output) {
+                    output->Release();
+                }
+                monitor = on;
+                output = FindOutput(on);
+                previous = 0;
+                period = 0.0;
+                samples = 0;
+                reported = false;
+                display_period_ns.store(0);
+            }
+            if (!output) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
+        }
         if (FAILED(output->WaitForVBlank())) {
-            Release();
-            return;
+            output->Release();
+            output = nullptr;
+            display_period_ns.store(0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+        const long long at = Now();
+        last_vblank_ns.store(at);
+        if (previous) {
+            const double interval = double(at - previous);
+            // one refresh (not a missed one, not a mode change): averaged in
+            if (interval > wanted * 0.75 && interval < wanted * 1.25) {
+                period = samples == 0 ? interval : period + (interval - period) * (samples < 60 ? 1.0 / (samples + 1) : 1.0 / 60);
+                ++samples;
+            }
+        }
+        previous = at;
+        if (samples >= 30) {
+            const bool match = std::abs(period - wanted) / wanted < 0.02;
+            display_period_ns.store(match ? (long long)std::llround(period) : 0);
+            if (!reported || match != matching) {
+                std::printf("VideoOut: display refresh measured %.3f Hz, vblank %.3f Hz: %s\n", 1e9 / period,
+                            1e9 / wanted,
+                            match ? "the vblank follows the display's refresh"
+                                  : "not the same rate, the timer paces the vblank");
+                std::fflush(stdout);
+                reported = true;
+                matching = match;
+            }
         }
     }
-    const double measured = std::chrono::duration<double>(Clock::now() - first).count() / Samples;
-    const double wanted = std::chrono::duration<double>(period).count();
-    matches = std::abs(measured - wanted) / wanted < 0.02;
-    last_vblank = Clock::now();
-    misses = 0;
-    std::printf("VideoOut: display refresh measured %.3f Hz, vblank %.3f Hz: %s\n", 1.0 / measured, 1.0 / wanted,
-                matches ? "the vblank follows the display's refresh"
-                        : "not the same rate, the timer paces the vblank");
 }
 
 } // namespace
@@ -115,40 +143,28 @@ bool Start(std::chrono::nanoseconds vblank_period) {
     if (!allowed) {
         return false;
     }
-    period = vblank_period;
-    LookUp();
-    return true; // Wait() decides each tick (the window may move to a display that matches)
+    nominal = vblank_period;
+    std::thread(Watch).detach();
+    return true;
 }
 
-bool Wait() {
-    if (Clock::now() - checked > std::chrono::seconds(2)) {
-        LookUp();
+std::chrono::nanoseconds Correction() {
+    const long long period = display_period_ns.load();
+    const long long vblank = last_vblank_ns.load();
+    const long long now = Now();
+    // no match, or no vblank lately (the watcher is between displays): the timer as it is
+    if (!period || now - vblank > 4 * period) {
+        return {};
     }
-    if (!output || !matches) {
-        return false;
+    // Where this tick falls after the display's vblank, against where it should (PhaseNs), wrapped to half a period
+    // either way; a tenth of that is taken off the next interval, and the interval runs at the display's rate.
+    long long error = (now - vblank) % period - PhaseNs;
+    if (error > period / 2) {
+        error -= period;
+    } else if (error < -period / 2) {
+        error += period;
     }
-    if (FAILED(output->WaitForVBlank())) {
-        Release();
-        monitor = nullptr;
-        return false;
-    }
-    // A display that stops refreshing at the expected pace (asleep, a mode change, VRR taking over) gives the
-    // timer back until the next look-up.
-    const auto now = Clock::now();
-    const double interval = std::chrono::duration<double>(now - last_vblank).count();
-    const double wanted = std::chrono::duration<double>(period).count();
-    last_vblank = now;
-    if (interval < wanted * 0.5 || interval > wanted * 1.5) {
-        if (++misses >= 30) {
-            std::printf("VideoOut: the display's vblanks stopped matching the vblank rate: the timer paces it\n");
-            Release();
-            monitor = nullptr;
-            return false;
-        }
-    } else {
-        misses = 0;
-    }
-    return true;
+    return std::chrono::nanoseconds(period - nominal.count() - error / 10);
 }
 
 } // namespace BbVblank
@@ -159,8 +175,8 @@ namespace BbVblank {
 bool Start(std::chrono::nanoseconds) {
     return false;
 }
-bool Wait() {
-    return false;
+std::chrono::nanoseconds Correction() {
+    return {};
 }
 } // namespace BbVblank
 

@@ -933,17 +933,17 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     const bool fast_vblank = EmulatorSettings.GetVblankFrequency() > 60;
     constexpr std::chrono::nanoseconds movie_period{1000000000 / 60};
     auto next_movie_vblank = std::chrono::steady_clock::now();
-    // bbport (GitHub #26): the vblank on the display's own refresh when it refreshes at this rate (bbport_vblank.h):
-    // each tick then starts at the display's vblank instead of the timer's (a timer started afresh there keeps the
-    // "draw too fast" check below working); a tick the display does not answer falls back to the timer.
+    // bbport (GitHub #26): the vblank steered by the display's own refresh when it refreshes at this rate
+    // (bbport_vblank.h): each tick's interval is lengthened or shortened a little so the ticks run at the display's
+    // measured rate, just after its vblanks; the timer keeps making up a late tick on the next one.
     const bool vblank_sync = BbVblank::Start(vblank_period);
 
     while (!token.stop_requested()) {
         BbThreads::SampleCore(BbThreads::CorePresent);
-        if (vblank_sync && BbVblank::Wait()) {
-            timer = Common::AccurateTimer{vblank_period};
-        }
         timer.Start();
+        if (vblank_sync) {
+            timer.Adjust(BbVblank::Correction());
+        }
         const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
 
         if (DebugState.IsGuestThreadsPaused()) {
