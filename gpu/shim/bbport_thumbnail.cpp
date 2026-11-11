@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -57,14 +58,22 @@ bool WritePng(const std::string& path, const std::vector<unsigned char>& rgb) {
     if (!png) {
         return false;
     }
-    FILE* f = std::fopen(path.c_str(), "wb");
-    const bool ok = f && std::fwrite(png, 1, size, f) == size;
+    // Written beside it and renamed over it once complete: a save list opened meanwhile (Save game, then Load game
+    // at once) read a truncated, half-written file and showed no picture.
+    const std::string temp = path + ".new";
+    FILE* f = std::fopen(temp.c_str(), "wb");
+    bool ok = f && std::fwrite(png, 1, size, f) == size;
     if (f) {
-        std::fclose(f);
+        ok = std::fclose(f) == 0 && ok;
     }
     mz_free(png);
+    std::error_code ec;
+    if (ok) {
+        std::filesystem::rename(temp, path, ec); // replaces the old picture in one step
+        ok = !ec;
+    }
     if (!ok) {
-        std::remove(path.c_str());
+        std::remove(temp.c_str());
     }
     return ok;
 }
