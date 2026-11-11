@@ -349,6 +349,8 @@ int bbport_saves_trash(int index);
 int bbport_saves_save_entry(int index, char *label, size_t label_size, char *picture, size_t picture_size);
 void bbport_saves_save_pick(int index);
 void bbport_saves_save_cancel(void);
+/* runtime_exit_menu.c: the pause menu's Save Game was just picked (taken once). */
+int runtime_exit_menu_take_save_request(void);
 static struct {
     int choosing, offer_new, count, user, with_slots, saving, slot_count, slots[SAVE_LIST_SLOTS];
     const char *heading;
@@ -493,17 +495,19 @@ static void save_list(const unsigned char *param) {
            save_dialog.pick<0 ? "nothing to choose, cancelled" : save_dialog.pick ? "focused " : "new save data",
            save_dialog.pick>0 ? save_dialog.dir : "");
     if (!save_list_enabled()) return;
-    /* Where to save (Chapter Select, the pause menu): never a second campaign save (New save: SAVEDATA031 would leave
-     * the save slots, the story save and "Current save" on the first one while the game plays on in the other). The
-     * list offers the campaign save and slots 1-5 for a copy; with no campaign save yet (a new game), or in practice
-     * mode, the entry the game focuses is taken as before. */
+    /* Where to save: never a second campaign save (New save: SAVEDATA031 would leave the save slots, the story save
+     * and "Current save" on the first one while the game plays on in the other). Only after the pause menu's Save
+     * Game the list offers the campaign save and slots 1-5 for a copy; Chapter Select, New Game and the like (the
+     * game asks the same), no campaign save yet, or practice mode: the entry the game focuses is taken, no list, as
+     * in 0.3.6.52.1 (the story save keeps the playthrough when Chapter Select goes back). */
     const int game_now=bbport_saves_game();
     char campaign_now[16];
     snprintf(campaign_now,sizeof(campaign_now),"SAVEDATA0%d0",game_now);
     int campaign_listed=0;
     for (uint32_t i=0;game_now && names && i<count;++i)
         if (!strncmp(names[i],campaign_now,32) && runtime_savedata_exists(user,title,campaign_now)) campaign_listed=1;
-    if (type==1 && (!campaign_listed || runtime_checkpoint_practice())) return;
+    if (type==1 && (!campaign_listed || runtime_checkpoint_practice() || !runtime_exit_menu_take_save_request()))
+        return;
     /* The list: the slots that exist (as on the console), the focused one selected. */
     memset(&save_choice,0,sizeof(save_choice));
     bbport_saves_list_cancel();   /* a slot picked in an earlier list the game did not go on with */

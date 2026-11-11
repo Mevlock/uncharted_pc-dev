@@ -106,6 +106,27 @@ static void u1_add_to_page(const U1Build *b, uint64_t image, unsigned char *page
     }
 }
 
+/* The pause menu's Save Game was picked (U2/U3: BUTTON_SAVEGAME 0x62ca5c41; U1: U1_SAVE_GAME_ID): the game's save
+ * dialog that follows shows the save slots (runtime_services.c). Chapter Select, New Game and the like ask the same
+ * dialog where to save without this: they save to the campaign save as the game focuses it (0.3.6.52.1), with no
+ * list. Taken once, and only within 10 s. BB_EXIT_MENU_IDS=1 (diagnosis): every item id the menus' handlers get. */
+#define DC_SAVEGAME_ID 0x62ca5c41u
+#define U1_SAVE_GAME_ID 0x17u
+static struct timespec save_requested_at;
+static void note_item(const char *game, uint32_t id, int save_game) {
+    static int log = -1;
+    if (log < 0) { const char *e=getenv("BB_EXIT_MENU_IDS"); log = e && e[0]=='1'; }
+    if (log) printf("Exit menu: %s: menu item %08x picked\n", game, id);
+    if (save_game) clock_gettime(CLOCK_MONOTONIC, &save_requested_at);
+}
+int runtime_exit_menu_take_save_request(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    const int fresh = save_requested_at.tv_sec && now.tv_sec - save_requested_at.tv_sec <= 10;
+    save_requested_at.tv_sec = 0;
+    return fresh;
+}
+
 /* Ends the game from its menu: a save being written finishes first (at most 5 s). */
 static void quit_from_menu(const char *game) {
     printf("Exit menu: %s: Quit picked, closing the game\n",game);
@@ -119,6 +140,7 @@ static void quit_from_menu(const char *game) {
 
 /* The pause menu's Quit: the game's Yes/No (title "Quit"), Yes sends the main menu Quit's id. */
 static void u1_handler(const U1Build *b, uint64_t image, unsigned char *host, uint32_t id) {
+    note_item(b->name, id, id == U1_SAVE_GAME_ID);
     if (id==QUIT_ID) quit_from_menu("Uncharted 1");
     if (id!=PAUSE_QUIT_ID || !host) return;
     int32_t toggle;
@@ -296,6 +318,7 @@ static void dc_add_quit(const DcLayout *l, unsigned char *menu) {
 /* The pause menu's Quit was picked: the handler goes on to open the Yes/No page (the item's target page); its
  * record gets the title "Quit", the game's Yes and No, and Yes sends the main menu's Quit id. */
 static void dc_handler(const DcLayout *l, unsigned char *host, uint32_t id) {
+    note_item(l->name, id, id == DC_SAVEGAME_ID);
     if (id==DC_QUIT_ID) quit_from_menu(l->name);
     if (id!=DC_PAUSE_QUIT_ID || !host) return;
     unsigned char *dialog;
