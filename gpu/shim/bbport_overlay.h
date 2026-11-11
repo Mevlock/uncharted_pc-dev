@@ -74,8 +74,7 @@ bool CapturesInput();
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text);
 
 /// The game's save list (sceSaveDataDialog list mode; ported from BilalReloaded's port, PR #349 by
-/// the-best-is-best): `items` (lines split by '
-'), each one's PNG picture (empty = none), the focused entry, and
+/// the-best-is-best): `items` (lines split by a line break), each one's PNG picture (empty = none), the focused entry, and
 /// the first entry that can be deleted (-1 none). The game's thread; false when the overlay is not ready. While it
 /// is open the game gets no input. Keyboard, controller and mouse (hover highlights, click picks, wheel scrolls,
 /// right button cancels).

@@ -504,8 +504,8 @@ extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {
 extern "C" int bbgpu_choice_begin(const char* title, const char* const* labels, const char* const* pictures,
                                   int count, int focus, int deletable_from) {
     if (!g_window || count <= 0 || !labels) return 0;
-    std::vector<std::string> items(size_t(count));
-    std::vector<std::vector<unsigned char>> pngs(size_t(count));
+    std::vector<std::string> items(static_cast<size_t>(count));
+    std::vector<std::vector<unsigned char>> pngs(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i) {
         items[i] = labels[i] ? labels[i] : "";
         if (!pictures || !pictures[i]) continue;
