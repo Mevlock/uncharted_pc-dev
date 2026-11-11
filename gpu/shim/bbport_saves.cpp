@@ -531,6 +531,8 @@ std::string Describe(const Checkpoint& c, bool translated) {
 
 namespace {
 
+bool PutBack(int game, const std::string& folder);
+
 // A slot chosen with Load put back as the campaign save.
 void ApplyPending(int game) {
     const fs::path pending = PendingFile(game);
@@ -551,8 +553,16 @@ void ApplyPending(int game) {
         std::printf("Save slots: %s could not be removed: the load is not applied\n", Utf8(pending).c_str());
         return;
     }
+    PutBack(game, folder);
+}
+
+// A slot folder (slot1..5, before-load, story, practice) put back as the campaign save, while the game has no save
+// open: at start-up (a Load from the overlay) or from the game's own save list. False when it was not (the
+// player's save is then as it was).
+bool PutBack(int game, const std::string& folder) {
+    std::error_code ec;
     if (folder.find_first_of("/\\.") != std::string::npos) {
-        return;
+        return false;
     }
     const fs::path from = GameBackups(game) / folder;
     const std::string name = SlotName(game);
@@ -666,6 +676,7 @@ void ApplyPending(int game) {
     }
     std::printf("Save slots: %s %s\n", Utf8(from).c_str(),
                 ok ? "restored as the campaign save" : ("NOT restored: " + error).c_str());
+    return ok;
 }
 
 } // namespace
@@ -927,4 +938,106 @@ extern "C" void bbport_saves_apply_pending(void) {
 
 extern "C" void bbport_saves_closed(const char* host_dir) {
     Guarded("story save update", [&] { ClosedImpl(host_dir); });
+}
+
+// The game's own save list (runtime_services.c, sceSaveDataDialog load list): the slots join it, after the game's
+// own saves. Slot indexes as in BbSaves (0..4 the slots, UndoSlot, StorySlot).
+extern "C" int bbport_saves_game(void) {
+    return BbSaves::Game();
+}
+
+// 1 when the slot holds a save: `label` gets its lines (name, checkpoint, the game's progress text, when it was
+// saved) and `picture` the save's picture (empty when it has none).
+extern "C" int bbport_saves_list_entry(int index, char* label, size_t label_size, char* picture, size_t picture_size) {
+    int used = 0;
+    Guarded("save list entry", [&] {
+        std::lock_guard guard(lock);
+        const int game = BbSaves::Game();
+        if (!game || index < 0 || index > BbSaves::StorySlot) {
+            return;
+        }
+        BbSaves::Refresh();
+        const BbSaves::Slot& s = BbSaves::GetSlot(index);
+        if (!s.used) {
+            return;
+        }
+        // Name; the game's progress text; where (chapter and checkpoint, not the task's inner name); when.
+        const std::string name = index == BbSaves::StorySlot ? std::string(T("Story save"))
+                                 : index == BbSaves::UndoSlot
+                                     ? std::string(T("Undo last load - back to your save from before it"))
+                                     : fmt::format(fmt::runtime(T("Slot {}")), index + 1);
+        std::string text = name;
+        if (!s.progress.empty()) {
+            text += "\n" + s.progress;
+        }
+        if (s.checkpoint.known) {
+            const BbSaves::Checkpoint& c = s.checkpoint;
+            text += "\n" + fmt::format(fmt::runtime(T("Chapter {}")), c.chapter) + " " + c.chapter_title + " \xC2\xB7 " +
+                    (c.number ? fmt::format(fmt::runtime(T("Checkpoint {}")), c.number) : std::string(T("Cutscene")));
+        }
+        if (!s.date.empty()) {
+            text += "\n" + fmt::format(fmt::runtime(T("Saved {}")), s.date);
+        }
+        std::snprintf(label, label_size, "%s", text.c_str());
+        picture[0] = 0;
+        const fs::path meta = SlotDir(game, index) / (SlotName(game) + ".sce_sys");
+        std::error_code ec;
+        for (const char* file : {"thumb.png", "icon0.png"}) {
+            if (fs::file_size(meta / file, ec) > 0 && !ec) {
+                std::snprintf(picture, picture_size, "%s", Utf8(meta / file).c_str());
+                break;
+            }
+            ec.clear();
+        }
+        used = 1;
+    });
+    return used;
+}
+
+// Picked in the game's save list: the slot becomes the campaign save now (the game opens it next), the save it
+// replaces kept as "Before the last load" (loading that one swaps back). 1 done, 0 not (saves as they were).
+extern "C" int bbport_saves_put_back(int index) {
+    int ok = 0;
+    Guarded("load from the save list", [&] {
+        std::lock_guard guard(lock);
+        const int game = BbSaves::Game();
+        BbSaves::Refresh();
+        if (!game || index < 0 || index > BbSaves::StorySlot || !BbSaves::GetSlot(index).used ||
+            runtime_savedata_mounted()) {
+            return;
+        }
+        std::string message;
+        if (index != BbSaves::UndoSlot && !BbSaves::Store(BbSaves::UndoSlot, message)) {
+            std::printf("Save slots: %s\n", message.c_str());
+            return;
+        }
+        ok = PutBack(game, SlotFolder(index));
+        BbSaves::Refresh();
+    });
+    return ok;
+}
+
+// Deleted in the game's save list: a slot (1..5 only) moves to <saves>.backups/u<game>/deleted/slot<n>-<time>,
+// never removed. 1 done.
+extern "C" int bbport_saves_trash(int index) {
+    int ok = 0;
+    Guarded("slot delete", [&] {
+        std::lock_guard guard(lock);
+        const int game = BbSaves::Game();
+        if (!game || index < 0 || index >= BbSaves::SlotCount) {
+            return;
+        }
+        std::time_t t = std::time(nullptr);
+        char stamp[32];
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", std::localtime(&t));
+        const fs::path to = GameBackups(game) / "deleted" / (SlotFolder(index) + "-" + stamp);
+        std::error_code ec;
+        fs::create_directories(to.parent_path(), ec);
+        fs::rename(SlotDir(game, index), to, ec);
+        ok = !ec;
+        std::printf("Save slots: %s %s\n", Utf8(SlotDir(game, index)).c_str(),
+                    ok ? ("moved to " + Utf8(to)).c_str() : ("NOT deleted: " + ec.message()).c_str());
+        BbSaves::Refresh();
+    });
+    return ok;
 }

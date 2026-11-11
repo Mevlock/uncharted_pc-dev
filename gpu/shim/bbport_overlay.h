@@ -73,4 +73,18 @@ bool CapturesInput();
 /// `active` is false; typing goes to the window (sdl_window), the box only displays it.
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text);
 
+/// The game's save list (sceSaveDataDialog list mode; ported from BilalReloaded's port, PR #349 by
+/// the-best-is-best): `items` (lines split by a line break), each one's PNG picture (empty = none), the focused entry, and
+/// the first entry that can be deleted (-1 none). The game's thread; false when the overlay is not ready. While it
+/// is open the game gets no input. Keyboard, controller and mouse (hover highlights, click picks, wheel scrolls,
+/// right button cancels).
+/// `sections`: a heading above an entry (empty = none). An entry's first line is its name, drawn brighter.
+bool BeginChoice(const std::string& title, std::vector<std::string> items,
+                 std::vector<std::vector<unsigned char>> pngs, std::vector<std::string> sections, int focus,
+                 int deletable_from);
+/// -1 open, -2 cancelled, <= -3 delete entry -3 - n (the list closes), else the chosen entry (the list closes).
+int PollChoice();
+/// The game closed its dialog: the list goes.
+void CancelChoice();
+
 } // namespace BbOverlay

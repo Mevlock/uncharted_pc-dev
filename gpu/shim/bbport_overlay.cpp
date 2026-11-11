@@ -1071,7 +1071,7 @@ constexpr int ToastIconSize = 256;
 
 // 8-bit RGB/RGBA PNG without interlacing (what the trophy packs hold) to RGBA.
 bool DecodePng(const std::vector<unsigned char>& png, std::vector<unsigned char>& rgba, int& width,
-               int& height) {
+               int& height, int max_width = ToastIconSize, int max_height = ToastIconSize) {
     static const unsigned char signature[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
     if (png.size() < 33 || std::memcmp(png.data(), signature, 8) != 0) {
         return false;
@@ -1102,8 +1102,8 @@ bool DecodePng(const std::vector<unsigned char>& png, std::vector<unsigned char>
         }
         at += 12 + length;
     }
-    if (color_type < 0 || width <= 0 || height <= 0 || width > ToastIconSize ||
-        height > ToastIconSize || idat.empty()) {
+    if (color_type < 0 || width <= 0 || height <= 0 || width > max_width ||
+        height > max_height || idat.empty()) {
         return false;
     }
     const int bpp = color_type == 6 ? 4 : 3;
@@ -1245,6 +1245,325 @@ void TrophyToast() {
     ImGui::PopStyleVar(4);
 }
 
+
+// ---- The game's save list (sceSaveDataDialog list mode, runtime_services.c) -----------------------------------
+// Ported from BilalReloaded's port (gow3_overlay.cpp ChoiceBox / HandleChoiceEvent, PR #349 by the-best-is-best;
+// GPL-2.0-or-later), with the mouse added: hover highlights an entry, a click picks it, the wheel scrolls, the right
+// button cancels; OK / Cancel / Delete buttons below. Keyboard: Up/Down (W/S), Enter or Space, Esc or Backspace,
+// Delete. Controller: D-pad, Cross (A), Circle (B), Triangle (Y). A delete takes a second press (Delete, Triangle or
+// the button) on the same entry. Guarded by imgui_mutex.
+constexpr int ChoicePictureW = 456, ChoicePictureH = 256; // a save picture (bbport_thumbnail.h); icon0.png is smaller
+std::atomic<bool> choice_active{false};
+std::string choice_title;
+std::vector<std::string> choice_items;
+std::vector<std::string> choice_sections; // a heading above an entry (empty = none)
+int choice_index = 0;
+std::atomic<int> choice_result{-1}; // -1 open, -2 cancelled, <= -3 delete -3 - index, else the chosen index
+int choice_deletable = -1, choice_delete_armed = -1; // entries from choice_deletable on can be deleted
+bool choice_scroll = false;                           // the selection moved by key: scroll it into view
+struct ChoicePicture {
+    std::vector<unsigned char> rgba; // decoded, waiting for the present thread to upload
+    int w = 0, h = 0;
+    bool shown = false; // the entry has a picture
+};
+std::vector<ChoicePicture> choice_pictures;
+std::vector<ImTextureData*> choice_textures; // kept and rewritten for later lists (never destroyed while running)
+bool choice_uploads = false;
+// The cursor moved since the list opened: until then ImGui's mouse position is an old one (or none) and a click
+// does not pick (it would take whatever entry was under the cursor of an earlier menu).
+bool choice_mouse_seen = false;
+
+void ChoiceClose(int result) {
+    choice_result = result;
+    choice_active = false;
+    choice_delete_armed = -1;
+    if (!menu_open) {
+        ImGui::GetIO().MouseDrawCursor = false;
+    }
+}
+
+// Present thread: the decoded pictures into their textures (one per entry, made on first use).
+void ChoiceUploadPictures() {
+    if (!choice_uploads) {
+        return;
+    }
+    choice_uploads = false;
+    if (choice_textures.size() < choice_pictures.size()) {
+        choice_textures.resize(choice_pictures.size(), nullptr);
+    }
+    for (size_t i = 0; i < choice_pictures.size(); ++i) {
+        ChoicePicture& p = choice_pictures[i];
+        if (p.rgba.empty()) {
+            continue;
+        }
+        ImTextureData*& tex = choice_textures[i];
+        const bool created = tex == nullptr;
+        if (created) {
+            tex = IM_NEW(ImTextureData)();
+            tex->Create(ImTextureFormat_RGBA32, ChoicePictureW, ChoicePictureH);
+            tex->UseColors = true;
+        }
+        std::memset(tex->Pixels, 0, size_t(ChoicePictureW) * ChoicePictureH * 4);
+        for (int y = 0; y < p.h; ++y) {
+            std::memcpy(tex->GetPixelsAt(0, y), &p.rgba[size_t(y) * p.w * 4], size_t(p.w) * 4);
+        }
+        if (created) {
+            ImGui::RegisterUserTexture(tex);
+        } else {
+            tex->UpdateRect = {0, 0, u16(ChoicePictureW), u16(ChoicePictureH)};
+            tex->Updates.push_back(tex->UpdateRect);
+            tex->Status = ImTextureStatus_WantUpdates;
+        }
+        p.rgba.clear();
+        p.rgba.shrink_to_fit();
+    }
+}
+
+// The entry's label: "New save" from the runtime is translated.
+const char* ChoiceLabel(const std::string& item) {
+    return item == "New save" ? T("New save") : item.c_str();
+}
+
+void ChoiceDeletePress() {
+    const int count = int(choice_items.size());
+    if (choice_deletable < 0 || choice_index < choice_deletable || choice_index >= count) {
+        return;
+    }
+    if (choice_delete_armed != choice_index) {
+        choice_delete_armed = choice_index;
+        return;
+    }
+    ChoiceClose(-3 - choice_index);
+}
+
+void ChoiceBox() {
+    ChoiceUploadPictures();
+    ImGuiIO& io = ImGui::GetIO();
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float s = base_scale;
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(viewport->WorkSize.x * 0.36f, 0.0f),
+                                        ImVec2(viewport->WorkSize.x * 0.8f, viewport->WorkSize.y * 0.8f));
+    ImGui::SetNextWindowBgAlpha(0.94f);
+    ImGui::Begin("##save_list", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoSavedSettings);
+    ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.45f, 1.0f), "%s", T(choice_title.c_str()));
+    ImGui::Separator();
+    const int count = int(choice_items.size());
+    bool pictures = false;
+    for (int i = 0; i < count && i < int(choice_pictures.size()); ++i) {
+        pictures = pictures || (choice_pictures[i].shown && i < int(choice_textures.size()) && choice_textures[i]);
+    }
+    const ImVec2 picture_size(228.0f * s, 128.0f * s);
+    // The entries scroll in a child of their own height (up to what fits): the help below stays on screen.
+    const ImGuiStyle& style = ImGui::GetStyle();
+    float rows_height = 0.0f;
+    for (size_t i = 0; i < choice_items.size(); ++i) {
+        const std::string& item = choice_items[i];
+        const float lines = float(1 + std::count(item.begin(), item.end(), '\n'));
+        rows_height += std::max(pictures ? picture_size.y : 0.0f, lines * ImGui::GetTextLineHeight()) +
+                       style.ItemSpacing.y;
+        if (i < choice_sections.size() && !choice_sections[i].empty()) {
+            rows_height += ImGui::GetTextLineHeightWithSpacing() + style.ItemSpacing.y;
+        }
+    }
+    const float footer_height = ImGui::GetFrameHeightWithSpacing() + ImGui::GetTextLineHeightWithSpacing() * 3.0f +
+                                style.ItemSpacing.y * 3.0f;
+    const float title_height = ImGui::GetCursorPosY();
+    const float room = viewport->WorkSize.y * 0.8f - title_height - footer_height - style.WindowPadding.y * 2.0f;
+    ImGui::BeginChild("##save_list_rows",
+                      ImVec2(0.0f, std::max(pictures ? picture_size.y : ImGui::GetTextLineHeight(),
+                                            std::min(rows_height, room))),
+                      ImGuiChildFlags_AutoResizeX, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoNav);
+    const bool mouse_moved = io.MouseDelta.x != 0.0f || io.MouseDelta.y != 0.0f;
+    int clicked = -1;
+    for (int i = 0; i < count; ++i) {
+        const bool selected = i == choice_index;
+        if (i < int(choice_sections.size()) && !choice_sections[i].empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.72f, 0.45f, 1.0f));
+            ImGui::SeparatorText(choice_sections[i].c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::PushID(i);
+        ImGui::BeginGroup();
+        ImTextureData* tex = i < int(choice_textures.size()) && i < int(choice_pictures.size()) &&
+                                     choice_pictures[i].shown
+                                 ? choice_textures[i]
+                                 : nullptr;
+        if (tex) {
+            const ChoicePicture& p = choice_pictures[i];
+            // the picture fills the 228x128 box (a smaller icon keeps its shape, centred)
+            const float fit = std::min(picture_size.x / float(p.w), picture_size.y / float(p.h));
+            const ImVec2 size(float(p.w) * fit, float(p.h) * fit);
+            const ImVec2 at = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(picture_size);
+            const ImVec2 min(at.x + (picture_size.x - size.x) * 0.5f, at.y + (picture_size.y - size.y) * 0.5f);
+            ImGui::GetWindowDrawList()->AddImage(tex->GetTexRef(), min, ImVec2(min.x + size.x, min.y + size.y),
+                                                 ImVec2(0.0f, 0.0f),
+                                                 ImVec2(float(p.w) / ChoicePictureW, float(p.h) / ChoicePictureH));
+        } else if (pictures) {
+            ImGui::Dummy(picture_size);
+        }
+        if (pictures) {
+            ImGui::SameLine();
+        }
+        // The first line is the entry's name (bright, gold when selected), the lines after it its details (dimmer).
+        {
+            const std::string label = ChoiceLabel(choice_items[i]);
+            const size_t cut = label.find('\n');
+            ImGui::BeginGroup();
+            ImGui::TextColored(selected ? ImVec4(1.0f, 0.9f, 0.55f, 1.0f) : ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s %s",
+                               selected ? ">" : " ", label.substr(0, cut).c_str());
+            if (cut != std::string::npos) {
+                // in line with the name (the group starts beside the picture, so no Indent)
+                std::string details = "  " + label.substr(cut + 1);
+                for (size_t at = details.find('\n'); at != std::string::npos; at = details.find('\n', at + 3)) {
+                    details.insert(at + 1, "  ");
+                }
+                ImGui::TextColored(selected ? ImVec4(0.92f, 0.85f, 0.65f, 1.0f) : ImVec4(0.72f, 0.72f, 0.72f, 1.0f),
+                                   "%s", details.c_str());
+            }
+            ImGui::EndGroup();
+        }
+        ImGui::EndGroup();
+        // The mouse: moving over an entry selects it, a click picks it.
+        if (choice_mouse_seen && ImGui::IsItemHovered()) {
+            if (mouse_moved && choice_index != i) {
+                choice_index = i;
+                choice_delete_armed = -1;
+            }
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                clicked = i;
+            }
+        }
+        if (selected) {
+            const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+            const float pad = 3.0f * s;
+            ImGui::GetWindowDrawList()->AddRect(ImVec2(min.x - pad, min.y - pad), ImVec2(max.x + pad, max.y + pad),
+                                                IM_COL32(255, 230, 140, 255), 0.0f, 0, 2.0f * s);
+            if (choice_scroll) {
+                ImGui::SetScrollHereY();
+                choice_scroll = false;
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    ImGui::Separator();
+    const bool can_delete = choice_deletable >= 0 && choice_index >= choice_deletable && choice_index < count;
+    bool ok = ImGui::Button(T("OK"));
+    ImGui::SameLine();
+    const bool cancel = ImGui::Button(T("Cancel"));
+    bool erase = false;
+    if (can_delete) {
+        ImGui::SameLine();
+        const bool armed = choice_delete_armed == choice_index;
+        if (armed) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.18f, 0.14f, 1.0f));
+        }
+        erase = ImGui::Button(armed ? T("Delete: press again") : T("Delete"));
+        if (armed) {
+            ImGui::PopStyleColor();
+        }
+    }
+    TextGrey(T("Up/Down or D-pad: choose   Enter or Cross (A): OK   Esc or Circle (B): cancel"));
+    TextGrey(T("Mouse: point to choose, click = OK, right button = cancel"));
+    if (choice_delete_armed >= 0 && choice_delete_armed == choice_index) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%s",
+                           T("Press Delete or Triangle (Y) AGAIN to delete this save (it goes to savedata-deleted)"));
+    } else if (can_delete) {
+        ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "%s", T("Delete or Triangle (Y): delete this save"));
+    } else if (choice_deletable >= 0) {
+        TextGrey(T("Select a save, then Delete or Triangle (Y) to delete it"));
+    }
+    ImGui::End();
+    if (clicked >= 0) {
+        choice_index = clicked;
+        ok = true;
+    }
+    if (erase) {
+        ChoiceDeletePress();
+    } else if (ok && count) {
+        ChoiceClose(choice_index);
+    } else if (cancel || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        ChoiceClose(-2);
+    }
+}
+
+// Window thread: keys and buttons move and confirm; the mouse goes to ImGui (ChoiceBox reads it). The rest stays
+// away from the game (held neutral by CapturesInput).
+bool HandleChoiceEvent(const SDL_Event& event) {
+    ImGuiIO& io = ImGui::GetIO();
+    int move = 0, finish = 0; // finish: 1 accept, 2 cancel
+    bool erase = false;
+    switch (event.type) {
+    case SDL_EVENT_KEY_DOWN: {
+        const SDL_Keycode key = event.key.key;
+        move = key == SDLK_UP || key == SDLK_W ? -1 : key == SDLK_DOWN || key == SDLK_S ? 1 : 0;
+        finish = key == SDLK_RETURN || key == SDLK_KP_ENTER || key == SDLK_SPACE ? 1
+                 : key == SDLK_ESCAPE || key == SDLK_BACKSPACE                   ? 2
+                                                                                 : 0;
+        erase = key == SDLK_DELETE && !event.key.repeat;
+        if (event.key.repeat && finish) {
+            finish = 0; // a held Enter from the game's own menu does not answer the list
+        }
+        break;
+    }
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN: {
+        const u8 button = event.gbutton.button;
+        move = button == SDL_GAMEPAD_BUTTON_DPAD_UP ? -1 : button == SDL_GAMEPAD_BUTTON_DPAD_DOWN ? 1 : 0;
+        finish = button == SDL_GAMEPAD_BUTTON_SOUTH ? 1 : button == SDL_GAMEPAD_BUTTON_EAST ? 2 : 0;
+        erase = button == SDL_GAMEPAD_BUTTON_NORTH;
+        break;
+    }
+    case SDL_EVENT_MOUSE_MOTION: {
+        const float density = PixelDensity(event.motion.windowID);
+        io.AddMousePosEvent(event.motion.x * density, event.motion.y * density);
+        choice_mouse_seen = true;
+        return true;
+    }
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP: {
+        const int button = event.button.button == SDL_BUTTON_LEFT    ? 0
+                           : event.button.button == SDL_BUTTON_RIGHT  ? 1
+                           : event.button.button == SDL_BUTTON_MIDDLE ? 2
+                                                                      : -1;
+        if (button >= 0) {
+            io.AddMouseButtonEvent(button, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+        }
+        return true;
+    }
+    case SDL_EVENT_MOUSE_WHEEL:
+        io.AddMouseWheelEvent(event.wheel.x, event.wheel.y);
+        return true;
+    case SDL_EVENT_KEY_UP:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP:
+    case SDL_EVENT_TEXT_INPUT:
+        return true;
+    default:
+        return false;
+    }
+    const int count = int(choice_items.size());
+    if (move || finish) {
+        choice_delete_armed = -1;
+    }
+    if (move && count) {
+        choice_index = (choice_index + move + count) % count;
+        choice_scroll = true;
+    }
+    if (erase) {
+        ChoiceDeletePress();
+        return true;
+    }
+    if (finish) {
+        ChoiceClose(finish == 1 && count ? choice_index : -2);
+    }
+    return true;
+}
+
 } // namespace
 
 void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) {
@@ -1337,6 +1656,9 @@ bool HandleEvent(const SDL_Event& event) {
     std::scoped_lock lock{imgui_mutex};
     if (!initialized) {
         return false;
+    }
+    if (choice_active && !menu_open) {
+        return HandleChoiceEvent(event);
     }
     ImGuiIO& io = ImGui::GetIO();
     const bool is_open = menu_open;
@@ -1773,7 +2095,7 @@ void ShaderPreparation() {
 }
 
 bool Visible() {
-    return initialized && (menu_open || text_entry_active || BbSettings::Get().show_fps ||
+    return initialized && (menu_open || text_entry_active || choice_active || BbSettings::Get().show_fps ||
                            toast_busy || prep_phase.load(std::memory_order_relaxed) != 0 ||
                            scan_total.load(std::memory_order_relaxed) != 0 ||
                            prep_screen.load(std::memory_order_relaxed));
@@ -1789,7 +2111,62 @@ void NotifyTrophy(int grade, std::string game, std::string name, std::vector<uns
 
 bool CapturesInput() {
     // the preparation page covers the game: its input is held so the title screen cannot be passed unseen
-    return menu_open || text_entry_active || prep_screen.load(std::memory_order_relaxed);
+    return menu_open || text_entry_active || choice_active || prep_screen.load(std::memory_order_relaxed);
+}
+
+bool BeginChoice(const std::string& title, std::vector<std::string> items,
+                 std::vector<std::vector<unsigned char>> pngs, std::vector<std::string> sections, int focus,
+                 int deletable_from) {
+    sections.resize(items.size());
+    // The pictures are decoded on the caller's thread; the present thread uploads them.
+    std::vector<ChoicePicture> pictures(items.size());
+    for (size_t i = 0; i < items.size() && i < pngs.size(); ++i) {
+        ChoicePicture& p = pictures[i];
+        if (!pngs[i].empty() && DecodePng(pngs[i], p.rgba, p.w, p.h, ChoicePictureW, ChoicePictureH)) {
+            p.shown = true;
+        } else {
+            p.rgba.clear();
+        }
+    }
+    std::scoped_lock lock{imgui_mutex};
+    if (!initialized || items.empty()) {
+        return false;
+    }
+    choice_pictures = std::move(pictures);
+    choice_uploads = true;
+    choice_title = title;
+    choice_items = std::move(items);
+    choice_sections = std::move(sections);
+    const int count = int(choice_items.size());
+    choice_index = focus >= 0 && focus < count ? focus : 0;
+    choice_deletable = deletable_from >= 0 && deletable_from < count ? deletable_from : -1;
+    choice_delete_armed = -1;
+    choice_scroll = true;
+    choice_result = -1;
+    // A new list waits for the cursor to move before the mouse picks (ImGui's position is an old one).
+    if (!choice_active) {
+        choice_mouse_seen = false;
+        ImGui::GetIO().AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+        // ...and with no button held: a release that went to the game (the right button whose press closed the
+        // last list) would leave ImGui's button down, and the next click would not count as one.
+        for (int button = 0; button < 3; ++button) {
+            ImGui::GetIO().AddMouseButtonEvent(button, false);
+        }
+    }
+    choice_active = true;
+    ImGui::GetIO().MouseDrawCursor = true;
+    return true;
+}
+
+int PollChoice() {
+    return choice_result.load();
+}
+
+void CancelChoice() {
+    std::scoped_lock lock{imgui_mutex};
+    if (choice_active) {
+        ChoiceClose(-2);
+    }
 }
 
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {
@@ -1870,6 +2247,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (text_entry_active) {
         TextEntryBox();
+    }
+    if (choice_active && !menu_open) {
+        ChoiceBox();
     }
     TrophyToast();
     ShaderPreparation();

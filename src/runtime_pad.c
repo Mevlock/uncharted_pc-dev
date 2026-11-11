@@ -1710,6 +1710,12 @@ static void sample(PadData *d) {
         if (d->buttons) d->buttons=0;
         else hold_after_capture=0;
     }
+    /* (BilalReloaded, PR #349 by the-best-is-best) a save made from the pause menu's save list gets the picture of
+     * the game from before Options was pressed (the camera hooks keep running behind that menu). */
+    static int options_held;
+    const int options=(d->buttons&BTN_OPTIONS)!=0;
+    if (options && !options_held) bbgpu_thumbnail_pause();
+    options_held=options;
 }
 
 static ABI int32_t pad_init(void) { pthread_mutex_lock(&lock); initialized=1; pthread_mutex_unlock(&lock); return 0; }

@@ -324,14 +324,130 @@ enum { SAVE_LIST=1, SAVE_USER_MSG=2, SAVE_SYSTEM_MSG=3, SAVE_ERROR_CODE=4, SAVE_
 #define SAVE_PARAM_SIZE 1328 /* OrbisSaveDataParam */
 static struct { uint32_t mode; int waits, pick; void *user_data; char dir[32]; unsigned char param[SAVE_PARAM_SIZE]; } save_dialog;
 /* List mode: SaveDialogItems {userId, pad, titleId*, dirName*, dirNameNum, pad, newItem*,
- * focusPos, pad, focusPosDirName*, ...}; dispType 1 save, 2 load, 3 delete. The entry the
- * dialog focuses is taken, as when the player confirms at once: focusPos 0 list head (the new
+ * focusPos, pad, focusPosDirName*, ...}; dispType 1 save, 2 load, 3 delete. focusPos 0 list head (the new
  * save entry comes first), 1 list tail, 2 first slot, 3 last slot, 4 latest, 5 oldest, 6 named.
- * pick: 1 existing slot, 0 the new save entry (empty name: the game names it), -1 cancelled. */
+ * pick: 1 existing slot, 0 the new save entry (empty name: the game names it), -1 cancelled.
+ * The save list (ported from BilalReloaded's port, PR #349 by the-best-is-best; GPL-2.0-or-later): the overlay
+ * shows the list (New save first when offered, then the saves that exist, with their pictures) and the dialog
+ * runs until the player picks one, cancels, or deletes one (moved to savedata-deleted; the list shows again).
+ * BB_SAVE_LIST=0, scripted runs (BB_PAD_FILE, unless BB_SAVE_LIST=1) or no window: the entry the dialog focuses
+ * is taken at once, as when the player confirms at once (the port's behaviour before). */
+#define SAVE_LIST_MAX 32
+/* The overlay's save slots (gpu/shim/bbport_saves.cpp) join a load list that offers the game's campaign save
+ * (SAVEDATA0<game>0, the save Continue loads): the list is then that save, slots 1-5 and "Undo last load".
+ * Picking a slot puts it back as the campaign save before the game opens it (the save it replaces becomes the
+ * undo), so the game loads it with no restart. Index as in BbSaves (0-4 slots, 5 before
+ * the last load, 6 story save). */
+#define SAVE_LIST_SLOTS 7
+int bbport_saves_game(void);
+int bbport_saves_list_entry(int index, char *label, size_t label_size, char *picture, size_t picture_size);
+int bbport_saves_put_back(int index);
+int bbport_saves_trash(int index);
+static struct {
+    int choosing, offer_new, count, user, with_slots, slot_count, slots[SAVE_LIST_SLOTS];
+    const char *heading;
+    char title[16], campaign[16], dirs[SAVE_LIST_MAX][32];
+} save_choice;
+static char save_choice_labels[SAVE_LIST_MAX+SAVE_LIST_SLOTS+1][800],
+            save_choice_icons[SAVE_LIST_MAX+SAVE_LIST_SLOTS+1][720];
+static int save_list_enabled(void) {
+    static int on=-1;
+    if (on<0) {
+        const char *env=getenv("BB_SAVE_LIST"), *pad=getenv("BB_PAD_FILE");
+        on=env && *env ? env[0]!='0' : !(pad && *pad);
+        printf("Runtime: save list %s\n",on ? "on: the game's save dialog is shown in the overlay"
+                                           : "off: the save dialog takes the focused entry (BB_SAVE_LIST=0 or a scripted run)");
+    }
+    return on;
+}
+static void save_choice_finish(int entry) {
+    save_choice.choosing=0;
+    memset(save_dialog.dir,0,sizeof(save_dialog.dir));
+    const int dir=entry-save_choice.offer_new, slot=dir-save_choice.count;
+    const char (*one)[32]=NULL;
+    if (entry<0) save_dialog.pick=-1;
+    else if (dir<0) save_dialog.pick=0;
+    else if (slot>=0) {
+        /* A slot: put back as the campaign save, which the game then opens. */
+        if (slot<save_choice.slot_count && bbport_saves_put_back(save_choice.slots[slot])) {
+            printf("Runtime: SaveDataDialog list: save slot %d put back as %s\n",save_choice.slots[slot],
+                   save_choice.campaign);
+            one=(const char (*)[32])save_choice.campaign;
+        } else {
+            printf("Runtime: SaveDataDialog list: save slot %d could not be put back: cancelled\n",
+                   slot<save_choice.slot_count ? save_choice.slots[slot] : -1);
+            save_dialog.pick=-1;
+        }
+    } else one=(const char (*)[32])save_choice.dirs[dir];
+    if (one) {
+        save_dialog.pick=runtime_savedata_pick(save_choice.user,save_choice.title,one,1,0,NULL,save_dialog.dir,
+                                               save_dialog.param);
+        if (save_dialog.pick<0 && save_choice.offer_new) save_dialog.pick=0;
+    }
+    printf("Runtime: SaveDataDialog list: %s%.32s\n",save_dialog.pick<0 ? "cancelled" : save_dialog.pick ? "chose " : "new save data",
+           save_dialog.pick>0 ? save_dialog.dir : "");
+    dialogs[2].status=3;
+}
+/* Shows the list with `focus` (an entry); 0 when there is nothing to show or no window. */
+static int save_choice_show(int focus) {
+    const char *labels[SAVE_LIST_MAX+SAVE_LIST_SLOTS+1], *icons[SAVE_LIST_MAX+SAVE_LIST_SLOTS+1],
+               *sections[SAVE_LIST_MAX+SAVE_LIST_SLOTS+1]={0};
+    int n=0;
+    if (save_choice.offer_new) {
+        snprintf(save_choice_labels[n],sizeof(save_choice_labels[n]),"New save");
+        labels[n]=save_choice_labels[n]; icons[n]=NULL; ++n;
+    }
+    for (int i=0;i<save_choice.count;++i) {
+        char *label=save_choice_labels[n];
+        runtime_savedata_label(save_choice.user,save_choice.title,save_choice.dirs[i],label,sizeof(save_choice_labels[n]));
+        if (save_choice.with_slots) {
+            /* The campaign save: named for what it is; the game's title (its first line) is the same on every
+             * entry and goes. */
+            char details[sizeof(save_choice_labels[0])];
+            const char *rest=strchr(label,'\n');
+            snprintf(details,sizeof(details),"%s",rest ? rest+1 : "");
+            snprintf(label,sizeof(save_choice_labels[n]),"Current save - where Continue starts\n%s",details);
+            if (!i) sections[n]="Your game";
+        }
+        labels[n]=label;
+        icons[n]=runtime_savedata_icon(save_choice.user,save_choice.title,save_choice.dirs[i],save_choice_icons[n],
+                                       sizeof(save_choice_icons[n])) ? NULL : save_choice_icons[n];
+        ++n;
+    }
+    /* The slots, re-read each time the list shows (a delete takes one out). */
+    save_choice.slot_count=0;
+    /* Slots 1-5, then "Undo last load" (the save from before the last load). The story save stays on the overlay's
+     * page, where it is explained. */
+    static const int order[]={0,1,2,3,4,5};
+    for (int k=0;save_choice.with_slots && k<(int)(sizeof(order)/sizeof(order[0]));++k) {
+        if (!bbport_saves_list_entry(order[k],save_choice_labels[n],sizeof(save_choice_labels[n]),save_choice_icons[n],
+                                     sizeof(save_choice_icons[n])))
+            continue;
+        labels[n]=save_choice_labels[n];
+        icons[n]=save_choice_icons[n][0] ? save_choice_icons[n] : NULL;
+        if (order[k]==5) sections[n]="Undo";
+        else if (!save_choice.slot_count) sections[n]="Your save slots (made with Save here: Insert > Save slots)";
+        save_choice.slots[save_choice.slot_count++]=order[k];
+        ++n;
+    }
+    if (!n) return 0;
+    if (focus>=n) focus=n-1;
+    if (focus<0) focus=0;
+    /* With the slots only they can be deleted here (the save Continue loads is not one to lose by a key press). */
+    const int deletable=save_choice.with_slots ? (save_choice.slot_count ? save_choice.offer_new+save_choice.count : -1)
+                       : save_choice.count ? save_choice.offer_new : -1;
+    if (!bbgpu_choice_begin(save_choice.heading,labels,icons,sections,n,focus,deletable))
+        return 0;
+    printf("Runtime: SaveDataDialog list (%s): %d entries shown (%d save slots)\n",save_choice.heading,n,
+           save_choice.slot_count);
+    save_choice.choosing=1;
+    return 1;
+}
 static void save_list(const unsigned char *param) {
     uint32_t type; const unsigned char *items;
     memcpy(&type,param+56,4); memcpy(&items,param+72,8);
     save_dialog.pick=-1;
+    save_choice.choosing=0;
     memset(save_dialog.dir,0,sizeof(save_dialog.dir));
     if (!items || type==3) return;
     int32_t user; const char *title, *focus; const char (*names)[32]; uint32_t count, focus_pos;
@@ -346,11 +462,63 @@ static void save_list(const unsigned char *param) {
                                                 focus,save_dialog.dir,save_dialog.param);
     if (save_dialog.pick<0 && offer_new) save_dialog.pick=0;
     printf("Runtime: SaveDataDialog list (%s, %u slots, focus %u): %s%.32s\n",type==1 ? "save" : "load",count,focus_pos,
-           save_dialog.pick<0 ? "nothing to choose, cancelled" : save_dialog.pick ? "chose " : "new save data",
+           save_dialog.pick<0 ? "nothing to choose, cancelled" : save_dialog.pick ? "focused " : "new save data",
            save_dialog.pick>0 ? save_dialog.dir : "");
+    if (!save_list_enabled()) return;
+    /* The list: the slots that exist (as on the console), the focused one selected. */
+    memset(&save_choice,0,sizeof(save_choice));
+    save_choice.user=user;
+    snprintf(save_choice.title,sizeof(save_choice.title),"%.9s",title ? title : "");
+    save_choice.offer_new=offer_new;
+    save_choice.heading=type==1 ? "Save game" : "Load game";
+    const int game=bbport_saves_game();
+    snprintf(save_choice.campaign,sizeof(save_choice.campaign),"SAVEDATA0%d0",game);
+    for (uint32_t i=0;game && type==2 && names && i<count;++i)
+        if (!strncmp(names[i],save_choice.campaign,32)) save_choice.with_slots=1;
+    /* With the slots the game's own entry is its campaign save alone: its other save (U2's SAVEDATA021, written
+     * beside it) looks the same in the list and is no choice of the player's. The focus then goes to the campaign
+     * save. */
+    int focus_entry=0;
+    for (uint32_t i=0;names && i<count && save_choice.count<SAVE_LIST_MAX;++i) {
+        char name[33]; memcpy(name,names[i],32); name[32]=0;
+        if (save_choice.with_slots && strcmp(name,save_choice.campaign)) continue;
+        if (!name[0] || !runtime_savedata_exists(user,save_choice.title,name)) continue;
+        if (save_dialog.pick>0 && !strncmp(name,save_dialog.dir,32)) focus_entry=save_choice.count+offer_new;
+        memcpy(save_choice.dirs[save_choice.count++],name,32);
+    }
+    if (!save_choice_show(focus_entry)) {
+        printf("Runtime: SaveDataDialog list: %s; the focused entry is taken\n",
+               save_choice.count || offer_new ? "no window" : "no saves");
+        save_choice.choosing=0;
+    }
+}
+/* Game thread (the dialog's status): the player's answer, once there is one. */
+static void save_choice_update(void) {
+    if (!save_choice.choosing) return;
+    const int choice=bbgpu_choice_poll();
+    if (choice==-1) return;
+    if (choice<=-3) {
+        /* Deleted from the list: a save of the game moves to savedata-deleted, a slot (1-5) to the slots' deleted
+         * folder; "Undo last load" stays. The list shows again. */
+        const int entry=-3-choice, dir=entry-save_choice.offer_new, slot=dir-save_choice.count;
+        if (dir>=0 && dir<save_choice.count && !runtime_savedata_trash(save_choice.user,save_choice.title,save_choice.dirs[dir])) {
+            memmove(save_choice.dirs[dir],save_choice.dirs[dir+1],(size_t)(save_choice.count-dir-1)*32);
+            --save_choice.count;
+        } else if (slot>=0 && slot<save_choice.slot_count) {
+            if (save_choice.slots[slot]<5) bbport_saves_trash(save_choice.slots[slot]);
+            else printf("Runtime: SaveDataDialog list: Undo last load is not deleted here\n");
+        }
+        save_choice.choosing=0;
+        if (!save_choice_show(entry)) save_choice_finish(-1);
+        return;
+    }
+    save_choice_finish(choice<0 ? -1 : choice);
 }
 static ABI int32_t save_init(void) { return dialog_init(2); }
-static ABI int32_t save_term(void) { return dialog_term(2); }
+static ABI int32_t save_term(void) {
+    if (save_choice.choosing) { bbgpu_choice_cancel(); save_choice_finish(-1); }
+    return dialog_term(2);
+}
 static ABI int32_t save_open(const unsigned char *param) {
     if (!dialogs[2].initialized) return DIALOG_NOT_INITIALIZED;
     if (!param) return (int32_t)0x80B80006; /* ARG_NULL */
@@ -370,6 +538,7 @@ static ABI int32_t save_open(const unsigned char *param) {
     return 0;
 }
 static ABI int32_t save_status(void) {
+    if (save_choice.choosing) { save_choice_update(); return dialogs[2].status; }   /* RUNNING until the player answers */
     if (dialogs[2].status==2 && !save_dialog.waits) dialogs[2].status=3;
     return dialogs[2].status;
 }
@@ -395,6 +564,7 @@ static ABI int32_t save_ready(void) { return 1; }
 static ABI int32_t save_progress(int32_t target,uint32_t rate) { (void)target; (void)rate; return 0; }
 static ABI int32_t save_close(const void *param) {
     (void)param;
+    if (save_choice.choosing) { bbgpu_choice_cancel(); save_choice_finish(-1); }   /* the game closed the list */
     if (dialogs[2].status==2) dialogs[2].status=3;
     return 0;
 }

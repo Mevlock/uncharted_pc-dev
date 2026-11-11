@@ -400,6 +400,13 @@ bool WindowSDL::PollEvents() {
             UpdateTextTitle();
             continue;
         }
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+            // A release always reaches the game's mouse state, also when the overlay takes the event: the click
+            // that opens the in-game save list is released over the list, and its button would stay held for the
+            // game (its next click no press).
+            std::scoped_lock lock{mouse_mutex};
+            mouse_buttons &= ~MouseBit(event.button.button);
+        }
         if (BbOverlay::HandleEvent(event)) {
             continue;
         }

@@ -13,6 +13,7 @@
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "bbport_overlay.h"
+#include "bbport_thumbnail.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/cache_storage.h"
@@ -198,6 +199,12 @@ Presenter::~Presenter() {
     if (hudless_frame.image) {
         vmaDestroyImage(instance.GetAllocator(), hudless_frame.image, hudless_frame.allocation);
         device.destroyImageView(hudless_frame.image_view);
+    }
+    if (thumbnail.image) {
+        vmaDestroyImage(instance.GetAllocator(), thumbnail.image, thumbnail.image_allocation);
+    }
+    if (thumbnail.buffer) {
+        vmaDestroyBuffer(instance.GetAllocator(), thumbnail.buffer, thumbnail.buffer_allocation);
     }
 }
 
@@ -891,7 +898,148 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     return frame;
 }
 
+// bbport: the save list's pictures (bbport_thumbnail.h), from BilalReloaded's port (CaptureThumbnail, PR #349 by
+// the-best-is-best). The game frame (in TransferSrcOptimal after its blit to the swapchain) is scaled into a small
+// RGBA8 image (a frame wider than 16:9, the widened gameplay frame, by its middle 16:9), which is copied to a mapped
+// buffer; ReadThumbnail takes it once that frame's present has finished. The overlay is drawn later, straight into
+// the swapchain image, so it is never in the picture.
+void Presenter::CaptureThumbnail(vk::CommandBuffer cmdbuf, const Frame* frame) {
+    using BbThumbnail::Height;
+    using BbThumbnail::Width;
+    const vk::Device device = instance.GetDevice();
+    const vk::Format format = FrameGenerator::ColorFormat; // the frame's own format: the bytes stay as shown
+    if (!thumbnail.image) {
+        const vk::FormatProperties props = instance.GetPhysicalDevice().getFormatProperties(format);
+        if (!(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eBlitDst)) {
+            thumbnail.failed = true;
+            LOG_WARNING(Render_Vulkan, "Save pictures: {} cannot be a blit target", vk::to_string(format));
+            return;
+        }
+        const VkImageCreateInfo image_info = static_cast<VkImageCreateInfo>(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = format,
+            .extent = {Width, Height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc,
+        });
+        const VmaAllocationCreateInfo image_alloc{.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkImage image{};
+        const VkBufferCreateInfo buffer_info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = VkDeviceSize(Width) * Height * 4,
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        };
+        const VmaAllocationCreateInfo buffer_alloc{
+            .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+            .usage = VMA_MEMORY_USAGE_AUTO,
+        };
+        VkBuffer buffer{};
+        VmaAllocationInfo buffer_out{};
+        if (vmaCreateImage(instance.GetAllocator(), &image_info, &image_alloc, &image,
+                           &thumbnail.image_allocation, nullptr) != VK_SUCCESS) {
+            thumbnail.failed = true;
+            return;
+        }
+        thumbnail.image = vk::Image{image};
+        if (vmaCreateBuffer(instance.GetAllocator(), &buffer_info, &buffer_alloc, &buffer,
+                            &thumbnail.buffer_allocation, &buffer_out) != VK_SUCCESS ||
+            !buffer_out.pMappedData) {
+            if (buffer) {
+                vmaDestroyBuffer(instance.GetAllocator(), buffer, thumbnail.buffer_allocation);
+            }
+            thumbnail.failed = true;
+            return;
+        }
+        thumbnail.buffer = vk::Buffer{buffer};
+        thumbnail.mapped = buffer_out.pMappedData;
+        SetObjectName(device, thumbnail.image, "Save picture");
+    }
+    const vk::ImageSubresourceRange range{
+        .aspectMask = vk::ImageAspectFlagBits::eColor,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+    const vk::ImageMemoryBarrier to_dst{
+        .srcAccessMask = vk::AccessFlagBits::eNone,
+        .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+        .oldLayout = vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eTransferDstOptimal,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = thumbnail.image,
+        .subresourceRange = range,
+    };
+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, {}, {},
+                           to_dst);
+    s32 x0 = 0, x1 = s32(frame->width);
+    if (u64(frame->width) * 9 > u64(frame->height) * 16 + 16) { // wider than 16:9: its middle
+        const s32 w = s32(u64(frame->height) * 16 / 9);
+        x0 = (s32(frame->width) - w) / 2;
+        x1 = x0 + w;
+    }
+    const vk::ImageBlit blit{
+        .srcSubresource = MakeImageSubresourceLayers(),
+        .srcOffsets = std::array{vk::Offset3D{x0, 0, 0}, vk::Offset3D{x1, s32(frame->height), 1}},
+        .dstSubresource = MakeImageSubresourceLayers(),
+        .dstOffsets = std::array{vk::Offset3D{0, 0, 0}, vk::Offset3D{s32(Width), s32(Height), 1}},
+    };
+    cmdbuf.blitImage(frame->image, vk::ImageLayout::eTransferSrcOptimal, thumbnail.image,
+                     vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
+    const vk::ImageMemoryBarrier to_src{
+        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+        .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+        .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+        .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = thumbnail.image,
+        .subresourceRange = range,
+    };
+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, {}, {},
+                           to_src);
+    const vk::BufferImageCopy copy{
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource = MakeImageSubresourceLayers(),
+        .imageOffset = {0, 0, 0},
+        .imageExtent = {Width, Height, 1},
+    };
+    cmdbuf.copyImageToBuffer(thumbnail.image, vk::ImageLayout::eTransferSrcOptimal, thumbnail.buffer, copy);
+    const vk::BufferMemoryBarrier to_host{
+        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+        .dstAccessMask = vk::AccessFlagBits::eHostRead,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .buffer = thumbnail.buffer,
+        .offset = 0,
+        .size = VK_WHOLE_SIZE,
+    };
+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eHost, {}, {}, to_host,
+                           {});
+    thumbnail.pending = frame->present_done;
+}
+
+void Presenter::ReadThumbnail() {
+    if (!thumbnail.pending ||
+        instance.GetDevice().getFenceStatus(thumbnail.pending) != vk::Result::eSuccess) {
+        return;
+    }
+    thumbnail.pending = vk::Fence{};
+    vmaInvalidateAllocation(instance.GetAllocator(), thumbnail.buffer_allocation, 0, VK_WHOLE_SIZE);
+    BbThumbnail::Store(static_cast<const unsigned char*>(thumbnail.mapped));
+}
+
 void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
+    // bbport: a finished save picture copy is read before any present_done fence is reset.
+    ReadThumbnail();
+    if (thumbnail.pending == frame->present_done) {
+        thumbnail.pending = vk::Fence{}; // its fence is reset below: that copy is dropped
+    }
     // Free the frame for reuse
     const auto free_frame = [&] {
         if (!is_reusing_frame) {
@@ -967,7 +1115,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // bbport: low latency mode: the game's own frame carries its frame id (vk_low_latency.h).
     const bool game_frame = !is_reusing_frame && is_game_frame;
     const u64 latency_id = game_frame ? LowLatency::TakeGameFrame() : 0;
+    thumbnail_game_frame = game_frame;
     const bool presented = PresentImage(frame, frame->image, true, latency_id);
+    thumbnail_game_frame = false;
     if (game_frame) {
         LowLatency::GameFramePresented();
     }
@@ -1062,6 +1212,10 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
                          MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height,
                                           frame->fill),
                          vk::Filter::eLinear);
+        if (last && thumbnail_game_frame && image == frame->image && !frame->is_hdr && !thumbnail.failed &&
+            !thumbnail.pending && BbThumbnail::Wanted()) {
+            CaptureThumbnail(cmdbuf, frame);
+        }
         // bbport: the settings menu / FPS counter over the frame, at display resolution.
         BbOverlay::NotePresent();
         const bool overlay = BbOverlay::Visible();

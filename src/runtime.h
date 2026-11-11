@@ -147,6 +147,12 @@ void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_us(uint64_t rdi, uint64
                                                            const uint64_t *regs);
 int runtime_savedata_pick(int32_t user, const char *title, const char (*names)[32], uint32_t count,
                           int which, const char *focus, char out[32], void *param_out);
+/* The save list (runtime_services.c): a save as the game would mount it exists; its picture (thumb.png, else
+ * icon0.png; -1 none); its label (title, subtitle, detail, date); moved to <user dir>/savedata-deleted (0 moved). */
+int runtime_savedata_exists(int32_t user, const char *title, const char *dir);
+int runtime_savedata_icon(int32_t user, const char *title, const char *dir, char *out, size_t size);
+void runtime_savedata_label(int32_t user, const char *title, const char *dir, char *out, size_t size);
+int runtime_savedata_trash(int32_t user, const char *title, const char *dir);
 void runtime_thread_attach_host(const char *name);
 uintptr_t runtime_fiber_resolve(const char *name);
 void runtime_fiber_report(void);
