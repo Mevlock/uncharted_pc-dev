@@ -520,6 +520,9 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
             ux=mx/(float)ww*UI_WIDTH; uy=my/(float)wh*UI_HEIGHT;
             /* (16:10, Vert+: its UI is squeezed back to 16:9 vertically, runtime_ultrawide_scale < 0: the UI's height is that share of the window's) */
             if (runtime_ultrawide_scale<0.0f) { const float sv=-runtime_ultrawide_scale; uy=(my-(float)wh*(1.0f-sv)*0.5f)/((float)wh*sv)*UI_HEIGHT; }
+            /* (ultrawide, Hor+: the UI is squeezed back to 16:9 sideways, 0 < scale < 1: the UI's width is that share of the window's; the pause menus over
+             * gameplay were read as stretched over the whole width: off by 60 at the Controls page's values on 21:9) */
+            else if (runtime_ultrawide_scale>0.0f && runtime_ultrawide_scale<0.999f) { const float sh=runtime_ultrawide_scale; ux=(mx-(float)ww*(1.0f-sh)*0.5f)/((float)ww*sh)*UI_WIDTH; }
         }
         else {
             const float scale=fminf((float)ww/UI_WIDTH,(float)wh/UI_HEIGHT);
@@ -1396,6 +1399,9 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             ux=mx/(float)ww*UI_WIDTH; uy=my/(float)wh*UI_HEIGHT;
             /* (16:10, Vert+: its UI is squeezed back to 16:9 vertically, runtime_ultrawide_scale < 0: the UI's height is that share of the window's) */
             if (runtime_ultrawide_scale<0.0f) { const float sv=-runtime_ultrawide_scale; uy=(my-(float)wh*(1.0f-sv)*0.5f)/((float)wh*sv)*UI_HEIGHT; }
+            /* (ultrawide, Hor+: the UI is squeezed back to 16:9 sideways, 0 < scale < 1: the UI's width is that share of the window's; the pause menus over
+             * gameplay were read as stretched over the whole width: off by 60 at the Controls page's values on 21:9) */
+            else if (runtime_ultrawide_scale>0.0f && runtime_ultrawide_scale<0.999f) { const float sh=runtime_ultrawide_scale; ux=(mx-(float)ww*(1.0f-sh)*0.5f)/((float)ww*sh)*UI_WIDTH; }
         }
         else {
             const float scale=fminf((float)ww/UI_WIDTH,(float)wh/UI_HEIGHT);
