@@ -245,6 +245,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
                 **{f'{game}_devmode': False for game, _t, _s, _e in GAMES},
+                **{f'{game}_devmode_text': True for game, _t, _s, _e in GAMES},
                 **{f'{game}_{cheat}': False for game, cheats in SWITCH_CHEATS.items() for cheat in cheats}}
 
 
@@ -907,7 +908,9 @@ def game_environment(s, start=None):
     env['BB_UI_LANGUAGE'] = uncharted_i18n.language_code(str(s.get('ui_language') or ''))
     env['BB_CHEATS'] = ','.join([f'{game}:{cheat}' for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')
                                  if s.get(f'{game}_infinite_{cheat}')] +
-                                [f'{game}:devmode' for game, _t, _s, _e in GAMES if s.get(f'{game}_devmode')] +
+                                # without its debug text: devmode_quiet (the same flags, the text block skipped)
+                                [f'{game}:devmode' + ('' if s.get(f'{game}_devmode_text', True) else '_quiet')
+                                 for game, _t, _s, _e in GAMES if s.get(f'{game}_devmode')] +
                                 [f'{game}:{cheat}' for game, cheats in SWITCH_CHEATS.items() for cheat in cheats
                                  if s.get(f'{game}_{cheat}')])
     # Developer mode also opens Naughty Dog's menus, which the games build but never open: F11 the Dev Menu, F8 the
@@ -1231,11 +1234,11 @@ class Launcher:
                 row=r + 1, column=1, sticky='w', pady=(3, 4))
         return widget
 
-    def check(self, parent, key, title, hint=None):
+    def check(self, parent, key, title, hint=None, indent=0):
         parent = self.target(parent)
         r = self.next_row(parent)
         line = self.tk.Frame(parent, bg=CARD)
-        line.grid(row=r, column=0, columnspan=2, sticky='w', pady=(7, 0))
+        line.grid(row=r, column=0, columnspan=2, sticky='w', pady=(7, 0), padx=(self.px(indent), 0))
         self.toggle(line, self.var(key)).pack(side='left')
         label = self.tk.Label(line, text=title, bg=CARD, fg=TEXT, font=self.font_ui, cursor='hand2')
         label.pack(side='left', padx=(self.px(12), 0))
@@ -2341,6 +2344,7 @@ class Launcher:
             for cheat in SWITCH_CHEATS.get(game, ()):
                 self.check(f, f'{game}_{cheat}', _(SWITCH_CHEAT_TITLES[cheat]))
             self.check(f, f'{game}_devmode', _("Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu"))
+            self.check(f, f'{game}_devmode_text', _('Show the debug text (FPS, timings, memory) in developer mode'), indent=40)
 
     def build_advanced(self):
         f = self.page('advanced', _('Advanced'), _('Maintenance and options for testing.'))

@@ -58,8 +58,22 @@ DEVMODE = {
     US['big3-ps4_Shipping.elf']: (0x56cb8b, '4180bc24014c0000000f85551a0000418a8c24fc4b000084c90f84451a0000',
                                   '41c68424014c000000eb04551a000041c68424fc4b000001eb0584451a0000'),
 }
+
+# devmode_quiet: developer mode without the debug text. The check guards the block that draws it (FPS, ms Game/Rend/
+# GPU, memory, PlayGo, build date; all six executables): the two flags are set as above, then the jump the retail game
+# takes (the check's own je target, past the block) instead of the block. The edit's last jmp (eb 05 + 5 bytes)
+# becomes jmp rel32 + 2 nops.
+def _quiet(address, original, replacement):
+    original, replacement = bytes.fromhex(original), bytes.fromhex(replacement)
+    assert replacement[-7:-5] == b'\xeb\x05' and len(original) == len(replacement)
+    past_block = address + len(original) + struct.unpack('<i', original[-4:])[0]
+    jump = past_block - (address + len(original) - 2)
+    return address, original.hex(), (replacement[:-7] + b'\xe9' + struct.pack('<i', jump) + b'\x90\x90').hex()
+
+
 for _code, _patch in DEVMODE.items():
     PATCHES[_code]['devmode'] = _patch
+    PATCHES[_code]['devmode_quiet'] = _quiet(*_patch)
 
 # Naughty Dog's debug-menu switches, kept set by the runtime (BB_KEEP_BYTES): bytes in memory the game creates, so no
 # patch of the file reaches them. Uncharted 3's menu has "No Reload" and "One Hit Kills" in its cheat block (Infinite

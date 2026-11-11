@@ -201,6 +201,8 @@ EXTRA_TRANSLATIONS = {
         'One-Hit Kills': 'Tod mit einem Treffer',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Entwicklermodus: Debug-Text von Naughty Dog; F11 Dev Menu, F8 Quick Menu',
+        'Show the debug text (FPS, timings, memory) in developer mode':
+        'Debug-Text (FPS, Zeiten, Speicher) im Entwicklermodus anzeigen',
         'Shader preparation': 'Shader-Vorbereitung',
         "Each game's shaders are built once for your graphics card, so play does not stutter when it meets a new one. It happens on the first start, or here ahead of time.":
         'Die Shader jedes Spiels werden einmal für deine Grafikkarte erstellt, damit das Spiel bei einem neuen Shader nicht ruckelt. Das geschieht beim ersten Start oder hier im Voraus.',
@@ -615,6 +617,8 @@ EXTRA_TRANSLATIONS = {
         'One-Hit Kills': 'Uccisioni con un colpo',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Modalità sviluppatore: testo di debug di Naughty Dog; F11 Dev Menu, F8 Quick Menu',
+        'Show the debug text (FPS, timings, memory) in developer mode':
+        'Mostra il testo di debug (FPS, tempi, memoria) in modalità sviluppatore',
         'Shader preparation': 'Preparazione degli shader',
         "Each game's shaders are built once for your graphics card, so play does not stutter when it meets a new one. It happens on the first start, or here ahead of time.":
         'Gli shader di ogni gioco vengono compilati una volta per la tua scheda video, così il gioco non scatta quando ne incontra uno nuovo. Avviene al primo avvio, oppure qui in anticipo.',
@@ -1028,6 +1032,8 @@ EXTRA_TRANSLATIONS = {
         'One-Hit Kills': '一撃必殺',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         '開発者モード: Naughty Dog のデバッグ表示、F11 Dev Menu、F8 Quick Menu',
+        'Show the debug text (FPS, timings, memory) in developer mode':
+        '開発者モードでデバッグ表示（FPS、処理時間、メモリ）を表示',
         'Shader preparation': 'シェーダーの準備',
         "Each game's shaders are built once for your graphics card, so play does not stutter when it meets a new one. It happens on the first start, or here ahead of time.":
         '各ゲームのシェーダーはお使いのグラフィックカード向けに一度だけ作成されるため、新しいシェーダーに出会ってもカクつきません。初回起動時、またはここで事前に行われます。',
@@ -1337,6 +1343,8 @@ EXTRA_TRANSLATIONS = {
         'One-Hit Kills': 'Muertes de un golpe',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Modo desarrollador: texto de depuración de Naughty Dog; F11 Dev Menu, F8 Quick Menu',
+        'Show the debug text (FPS, timings, memory) in developer mode':
+        'Mostrar el texto de depuración (FPS, tiempos, memoria) en modo desarrollador',
         'Shader preparation': 'Preparación de shaders',
         "Each game's shaders are built once for your graphics card, so play does not stutter when it meets a new one. It happens on the first start, or here ahead of time.":
         'Los shaders de cada juego se compilan una vez para tu tarjeta gráfica, para que no haya tirones al encontrar uno nuevo. Ocurre en el primer inicio, o aquí por adelantado.',
@@ -1649,6 +1657,8 @@ EXTRA_TRANSLATIONS = {
         'One-Hit Kills': 'Mortes com um golpe',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Modo desenvolvedor: texto de depuração da Naughty Dog; F11 Dev Menu, F8 Quick Menu',
+        'Show the debug text (FPS, timings, memory) in developer mode':
+        'Mostrar o texto de depuração (FPS, tempos, memória) no modo desenvolvedor',
         'Shader preparation': 'Preparação de shaders',
         "Each game's shaders are built once for your graphics card, so play does not stutter when it meets a new one. It happens on the first start, or here ahead of time.":
         'Os shaders de cada jogo são compilados uma vez para sua placa de vídeo, para que o jogo não trave ao encontrar um novo. Isso acontece na primeira inicialização, ou aqui com antecedência.',
@@ -1962,6 +1972,8 @@ EXTRA_TRANSLATIONS = {
         'One-Hit Kills': 'Tué en un coup',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu":
         'Mode développeur : texte de débogage de Naughty Dog ; F11 Dev Menu, F8 Quick Menu',
+        'Show the debug text (FPS, timings, memory) in developer mode':
+        'Afficher le texte de débogage (FPS, temps, mémoire) en mode développeur',
         'Shader preparation': 'Préparation des shaders',
         "Each game's shaders are built once for your graphics card, so play does not stutter when it meets a new one. It happens on the first start, or here ahead of time.":
         'Les shaders de chaque jeu sont compilés une fois pour votre carte graphique, afin que le jeu ne saccade pas en rencontrant un nouveau shader. Cela se fait au premier démarrage, ou ici à l’avance.',
@@ -2470,6 +2482,8 @@ EXTRA_TRANSLATIONS = {
         'DLSS model': 'Модель DLSS',
         'Depth of field': 'Глубина резкости',
         "Developer mode: Naughty Dog's debug text; F11 Dev Menu, F8 Quick Menu": 'Режим разработчика: отладочный текст Naughty Dog; F11 — меню разработчика, F8 — быстрое меню',
+        'Show the debug text (FPS, timings, memory) in developer mode':
+        'Показывать отладочный текст (FPS, время кадра, память) в режиме разработчика',
         "Don't show this after updates": 'Не показывать после обновлений',
         'Driver default (K, DLSS 4)': 'По умолчанию драйвера (K, DLSS 4)',
         "Each game's shaders are built once for your graphics card, so play does not stutter when it meets a new one. It happens on the first start, or here ahead of time.": 'Шейдеры каждой игры один раз собираются под вашу видеокарту, чтобы игра не подтормаживала, встречая новый. Это происходит при первом запуске или заранее здесь.',

@@ -967,6 +967,17 @@ void FpsCounter() {
     // 1%, MAX the slowest frame (5 seconds).
     ImGui::Text("%.0f FPS %.1fms  1%%L %.0f  MAX %.0fms", game_fps,
                 game_fps > 0.0f ? 1000.0f / game_fps : 0.0f, game_low_fps, game_worst_ms);
+    // Developer mode with Naughty Dog's debug text hidden (run.py: this game's cheats hold devmode_quiet): "DEV MODE"
+    // on the top line, green like the game's own text, so it is still plain that the mode is on.
+    static const bool dev_quiet = [] {
+        const char* cheats = std::getenv("BB_CHEATS");
+        const std::string list = std::string(",") + (cheats ? cheats : "") + ",";
+        return list.find(",devmode_quiet,") != std::string::npos;
+    }();
+    if (dev_quiet) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.35f, 1.0f, 0.35f, 1.0f), " DEV MODE");
+    }
     // "DLSS 2288x960 Q  FG 2x 120": anti-aliasing, render size (Quality, Balanced,
     // Performance), and with frame generation adding frames (none in menus and movies) the
     // frames on screen.
