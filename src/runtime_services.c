@@ -400,7 +400,7 @@ static void save_choice_finish(int entry) {
         one=(const char (*)[32])save_choice.dirs[dir];
         /* Saving over one of the games (Chapter Select, New Game, or Save game onto another than the one in play):
          * a copy first, for Undo. */
-        if ((save_choice.saving || save_choice.choosing_game) &&
+        if ((save_choice.saving || save_choice.choosing_game) && !runtime_checkpoint_practice() &&
             (!save_choice.saving || strncmp(save_choice.dirs[dir],save_choice.campaign,32)))
             bbport_saves_keep_before_overwrite(save_choice.dirs[dir]);
     }
@@ -443,7 +443,7 @@ static int save_choice_show(int focus) {
     }
     /* Load game: Undo, when a game was kept before it was saved over (re-read each time the list shows). */
     save_choice.slot_count=0;
-    if (save_choice.with_slots && !save_choice.saving && !save_choice.choosing_game &&
+    if (save_choice.with_slots && !save_choice.saving && !save_choice.choosing_game && !runtime_checkpoint_practice() &&
         bbport_saves_list_entry(SAVE_UNDO,save_choice_labels[n],sizeof(save_choice_labels[n]),save_choice_icons[n],
                                 sizeof(save_choice_icons[n]))) {
         labels[n]=save_choice_labels[n];
@@ -490,7 +490,8 @@ static void save_list(const unsigned char *param) {
      *   Save game, Chapter Select, New Game ("where to save"): your games and New save. Saving over a game other
      *     than the one in play (and from Chapter Select or New Game, any) keeps a copy of it first, for Undo.
      *   Load game: your games, and Undo when a game was kept before it was saved over.
-     * Practice mode (checkpoint jumps), or no game yet: the entry the game focuses is taken, no list. */
+     * Practice mode (after a checkpoint jump): the same lists (the game saves to and loads its practice copies), no
+     * Undo copies. No game yet: the entry the game focuses is taken, no list. */
     const int game_now=bbport_saves_game();
     const int from_pause=type==1 && runtime_exit_menu_take_save_request();
     char playing[16];
@@ -500,7 +501,7 @@ static void save_list(const unsigned char *param) {
         char name[33]; memcpy(name,names[i],32); name[32]=0;
         if (bbport_saves_campaign_digit(name)>=0 && runtime_savedata_exists(user,title,name)) ++campaigns;
     }
-    if (runtime_checkpoint_practice() || !game_now) return;
+    if (!game_now) return;
     if (type==1 && !campaigns) return;        /* a first game: New save, as focused */
     /* The list, the focused entry selected. */
     memset(&save_choice,0,sizeof(save_choice));
