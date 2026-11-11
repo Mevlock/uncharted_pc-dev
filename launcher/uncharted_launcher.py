@@ -1887,11 +1887,11 @@ class Launcher:
                  _('Anisotropic filtering: floors, roads and walls seen at a shallow angle stay sharp '
                    'into the distance. In Uncharted 3 with DLSS it makes the picture softer, so it is off by default.'))
         self.check(f, 'full_res_textures', _('Full resolution textures'),
-                   _('Uncharted 2 and 3 (version 1.02): every texture at its full size from the start, as the developers’ '
+                   _('Uncharted 2 and 3: every texture at its full size from the start, as the developers’ '
                      'debug switch does, instead of the smaller versions the games stream in first: trees, leaves and far '
                      'buildings stay sharp. Uses more video memory; about 1% slower. From BilalReloaded’s port.'))
         self.check(f, 'hires_shadows', _('Hi-res lamp and flashlight shadows'),
-                   _('Uncharted 2 and 3 (version 1.02): a bigger shadow map for lamps and the flashlight, sharper shadow '
+                   _('Uncharted 2 and 3: a bigger shadow map for lamps and the flashlight, sharper shadow '
                      'edges (the developers’ debug switch). From BilalReloaded’s port.'))
         self.check(f, 'bloom', _('Bloom'),
                    _('The soft glow around bright lights and glints (all three games share the effect); '

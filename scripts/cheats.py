@@ -188,10 +188,36 @@ def quality_switches(data, names):
         if full is not None and any(text[i:i + 0x60].find(bytes.fromhex('498d85c0070000')) > 0 for i in label_leas(full)) and                 any(code['vaddr'] + i == 0xe127f1 for i in label_leas(full)):
             block = 0x18c6280
     if block is None:
+        # 1.00 (EU and US): the item's constructor gets the switch's address in rdx right before the label,
+        # lea rdx, [r12-r15 + 0x7c0 / 0x1c4], and that register was loaded with the block (lea reg, [rip + block]) earlier
+        # in the same function: both items must give the same block
+        def block_1_00(label, offset):
+            if label is None:
+                return None
+            for i in label_leas(label):
+                for reg, modrm, size in ((12, bytes.fromhex('9424'), 8), (13, bytes.fromhex('95'), 7), (14, bytes.fromhex('96'), 7), (15, bytes.fromhex('97'), 7)):
+                    lea_rdx = bytes.fromhex('498d') + modrm + struct.pack('<i', offset)
+                    if text[i - size:i] != lea_rdx:
+                        continue
+                    load = bytes((0x4c, 0x8d, ((reg - 8) << 3) | 5))
+                    j = text.rfind(load, max(0, i - 0x4000), i - size)
+                    if j >= 0:
+                        return code['vaddr'] + j + 7 + struct.unpack_from('<i', text, j + 3)[0]
+            return None
+        a = block_1_00(full, 0x7c0)
+        b = block_1_00(address_of(QUALITY_LABELS['hiresshadow']), 0x1c4)
+        if a is not None and a == b:
+            block = a
+            result['_100'] = True
+    if block is None:
         print('Extra quality: the render-settings block was not found in this build; not applied')
         return {}
     if 'fullres' in names:
         result['fullres'] = block + 0x7c0
+    if result.pop('_100', False):   # (both switches already checked against their items)
+        if 'hiresshadow' in names:
+            result['hiresshadow'] = block + 0x1c4
+        return result
     if 'hiresshadow' in names:
         shadow = address_of(QUALITY_LABELS['hiresshadow'])
         ok = any(text[i:i + 0x50].find(bytes.fromhex('498d8424c4010000')) > 0 for i in label_leas(shadow)) if shadow else False
