@@ -31,9 +31,11 @@ PATCHES = {
     # grenade, U1 WeaponController::PostJointUpdate (after the kGrenade handle), U2 player-fast-grenade.cpp.
     EU['eboot.bin']: {'health': (0x261edb, '7535', 'eb35'),
                       'ammo': (0x71b003, 'e8c8acc2ff', NOP * 5),
+                      'noreload': (0x71b003, 'e8c8acc2ff', NOP * 5),  # U1: the clip is the ammo (as 'ammo')
                       'grenades': (0x71eb08, 'e8c371c2ff', NOP * 5)},
     US['eboot.bin']: {'health': (0x26244b, '7535', 'eb35'),
                       'ammo': (0x730f73, 'e8c854c1ff', NOP * 5),
+                      'noreload': (0x730f73, 'e8c854c1ff', NOP * 5),  # U1: the clip is the ammo (as 'ammo')
                       'grenades': (0x734a78, 'e8c319c1ff', NOP * 5)},
     EU['big2-ps4_Shipping.elf']: {'health': (0x35de73, '0f84bc010000', 'e9cf02000090'),
                                   'ammo': (0xa4fd8d, 'e87e8aa6ff', NOP * 5),
