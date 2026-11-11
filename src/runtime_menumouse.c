@@ -1962,6 +1962,31 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
             if (mouse_debug()) printf("Menu mouse: U2 drop-down click on value %d\n",dd.want);
         }
     }
+    /* U2's Yes/No and OK / Cancel by value (no d-pad steps): their two emphasised choices side by side are a focused list control of
+     * the values 0..1 (Quit, the difficulty window); the choice under the cursor left of the lit one is one value down, right of it one
+     * up; it is set at once, a click presses cross once it is the value */
+    if (u2m && !dd.on && have_hov && have_sel && hov.front && sel.front && hov.h>=36.0f && sel.h>=36.0f && hov.w>=120.0f &&
+        fabsf((hov.y+hov.h*0.5f)-(sel.y+sel.h*0.5f))<4.0f) {   /* (the choices' boxes: 210 x 40; a setting's Off / On, 25 tall, are no Yes/No) */
+        U2List yn={0}; int have_yn=0;
+        pthread_mutex_lock(&u3_lock);
+        for (int k=0;k<16 && !have_yn;++k) {
+            const U2List *l=&u2_lists[k];
+            if (l->us && now-l->us<150000 && l->focused && l->lo==0 && l->hi==1 && l->cur>=0 && l->cur<=1) { yn=*l; have_yn=1; }
+        }
+        pthread_mutex_unlock(&u3_lock);
+        if (have_yn) {
+            const float hcx=hov.x+hov.w*0.5f, scx=sel.x+sel.w*0.5f;
+            const int want=fabsf(hcx-scx)<2.0f ? yn.cur : hcx<scx ? yn.cur-1 : yn.cur+1;
+            if (want>=0 && want<=1) {
+                list_jump=1; h.click=0; h.click_until=0; menu_hover=1;
+                if (want!=yn.cur && (!u2_set_pending || u2_set_val!=want)) {
+                    u2_set_ds=yn.ds; u2_set_val=want; u2_set_keep=0; u2_set_us=now; u2_set_pending=1;
+                    if (mouse_debug()) printf("Menu mouse: U2 Yes/No choice %d -> %d\n",yn.cur,want);
+                }
+                if (clicked) { lc.on=1; lc.ds=yn.ds; lc.want=want; lc.until=now+1500000; lc.landed=0; }
+            }
+        }
+    }
     /* U2 1.02, a list (no page holds its rows): its value is set to the row under the cursor at once. The list's rows are the texts in
      * the hovered row's column (24-31 tall); the list control is the fresh one whose rows seen match their count; the row's place counts
      * from its first row seen (the top of the column). No drawn highlight is read: it fades after a jump (counting from it overshot), and
