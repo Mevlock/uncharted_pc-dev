@@ -344,8 +344,13 @@ int bbport_saves_list_entry(int index, char *label, size_t label_size, char *pic
 int bbport_saves_list_pick(int index);
 void bbport_saves_list_cancel(void);
 int bbport_saves_trash(int index);
+/* The Save game list (bbport_saves.cpp): slots 1-5 as places to save; the picked one gets a copy of the campaign
+ * save once the game has written it. */
+int bbport_saves_save_entry(int index, char *label, size_t label_size, char *picture, size_t picture_size);
+void bbport_saves_save_pick(int index);
+void bbport_saves_save_cancel(void);
 static struct {
-    int choosing, offer_new, count, user, with_slots, slot_count, slots[SAVE_LIST_SLOTS];
+    int choosing, offer_new, count, user, with_slots, saving, slot_count, slots[SAVE_LIST_SLOTS];
     const char *heading;
     char title[16], campaign[16], dirs[SAVE_LIST_MAX][32];
 } save_choice;
@@ -366,9 +371,19 @@ static void save_choice_finish(int entry) {
     memset(save_dialog.dir,0,sizeof(save_dialog.dir));
     const int dir=entry-save_choice.offer_new, slot=dir-save_choice.count;
     const char (*one)[32]=NULL;
+    if (save_choice.saving) bbport_saves_save_cancel();
     if (entry<0) save_dialog.pick=-1;
     else if (dir<0) save_dialog.pick=0;
-    else if (slot>=0) {
+    else if (slot>=0 && save_choice.saving) {
+        /* Save game, a slot: the game writes its campaign save as usual; the slot gets a copy once it has
+         * (bbport_saves_written). */
+        if (slot<save_choice.slot_count) {
+            bbport_saves_save_pick(save_choice.slots[slot]);
+            printf("Runtime: SaveDataDialog list: save slot %d picked: the campaign save is copied there once written\n",
+                   save_choice.slots[slot]+1);
+        }
+        one=(const char (*)[32])save_choice.campaign;
+    } else if (slot>=0) {
         /* A slot: put back as the campaign save when the game opens that next (bbport_saves_before_mount), so a
          * load the game does not go on with changes nothing. */
         if (slot<save_choice.slot_count && bbport_saves_list_pick(save_choice.slots[slot])) {
@@ -418,10 +433,21 @@ static int save_choice_show(int focus) {
     }
     /* The slots, re-read each time the list shows (a delete takes one out). */
     save_choice.slot_count=0;
+    /* Save game: slots 1-5, empty ones too (a place to save). */
+    for (int k=0;save_choice.saving && k<5;++k) {
+        if (!bbport_saves_save_entry(k,save_choice_labels[n],sizeof(save_choice_labels[n]),save_choice_icons[n],
+                                     sizeof(save_choice_icons[n])))
+            continue;
+        labels[n]=save_choice_labels[n];
+        icons[n]=save_choice_icons[n][0] ? save_choice_icons[n] : NULL;
+        if (!save_choice.slot_count) sections[n]="Save a copy into a slot as well";
+        save_choice.slots[save_choice.slot_count++]=k;
+        ++n;
+    }
     /* Slots 1-5, then "Undo last load" (the save from before the last load). The story save stays on the overlay's
      * page, where it is explained. */
     static const int order[]={0,1,2,3,4,5};
-    for (int k=0;save_choice.with_slots && k<(int)(sizeof(order)/sizeof(order[0]));++k) {
+    for (int k=0;save_choice.with_slots && !save_choice.saving && k<(int)(sizeof(order)/sizeof(order[0]));++k) {
         if (!bbport_saves_list_entry(order[k],save_choice_labels[n],sizeof(save_choice_labels[n]),save_choice_icons[n],
                                      sizeof(save_choice_icons[n])))
             continue;
@@ -467,13 +493,23 @@ static void save_list(const unsigned char *param) {
            save_dialog.pick<0 ? "nothing to choose, cancelled" : save_dialog.pick ? "focused " : "new save data",
            save_dialog.pick>0 ? save_dialog.dir : "");
     if (!save_list_enabled()) return;
-    /* Only to load. Where to save (Chapter Select, a new game: "New save" or the save there is) stays the entry the
-     * game focuses, as before the list: a second campaign save (New save: SAVEDATA031) would leave the save slots,
-     * the story save and "Current save" on the first one while the game plays on in the other. */
-    if (type==1) return;
+    /* Where to save (Chapter Select, the pause menu): never a second campaign save (New save: SAVEDATA031 would leave
+     * the save slots, the story save and "Current save" on the first one while the game plays on in the other). The
+     * list offers the campaign save and slots 1-5 for a copy; with no campaign save yet (a new game), or in practice
+     * mode, the entry the game focuses is taken as before. */
+    const int game_now=bbport_saves_game();
+    char campaign_now[16];
+    snprintf(campaign_now,sizeof(campaign_now),"SAVEDATA0%d0",game_now);
+    int campaign_listed=0;
+    for (uint32_t i=0;game_now && names && i<count;++i)
+        if (!strncmp(names[i],campaign_now,32) && runtime_savedata_exists(user,title,campaign_now)) campaign_listed=1;
+    if (type==1 && (!campaign_listed || runtime_checkpoint_practice())) return;
     /* The list: the slots that exist (as on the console), the focused one selected. */
     memset(&save_choice,0,sizeof(save_choice));
     bbport_saves_list_cancel();   /* a slot picked in an earlier list the game did not go on with */
+    bbport_saves_save_cancel();
+    save_choice.saving=type==1;
+    if (save_choice.saving) offer_new=0;   /* no second campaign save */
     save_choice.user=user;
     snprintf(save_choice.title,sizeof(save_choice.title),"%.9s",title ? title : "");
     save_choice.offer_new=offer_new;
@@ -481,7 +517,7 @@ static void save_list(const unsigned char *param) {
     const int game=bbport_saves_game();
     snprintf(save_choice.campaign,sizeof(save_choice.campaign),"SAVEDATA0%d0",game);
     /* Not in practice mode: the game opens the practice copy then, not the save a slot would replace. */
-    for (uint32_t i=0;game && type==2 && !runtime_checkpoint_practice() && names && i<count;++i)
+    for (uint32_t i=0;game && (type==2 || type==1) && !runtime_checkpoint_practice() && names && i<count;++i)
         if (!strncmp(names[i],save_choice.campaign,32)) save_choice.with_slots=1;
     /* With the slots the game's own entry is its campaign save alone: its other save (U2's SAVEDATA021, written
      * beside it) looks the same in the list and is no choice of the player's. The focus then goes to the campaign

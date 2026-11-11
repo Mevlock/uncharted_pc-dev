@@ -799,4 +799,15 @@ TRANSLATIONS = {
         "gioco, più lenta che di lato). Ctrl+clic per digitare un valore.",
         'エイム: エイム中のマウス感度の倍率（1.00 で見回しと同じ）。縦: 上下の倍率。カメラの上下: 通常カメラの上下のみ'
         '（ゲームの弧に沿って動き、左右より遅い）。Ctrl+クリックで値を入力。'),
+    'Save a copy into a slot as well': L(
+        'Guarda también una copia en una ranura', 'Salve também uma cópia em um slot',
+        'Sauvegarde aussi une copie dans un emplacement', 'Zusätzlich eine Kopie in einem Speicherplatz sichern',
+        'Salva anche una copia in uno slot', 'スロットにもコピーをセーブ'),
+    'Slot {} - empty': L('Ranura {} - vacía', 'Slot {} - vazio', 'Emplacement {} - vide', 'Speicherplatz {} - leer',
+                         'Slot {} - vuoto', 'スロット {} - 空き'),
+    'Your game saves as usual, and a copy goes here': L(
+        'Tu partida se guarda como siempre y una copia va aquí', 'Seu jogo salva como sempre e uma cópia vai aqui',
+        'Ta partie est sauvegardée comme d’habitude, et une copie va ici',
+        'Dein Spiel speichert wie gewohnt, und eine Kopie kommt hierher',
+        'La partita si salva come sempre e una copia va qui', 'いつも通りセーブされ、ここにもコピーされます'),
 }

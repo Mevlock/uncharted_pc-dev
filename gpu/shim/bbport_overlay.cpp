@@ -1327,7 +1327,8 @@ const char* ChoiceLabel(const std::string& item) {
 // name line of the campaign save, translated here (T leaves any other text, the game's own, as it is).
 [[maybe_unused]] static const char* const ChoiceRuntimeTexts[] = {
     N_("Load game"), N_("Save game"), N_("Your game"), N_("Current save - where Continue starts"),
-    N_("Your save slots (made with Save here: Insert > Save slots)"), N_("Undo")};
+    N_("Your save slots (made with Save here: Insert > Save slots)"), N_("Undo"),
+    N_("Save a copy into a slot as well")};
 
 void ChoiceDeletePress() {
     const int count = int(choice_items.size());

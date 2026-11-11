@@ -1090,3 +1090,62 @@ extern "C" int bbport_saves_trash(int index) {
     });
     return ok;
 }
+
+// The game's "Save game" list (runtime_services.c): next to the save Continue loads, slots 1-5 as places to save. The
+// game always writes its one campaign save (a second campaign save, "New save", would leave the slots, the story save
+// and Current save behind); a slot picked there gets a copy of it once the game has written it
+// (bbport_saves_written), as Save here does.
+namespace {
+int save_pick = -1; // slot (0..4) waiting for the game's write of its campaign save; guarded by `lock`
+}
+
+// A slot's line in the "Save game" list: as bbport_saves_list_entry when it holds a save (1), else "Slot N - empty"
+// (2); 0 for no slot.
+extern "C" int bbport_saves_save_entry(int index, char* label, size_t label_size, char* picture, size_t picture_size) {
+    if (index < 0 || index >= BbSaves::SlotCount) {
+        return 0;
+    }
+    if (bbport_saves_list_entry(index, label, label_size, picture, picture_size)) {
+        return 1;
+    }
+    std::snprintf(label, label_size, "%s\n%s", fmt::format(fmt::runtime(T("Slot {} - empty")), index + 1).c_str(),
+                  T("Your game saves as usual, and a copy goes here"));
+    picture[0] = 0;
+    return 2;
+}
+
+// Picked in the "Save game" list: the slot gets the campaign save once the game has written it.
+extern "C" void bbport_saves_save_pick(int index) {
+    std::lock_guard guard(lock);
+    save_pick = index >= 0 && index < BbSaves::SlotCount ? index : -1;
+}
+
+extern "C" void bbport_saves_save_cancel(void) {
+    std::lock_guard guard(lock);
+    save_pick = -1;
+}
+
+// runtime_savedata.c: a save the game opened to write is closed. The campaign save after a slot was picked in the
+// "Save game" list: copied into that slot.
+extern "C" void bbport_saves_written(const char* host_dir) {
+    Guarded("save into a slot", [&] {
+        std::lock_guard guard(lock);
+        const int game = BbSaves::Game();
+        if (save_pick < 0 || !game || !host_dir) {
+            return;
+        }
+        const fs::path dir = fs::u8path(host_dir);
+        if (Utf8(dir.filename()) != SlotName(game) || dir.parent_path() != SavesDir()) {
+            return;
+        }
+        const int index = save_pick;
+        save_pick = -1;
+        std::string error;
+        if (CopyCampaign(game, index, error)) {
+            std::printf("Save slots: the game's save copied into slot %d (picked in the Save game list)\n", index + 1);
+        } else {
+            std::printf("Save slots: the game's save could not be copied into slot %d: %s\n", index + 1, error.c_str());
+        }
+        BbSaves::Refresh();
+    });
+}

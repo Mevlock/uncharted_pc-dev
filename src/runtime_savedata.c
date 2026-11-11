@@ -344,6 +344,7 @@ static ABI int32_t save_terminate(void) {
 static int32_t last_user=1;
 void bbport_saves_apply_pending(void);
 void bbport_saves_closed(const char *host_dir);
+void bbport_saves_written(const char *host_dir);
 void bbport_saves_before_mount(const char *dir, int read_only);
 int runtime_savedata_dir(char *out, size_t size) { root(last_user,NULL,out,size); return 0; }
 int runtime_savedata_mounted(void) {
@@ -435,10 +436,12 @@ static ABI int32_t save_umount(const MountPoint *point) {
     pthread_mutex_lock(&lock);
     int slot=slot_of(point);
     char host[700]="", picture[720]="";
+    int wrote=0;
     if (slot>=0) {
         runtime_file_unmount(point->data); slots[slot].used=0; snprintf(host,sizeof(host),"%s",slots[slot].host);
         /* (BilalReloaded, PR #349 by the-best-is-best) a save the game wrote gets the last picture of the game in
          * play as thumb.png beside its param, shown in the save list (bbport_thumbnail.cpp). */
+        wrote=slots[slot].writable;
         if (slots[slot].writable) snprintf(picture,sizeof(picture),"%s/thumb.png",slots[slot].meta);
     }
     pthread_mutex_unlock(&lock);
@@ -451,6 +454,7 @@ static ABI int32_t save_umount(const MountPoint *point) {
      * follows the game's campaign saves (bbport_saves.cpp). */
     if (slot>=0) save_backup(host);
     if (slot>=0) bbport_saves_closed(host);
+    if (wrote) bbport_saves_written(host);   /* a slot picked in the game's Save game list gets the save now */
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
 static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const void *buffer, uint64_t size) {
