@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define U2_PLAYER_TYPE 0xa5a63e9bu
 #define ONE_HIT_DAMAGE 100000
@@ -71,6 +72,22 @@ void __attribute__((ms_abi)) runtime_u2_npc_damage(uint64_t rdi, uint64_t rsi, u
            kind,damage,(const void *)attacker,type,faction,(const void *)npc,npc_type,npc_faction);
 }
 
+/* Uncharted 1's jet ski (chapters 8 and 12-13): Nate drives, Elena shoots where the player aims, and the game counts
+ * her shots as hers (attacker side 5, an ally), so One Hit Kills did nothing there. Her BuddyJetskiSkill update
+ * (runtime_u1_jetski_skill, 0x4bf80 in all four code versions, El Dorado found it) runs every frame while she rides;
+ * while it ran less than half a second ago, an ally's attack counts as the player's. Enemies (side 2) hitting her or
+ * Nate stay as they are, and allies outside the jet ski too. */
+static volatile uint64_t jetski_seen_ns;
+static uint64_t onehit_now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
+}
+static int u1_jetski_riding(void) {
+    const uint64_t seen = __atomic_load_n(&jetski_seen_ns, __ATOMIC_RELAXED);
+    return seen && onehit_now_ns() - seen < 500000000u;
+}
+
 /* Uncharted 1 Npc::RespondToAttack (npc.cpp; EU and 1.02 both at 0x13ed0): rdi = the NPC, rsi = the attack record
  * {+8 the attacker's record, +0x14 damage as a share of the NPC's health (float: the player's body shots 0.375, its
  * headshots 375)}; the attacker record's +0x60 is 1 for the player (2 and 5 for the others measured 2026-11-11). With
@@ -85,7 +102,7 @@ void __attribute__((ms_abi)) runtime_u1_respond_to_attack(uint64_t rdi, uint64_t
         uint64_t who; memcpy(&who,(const void *)(uintptr_t)(rsi+8),8);
         uint32_t side=0; if (who) memcpy(&side,(const void *)(uintptr_t)(who+0x60),4);
         float damage; memcpy(&damage,(const void *)(uintptr_t)(rsi+0x14),4);
-        if (side==1 && damage>0.0f && damage<1000.0f) {
+        if ((side==1 || (side==5 && u1_jetski_riding())) && damage>0.0f && damage<1000.0f) {
             const float lethal=1000.0f;
             memcpy((void *)(uintptr_t)(rsi+0x14),&lethal,4);
         }
@@ -103,4 +120,15 @@ void __attribute__((ms_abi)) runtime_u1_respond_to_attack(uint64_t rdi, uint64_t
         for (int i=0;i<32;++i) printf(" %08x",o[i]);
     }
     printf("\n");
+}
+
+/* Uncharted 1 BuddyJetskiSkill update (0x4bf80, all four code versions): Elena rides the jet ski this frame. */
+void __attribute__((ms_abi)) runtime_u1_jetski_skill(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                     const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)image; (void)r14; (void)regs;
+    if (!onehit_on() && !onehit_log()) return;
+    const uint64_t now = onehit_now_ns();
+    const uint64_t seen = __atomic_load_n(&jetski_seen_ns, __ATOMIC_RELAXED);
+    if (onehit_log() && (!seen || now - seen >= 500000000u)) printf("OneHit1: Elena rides the jet ski: her shots count as the player's\n");
+    __atomic_store_n(&jetski_seen_ns, now, __ATOMIC_RELAXED);
 }
