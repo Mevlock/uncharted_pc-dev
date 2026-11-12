@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// The overlay's save slots, story save and current checkpoint (bbport_saves.cpp).
+// The overlay's Saves and Checkpoints pages: the game's campaign saves (your games), the Undo copy, the current
+// checkpoint, practice mode (bbport_saves.cpp).
 #pragma once
 
 #include <cstdint>
@@ -8,8 +9,9 @@
 
 namespace BbSaves {
 
+// The older save slots' folders (slot1..5, before-load, story; no longer on a page): a Load requested by an older
+// build still puts one back at start-up, and the story save follows when BB_STORY_SAVES=1.
 constexpr int SlotCount = 5;
-// Slot indexes after the five manual ones: the copy taken before each Load, and the story save.
 constexpr int UndoSlot = SlotCount;
 constexpr int StorySlot = SlotCount + 1;
 
@@ -22,31 +24,31 @@ struct Checkpoint {
     std::string chapter_title, name;
 };
 
-struct Slot {
-    bool used = false;
-    std::string progress;  // the game's own text, "Campaign 37% Complete - Run to Ground"
+// One of your games (a campaign save, SAVEDATA0<game><digit>), or the Undo copy of one.
+struct GameSave {
+    int digit = -1;        // 0-9: "Game <digit + 1>"
+    bool playing = false;  // the one the game plays on
     Checkpoint checkpoint;
-    std::string date;  // when it was saved into the slot
+    std::string date;  // when it was last saved (the Undo copy: when it was kept)
 };
 
 // 1, 2 or 3 (Uncharted 1/2/3), 0 when the running game is unknown.
 int Game();
 // Where the running game's campaign save is now (its last autosave), re-read when the file changes.
 Checkpoint Current();
-// The slots, re-read from disk.
-void Refresh();
-const Slot& GetSlot(int index);
-// True when the campaign save has left the story save: a jump back or ahead (Chapter Select, a new game)
-// rather than playing on from it. The story save then stays where it was until it is loaded again or
-// MakeStory moves it.
-bool AwayFromStory();
-// Copies the campaign save into a slot (replacing what it held). Fails while the game is writing a save.
-bool Store(int index, std::string& message);
-// The current campaign save becomes the story save (the player keeps a skip ahead on purpose).
-bool MakeStory(std::string& message);
-// Puts a slot back: copies the current save to the undo slot, then restarts the game, which restores the slot
-// before it opens its saves. Continue then starts there.
-bool Load(int index, std::string& message);
+// Your games, as in the game's own lists (re-read from disk), and the Undo copy: a game as it was before it was saved
+// over (false when there is none).
+std::vector<GameSave> Games();
+bool UndoSave(GameSave& out);
+// Restarts the game into one of your games: before the game opens its saves it is made the newest, so Continue
+// starts there.
+bool LoadGame(int digit, std::string& message);
+// Moves one of your games to savedata-deleted (not the one in play; never erased).
+bool DeleteGame(int digit, std::string& message);
+// Restarts the game with the Undo copy put back (the save it replaces becomes the next Undo); Continue starts there.
+bool LoadUndo(std::string& message);
+// Moves the Undo copy to the deleted folder (never erased).
+bool DeleteUndo(std::string& message);
 // The running game's playable checkpoints in game order.
 std::vector<Checkpoint> Checkpoints();
 // The running game's task jump is hooked (Uncharted 3, EU and 1.02 code).
@@ -57,8 +59,8 @@ bool Practising();
 bool StartPractice(std::string& message);
 // Jumps the running game to a checkpoint at its next frame. The first jump turns practice mode on.
 bool Jump(const Checkpoint& target, std::string& message);
-// Ends practice mode keeping its progress: the game restarts with the practice save as the campaign save and the
-// story save (the player's save from before goes to "Before the last load").
+// Ends practice mode keeping its progress: the practice save becomes a new game of its own (the next free campaign
+// save) and the game restarts with Continue there; the other games stay as they are.
 bool KeepPractice(std::string& message);
 // The outcome of the last jump once the game ran it: 1 done, -1 no such task, -2 not supported, 0 nothing new.
 int JumpResult();

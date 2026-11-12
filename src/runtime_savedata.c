@@ -346,6 +346,10 @@ void bbport_saves_apply_pending(void);
 void bbport_saves_closed(const char *host_dir);
 void bbport_saves_before_mount(const char *dir, int read_only);
 void bbport_saves_mounted(const char *dir, int read_only);
+/* A request from before the restart (a Load from the overlay's Saves page, Keep this progress), applied once before
+ * the game first looks at its saves: its first search (what Continue starts) or its first mount. */
+static pthread_once_t pending_once=PTHREAD_ONCE_INIT;
+static void apply_pending_once(void) { pthread_once(&pending_once,bbport_saves_apply_pending); }
 int runtime_savedata_dir(char *out, size_t size) { root(last_user,NULL,out,size); return 0; }
 int runtime_savedata_mounted(void) {
     pthread_mutex_lock(&lock);
@@ -374,9 +378,8 @@ static void practice_redirect(const char *base, const char *name, char *host, si
 static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32_t mode, MountResult *result) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     if (user<0) return ERR_INVALID_USER;
-    static pthread_once_t pending_once=PTHREAD_ONCE_INIT;
     last_user=user;
-    pthread_once(&pending_once,bbport_saves_apply_pending);
+    apply_pending_once();
     if (!dir || !result || !valid_name(dir->data,sizeof(dir->data))) return ERR_PARAMETER;
     bbport_saves_before_mount(dir->data,(mode & MODE_RDONLY)!=0);   /* an Undo picked in the Load list, put back now */
     char base[600], host[640], meta[680];
@@ -648,6 +651,8 @@ int runtime_savedata_trash(int32_t user, const char *title, const char *dir) {
     printf("Runtime: save data '%s' %s %s\n",dir,r ? "could not be moved to" : "moved to",trash);
     return r;
 }
+/* The overlay's Saves page (bbport_saves.cpp): a save of the running game deleted as from the save list. */
+int runtime_savedata_trash_save(const char *dir) { return runtime_savedata_trash(last_user,NULL,dir); }
 /* SQL-LIKE pattern: % any run, _ one character. */
 static int like(const char *s, const char *p) {
     if (!*p) return !*s;
@@ -666,6 +671,8 @@ static int compare(const void *a, const void *b) {
 static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     if (!cond || !result) return ERR_PARAMETER;
+    if (cond->user>=0) last_user=cond->user;
+    apply_pending_once();
     char base[600];
     root(cond->user,cond->title ? cond->title->data : NULL,base,sizeof(base));
     Entry *entries=NULL; size_t count=0, capacity=0;

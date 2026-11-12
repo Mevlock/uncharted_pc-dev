@@ -575,136 +575,111 @@ void CheckpointsPage() {
     }
 }
 
-// Save slots page: the story save, five slots and the copy taken before the last Load (bbport_saves.cpp).
-// Saving over a used slot, loading and moving the story save each ask first, on the page itself.
-void SaveSlotsPage() {
-    enum class Action { None, Store, Load, MakeStory };
+// Saves page: your games and the Undo copy, as in the game's own Save and Load lists (bbport_saves.cpp); each line
+// where it is and when it was saved. Loading and deleting each ask first, on the page itself.
+void SavesPage() {
+    enum class Action { None, LoadGame, DeleteGame, LoadUndo, DeleteUndo };
     static Action pending = Action::None;
-    static int pending_slot = -1;
+    static int pending_digit = -1;
     static std::string message;
+    static std::vector<BbSaves::GameSave> games;
+    static BbSaves::GameSave undo;
+    static bool has_undo = false;
     static double refreshed = -10.0;
     if (ImGui::GetTime() - refreshed > 2.0) {
-        BbSaves::Refresh();
+        games = BbSaves::Games();
+        has_undo = BbSaves::UndoSave(undo);
         refreshed = ImGui::GetTime();
     }
-    const auto when = [](const BbSaves::Slot& slot) {
-        return slot.date.empty() ? std::string() : "  (" + slot.date + ")";
-    };
+    const auto when = [](const std::string& date) { return date.empty() ? std::string() : "  (" + date + ")"; };
+    const bool practice = BbSaves::Practising();
 
     ImGui::TextWrapped(T("Now: %s"), BbSaves::Describe(BbSaves::Current()).c_str());
-
-    ImGui::SeparatorText(T("Story save"));
-    const BbSaves::Slot& story = BbSaves::GetSlot(BbSaves::StorySlot);
-    const bool away = BbSaves::AwayFromStory();
-    if (!story.used) {
-        TextGrey(T("Starts with the game's next save."));
-    } else {
-        ImGui::TextWrapped("%s%s", BbSaves::Describe(story.checkpoint).c_str(), when(story).c_str());
-        if (away) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
-            ImGui::TextWrapped("%s", T("Your save has moved away from your story (Chapter Select or a new game). "
-                                       "The story save stays here until you load it, or make the current save "
-                                       "your story save to keep the change."));
-            ImGui::PopStyleColor();
-        } else {
-            TextGrey(T("Follows your playthrough as you play on."));
-        }
-        if (ImGui::Button(TI("Load story save"))) {
-            pending = Action::Load;
-            pending_slot = BbSaves::StorySlot;
-        }
-        ImGui::SameLine();
+    if (practice) {
+        TextGrey(T("Practice mode: load or delete your games once the game has restarted."));
     }
-    ImGui::BeginDisabled(story.used && !away);
-    if (ImGui::Button(TI("Make this my story save"))) {
-        pending = Action::MakeStory;
-    }
-    ImGui::EndDisabled();
-    Hint(T("Use this after skipping ahead on purpose: the story save then follows your playthrough from "
-           "where you are now."));
 
-    ImGui::SeparatorText(T("Slots"));
-    for (int i = 0; i < BbSaves::SlotCount; ++i) {
-        const BbSaves::Slot& slot = BbSaves::GetSlot(i);
-        ImGui::PushID(i);
-        ImGui::AlignTextToFramePadding();
-        ImGui::Text("%d", i + 1);
-        ImGui::SameLine();
-        if (ImGui::Button(TI("Save here"))) {
-            pending = Action::Store;
-            pending_slot = i;
-        }
-        ImGui::SameLine();
-        ImGui::BeginDisabled(!slot.used);
+    ImGui::SeparatorText(T("Your games"));
+    if (games.empty()) {
+        TextGrey(T("No games yet: they appear once the game has saved."));
+    }
+    for (const BbSaves::GameSave& g : games) {
+        ImGui::PushID(g.digit);
+        ImGui::BeginDisabled(practice);
         if (ImGui::Button(TI("Load"))) {
-            pending = Action::Load;
-            pending_slot = i;
+            pending = Action::LoadGame;
+            pending_digit = g.digit;
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(g.playing);
+        if (ImGui::Button(TI("Delete"))) {
+            pending = Action::DeleteGame;
+            pending_digit = g.digit;
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        const std::string name =
+            fmt::format(fmt::runtime(g.playing ? T("Game {} - the one you are playing") : T("Game {}")), g.digit + 1);
+        ImGui::TextWrapped("%s: %s%s", name.c_str(), BbSaves::Describe(g.checkpoint).c_str(), when(g.date).c_str());
+        ImGui::PopID();
+    }
+    if (has_undo) {
+        ImGui::SeparatorText(T("Undo"));
+        ImGui::PushID("undo");
+        ImGui::BeginDisabled(practice);
+        if (ImGui::Button(TI("Load"))) {
+            pending = Action::LoadUndo;
+            pending_digit = undo.digit;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(TI("Delete"))) {
+            pending = Action::DeleteUndo;
+            pending_digit = undo.digit;
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (slot.used) {
-            ImGui::TextWrapped("%s%s", BbSaves::Describe(slot.checkpoint).c_str(), when(slot).c_str());
-        } else {
-            ImGui::TextDisabled("%s", T("empty"));
-        }
-        ImGui::PopID();
-    }
-    const BbSaves::Slot& undo = BbSaves::GetSlot(BbSaves::UndoSlot);
-    if (undo.used) {
-        ImGui::PushID("undo");
-        if (ImGui::Button(TI("Load"))) {
-            pending = Action::Load;
-            pending_slot = BbSaves::UndoSlot;
-        }
-        ImGui::SameLine();
-        ImGui::TextWrapped(T("Before the last load: %s%s"), BbSaves::Describe(undo.checkpoint).c_str(),
-                           when(undo).c_str());
+        const std::string name =
+            fmt::format(fmt::runtime(T("Undo - Game {} as it was before it was saved over")), undo.digit + 1);
+        ImGui::TextWrapped("%s: %s%s", name.c_str(), BbSaves::Describe(undo.checkpoint).c_str(),
+                           undo.date.empty() ? ""
+                                             : ("  (" + fmt::format(fmt::runtime(T("Kept {}")), undo.date) + ")").c_str());
         ImGui::PopID();
     }
 
     if (pending != Action::None) {
         ImGui::Spacing();
-        std::string question;
-        bool ask = true;
-        if (pending == Action::Store) {
-            question = fmt::format(fmt::runtime(T("Replace what slot {} holds with your current save?")),
-                                   pending_slot + 1);
-            ask = BbSaves::GetSlot(pending_slot).used;
-        } else if (pending == Action::Load) {
-            question = pending_slot == BbSaves::StorySlot
-                           ? std::string(T("Load the story save? The game restarts and Continue starts there. "
-                                           "Your current save is kept as \"Before the last load\"."))
-                       : pending_slot == BbSaves::UndoSlot
-                           ? std::string(T("Load the save from before the last load? The game restarts and "
-                                           "Continue starts there. Your current save is kept as \"Before the "
-                                           "last load\"."))
-                           : fmt::format(fmt::runtime(T("Load slot {}? The game restarts and Continue starts "
-                                                        "there. Your current save is kept as \"Before the last "
-                                                        "load\".")),
-                                         pending_slot + 1);
-        } else {
-            question = T("Make your current save the story save?");
-        }
-        bool yes = !ask;
-        if (ask) {
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
-            ImGui::TextWrapped("%s", question.c_str());
-            ImGui::PopStyleColor();
-            yes = ImGui::Button(TI("Yes"));
-            ImGui::SameLine();
-            if (ImGui::Button(TI("Cancel"))) {
-                pending = Action::None;
-            }
+        const std::string question =
+            pending == Action::LoadGame
+                ? fmt::format(fmt::runtime(T("Load game {}? The game restarts and Continue starts there.")),
+                              pending_digit + 1)
+            : pending == Action::DeleteGame
+                ? fmt::format(fmt::runtime(T("Delete game {}? It moves to the savedata-deleted folder (not erased).")),
+                              pending_digit + 1)
+            : pending == Action::LoadUndo
+                ? fmt::format(fmt::runtime(T("Put game {} back as it was before it was saved over? The game restarts "
+                                             "and Continue starts there. The save it replaces becomes the next Undo.")),
+                              pending_digit + 1)
+                : std::string(T("Delete the Undo copy? It moves to the deleted folder (not erased)."));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+        ImGui::TextWrapped("%s", question.c_str());
+        ImGui::PopStyleColor();
+        const bool yes = ImGui::Button(TI("Yes"));
+        ImGui::SameLine();
+        if (ImGui::Button(TI("Cancel"))) {
+            pending = Action::None;
         }
         if (yes) {
             const Action action = pending;
             pending = Action::None;
-            if (action == Action::Store) {
-                BbSaves::Store(pending_slot, message);
-            } else if (action == Action::Load) {
-                BbSaves::Load(pending_slot, message);  // restarts the game when it works
+            if (action == Action::LoadGame) {
+                BbSaves::LoadGame(pending_digit, message);  // restarts the game when it works
+            } else if (action == Action::DeleteGame) {
+                BbSaves::DeleteGame(pending_digit, message);
+            } else if (action == Action::LoadUndo) {
+                BbSaves::LoadUndo(message);  // restarts the game when it works
             } else {
-                BbSaves::MakeStory(message);
+                BbSaves::DeleteUndo(message);
             }
             refreshed = -10.0;
         }
@@ -713,8 +688,8 @@ void SaveSlotsPage() {
         ImGui::TextWrapped("%s", message.c_str());
     }
     ImGui::Spacing();
-    TextGrey(T("Copies of this game's campaign save (the one Continue loads). Treasures, "
-                                "unlocks and trophies are not changed."));
+    TextGrey(T("Your games, as in the game's own Save and Load lists. Treasures, unlocks and trophies are not "
+               "changed."));
 }
 
 void Menu() {
@@ -903,13 +878,13 @@ void Menu() {
     }
     ImGui::EndTabItem();
     }
-    // Save slots: Uncharted 1, 2 and 3 (the collection's menu has no campaign save).
+    // Checkpoints and Saves: Uncharted 1, 2 and 3 (the collection's menu has no campaign save).
     if (BbSaves::Game() && ImGui::BeginTabItem(TI("Checkpoints"))) {
         CheckpointsPage();
         ImGui::EndTabItem();
     }
-    if (BbSaves::Game() && ImGui::BeginTabItem(TI("Save slots"))) {
-        SaveSlotsPage();
+    if (BbSaves::Game() && ImGui::BeginTabItem(TI("Saves"))) {
+        SavesPage();
         ImGui::EndTabItem();
     }
     ImGui::EndTabBar();

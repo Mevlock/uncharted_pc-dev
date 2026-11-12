@@ -704,6 +704,91 @@ TRANSLATIONS = {
                    'ゲームをセーブ'),
     'New save': L('Nueva partida guardada', 'Novo jogo salvo', 'Nouvelle sauvegarde', 'Neuer Spielstand',
                   'Nuovo salvataggio', '新規セーブ'),
+    # ---- Saves page (your games and the Undo copy) ----------------------------------------------------------------
+    'Saves': L('Partidas', 'Jogos salvos', 'Sauvegardes', 'Spielstände', 'Salvataggi', 'セーブ'),
+    'Your games': L('Tus partidas', 'Seus jogos', 'Vos parties', 'Deine Spiele', 'Le tue partite', 'あなたのゲーム'),
+    'No games yet: they appear once the game has saved.': L(
+        'Aún no hay partidas: aparecen cuando el juego guarda.',
+        'Ainda não há jogos: eles aparecem quando o jogo salva.',
+        'Pas encore de partie : elles apparaissent dès que le jeu sauvegarde.',
+        'Noch keine Spiele: Sie erscheinen, sobald das Spiel speichert.',
+        'Ancora nessuna partita: compaiono quando il gioco salva.',
+        'まだゲームがありません。ゲームがセーブすると表示されます。'),
+    'Practice mode: load or delete your games once the game has restarted.': L(
+        'Modo práctica: carga o borra tus partidas cuando el juego se haya reiniciado.',
+        'Modo de treino: carregue ou apague seus jogos depois que o jogo reiniciar.',
+        'Mode entraînement : chargez ou supprimez vos parties une fois le jeu redémarré.',
+        'Übungsmodus: Lade oder lösche deine Spiele, sobald das Spiel neu gestartet ist.',
+        'Modalità pratica: carica o elimina le tue partite dopo il riavvio del gioco.',
+        '練習モード: ゲームの再起動後に、ゲームのロードや削除ができます。'),
+    'Load game {}? The game restarts and Continue starts there.': L(
+        '¿Cargar la partida {}? El juego se reinicia y Continuar empieza ahí.',
+        'Carregar o jogo {}? O jogo reinicia e Continuar começa ali.',
+        'Charger la partie {} ? Le jeu redémarre et Continuer reprend là.',
+        'Spiel {} laden? Das Spiel startet neu und Fortsetzen beginnt dort.',
+        'Caricare la partita {}? Il gioco si riavvia e Continua parte da lì.',
+        'ゲーム {} をロードしますか？ゲームが再起動し、コンティニューはそこから始まります。'),
+    'Delete game {}? It moves to the savedata-deleted folder (not erased).': L(
+        '¿Borrar la partida {}? Pasa a la carpeta savedata-deleted (no se elimina).',
+        'Apagar o jogo {}? Ele vai para a pasta savedata-deleted (não é apagado de vez).',
+        'Supprimer la partie {} ? Elle est déplacée dans le dossier savedata-deleted (pas effacée).',
+        'Spiel {} löschen? Es kommt in den Ordner savedata-deleted (nicht endgültig gelöscht).',
+        'Eliminare la partita {}? Viene spostata nella cartella savedata-deleted (non cancellata).',
+        'ゲーム {} を削除しますか？savedata-deleted フォルダーに移動します(完全には消えません)。'),
+    'Put game {} back as it was before it was saved over? The game restarts and Continue starts there. The save it '
+    'replaces becomes the next Undo.': L(
+        '¿Devolver la partida {} a como estaba antes de guardar encima? El juego se reinicia y Continuar empieza ahí. '
+        'La partida que reemplaza pasa a ser el siguiente Deshacer.',
+        'Voltar o jogo {} para como estava antes de salvar por cima? O jogo reinicia e Continuar começa ali. O jogo '
+        'salvo que ele substitui vira o próximo Desfazer.',
+        'Remettre la partie {} telle qu’elle était avant d’être écrasée ? Le jeu redémarre et Continuer reprend là. '
+        'La sauvegarde qu’elle remplace devient le prochain Annuler.',
+        'Spiel {} so zurückholen, wie es vor dem Überspeichern war? Das Spiel startet neu und Fortsetzen beginnt '
+        'dort. Der ersetzte Spielstand wird das nächste Rückgängig.',
+        'Riportare la partita {} com’era prima di salvarci sopra? Il gioco si riavvia e Continua parte da lì. Il '
+        'salvataggio che sostituisce diventa il prossimo Annulla.',
+        'ゲーム {} を上書きされる前の状態に戻しますか？ゲームが再起動し、コンティニューはそこから始まります。'
+        '置き換えられるセーブは次の「元に戻す」になります。'),
+    'Delete the Undo copy? It moves to the deleted folder (not erased).': L(
+        '¿Borrar la copia de Deshacer? Pasa a la carpeta deleted (no se elimina).',
+        'Apagar a cópia de Desfazer? Ela vai para a pasta deleted (não é apagada de vez).',
+        'Supprimer la copie Annuler ? Elle est déplacée dans le dossier deleted (pas effacée).',
+        'Die Rückgängig-Kopie löschen? Sie kommt in den Ordner deleted (nicht endgültig gelöscht).',
+        'Eliminare la copia di Annulla? Viene spostata nella cartella deleted (non cancellata).',
+        '「元に戻す」のコピーを削除しますか？deleted フォルダーに移動します(完全には消えません)。'),
+    "Your games, as in the game's own Save and Load lists. Treasures, unlocks and trophies are not changed.": L(
+        'Tus partidas, como en las listas de guardar y cargar del propio juego. Los tesoros, desbloqueos y trofeos no '
+        'cambian.',
+        'Seus jogos, como nas listas de salvar e carregar do próprio jogo. Tesouros, desbloqueios e troféus não mudam.',
+        'Vos parties, comme dans les listes Sauvegarder et Charger du jeu. Les trésors, déblocages et trophées ne '
+        'changent pas.',
+        'Deine Spiele, wie in den Speichern- und Laden-Listen des Spiels. Schätze, Freischaltungen und Trophäen '
+        'ändern sich nicht.',
+        'Le tue partite, come negli elenchi Salva e Carica del gioco. Tesori, sblocchi e trofei non cambiano.',
+        'ゲーム本来のセーブ・ロード一覧と同じ、あなたのゲームです。お宝、アンロック、トロフィーは変わりません。'),
+    'That game is not there any more.': L(
+        'Esa partida ya no está.', 'Esse jogo não está mais lá.', 'Cette partie n’existe plus.',
+        'Dieses Spiel gibt es nicht mehr.', 'Quella partita non c’è più.', 'そのゲームはもうありません。'),
+    'The game you are playing is not deleted.': L(
+        'La partida que estás jugando no se borra.', 'O jogo que você está jogando não é apagado.',
+        'La partie en cours n’est pas supprimée.', 'Das Spiel, das du gerade spielst, wird nicht gelöscht.',
+        'La partita che stai giocando non viene eliminata.', 'プレイ中のゲームは削除されません。'),
+    'Could not delete it.': L('No se pudo borrar.', 'Não foi possível apagar.', 'Suppression impossible.',
+                              'Konnte nicht gelöscht werden.', 'Impossibile eliminarla.', '削除できませんでした。'),
+    'Game {} deleted (moved to savedata-deleted).': L(
+        'Partida {} borrada (movida a savedata-deleted).', 'Jogo {} apagado (movido para savedata-deleted).',
+        'Partie {} supprimée (déplacée dans savedata-deleted).', 'Spiel {} gelöscht (nach savedata-deleted verschoben).',
+        'Partita {} eliminata (spostata in savedata-deleted).', 'ゲーム {} を削除しました(savedata-deleted に移動)。'),
+    'There is nothing to undo.': L('No hay nada que deshacer.', 'Não há nada para desfazer.',
+                                   'Il n’y a rien à annuler.', 'Es gibt nichts rückgängig zu machen.',
+                                   'Non c’è niente da annullare.', '元に戻すものはありません。'),
+    'The Undo copy is deleted (moved to the deleted folder).': L(
+        'La copia de Deshacer está borrada (movida a la carpeta deleted).',
+        'A cópia de Desfazer foi apagada (movida para a pasta deleted).',
+        'La copie Annuler est supprimée (déplacée dans le dossier deleted).',
+        'Die Rückgängig-Kopie ist gelöscht (in den Ordner deleted verschoben).',
+        'La copia di Annulla è stata eliminata (spostata nella cartella deleted).',
+        '「元に戻す」のコピーを削除しました(deleted フォルダーに移動)。'),
     'Where to save': L('Dónde guardar', 'Onde salvar', 'Où sauvegarder', 'Wo speichern', 'Dove salvare',
                        'セーブ先'),
     'Game {}': L('Partida {}', 'Jogo {}', 'Partie {}', 'Spiel {}', 'Partita {}', 'ゲーム {}'),

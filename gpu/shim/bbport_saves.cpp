@@ -37,6 +37,8 @@
 extern "C" {
 int runtime_savedata_dir(char* out, size_t size);
 int runtime_savedata_mounted(void);
+int runtime_savedata_trash_save(const char* dir); // runtime_savedata.c: a save of the game to savedata-deleted
+int bbport_saves_trash_undo(void);
 void runtime_restart(void);
 void runtime_checkpoint_request(uint32_t task);
 int runtime_checkpoint_practice(void);
@@ -70,7 +72,6 @@ constexpr size_t header_size = 0xc;
 constexpr int chapter_end_checkpoints = 2;
 
 std::recursive_mutex lock;
-BbSaves::Slot slots[BbSaves::StorySlot + 1];
 BbSaves::Checkpoint current;
 fs::file_time_type current_time{};
 std::chrono::steady_clock::time_point current_checked{};
@@ -265,6 +266,24 @@ std::string Now() {
     std::strftime(text, sizeof(text), "%Y-%m-%d %H:%M", std::localtime(&t));
     return text;
 }
+// A file's time as Now() writes it ("2026-11-12 00:15"); empty when it is not there.
+std::string FileDate(const fs::path& file) {
+    std::error_code ec;
+    const auto written = fs::last_write_time(file, ec);
+    if (ec) {
+        return {};
+    }
+    const auto sys = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        written - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+    const std::time_t t = std::chrono::system_clock::to_time_t(sys);
+    char text[64];
+    std::strftime(text, sizeof(text), "%Y-%m-%d %H:%M", std::localtime(&t));
+    return text;
+}
+// The Undo copy (defined with the game's save lists, further down).
+fs::path OverwriteDir(int game);
+std::string UndoName(int game);
+bool SwapUndo(int game, const std::string& name, std::string& error);
 
 // `to` replaced by a copy of the two folders of a save (the save and its .sce_sys) found in `from`: copied next
 // to it first, so a failed copy leaves `to` as it was.
@@ -379,102 +398,108 @@ Checkpoint Current() {
     return current;
 }
 
-void Refresh() {
+std::vector<GameSave> Games() {
     std::lock_guard guard(lock);
+    std::vector<GameSave> games;
     const int game = Game();
-    for (int i = 0; i <= StorySlot; ++i) {
-        Slot s;
-        const fs::path dir = SlotDir(game, i);
-        std::error_code ec;
-        if (game && fs::exists(dir / SlotName(game) / "USR-DATA", ec)) {
-            s.used = true;
-            s.progress = ReadProgress(dir / (SlotName(game) + ".sce_sys"));
-            s.checkpoint = ReadCheckpoint(game, dir / SlotName(game));
-            std::ifstream info(dir / "saved.txt");
-            std::getline(info, s.date);
-        }
-        slots[i] = s;
+    if (!game) {
+        return games;
     }
-}
-
-const Slot& GetSlot(int index) {
-    return slots[index];
-}
-
-bool AwayFromStory() {
-    std::lock_guard guard(lock);
-    const StoryStatus s = ReadStory(Game());
-    return s.exists && !s.following;
-}
-
-bool Store(int index, std::string& message) {
-    std::lock_guard guard(lock);
-    const int game = Game();
-    if (!game || index < 0 || index > StorySlot) {
-        message = T("Save slots are only for Uncharted 1, 2 and 3.");
-        return false;
-    }
-    if (runtime_savedata_mounted()) {
-        message = T("The game is saving: try again in a moment.");
-        return false;
-    }
-    // In practice mode the save the page shows as "Now" is the practice copy: a slot or the story save takes that.
-    // The undo copy (before a Load or Keep this progress) is always the player's own campaign save.
-    const bool practice = index != UndoSlot && runtime_checkpoint_practice();
-    const fs::path source = practice ? GameBackups(game) / "practice" : SavesDir();
+    const fs::path saves = SavesDir();
     std::error_code ec;
-    if (!fs::exists(source / ActiveName(game) / "USR-DATA", ec)) {
-        message = practice ? T("Nothing to save yet: the game has not saved since the jump.")
-                           : T("There is no campaign save yet.");
-        return false;
+    for (int d = 0; d <= 9; ++d) {
+        const std::string name = CampaignName(game, d);
+        if (!fs::exists(saves / name / "USR-DATA", ec)) {
+            continue;
+        }
+        GameSave g;
+        g.digit = d;
+        g.playing = d == ActiveDigit(game);
+        g.checkpoint = ReadCheckpoint(game, saves / name);
+        g.date = FileDate(saves / (name + ".sce_sys") / "param.bin");
+        games.push_back(g);
     }
-    std::string error;
-    if (!CopyCampaign(game, index, error, source)) {
-        message = fmt::format(fmt::runtime(T("Could not copy the save: {}")), error);
-        return false;
-    }
-    std::printf("Save slots: %s copied to %s\n", practice ? "practice save" : "campaign save",
-                Utf8(SlotDir(game, index)).c_str());
-    Refresh();
-    message = index < SlotCount ? fmt::format(fmt::runtime(T("Saved in slot {}.")), index + 1) : std::string(T("Saved."));
-    return true;
+    return games;
 }
 
-bool MakeStory(std::string& message) {
-    std::lock_guard guard(lock);
-    if (!Store(StorySlot, message)) {
-        return false;
-    }
-    WriteStory(Game(), ReadCheckpoint(Game(), SlotDir(Game(), StorySlot) / SlotName(Game())).task, true);
-    message = T("This is now your story save.");
-    return true;
-}
-
-bool Load(int index, std::string& message) {
+bool UndoSave(GameSave& out) {
     std::lock_guard guard(lock);
     const int game = Game();
-    if (!game || index < 0 || index > StorySlot || !GetSlot(index).used) {
-        message = T("That slot is empty.");
+    const std::string name = game ? UndoName(game) : std::string();
+    if (name.empty()) {
         return false;
     }
+    out = {};
+    out.digit = CampaignDigit(game, name);
+    out.checkpoint = ReadCheckpoint(game, OverwriteDir(game) / name);
+    std::ifstream info(OverwriteDir(game) / "saved.txt");
+    std::getline(info, out.date);
+    return true;
+}
+
+namespace {
+// A request for the next start (pending-load.txt), then the restart. False (with `message`) when it could not be.
+bool RequestAndRestart(int game, const std::string& request, std::string& message) {
     if (runtime_savedata_mounted()) {
         message = T("The game is saving: try again in a moment.");
-        return false;
-    }
-    // Loading the before-load copy itself puts it back as it is (no new copy over it).
-    if (index != UndoSlot && !Store(UndoSlot, message)) {
         return false;
     }
     std::ofstream pending(PendingFile(game));
-    pending << "u" << game << " " << SlotFolder(game, index) << "\n";
+    pending << "u" << game << " " << request << "\n";
     pending.close();
     if (!pending) {
         message = T("Could not write the load request.");
         return false;
     }
-    std::printf("Save slots: %s requested, restarting\n", Utf8(SlotDir(game, index)).c_str());
+    std::printf("Saves: %s requested, restarting\n", request.c_str());
     std::fflush(stdout);
     runtime_restart();
+    return true;
+}
+} // namespace
+
+bool LoadGame(int digit, std::string& message) {
+    std::lock_guard guard(lock);
+    const int game = Game();
+    std::error_code ec;
+    if (!game || digit < 0 || digit > 9 || !fs::exists(SavesDir() / CampaignName(game, digit) / "USR-DATA", ec)) {
+        message = T("That game is not there any more.");
+        return false;
+    }
+    return RequestAndRestart(game, "continue " + CampaignName(game, digit), message);
+}
+
+bool DeleteGame(int digit, std::string& message) {
+    std::lock_guard guard(lock);
+    const int game = Game();
+    if (!game || digit < 0 || digit > 9 || digit == ActiveDigit(game) || runtime_checkpoint_practice()) {
+        message = T("The game you are playing is not deleted.");
+        return false;
+    }
+    if (runtime_savedata_trash_save(CampaignName(game, digit).c_str()) != 0) {
+        message = T("Could not delete it.");
+        return false;
+    }
+    message = fmt::format(fmt::runtime(T("Game {} deleted (moved to savedata-deleted).")), digit + 1);
+    return true;
+}
+
+bool LoadUndo(std::string& message) {
+    std::lock_guard guard(lock);
+    const int game = Game();
+    if (!game || UndoName(game).empty()) {
+        message = T("There is nothing to undo.");
+        return false;
+    }
+    return RequestAndRestart(game, "undo", message);
+}
+
+bool DeleteUndo(std::string& message) {
+    if (!bbport_saves_trash_undo()) {
+        message = T("Could not delete it.");
+        return false;
+    }
+    message = T("The Undo copy is deleted (moved to the deleted folder).");
     return true;
 }
 
@@ -658,6 +683,8 @@ void ApplyPending(int game) {
     }
     if (folder == "practice-new") {
         f >> from_name >> to_name;
+    } else if (folder == "continue") {
+        f >> to_name;
     }
     f.close();
     if (which_game != "u" + std::to_string(game)) {
@@ -719,6 +746,30 @@ void ApplyPending(int game) {
         fs::remove_all(practice, ec);
         std::printf("Saves: the practice save is now game %d (%s); the other games are as they were\n", to_digit + 1,
                     to_name.c_str());
+        return;
+    }
+    if (folder == "continue" || folder == "undo") {
+        // The Saves page's Load: that game (or the Undo copy, swapped in first) made the newest, which Continue
+        // starts, and the game in play.
+        std::string name = to_name, error;
+        if (folder == "undo") {
+            name = UndoName(game);
+            if (name.empty() || !SwapUndo(game, name, error)) {
+                std::printf("Saves: Undo could NOT be put back (%s): the saves stay as they were\n",
+                            name.empty() ? "nothing kept" : error.c_str());
+                return;
+            }
+            std::printf("Saves: %s put back as it was (the save it replaced is the next Undo)\n", name.c_str());
+        }
+        const int digit = CampaignDigit(game, name);
+        const fs::path param = SavesDir() / (name + ".sce_sys") / "param.bin";
+        if (digit < 0 || !fs::exists(param, ec)) {
+            std::printf("Saves: %s is not there: Continue starts where it would\n", name.c_str());
+            return;
+        }
+        fs::last_write_time(param, fs::file_time_type::clock::now(), ec);
+        SetActiveDigit(game, digit);
+        std::printf("Saves: Continue starts %s%s\n", name.c_str(), ec ? " (its time could not be set)" : "");
         return;
     }
     PutBack(game, folder);
