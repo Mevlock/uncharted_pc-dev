@@ -39,6 +39,9 @@ std::string picture_game;           // the campaign save in play when it was tak
 // with no picture of play yet gets this one.
 std::vector<unsigned char> scene;
 std::string scene_game;
+// From the start (the title screen) and from opening another game until the fade into its play: no clean pictures.
+bool wait_fade = true;
+std::string opened_game; // the campaign save last opened ("SAVEDATA031")
 Clock::time_point clean_at{};       // the newest clean picture's time (a frame picture then waits its turn)
 Clock::time_point last_request{}, last_clean_request{};
 // The camera hooks keep running behind the pause menu, so frame pictures go on being taken there (with the menu in
@@ -151,13 +154,15 @@ bool Wanted() {
 
 void Store(const unsigned char* rgba) {
     std::vector<unsigned char> rgb = ToRgb(rgba);
-    if (Blank(rgb)) {
-        return;
-    }
+    const bool blank = Blank(rgb);
     const std::string game = GameInPlay();
     std::scoped_lock lock{mutex};
-    if (Clock::now() - clean_at <= std::chrono::seconds(3)) {
-        return; // a clean picture came in meanwhile
+    if (blank) {
+        wait_fade = false;
+        return;
+    }
+    if (wait_fade || Clock::now() - clean_at <= std::chrono::seconds(3)) {
+        return; // the title screen / a menu before the fade into play, or a clean picture came in meanwhile
     }
     picture = std::move(rgb);
     picture_game = game;
@@ -177,12 +182,17 @@ bool WantedClean() {
 
 void StoreClean(const unsigned char* rgba) {
     std::vector<unsigned char> rgb = ToRgb(rgba);
-    if (Blank(rgb)) {
-        return; // a fade (the frame picture is black then too, and not kept either)
-    }
+    const bool blank = Blank(rgb);
     const std::string game = GameInPlay();
     const bool in_play = InPlay(); // a follow / cover / aim camera (also behind the pause menu)
     std::scoped_lock lock{mutex};
+    if (blank) {
+        wait_fade = false; // the load into the game: what follows is its play
+        return;            // a fade (the frame picture is black then too, and not kept either)
+    }
+    if (wait_fade) {
+        return; // the title screen or the menu the game was opened from
+    }
     if (in_play) {
         picture = std::move(rgb);
         picture_game = game;
@@ -200,11 +210,22 @@ void NoteSaveList() {
     save_list_at = Clock::now();
 }
 
-void CampaignOpened(const std::string&) {}
+// Another game is opened (a new game from the title screen or Chapter Select, a load): until the fade into it, the
+// screen shows the title or the menu it was opened from, not its play.
+void CampaignOpened(const std::string& dir) {
+    const std::string save = SaveOf(dir + "/");
+    std::scoped_lock lock{mutex};
+    if (save != opened_game) {
+        opened_game = save;
+        wait_fade = true;
+    }
+}
 
-// The game loads one of its saves: the picture from before the last pause belongs to the play before it.
+// The game loads one of its saves: the picture from before the last pause belongs to the play before it, and the
+// pictures until the fade into the load show the menu.
 void Loading(const std::string&) {
     std::scoped_lock lock{mutex};
+    wait_fade = true;
     save_list_at = {};
     before_pause.clear();
     before_pause_game.clear();
