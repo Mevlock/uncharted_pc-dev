@@ -1350,7 +1350,9 @@ void ChoiceBox() {
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
                                    viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(viewport->WorkSize.x * 0.36f, 0.0f),
+    // As wide as its cards and help lines (UI scale: the same look at every resolution and on an ultrawide; a share of
+    // the screen's width left room to the right of the cards there).
+    ImGui::SetNextWindowSizeConstraints(ImVec2(std::min(560.0f * s, viewport->WorkSize.x * 0.9f), 0.0f),
                                         ImVec2(viewport->WorkSize.x * 0.8f, viewport->WorkSize.y * 0.8f));
     ImGui::SetNextWindowBgAlpha(0.96f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f * s);
@@ -1404,6 +1406,16 @@ void ChoiceBox() {
     // their text looked ragged).
     static float card_width = 0.0f;
     float widest = 0.0f;
+    // ...and as wide as the help lines below (or the window's least width) when they are wider: the cards' right edge
+    // meets the window's. From the texts, not the window: cards sized by the window would hold it at that width.
+    {
+        float help = std::min(560.0f * s, viewport->WorkSize.x * 0.9f) - 2.0f * 18.0f * s;
+        for (const char* line : {"Up/Down or D-pad: choose   Enter or Cross (A): OK   Esc or Circle (B): cancel",
+                                 "Mouse: point to choose, click = OK, right button = cancel"}) {
+            help = std::max(help, ImGui::CalcTextSize(T(line)).x);
+        }
+        card_width = std::max(card_width, help - 2.0f * card_pad);
+    }
     ImDrawList* draw = ImGui::GetWindowDrawList();
     for (int i = 0; i < count; ++i) {
         const bool selected = i == choice_index;
