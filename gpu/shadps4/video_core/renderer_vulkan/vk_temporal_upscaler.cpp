@@ -2922,9 +2922,12 @@ std::chrono::steady_clock::time_point fade_window_until{}, fade_last_call{};
 float fade_previous = -1.0f;
 int fade_steady = 0;
 int fade_quiet = 0; // frames in a row with the brightness neither rising nor falling (the jitter's hold)
-std::array<float, 32> fade_history{}; // brightness readings of the window, a ring
-size_t fade_history_count = 0;
 constexpr u32 FadeSamples = 64;
+std::array<float, 32> fade_history{}; // brightness readings of the window, a ring
+// The same readings per sample point: a fade moves (nearly) all of them the same way, a moving camera some up and
+// some down (U3 chapter 2, walking in the street: the mean wobbled 0.78x-1.24x and kept the history resetting).
+std::array<std::array<float, FadeSamples>, 32> fade_sample_history{};
+size_t fade_history_count = 0;
 } // namespace
 std::atomic<long long> g_fade_cut_ns{0}; // set at a camera cut (ConsumeCut)
 
@@ -2966,13 +2969,15 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
     // The brightness of a frame copied a few frames ago (finished on the GPU by now).
     FadeSlot& slot = fade_slots[fade_next];
     float brightness = -1.0f;
+    std::array<float, FadeSamples> samples{};
     if (slot.pending && scheduler.IsFree(slot.tick)) {
         vmaInvalidateAllocation(instance.GetAllocator(), slot.allocation, 0, VK_WHOLE_SIZE);
         float sum = 0.0f;
         for (u32 i = 0; i < FadeSamples; ++i) {
+            float value = 0.0f;
             if (slot.bytes_per_pixel == 4) {
                 const u8* p = static_cast<const u8*>(slot.mapped) + i * 4;
-                sum += (p[0] + p[1] + p[2]) / (3.0f * 255.0f);
+                value = (p[0] + p[1] + p[2]) / (3.0f * 255.0f);
             } else {
                 const u16* p = reinterpret_cast<const u16*>(static_cast<const u8*>(slot.mapped) + i * 8);
                 for (int c = 0; c < 3; ++c) {
@@ -2980,9 +2985,11 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
                     const u32 e = (h >> 10) & 0x1f, m = h & 0x3ff;
                     const float v = e == 0 ? m / 1024.0f / 16384.0f
                                            : (1.0f + m / 1024.0f) * std::ldexp(1.0f, int(e) - 15);
-                    sum += std::min(v, 4.0f) / 3.0f;
+                    value += std::min(v, 4.0f) / 3.0f;
                 }
             }
+            samples[i] = value;
+            sum += value;
         }
         brightness = sum / FadeSamples;
         slot.pending = false;
@@ -3045,14 +3052,29 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
     // the rise is measured against the reading ~32 frames earlier (3% and a small floor). Readings
     // are kept on every frame; a (near) black picture also opens the window: a checkpoint restart
     // fades out and in without any camera cut (Drake restarts where he stood).
+    // A rise or fall counts as a fade only when the sample points that changed (by more than 1%) went the same way:
+    // 4 in 5 of them at least, and 8 or more changed (a fade from black leaves its black parts as they are; the
+    // camera moving over the scene brightens some and darkens others).
     bool brightening = false, darkening = false;
+    int rising = 0, falling = 0;
     const bool have_reading = brightness >= 0.0f;
     if (have_reading) {
         const bool have_earlier = fade_history_count >= fade_history.size();
-        const float oldest = have_earlier ? fade_history[fade_history_count % fade_history.size()]
-                                          : fade_history[0];
-        brightening = fade_history_count > 0 && brightness > oldest * 1.03f + 0.002f;
-        darkening = fade_history_count > 0 && brightness < oldest * 0.97f - 0.002f;
+        const size_t oldest_index = have_earlier ? fade_history_count % fade_history.size() : 0;
+        const float oldest = fade_history[oldest_index];
+        if (fade_history_count > 0) {
+            const auto& before = fade_sample_history[oldest_index];
+            for (u32 i = 0; i < FadeSamples; ++i) {
+                rising += samples[i] > before[i] * 1.01f + 0.002f;
+                falling += samples[i] < before[i] * 0.99f - 0.002f;
+            }
+        }
+        const int changed = rising + falling;
+        const bool together_up = changed >= 8 && rising * 5 >= changed * 4;
+        const bool together_down = changed >= 8 && falling * 5 >= changed * 4;
+        brightening = fade_history_count > 0 && brightness > oldest * 1.03f + 0.002f && together_up;
+        darkening = fade_history_count > 0 && brightness < oldest * 0.97f - 0.002f && together_down;
+        fade_sample_history[fade_history_count % fade_history.size()] = samples;
         fade_history[fade_history_count % fade_history.size()] = brightness;
         ++fade_history_count;
         if (brightness < 0.03f) {
@@ -3079,9 +3101,10 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
     static int noted = 0;
     if (noted < 4000 && std::getenv("BB_DLSS_FADE_LOG")) {
         ++noted;
-        std::printf("DLSS fade: t=%.3f brightness %.4f %s (steady %d)%s\n",
+        std::printf("DLSS fade: t=%.3f brightness %.4f %s (steady %d)%s up %d down %d\n",
                     std::chrono::duration<double>(now.time_since_epoch()).count(), brightness,
-                    resetting ? "reset" : "kept", fade_steady, fade_was_resetting ? " no jitter" : "");
+                    resetting ? "reset" : "kept", fade_steady, fade_was_resetting ? " no jitter" : "", rising,
+                    falling);
     }
     return resetting;
 }
