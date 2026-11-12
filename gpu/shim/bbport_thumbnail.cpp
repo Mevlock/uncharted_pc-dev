@@ -39,9 +39,11 @@ std::string picture_game;           // the campaign save in play when it was tak
 // with no picture of play yet gets this one.
 std::vector<unsigned char> scene;
 std::string scene_game;
-// From the start (the title screen) and from opening another game until the fade into its play: no clean pictures.
-bool wait_fade = true;
 std::string opened_game; // the campaign save last opened ("SAVEDATA031")
+// The pause menu's Save game list was shown: the save picked there is a save by hand. A game's first picture comes
+// with its first save by hand; until then it shows the game's icon (its first saves, when it is made and at the
+// first checkpoints, are written while the title screen or a fade is the newest picture).
+Clock::time_point manual_at{};
 Clock::time_point clean_at{};       // the newest clean picture's time (a frame picture then waits its turn)
 Clock::time_point last_request{}, last_clean_request{};
 // The camera hooks keep running behind the pause menu, so frame pictures go on being taken there (with the menu in
@@ -131,6 +133,16 @@ bool IsCampaign(const std::string& save) {
     return save.size() == 11 && save.compare(0, 9, "SAVEDATA0") == 0 && save[10] >= '0' && save[10] <= '9';
 }
 
+// (mutex held) Opening another game or a load: the pictures so far show the play before it or the title screen.
+void ForgetPlay() {
+    picture.clear();
+    picture_game.clear();
+    scene.clear();
+    scene_game.clear();
+    before_pause.clear();
+    before_pause_game.clear();
+}
+
 } // namespace
 
 bool Wanted() {
@@ -157,12 +169,8 @@ void Store(const unsigned char* rgba) {
     const bool blank = Blank(rgb);
     const std::string game = GameInPlay();
     std::scoped_lock lock{mutex};
-    if (blank) {
-        wait_fade = false;
-        return;
-    }
-    if (wait_fade || Clock::now() - clean_at <= std::chrono::seconds(3)) {
-        return; // the title screen / a menu before the fade into play, or a clean picture came in meanwhile
+    if (blank || Clock::now() - clean_at <= std::chrono::seconds(3)) {
+        return; // a fade, or a clean picture came in meanwhile
     }
     picture = std::move(rgb);
     picture_game = game;
@@ -187,11 +195,7 @@ void StoreClean(const unsigned char* rgba) {
     const bool in_play = InPlay(); // a follow / cover / aim camera (also behind the pause menu)
     std::scoped_lock lock{mutex};
     if (blank) {
-        wait_fade = false; // the load into the game: what follows is its play
-        return;            // a fade (the frame picture is black then too, and not kept either)
-    }
-    if (wait_fade) {
-        return; // the title screen or the menu the game was opened from
+        return; // a fade (the frame picture is black then too, and not kept either)
     }
     if (in_play) {
         picture = std::move(rgb);
@@ -207,28 +211,30 @@ void ForgetSave(const std::string&) {}
 
 void NoteSaveList() {
     std::scoped_lock lock{mutex};
-    save_list_at = Clock::now();
+    save_list_at = manual_at = Clock::now();
 }
 
-// Another game is opened (a new game from the title screen or Chapter Select, a load): until the fade into it, the
-// screen shows the title or the menu it was opened from, not its play.
+// Another game is opened (a new game from the title screen or Chapter Select, a load): the pictures so far are not
+// of its play.
 void CampaignOpened(const std::string& dir) {
     const std::string save = SaveOf(dir + "/");
     std::scoped_lock lock{mutex};
     if (save != opened_game) {
         opened_game = save;
-        wait_fade = true;
+        if (manual_at != Clock::time_point{} && Clock::now() - manual_at < std::chrono::minutes(2)) {
+            // Saved by hand into a new save or over another game: the play so far goes into it, pictures too.
+            picture_game = scene_game = before_pause_game = save;
+        } else {
+            ForgetPlay();
+        }
     }
 }
 
-// The game loads one of its saves: the picture from before the last pause belongs to the play before it, and the
-// pictures until the fade into the load show the menu.
+// The game loads one of its saves: the pictures so far belong to the play before it.
 void Loading(const std::string&) {
     std::scoped_lock lock{mutex};
-    wait_fade = true;
+    ForgetPlay();
     save_list_at = {};
-    before_pause.clear();
-    before_pause_game.clear();
 }
 
 } // namespace BbThumbnail
@@ -246,6 +252,16 @@ extern "C" int bbgpu_thumbnail_save(const char* path) {
         const auto now = Clock::now();
         const bool clean_recent = now - clean_at <= std::chrono::seconds(3);
         const auto mine = [&](const std::string& game) { return !IsCampaign(save) || game == save; };
+        if (IsCampaign(save)) {
+            const bool by_hand = manual_at != Clock::time_point{} && now - manual_at < std::chrono::minutes(2);
+            std::error_code ec;
+            if (!by_hand && !std::filesystem::exists(path, ec)) {
+                return 0; // no save by hand yet: the game's icon
+            }
+            if (by_hand) {
+                manual_at = {}; // this one
+            }
+        }
         if (!clean_recent && save_list_at != Clock::time_point{} && now - save_list_at < std::chrono::minutes(2) &&
             !before_pause.empty() && mine(before_pause_game)) {
             // A save from the pause menu's list without clean pictures: the frame from before the pause (the menu
