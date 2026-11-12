@@ -341,6 +341,7 @@ static struct { uint32_t mode; int waits, pick; void *user_data; char dir[32]; u
 #define SAVE_LIST_SLOTS 20
 #define SAVE_UNDO 200                /* the game kept before it was saved over (bbport_saves.cpp) */
 int bbport_saves_keep_before_overwrite(const char *dir);
+void bbport_saves_fresh_start(const char *dir);
 int bbport_saves_undo_name(char *out, size_t size);
 int bbport_saves_game(void);
 void bbport_saves_active_name(char *out, size_t size);
@@ -402,6 +403,11 @@ static void save_choice_finish(int entry) {
         if ((save_choice.saving || save_choice.choosing_game) && !runtime_checkpoint_practice() &&
             (!save_choice.saving || strncmp(save_choice.dirs[dir],save_choice.campaign,32)))
             bbport_saves_keep_before_overwrite(save_choice.dirs[dir]);
+        /* Chapter Select or New Game over a game: it starts afresh, so it shows the game's icon until it is saved by
+         * hand (its old picture stays with its Undo copy). Its first save is written as the title screen or the menu
+         * is still shown, and that picture went on it. */
+        if (save_choice.choosing_game && !runtime_checkpoint_practice())
+            bbport_saves_fresh_start(save_choice.dirs[dir]);
     }
     if (one) {
         save_dialog.pick=runtime_savedata_pick(save_choice.user,save_choice.title,one,1,0,NULL,save_dialog.dir,

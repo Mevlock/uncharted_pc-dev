@@ -1433,6 +1433,22 @@ extern "C" int bbport_saves_keep_before_overwrite(const char* dir) {
     return ok;
 }
 
+// Chapter Select or New Game over one of the games (runtime_services.c): its picture goes (the game's icon until it
+// is saved by hand; the Undo copy made just before keeps the old one).
+extern "C" void bbport_saves_fresh_start(const char* dir) {
+    Guarded("fresh start", [&] {
+        std::lock_guard guard(lock);
+        const int game = BbSaves::Game();
+        if (!game || !dir || CampaignDigit(game, dir) < 0) {
+            return;
+        }
+        std::error_code ec;
+        if (fs::remove(SavesDir() / (std::string(dir) + ".sce_sys") / "thumb.png", ec)) {
+            std::printf("Saves: %s starts afresh: its picture goes until it is saved by hand\n", dir);
+        }
+    });
+}
+
 // The save Undo puts back (its name in `out`), 1 when there is one.
 extern "C" int bbport_saves_undo_name(char* out, size_t size) {
     std::lock_guard guard(lock);
