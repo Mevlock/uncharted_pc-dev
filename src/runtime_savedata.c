@@ -363,14 +363,22 @@ int runtime_savedata_mounted(void) {
  * deleting alike (a game deleting its campaign save, on New Game say, must not delete the player's own). Not only
  * the first: a game playing on its second campaign save (0.3.6.52's Chapter Select made one; Continue picks the
  * newest) wrote the jumps into the player's save there. The profile saves (SAVEDATA0<game>P, CC) stay as they are. */
-static void practice_redirect(const char *base, const char *name, char *host, size_t host_size, char *meta,
-                              size_t meta_size) {
-    if (!runtime_checkpoint_practice()) return;
+/* The running game (1-3) while practice mode is on, else 0. */
+static int practice_game(void) {
+    if (!runtime_checkpoint_practice()) return 0;
     const char *exe=getenv("BB_EXE");
-    const int game=!exe ? 0 : strstr(exe,"big3") ? 3 : strstr(exe,"big2") ? 2 : !strcmp(exe,"eboot.bin") ? 1 : 0;
+    return !exe ? 0 : strstr(exe,"big3") ? 3 : strstr(exe,"big2") ? 2 : !strcmp(exe,"eboot.bin") ? 1 : 0;
+}
+/* SAVEDATA0<game>0 to 9: a campaign save of `game`. */
+static int campaign_name(const char *name, int game) {
     char campaign[16];
     snprintf(campaign,sizeof(campaign),"SAVEDATA0%d",game);
-    if (game && strlen(name)==11 && !strncmp(name,campaign,10) && name[10]>='0' && name[10]<='9') {
+    return game && strlen(name)==11 && !strncmp(name,campaign,10) && name[10]>='0' && name[10]<='9';
+}
+static void practice_redirect(const char *base, const char *name, char *host, size_t host_size, char *meta,
+                              size_t meta_size) {
+    const int game=practice_game();
+    if (campaign_name(name,game)) {
         snprintf(host,host_size,"%s.backups/u%d/practice/%s",base,game,name);
         snprintf(meta,meta_size,"%s.backups/u%d/practice/%s.sce_sys",base,game,name);
     }
@@ -676,18 +684,29 @@ static ABI int32_t save_search(const SearchCond *cond, SearchResult *result) {
     char base[600];
     root(cond->user,cond->title ? cond->title->data : NULL,base,sizeof(base));
     Entry *entries=NULL; size_t count=0, capacity=0;
-    DIR *d=opendir(base);
-    for (struct dirent *e; d && (e=readdir(d));) {
-        size_t n=strlen(e->d_name);
-        if (e->d_name[0]=='.' || n>=32 || (n>8 && !strcmp(e->d_name+n-8,".sce_sys"))) continue;
-        if (cond->dir && cond->dir->data[0] && !like(e->d_name,cond->dir->data)) continue;
-        if (count==capacity) { capacity=capacity ? capacity*2 : 16; entries=realloc(entries,capacity*sizeof(*entries)); }
-        snprintf(entries[count].name,32,"%s",e->d_name);
-        char meta[680]; snprintf(meta,sizeof(meta),"%s/%s.sce_sys",base,e->d_name);
-        read_param(meta,&entries[count].param);
-        ++count;
+    /* Practice mode: the campaign saves are the practice copies, as for mounting and deleting (practice_redirect):
+     * the player's own are left out and the practice folder's listed, so a campaign save the game creates while
+     * practising (Chapter Select or New Game onto New save) is found right after, and one only in the player's
+     * folder is not offered for a mount that would not find it. */
+    const int game=practice_game();
+    char practice[640];
+    snprintf(practice,sizeof(practice),"%s.backups/u%d/practice",base,game);
+    for (int pass=0;pass<(game ? 2 : 1);++pass) {
+        const char *folder=pass ? practice : base;
+        DIR *d=opendir(folder);
+        for (struct dirent *e; d && (e=readdir(d));) {
+            size_t n=strlen(e->d_name);
+            if (e->d_name[0]=='.' || n>=32 || (n>8 && !strcmp(e->d_name+n-8,".sce_sys"))) continue;
+            if (game && campaign_name(e->d_name,game)!=pass) continue;
+            if (cond->dir && cond->dir->data[0] && !like(e->d_name,cond->dir->data)) continue;
+            if (count==capacity) { capacity=capacity ? capacity*2 : 16; entries=realloc(entries,capacity*sizeof(*entries)); }
+            snprintf(entries[count].name,32,"%s",e->d_name);
+            char meta[680]; snprintf(meta,sizeof(meta),"%s/%s.sce_sys",folder,e->d_name);
+            read_param(meta,&entries[count].param);
+            ++count;
+        }
+        if (d) closedir(d);
     }
-    if (d) closedir(d);
     sort_key=cond->key; sort_order=cond->order;
     if (count) qsort(entries,count,sizeof(*entries),compare);
     result->hits=(uint32_t)count;
