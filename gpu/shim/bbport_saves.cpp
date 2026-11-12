@@ -1331,6 +1331,8 @@ extern "C" void bbport_saves_before_mount(const char* dir, int read_only) {
         BbThumbnail::CampaignOpened(std::string(dir) + ".sce_sys");
         if (read_only) {
             BbThumbnail::Loading(std::string(dir) + ".sce_sys");
+        } else {
+            BbThumbnail::Writing(std::string(dir) + ".sce_sys");
         }
         if (list_pick < 0) {
             return;

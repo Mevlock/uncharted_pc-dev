@@ -40,6 +40,9 @@ std::string picture_game;           // the campaign save in play when it was tak
 std::vector<unsigned char> scene;
 std::string scene_game;
 std::string opened_game; // the campaign save last opened ("SAVEDATA031")
+// Since the start or a load, the game has not written a campaign save yet: play has not begun (the title screen, a
+// menu or the loading is on screen; the game writes a save as play begins).
+bool before_play = true;
 // The pause menu's Save game list was shown: the save picked there is a save by hand. A game's first picture comes
 // with its first save by hand; until then it shows the game's icon (its first saves, when it is made and at the
 // first checkpoints, are written while the title screen or a fade is the newest picture).
@@ -234,7 +237,16 @@ void CampaignOpened(const std::string& dir) {
 void Loading(const std::string&) {
     std::scoped_lock lock{mutex};
     ForgetPlay();
+    before_play = true;
     save_list_at = {};
+}
+
+void Writing(const std::string&) {
+    std::scoped_lock lock{mutex};
+    if (before_play) {
+        before_play = false;
+        ForgetPlay(); // this save keeps the picture it has
+    }
 }
 
 } // namespace BbThumbnail
