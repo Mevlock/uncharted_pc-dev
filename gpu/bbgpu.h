@@ -50,6 +50,8 @@ void bbgpu_choice_cancel(void);
  * the picture from before it). */
 int bbgpu_thumbnail_save(const char *path);
 void bbgpu_thumbnail_pause(void);
+/* runtime_checkpoint.c: a jump to a checkpoint, like a load for the save pictures. */
+void bbgpu_thumbnail_jump(void);
 /* 1 while the full-screen shader preparation page shows (the game runs behind it). */
 int bbgpu_preparation_screen(void);
 /* 1 once after the game's window came back from the background while it was in gameplay (BB_PAUSE_ON_FOCUS_LOST=1;

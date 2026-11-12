@@ -296,6 +296,11 @@ extern "C" int bbgpu_thumbnail_save(const char* path) {
     return 1;
 }
 
+// runtime_checkpoint.c, a jump to a checkpoint: like a load (the pictures so far are of the play before it).
+extern "C" void bbgpu_thumbnail_jump(void) {
+    BbThumbnail::Loading({});
+}
+
 extern "C" void bbgpu_thumbnail_pause(void) {
     using namespace BbThumbnail;
     std::scoped_lock lock{mutex};

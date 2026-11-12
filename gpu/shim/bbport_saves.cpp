@@ -686,6 +686,8 @@ void ApplyPending(int game) {
             std::printf("Saves: the practice save could not become a new game: %s\n", ec.message().c_str());
             return;
         }
+        // A new game: the game's icon until it is first saved by hand (the practice save's picture is of the jump).
+        fs::remove(SavesDir() / (to_name + ".sce_sys") / "thumb.png", ec);
         SetActiveDigit(game, to_digit);
         fs::remove_all(practice, ec);
         std::printf("Saves: the practice save is now game %d (%s); the other games are as they were\n", to_digit + 1,

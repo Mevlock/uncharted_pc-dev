@@ -11,6 +11,7 @@
  * mounts from <saves>.backups/u<game>/practice instead (runtime_savedata.c), a copy of the campaign save made
  * before the jump, so the jumps and everything played after them never reach the player's own save. */
 #include "runtime.h"
+#include "gpu/bbgpu.h"
 #include <inttypes.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -97,6 +98,7 @@ static void frame(const Build *b, uint64_t image) {
     }
     int fade=0;
     printf("Checkpoints: jumping to task %08x (%s)\n",task,b->name);
+    bbgpu_thumbnail_jump(); /* save pictures: like a load (the pictures so far are of the play before it) */
     fflush(stdout);
     ((PlayTask)(uintptr_t)(image+b->play_task))(t,2,&fade,1);
     atomic_store(&result,1);
@@ -218,6 +220,7 @@ static void old_frame(const OldBuild *b, uint64_t image) {
                                   : **(int *const *)((unsigned char *)t+0x40)==1;
     printf("Checkpoints: jumping to task %08x (%s%s)\n",task,b->name,active ? ", already the active task: reset" : "");
     fflush(stdout);
+    bbgpu_thumbnail_jump(); /* save pictures: like a load */
     if (active) {
         ((ResetTasks)(uintptr_t)(image+b->reset))(b->reset_active);
     } else {
