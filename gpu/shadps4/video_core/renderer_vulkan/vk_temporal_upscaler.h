@@ -221,6 +221,25 @@ private:
         u64 tick = 0;
         bool pending = false, failed = false;
     } clean_picture;
+    /// bbport (diagnosis, BB_MOTION_TRIGGER=<file>): once the file appears, the scene before the UI of every frame,
+    /// a fifth of its size in one channel, with the frame's time, for BB_MOTION_FRAMES frames (720); written next to
+    /// the trigger file once the GPU has run them (motion_<n>.raw, motion_<n>.txt). Small enough not to change the
+    /// frame timing it is there to show (judder: does an object move on every frame or in steps).
+    void CaptureMotion(vk::CommandBuffer cmdbuf, vk::Image source, u32 width, u32 height);
+    void WriteMotion();
+    struct {
+        vk::Image image{};
+        VmaAllocation image_allocation{};
+        vk::Buffer buffer{};
+        VmaAllocation buffer_allocation{};
+        void* mapped = nullptr;
+        u32 width = 0, height = 0;
+        int frames = 0, taken = 0, written = 0;
+        bool armed = false, pending_write = false, failed = false;
+        u64 write_tick = 0;
+        std::vector<double> times; // ms since the capture started, per frame
+        std::chrono::steady_clock::time_point start{};
+    } motion;
     bool RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
                     const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh, float frame_ms,
                     bool hdr);

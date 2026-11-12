@@ -324,6 +324,15 @@ TemporalUpscaler::~TemporalUpscaler() {
         }
         clean_picture = {};
     }
+    if (motion.image || motion.buffer) {
+        scheduler.Finish();
+        if (motion.image) {
+            vmaDestroyImage(instance.GetAllocator(), VkImage(motion.image), motion.image_allocation);
+        }
+        if (motion.buffer) {
+            vmaDestroyBuffer(instance.GetAllocator(), VkBuffer(motion.buffer), motion.buffer_allocation);
+        }
+    }
 }
 
 bool TemporalUpscaler::Active() const {
@@ -2368,9 +2377,186 @@ void TemporalUpscaler::ReadCleanPicture() {
     BbThumbnail::StoreClean(static_cast<const unsigned char*>(clean_picture.mapped));
 }
 
+// bbport (diagnosis): see the header. One R8 image a fifth of the size, blitted from `source` (General) every frame
+// and copied into the frame's slice of one host buffer; the buffer is made when the trigger file appears.
+void TemporalUpscaler::CaptureMotion(vk::CommandBuffer cmdbuf, vk::Image source, u32 width, u32 height) {
+    static const char* trigger = std::getenv("BB_MOTION_TRIGGER");
+    if (!trigger || !*trigger || motion.failed || motion.pending_write || !source || !width || !height) {
+        return;
+    }
+    if (!motion.armed) {
+        if (std::remove(trigger) != 0) {
+            return; // not asked for (yet)
+        }
+        const char* env = std::getenv("BB_MOTION_FRAMES");
+        motion.frames = std::clamp(env && *env ? std::atoi(env) : 720, 10, 3000);
+        motion.width = std::max(width / 5, 16u);
+        motion.height = std::max(height / 5, 16u);
+        const VkImageCreateInfo image_info = static_cast<VkImageCreateInfo>(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = vk::Format::eR8Unorm,
+            .extent = {motion.width, motion.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc,
+        });
+        const VmaAllocationCreateInfo image_alloc{.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkImage image{};
+        const VkBufferCreateInfo buffer_info{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = VkDeviceSize(motion.width) * motion.height * VkDeviceSize(motion.frames),
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        };
+        const VmaAllocationCreateInfo buffer_alloc{
+            .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+            .usage = VMA_MEMORY_USAGE_AUTO,
+        };
+        VkBuffer buffer{};
+        VmaAllocationInfo out{};
+        if (vmaCreateImage(instance.GetAllocator(), &image_info, &image_alloc, &image, &motion.image_allocation,
+                           nullptr) != VK_SUCCESS) {
+            std::printf("Motion capture: no image\n");
+            motion.failed = true;
+            return;
+        }
+        motion.image = vk::Image{image};
+        if (vmaCreateBuffer(instance.GetAllocator(), &buffer_info, &buffer_alloc, &buffer, &motion.buffer_allocation,
+                            &out) != VK_SUCCESS ||
+            !out.pMappedData) {
+            if (buffer) {
+                vmaDestroyBuffer(instance.GetAllocator(), buffer, motion.buffer_allocation);
+            }
+            vmaDestroyImage(instance.GetAllocator(), image, motion.image_allocation);
+            motion.image = vk::Image{};
+            std::printf("Motion capture: no host memory for %d frames\n", motion.frames);
+            motion.failed = true;
+            return;
+        }
+        motion.buffer = vk::Buffer{buffer};
+        motion.mapped = out.pMappedData;
+        motion.taken = 0;
+        motion.times.clear();
+        motion.start = std::chrono::steady_clock::now();
+        motion.armed = true;
+        std::printf("Motion capture: %d frames of %ux%u from now\n", motion.frames, motion.width, motion.height);
+    }
+    const vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    const vk::ImageSubresourceLayers layers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+    const std::array before{
+        vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eBlit,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = source,
+            .subresourceRange = range,
+        },
+        vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eBlit,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eTransferDstOptimal,
+            .image = motion.image,
+            .subresourceRange = range,
+        },
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(before.size()), .pImageMemoryBarriers = before.data()});
+    const vk::ImageBlit blit{
+        .srcSubresource = layers,
+        .srcOffsets = std::array{vk::Offset3D{0, 0, 0}, vk::Offset3D{s32(width), s32(height), 1}},
+        .dstSubresource = layers,
+        .dstOffsets = std::array{vk::Offset3D{0, 0, 0}, vk::Offset3D{s32(motion.width), s32(motion.height), 1}},
+    };
+    cmdbuf.blitImage(source, vk::ImageLayout::eGeneral, motion.image, vk::ImageLayout::eTransferDstOptimal, blit,
+                     vk::Filter::eLinear);
+    const std::array to_copy{
+        vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eBlit,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eCopy,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .oldLayout = vk::ImageLayout::eTransferDstOptimal,
+            .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+            .image = motion.image,
+            .subresourceRange = range,
+        },
+        vk::ImageMemoryBarrier2{
+            .srcStageMask = vk::PipelineStageFlagBits2::eBlit,
+            .srcAccessMask = vk::AccessFlagBits2::eTransferRead,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = source,
+            .subresourceRange = range,
+        },
+    };
+    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(to_copy.size()), .pImageMemoryBarriers = to_copy.data()});
+    const vk::BufferImageCopy copy{
+        .bufferOffset = VkDeviceSize(motion.width) * motion.height * VkDeviceSize(motion.taken),
+        .imageSubresource = layers,
+        .imageExtent = {motion.width, motion.height, 1},
+    };
+    cmdbuf.copyImageToBuffer(motion.image, vk::ImageLayout::eTransferSrcOptimal, motion.buffer, copy);
+    const vk::MemoryBarrier2 to_host{
+        .srcStageMask = vk::PipelineStageFlagBits2::eCopy,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eHost,
+        .dstAccessMask = vk::AccessFlagBits2::eHostRead,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &to_host});
+    motion.times.push_back(
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - motion.start).count());
+    if (++motion.taken == motion.frames) {
+        motion.armed = false;
+        motion.pending_write = true;
+        motion.write_tick = scheduler.CurrentTick();
+    }
+}
+
+void TemporalUpscaler::WriteMotion() {
+    if (!motion.pending_write || !scheduler.IsFree(motion.write_tick)) {
+        return;
+    }
+    motion.pending_write = false;
+    vmaInvalidateAllocation(instance.GetAllocator(), motion.buffer_allocation, 0, VK_WHOLE_SIZE);
+    static const std::string dir = [] {
+        const std::string trigger = std::getenv("BB_MOTION_TRIGGER");
+        const size_t slash = trigger.find_last_of("/\\");
+        return slash == std::string::npos ? std::string(".") : trigger.substr(0, slash);
+    }();
+    const std::string base = dir + "/motion_" + std::to_string(motion.written++);
+    bool ok = false;
+    if (FILE* f = std::fopen((base + ".raw").c_str(), "wb")) {
+        const size_t size = size_t(motion.width) * motion.height * size_t(motion.frames);
+        ok = std::fwrite(motion.mapped, 1, size, f) == size;
+        ok = std::fclose(f) == 0 && ok;
+    }
+    if (FILE* f = std::fopen((base + ".txt").c_str(), "w")) {
+        std::fprintf(f, "%u %u %d\n", motion.width, motion.height, motion.frames);
+        for (const double t : motion.times) {
+            std::fprintf(f, "%.3f\n", t);
+        }
+        ok = std::fclose(f) == 0 && ok;
+    }
+    std::printf("Motion capture: %s %s.raw (%d frames, %.0f ms)\n", ok ? "written" : "NOT written", base.c_str(),
+                motion.frames, motion.times.empty() ? 0.0 : motion.times.back());
+    vmaDestroyBuffer(instance.GetAllocator(), VkBuffer(motion.buffer), motion.buffer_allocation);
+    vmaDestroyImage(instance.GetAllocator(), VkImage(motion.image), motion.image_allocation);
+    motion.buffer = vk::Buffer{};
+    motion.image = vk::Image{};
+    motion.mapped = nullptr;
+}
+
 void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::ImageId target) {
     velocity_pending = false;
     ReadCleanPicture();
+    WriteMotion();
     auto& color = texture_cache.GetImage(source);
     auto& depth = texture_cache.GetImage(velocity_depth);
     const u32 w = velocity_width, h = velocity_height, ow = target_width, oh = target_height;
@@ -2431,6 +2617,7 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
     }
     // the scene before the UI: the save picture (no HUD, no menu)
     CaptureCleanPicture(cmdbuf, vk::Image(ui_image), ow, oh);
+    CaptureMotion(cmdbuf, vk::Image(ui_image), ow, oh);
     ui_phase = true;
     velocity_ui = true;
     velocity_ui_flip = g_flips.load(std::memory_order_relaxed);
