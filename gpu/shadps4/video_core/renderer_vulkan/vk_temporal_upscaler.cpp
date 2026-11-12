@@ -3055,7 +3055,7 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
     // A rise or fall counts as a fade only when the sample points that changed (by more than 1%) went the same way:
     // 4 in 5 of them at least, and 8 or more changed (a fade from black leaves its black parts as they are; the
     // camera moving over the scene brightens some and darkens others).
-    bool brightening = false, darkening = false;
+    bool brightening = false, darkening = false, fast_rise = false;
     int rising = 0, falling = 0;
     const bool have_reading = brightness >= 0.0f;
     if (have_reading) {
@@ -3074,6 +3074,10 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
         const bool together_down = changed >= 8 && falling * 5 >= changed * 4;
         brightening = fade_history_count > 0 && brightness > oldest * 1.03f + 0.002f && together_up;
         darkening = fade_history_count > 0 && brightness < oldest * 0.97f - 0.002f && together_down;
+        // The history is reset only while the picture brightens fast (more than 10% on 32 frames): U2's ice cave
+        // builds its stripes there (+13-25% to the end of its fade-in), while the slow tail of a fade-in (U3's
+        // loads: +7-10% for ~0.75 s, the picture already clear enough to walk in) keeps it, the jitter still off.
+        fast_rise = brightening && brightness > oldest * 1.10f + 0.002f;
         fade_sample_history[fade_history_count % fade_history.size()] = samples;
         fade_history[fade_history_count % fade_history.size()] = brightness;
         ++fade_history_count;
@@ -3089,7 +3093,7 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
     }
     // In the window: reset while the picture gets brighter (darkness alone does not: a dark scene
     // keeps its history), then until 8 steady frames. No reading yet: the start of the window.
-    const bool fading = !have_reading ? fade_steady == 0 : brightening;
+    const bool fading = !have_reading ? fade_steady == 0 : fast_rise;
     fade_steady = fading ? 0 : fade_steady + 1;
     const bool resetting = fade_steady < 8;
     // The jitter stays off while the picture changes either way (U3's checkpoint restart: black, a white flash,
@@ -3106,7 +3110,22 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
                     resetting ? "reset" : "kept", fade_steady, fade_was_resetting ? " no jitter" : "", rising,
                     falling);
     }
-    return resetting;
+    // The history is reset in fades in Uncharted 2 only: its ice cave builds stripes from the fade frames without
+    // (stripe score 1.15 kept, 0.04 reset). Uncharted 1 and 3 keep it, the jitter still off: their loads fade in
+    // from black fast too, and walking during it showed thin detail without DLSS's history for ~2 s (U3 chapter 2's
+    // chain railings); they never had stripes. BB_DLSS_FADE_KEEP_HISTORY=1 / =0: keep / reset in every game.
+    static const bool keep_history = [] {
+        const char* env = std::getenv("BB_DLSS_FADE_KEEP_HISTORY");
+        if (env && *env) {
+            return env[0] == '1';
+        }
+        const char* exe = std::getenv("BB_EXE");
+        const bool u2 = exe && std::strstr(exe, "big2");
+        std::printf("DLSS fade: history %s during fades (%s)\n", u2 ? "reset" : "kept",
+                    u2 ? "Uncharted 2" : "not Uncharted 2");
+        return !u2;
+    }();
+    return resetting && !keep_history;
 }
 
 bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
