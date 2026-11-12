@@ -33,5 +33,7 @@ void CampaignOpened(const std::string& meta_name);
 /// The game opens one of its campaign saves to write it: its first write after the start or a load (the save it
 /// writes as play begins) drops the pictures so far once more (the title screen, menus, the loading).
 void Writing(const std::string& meta_name);
+/// A new save list (bbport_saves_list_cancel): a save picked by hand in an earlier one no longer counts.
+void NotByHand();
 
 } // namespace BbThumbnail

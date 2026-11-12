@@ -388,7 +388,9 @@ static void dc_add_quit(const DcLayout *l, unsigned char *menu) {
         for (uint32_t i=0;i<count;++i) {
             uint32_t id;
             memcpy(&id,items+(size_t)i*l->item_stride+8,4);
-            if (id==DC_GAMEROOT_QUIT_ID || id==DC_SPEEDRUN_QUIT_ID) template_id=id;
+            /* the usual pause page's item as the template when the page has both (the speed run's only where it is alone) */
+            if (id==DC_GAMEROOT_QUIT_ID) template_id=id;
+            else if (id==DC_SPEEDRUN_QUIT_ID && !template_id) template_id=id;
         }
         if (!template_id) continue;
         char where[40];

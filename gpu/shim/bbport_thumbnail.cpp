@@ -211,6 +211,16 @@ void StoreClean(const unsigned char* rgba) {
     clean_at = Clock::now();
 }
 
+// A save picked by hand in the pause menu's list is written within seconds: 30 s, then it no longer counts.
+bool ByHand(Clock::time_point now) {
+    return manual_at != Clock::time_point{} && now - manual_at < std::chrono::seconds(30);
+}
+
+void NotByHand() {
+    std::scoped_lock lock{mutex};
+    manual_at = {};
+}
+
 void NoteSaveList() {
     std::scoped_lock lock{mutex};
     save_list_at = Clock::now();
@@ -223,7 +233,7 @@ void CampaignOpened(const std::string& dir) {
     std::scoped_lock lock{mutex};
     if (save != opened_game) {
         opened_game = save;
-        if (manual_at != Clock::time_point{} && Clock::now() - manual_at < std::chrono::minutes(2)) {
+        if (ByHand(Clock::now())) {
             // Saved by hand into a new save or over another game: the play so far goes into it, pictures too.
             picture_game = scene_game = before_pause_game = save;
         } else {
@@ -244,7 +254,10 @@ void Writing(const std::string&) {
     std::scoped_lock lock{mutex};
     if (before_play) {
         before_play = false;
-        ForgetPlay(); // this save keeps the picture it has
+        // (a save by hand as the first write after the load: its pictures are of play since the load)
+        if (!ByHand(Clock::now())) {
+            ForgetPlay(); // this save keeps the picture it has
+        }
     }
 }
 
@@ -264,7 +277,7 @@ extern "C" int bbgpu_thumbnail_save(const char* path) {
         const bool clean_recent = now - clean_at <= std::chrono::seconds(3);
         const auto mine = [&](const std::string& game) { return !IsCampaign(save) || game == save; };
         if (IsCampaign(save)) {
-            const bool by_hand = manual_at != Clock::time_point{} && now - manual_at < std::chrono::minutes(2);
+            const bool by_hand = ByHand(now);
             std::error_code ec;
             if (!by_hand && !std::filesystem::exists(path, ec)) {
                 return 0; // no save by hand yet: the game's icon

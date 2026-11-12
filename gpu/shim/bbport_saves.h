@@ -40,6 +40,8 @@ Checkpoint Current();
 // over (false when there is none).
 std::vector<GameSave> Games();
 bool UndoSave(GameSave& out);
+// Both at once without waiting (the overlay): false while a save copy holds the saves (nothing read; try again).
+bool ReadSaves(std::vector<GameSave>& games, GameSave& undo, bool& has_undo);
 // Restarts the game into one of your games: before the game opens its saves it is made the newest, so Continue
 // starts there.
 bool LoadGame(int digit, std::string& message);

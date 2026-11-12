@@ -1504,14 +1504,20 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
      * box has the size of a locked reward's information box, the carousel stays drawn behind it and its lists lose the focus to
      * it as to a window: the choice is kept through those three rules. */
     int u2_choice_pair=0;
-    if (u2m && have_hov && hov.front && hov.w<=300.0f) {
+    if (u2m && have_hov && hov.front && hov.w>=150.0f && hov.w<=260.0f && hov.h>=30.0f && hov.h<=50.0f) {
+        /* exactly one other choice on its line, of its size, with a gap of 50-150 between them */
+        int others=0, spaced=0;
         pthread_mutex_lock(&u3_lock);
-        for (int i=0;i<U3_ROWS && !u2_choice_pair;++i) {
+        for (int i=0;i<U3_ROWS;++i) {
             const U3Row *r=&u3_rows[i];
-            if (!r->us || now-r->us>=100000 || !r->front || fabsf(r->x-hov.x)<1.0f) continue;
-            u2_choice_pair=fabsf(r->y-hov.y)<2.0f && fabsf(r->w-hov.w)<1.0f && fabsf(r->h-hov.h)<1.0f;
+            if (!r->us || now-r->us>=100000 || !r->front || fabsf(r->x-hov.x)<1.0f || fabsf(r->y-hov.y)>=2.0f) continue;
+            if (fabsf(r->w-hov.w)>=1.0f || fabsf(r->h-hov.h)>=1.0f) continue;
+            ++others;
+            const float gap=r->x>hov.x ? r->x-(hov.x+hov.w) : hov.x-(r->x+r->w);
+            spaced=gap>=50.0f && gap<=150.0f;
         }
         pthread_mutex_unlock(&u3_lock);
+        u2_choice_pair=others==1 && spaced;
     }
     if (info && !u2_choice_pair) have_hov=0;   /* an information box: the menu below is left alone */
     /* U2's drop-down choice (Options > Game > Difficulty: Easy .. Brutal over the page): a focused list of a few values with no

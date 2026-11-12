@@ -20,6 +20,7 @@
 
 #include "bbport_settings.h"
 #include "bbport_thumbnail.h"
+#include "bbport_saves.h"
 #include "bbport_threads.h"
 #include "common/thread.h"
 #include "bbport_toggles.h"
@@ -3102,14 +3103,6 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
     const bool changing = !have_reading ? fade_quiet == 0 : (brightening || darkening);
     fade_quiet = changing ? 0 : fade_quiet + 1;
     fade_was_resetting = resetting || fade_quiet < 8;
-    static int noted = 0;
-    if (noted < 4000 && std::getenv("BB_DLSS_FADE_LOG")) {
-        ++noted;
-        std::printf("DLSS fade: t=%.3f brightness %.4f %s (steady %d)%s up %d down %d\n",
-                    std::chrono::duration<double>(now.time_since_epoch()).count(), brightness,
-                    resetting ? "reset" : "kept", fade_steady, fade_was_resetting ? " no jitter" : "", rising,
-                    falling);
-    }
     // The history is reset in fades in Uncharted 2 only: its ice cave builds stripes from the fade frames without
     // (stripe score 1.15 kept, 0.04 reset). Uncharted 1 and 3 keep it, the jitter still off: their loads fade in
     // from black fast too, and walking during it showed thin detail without DLSS's history for ~2 s (U3 chapter 2's
@@ -3119,13 +3112,21 @@ bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource&
         if (env && *env) {
             return env[0] == '1';
         }
-        const char* exe = std::getenv("BB_EXE");
-        const bool u2 = exe && std::strstr(exe, "big2");
+        const bool u2 = BbSaves::Game() == 2;
         std::printf("DLSS fade: history %s during fades (%s)\n", u2 ? "reset" : "kept",
                     u2 ? "Uncharted 2" : "not Uncharted 2");
         return !u2;
     }();
-    return resetting && !keep_history;
+    const bool reset_now = resetting && !keep_history;
+    static int noted = 0;
+    if (noted < 4000 && std::getenv("BB_DLSS_FADE_LOG")) {
+        ++noted;
+        std::printf("DLSS fade: t=%.3f brightness %.4f %s (steady %d)%s up %d down %d\n",
+                    std::chrono::duration<double>(now.time_since_epoch()).count(), brightness,
+                    reset_now ? "reset" : resetting ? "kept (fading)" : "kept", fade_steady,
+                    fade_was_resetting ? " no jitter" : "", rising, falling);
+    }
+    return reset_now;
 }
 
 bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,

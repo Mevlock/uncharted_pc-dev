@@ -119,6 +119,13 @@ int active_digit = -1; // read from active.txt once, then kept here; guarded by 
 // `lock` is held through save copies (a load, practice mode starting) and a picture would wait that long.
 std::mutex active_name_mutex;
 std::string active_name; // "SAVEDATA031"; empty until known
+// Chapter Select or New Game picked over this game (bbport_saves_fresh_start): its picture goes once the game writes
+// it (a declined question changes nothing). Guarded by `lock`.
+std::string fresh_pick;
+// The Saves page's Load: the save made the newest for Continue, and its own time, put back once the game has read it
+// (its "saved" date stays the real one). Guarded by `lock`.
+std::string continue_name;
+fs::file_time_type continue_time{};
 int RememberActive(int game, int digit) {
     active_digit = digit;
     std::scoped_lock name_lock{active_name_mutex};
@@ -422,6 +429,17 @@ std::vector<GameSave> Games() {
     return games;
 }
 
+bool ReadSaves(std::vector<GameSave>& games, GameSave& undo, bool& has_undo) {
+    // The overlay's present thread: `lock` is held through save copies (a Keep, an Undo), which it must not wait for.
+    std::unique_lock guard(lock, std::try_to_lock);
+    if (!guard.owns_lock()) {
+        return false;
+    }
+    games = Games();
+    has_undo = UndoSave(undo);
+    return true;
+}
+
 bool UndoSave(GameSave& out) {
     std::lock_guard guard(lock);
     const int game = Game();
@@ -440,6 +458,10 @@ bool UndoSave(GameSave& out) {
 namespace {
 // A request for the next start (pending-load.txt), then the restart. False (with `message`) when it could not be.
 bool RequestAndRestart(int game, const std::string& request, std::string& message) {
+    if (runtime_checkpoint_practice()) {   // (the page offers no Load then; a restart would drop the practice session)
+        message = T("Practice mode: load or delete your games once the game has restarted.");
+        return false;
+    }
     if (runtime_savedata_mounted()) {
         message = T("The game is saving: try again in a moment.");
         return false;
@@ -766,6 +788,13 @@ void ApplyPending(int game) {
         if (digit < 0 || !fs::exists(param, ec)) {
             std::printf("Saves: %s is not there: Continue starts where it would\n", name.c_str());
             return;
+        }
+        // Made the newest for the game's save search; its own time comes back once the game has read it
+        // (bbport_saves_mounted), so its "saved" date stays the real one.
+        {
+            std::lock_guard guard(lock);
+            continue_time = fs::last_write_time(param, ec);
+            continue_name = ec ? std::string() : name;
         }
         fs::last_write_time(param, fs::file_time_type::clock::now(), ec);
         SetActiveDigit(game, digit);
@@ -1345,6 +1374,8 @@ extern "C" int bbport_saves_list_pick(int index) {
 extern "C" void bbport_saves_list_cancel(void) {
     std::lock_guard guard(lock);
     list_pick = -1;
+    fresh_pick.clear();
+    BbThumbnail::NotByHand();
 }
 
 // runtime_savedata.c, before the game opens a save (the mount can still fail: what the game plays on changes only
@@ -1392,6 +1423,17 @@ extern "C" void bbport_saves_mounted(const char* dir, int read_only) {
         {
             std::lock_guard guard(lock);
             SetActiveDigit(game, digit);
+            std::error_code ec;
+            if (!read_only && fresh_pick == dir) {
+                fresh_pick.clear();
+                if (fs::remove(SavesDir() / (std::string(dir) + ".sce_sys") / "thumb.png", ec)) {
+                    std::printf("Saves: %s starts afresh: its picture goes until it is saved by hand\n", dir);
+                }
+            }
+            if (read_only && continue_name == dir) {
+                continue_name.clear();
+                fs::last_write_time(SavesDir() / (std::string(dir) + ".sce_sys") / "param.bin", continue_time, ec);
+            }
         }
         const std::string meta = std::string(dir) + ".sce_sys";
         BbThumbnail::CampaignOpened(meta);
@@ -1442,10 +1484,7 @@ extern "C" void bbport_saves_fresh_start(const char* dir) {
         if (!game || !dir || CampaignDigit(game, dir) < 0) {
             return;
         }
-        std::error_code ec;
-        if (fs::remove(SavesDir() / (std::string(dir) + ".sce_sys") / "thumb.png", ec)) {
-            std::printf("Saves: %s starts afresh: its picture goes until it is saved by hand\n", dir);
-        }
+        fresh_pick = dir; // done as the game writes it (bbport_saves_mounted)
     });
 }
 

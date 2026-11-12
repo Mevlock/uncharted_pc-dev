@@ -586,9 +586,8 @@ void SavesPage() {
     static BbSaves::GameSave undo;
     static bool has_undo = false;
     static double refreshed = -10.0;
-    if (ImGui::GetTime() - refreshed > 2.0) {
-        games = BbSaves::Games();
-        has_undo = BbSaves::UndoSave(undo);
+    // (re-read every 2 s; while a save copy holds the saves, the last reading stays and the next frame tries again)
+    if (ImGui::GetTime() - refreshed > 2.0 && BbSaves::ReadSaves(games, undo, has_undo)) {
         refreshed = ImGui::GetTime();
     }
     const auto when = [](const std::string& date) { return date.empty() ? std::string() : "  (" + date + ")"; };
