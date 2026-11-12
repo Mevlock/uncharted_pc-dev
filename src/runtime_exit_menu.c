@@ -117,7 +117,9 @@ static void u1_add_to_page(const U1Build *b, uint64_t image, unsigned char *page
  * (the list follows at once), and any other item picked meanwhile drops it (backed out of Save Game, then Chapter
  * Select). BB_EXIT_MENU_IDS=1 (diagnosis): every item id the menus' handlers get. */
 #define DC_SAVEGAME_ID 0x62ca5c41u
-#define U1_SAVE_GAME_ID 0x17u
+/* U1 1.02, seen (BB_EXIT_MENU_IDS=1): Save Game 0x0b, Load Game 0x0c (the Load list follows), Chapter Select 0x17
+ * (then the chapter and its part, 0x4xx, then where to save). */
+#define U1_SAVE_GAME_ID 0x0bu
 static struct timespec save_requested_at;
 static void note_item(const char *game, uint32_t id, int save_game) {
     static int log = -1;
