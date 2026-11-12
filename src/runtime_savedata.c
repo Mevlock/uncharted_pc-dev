@@ -344,8 +344,8 @@ static ABI int32_t save_terminate(void) {
 static int32_t last_user=1;
 void bbport_saves_apply_pending(void);
 void bbport_saves_closed(const char *host_dir);
-void bbport_saves_written(const char *host_dir);
 void bbport_saves_before_mount(const char *dir, int read_only);
+void bbport_saves_mounted(const char *dir, int read_only);
 int runtime_savedata_dir(char *out, size_t size) { root(last_user,NULL,out,size); return 0; }
 int runtime_savedata_mounted(void) {
     pthread_mutex_lock(&lock);
@@ -378,7 +378,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     last_user=user;
     pthread_once(&pending_once,bbport_saves_apply_pending);
     if (!dir || !result || !valid_name(dir->data,sizeof(dir->data))) return ERR_PARAMETER;
-    bbport_saves_before_mount(dir->data,(mode & MODE_RDONLY)!=0);   /* a slot picked in the save list, put back now */
+    bbport_saves_before_mount(dir->data,(mode & MODE_RDONLY)!=0);   /* an Undo picked in the Load list, put back now */
     char base[600], host[640], meta[680];
     root(user,title,base,sizeof(base));
     snprintf(host,sizeof(host),"%s/%s",base,dir->data);
@@ -418,6 +418,8 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     pthread_mutex_unlock(&lock);
     printf("Runtime: save data '%s' mounted at %s (%s%s)\n",dir->data,result->point.data,
            exists ? "existing" : "created",(mode & MODE_RDONLY) ? ", read-only" : "");
+    /* Open now: a campaign save is the one the game plays on (a probe of a save that is not there changes nothing). */
+    bbport_saves_mounted(dir->data,(mode & MODE_RDONLY)!=0);
     return 0;
 }
 static ABI int32_t save_mount(const Mount1 *m, MountResult *result) {
@@ -438,26 +440,19 @@ static ABI int32_t save_umount(const MountPoint *point) {
     pthread_mutex_lock(&lock);
     int slot=slot_of(point);
     char host[700]="", picture[720]="";
-    int wrote=0;
     if (slot>=0) {
         runtime_file_unmount(point->data); slots[slot].used=0; snprintf(host,sizeof(host),"%s",slots[slot].host);
         /* (BilalReloaded, PR #349 by the-best-is-best) a save the game wrote gets the last picture of the game in
          * play as thumb.png beside its param, shown in the save list (bbport_thumbnail.cpp). */
-        wrote=slots[slot].writable;
         if (slots[slot].writable) snprintf(picture,sizeof(picture),"%s/thumb.png",slots[slot].meta);
     }
     pthread_mutex_unlock(&lock);
-    if (picture[0]) {
-        const int written=bbgpu_thumbnail_save(picture);
-        /* Waiting (written==2): the save keeps its older picture until the new one is taken in its play. Removed, a
-         * save whose wait was dropped (another save loaded first) had none at all. */
-        if (written) printf("Runtime: save picture %s (%s)\n",written==1 ? "written" : "waits for play to go on",picture);
-    }
+    /* No picture for it (none of its game's play yet, or not saved by hand yet): it keeps the one it has. */
+    if (picture[0] && bbgpu_thumbnail_save(picture)) printf("Runtime: save picture written (%s)\n",picture);
     /* A save closed: its files with data are backed up (save auto-repair), and the overlay's story save
      * follows the game's campaign saves (bbport_saves.cpp). */
     if (slot>=0) save_backup(host);
     if (slot>=0) bbport_saves_closed(host);
-    if (wrote) bbport_saves_written(host);   /* a slot picked in the game's Save game list gets the save now */
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
 static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const void *buffer, uint64_t size) {

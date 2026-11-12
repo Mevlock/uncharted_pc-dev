@@ -21,12 +21,9 @@ void Store(const unsigned char* rgba);
 bool WantedClean();
 /// Upscaler: the scene before the UI, Width x Height RGBA8 (sRGB-encoded) rows top to bottom.
 void StoreClean(const unsigned char* rgba);
-/// The game's save list ("Save game") was shown: the saves written before play goes on (at most two minutes) get
-/// the picture from before the pause menu (bbgpu_thumbnail_pause).
+/// The game's save list ("Save game") was shown: without clean pictures, the saves written before play goes on (at
+/// most two minutes) get the frame picture from before the pause menu (bbgpu_thumbnail_pause).
 void NoteSaveList();
-/// A save's folders are replaced (a slot put back, bbport_saves.cpp): its picture still waiting for play is
-/// dropped, so it does not land on the save put in its place. `meta_name`: "SAVEDATA020.sce_sys".
-void ForgetSave(const std::string& meta_name);
 /// The game loads one of its campaign saves: the pictures so far are dropped (the play before it, the title screen).
 /// `meta_name`: "SAVEDATA031.sce_sys".
 void Loading(const std::string& meta_name);

@@ -1319,16 +1319,35 @@ void ChoiceUploadPictures() {
     }
 }
 
-// The entry's label: "New save" from the runtime is translated.
+// The entry's label (translated when the list opens, ChoiceTranslate).
 const char* ChoiceLabel(const std::string& item) {
-    return item == "New save" ? T("New save") : item.c_str();
+    return item.c_str();
 }
-// The runtime's texts in the list (runtime_services.c, in English there): the heading, the group headings and the
-// name line of the campaign save, translated here (T leaves any other text, the game's own, as it is).
-[[maybe_unused]] static const char* const ChoiceRuntimeTexts[] = {
-    N_("Load game"), N_("Save game"), N_("Your game"), N_("Current save - where Continue starts"),
-    N_("Your save slots (made with Save here: Insert > Save slots)"), N_("Undo"),
-    N_("Save a copy into a slot as well")};
+// The runtime's texts in the list (runtime_services.c, in English there): the headings, translated where shown (T
+// leaves any other text, the game's own, as it is).
+[[maybe_unused]] static const char* const ChoiceRuntimeTexts[] = {N_("Load game"), N_("Save game"),
+                                                                  N_("Where to save"), N_("Undo")};
+// An entry's name line from the runtime (its first line): "New save", "Game 2", "Game 2 - the one you are playing";
+// the game's own lines after it stay as they are.
+std::string ChoiceTranslate(const std::string& item) {
+    const size_t end = item.find('\n');
+    const std::string first = item.substr(0, end), rest = end == std::string::npos ? std::string() : item.substr(end);
+    static const std::string playing = " - the one you are playing";
+    if (first == "New save") {
+        return T("New save") + rest;
+    }
+    if (first.rfind("Game ", 0) == 0) {
+        const bool in_play = first.size() > playing.size() &&
+                             first.compare(first.size() - playing.size(), playing.size(), playing) == 0;
+        const std::string number = first.substr(5, first.size() - 5 - (in_play ? playing.size() : 0));
+        if (!number.empty() && number.find_first_not_of("0123456789") == std::string::npos) {
+            return fmt::format(fmt::runtime(in_play ? T("Game {} - the one you are playing") : T("Game {}")),
+                               number) +
+                   rest;
+        }
+    }
+    return item;
+}
 
 void ChoiceDeletePress() {
     const int count = int(choice_items.size());
@@ -2228,6 +2247,9 @@ bool BeginChoice(const std::string& title, std::vector<std::string> items,
     choice_uploads = true;
     choice_title = title;
     choice_items = std::move(items);
+    for (std::string& item : choice_items) {
+        item = ChoiceTranslate(item);
+    }
     choice_sections = std::move(sections);
     const int count = int(choice_items.size());
     choice_index = focus >= 0 && focus < count ? focus : 0;

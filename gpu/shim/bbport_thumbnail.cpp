@@ -43,9 +43,10 @@ std::string opened_game; // the campaign save last opened ("SAVEDATA031")
 // Since the start or a load, the game has not written a campaign save yet: play has not begun (the title screen, a
 // menu or the loading is on screen; the game writes a save as play begins).
 bool before_play = true;
-// The pause menu's Save game list was shown: the save picked there is a save by hand. A game's first picture comes
-// with its first save by hand; until then it shows the game's icon (its first saves, when it is made and at the
-// first checkpoints, are written while the title screen or a fade is the newest picture).
+// A save was picked in the pause menu's Save game list (bbgpu_thumbnail_by_hand): the next campaign save written is
+// a save by hand. A game's first picture comes with its first save by hand; until then it shows the game's icon (its
+// first saves, when it is made and at the first checkpoints, are written while the title screen or a fade is the
+// newest picture).
 Clock::time_point manual_at{};
 Clock::time_point clean_at{};       // the newest clean picture's time (a frame picture then waits its turn)
 Clock::time_point last_request{}, last_clean_request{};
@@ -210,11 +211,9 @@ void StoreClean(const unsigned char* rgba) {
     clean_at = Clock::now();
 }
 
-void ForgetSave(const std::string&) {}
-
 void NoteSaveList() {
     std::scoped_lock lock{mutex};
-    save_list_at = manual_at = Clock::now();
+    save_list_at = Clock::now();
 }
 
 // Another game is opened (a new game from the title screen or Chapter Select, a load): the pictures so far are not
@@ -294,6 +293,13 @@ extern "C" int bbgpu_thumbnail_save(const char* path) {
         }
     }).detach();
     return 1;
+}
+
+// runtime_services.c, a save picked in the pause menu's Save game list (an existing game or New save).
+extern "C" void bbgpu_thumbnail_by_hand(void) {
+    using namespace BbThumbnail;
+    std::scoped_lock lock{mutex};
+    manual_at = Clock::now();
 }
 
 // runtime_checkpoint.c, a jump to a checkpoint: like a load (the pictures so far are of the play before it).

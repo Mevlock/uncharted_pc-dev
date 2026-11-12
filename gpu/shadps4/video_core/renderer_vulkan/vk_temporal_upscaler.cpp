@@ -313,6 +313,17 @@ TemporalUpscaler::~TemporalUpscaler() {
         scheduler.Finish();
         ffxVkPortableUpscaleContextDestroy(context);
     }
+    // bbport: the save picture's image and host buffer (CaptureCleanPicture), once the GPU is done with them.
+    if (clean_picture.image || clean_picture.buffer) {
+        scheduler.Finish();
+        if (clean_picture.image) {
+            vmaDestroyImage(instance.GetAllocator(), VkImage(clean_picture.image), clean_picture.image_allocation);
+        }
+        if (clean_picture.buffer) {
+            vmaDestroyBuffer(instance.GetAllocator(), VkBuffer(clean_picture.buffer), clean_picture.buffer_allocation);
+        }
+        clean_picture = {};
+    }
 }
 
 bool TemporalUpscaler::Active() const {

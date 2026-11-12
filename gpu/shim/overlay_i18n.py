@@ -319,58 +319,51 @@ TRANSLATIONS = {
         'I salti ai checkpoint non sono disponibili per questa versione del gioco.',
         'このバージョンのゲームではチェックポイントへのジャンプは利用できません。'),
     'Now: %s': L('Ahora: %s', 'Agora: %s', 'Actuellement : %s', 'Jetzt: %s', 'Ora: %s', '現在: %s'),
-    'Practice mode: the game saves to a practice copy until you restart it. Your own save and story save are not '
-    'touched.': L(
-        'Modo práctica: el juego guarda en una copia de práctica hasta que lo reinicies. Tu partida y tu partida de la '
-        'historia no se tocan.',
-        'Modo de treino: o jogo salva em uma cópia de treino até você reiniciá-lo. Seu jogo salvo e o jogo salvo da '
-        'história não são alterados.',
-        'Mode entraînement : le jeu sauvegarde dans une copie d’entraînement jusqu’à ce que vous le redémarriez. Votre '
-        'sauvegarde et votre sauvegarde de l’histoire ne sont pas modifiées.',
-        'Übungsmodus: Das Spiel speichert in eine Übungskopie, bis du es neu startest. Dein Spielstand und dein '
-        'Story-Spielstand bleiben unberührt.',
-        'Modalità pratica: il gioco salva su una copia di pratica finché non lo riavvii. Il tuo salvataggio e il '
-        'salvataggio della storia non vengono toccati.',
-        '練習モード: ゲームを再起動するまで、ゲームは練習用コピーにセーブします。あなたのセーブデータと'
-        'ストーリーセーブは変更されません。'),
+    'Practice mode: the game saves to a practice copy until you restart it. Your own games are not touched.': L(
+        'Modo práctica: el juego guarda en una copia de práctica hasta que lo reinicies. Tus partidas no se tocan.',
+        'Modo de treino: o jogo salva em uma cópia de treino até você reiniciá-lo. Seus jogos não são alterados.',
+        'Mode entraînement : le jeu sauvegarde dans une copie d’entraînement jusqu’à ce que vous le redémarriez. Vos '
+        'parties ne sont pas modifiées.',
+        'Übungsmodus: Das Spiel speichert in eine Übungskopie, bis du es neu startest. Deine Spiele bleiben unberührt.',
+        'Modalità pratica: il gioco salva su una copia di pratica finché non lo riavvii. Le tue partite non vengono '
+        'toccate.',
+        '練習モード: ゲームを再起動するまで、ゲームは練習用コピーにセーブします。あなたのゲームは変更されません。'),
     'Keep this progress': L('Conservar este progreso', 'Manter este progresso', 'Garder cette progression',
                             'Diesen Fortschritt behalten', 'Mantieni questi progressi', 'この進行状況を残す'),
-    'To carry on from here for real (for example past a place that does not work): the game restarts and Continue '
-    'starts at the practice save, which becomes your save and your story save. Your save from before is kept in Save '
-    'slots as "Before the last load".': L(
-        'Para seguir desde aquí de verdad (por ejemplo, tras un punto que no funciona): el juego se reinicia y '
-        'Continuar empieza en la partida de práctica, que pasa a ser tu partida y tu partida de la historia. Tu partida '
-        'anterior se conserva en Ranuras de guardado como “Antes de la última carga”.',
-        'Para continuar daqui de verdade (por exemplo, depois de um trecho que não funciona): o jogo reinicia e '
-        'Continuar começa no jogo salvo de treino, que passa a ser o seu jogo salvo e o jogo salvo da história. Seu '
-        'jogo salvo anterior fica em Slots de salvamento como “Antes do último carregamento”.',
-        'Pour continuer d’ici pour de bon (par exemple après un passage qui ne fonctionne pas) : le jeu redémarre et '
-        'Continuer reprend à la sauvegarde d’entraînement, qui devient votre sauvegarde et votre sauvegarde de '
-        'l’histoire. Votre sauvegarde précédente est conservée dans Emplacements de sauvegarde sous « Avant le dernier '
-        'chargement ».',
-        'Um von hier aus wirklich weiterzuspielen (etwa hinter einer Stelle, die nicht funktioniert): Das Spiel '
-        'startet neu und Fortsetzen beginnt beim Übungsspielstand, der dein Spielstand und dein Story-Spielstand wird. '
-        'Dein bisheriger Spielstand bleibt unter Speicherplätze als „Vor dem letzten Laden“ erhalten.',
-        "Per proseguire davvero da qui (ad esempio oltre un punto che non funziona): il gioco si riavvia e Continua "
-        "parte dal salvataggio di pratica, che diventa il tuo salvataggio e il salvataggio della storia. Il "
-        "salvataggio precedente resta in Slot di salvataggio come “Prima dell'ultimo caricamento”.",
-        'ここから本当に続ける場合(うまく動かない場所を越えた後など): ゲームが再起動し、コンティニューは'
-        '練習用セーブから始まります。それがあなたのセーブデータとストーリーセーブになります。以前のセーブデータは'
-        'セーブスロットに「前回のロード前」として残ります。'),
-    'Make the practice save your save? The game restarts and Continue starts there. Your save from before is kept as '
-    '"Before the last load".': L(
-        '¿Convertir la partida de práctica en tu partida? El juego se reinicia y Continuar empieza ahí. Tu partida '
-        'anterior se conserva como “Antes de la última carga”.',
-        'Tornar o jogo salvo de treino o seu jogo salvo? O jogo reinicia e Continuar começa ali. Seu jogo salvo '
-        'anterior fica como “Antes do último carregamento”.',
-        'Faire de la sauvegarde d’entraînement votre sauvegarde ? Le jeu redémarre et Continuer reprend là. Votre '
-        'sauvegarde précédente est conservée sous « Avant le dernier chargement ».',
-        'Den Übungsspielstand zu deinem Spielstand machen? Das Spiel startet neu und Fortsetzen beginnt dort. Dein '
-        'bisheriger Spielstand bleibt als „Vor dem letzten Laden“ erhalten.',
-        "Rendere il salvataggio di pratica il tuo salvataggio? Il gioco si riavvia e Continua parte da lì. Il "
-        "salvataggio precedente resta come “Prima dell'ultimo caricamento”.",
-        '練習用セーブをあなたのセーブデータにしますか？ゲームが再起動し、コンティニューはそこから始まります。'
-        '以前のセーブデータは「前回のロード前」として残ります。'),
+    'To carry on from here for real (for example past a place that does not work): the practice save becomes a new '
+    'game of its own, next to your other games, and the game restarts with Continue there. Your other games stay as '
+    'they are.': L(
+        'Para seguir desde aquí de verdad (por ejemplo, tras un punto que no funciona): la partida de práctica pasa a '
+        'ser una partida nueva, junto a tus otras partidas, y el juego se reinicia con Continuar ahí. Tus otras '
+        'partidas se quedan como están.',
+        'Para continuar daqui de verdade (por exemplo, depois de um trecho que não funciona): o jogo salvo de treino '
+        'vira um jogo novo, ao lado dos seus outros jogos, e o jogo reinicia com Continuar ali. Seus outros jogos '
+        'ficam como estão.',
+        'Pour continuer d’ici pour de bon (par exemple après un passage qui ne fonctionne pas) : la sauvegarde '
+        'd’entraînement devient une nouvelle partie, à côté de vos autres parties, et le jeu redémarre avec Continuer '
+        'là. Vos autres parties restent telles quelles.',
+        'Um von hier aus wirklich weiterzuspielen (etwa hinter einer Stelle, die nicht funktioniert): Der '
+        'Übungsspielstand wird ein eigenes neues Spiel neben deinen anderen Spielen, und das Spiel startet neu mit '
+        'Fortsetzen dort. Deine anderen Spiele bleiben, wie sie sind.',
+        "Per proseguire davvero da qui (ad esempio oltre un punto che non funziona): il salvataggio di pratica diventa "
+        "una nuova partita, accanto alle tue altre partite, e il gioco si riavvia con Continua da lì. Le tue altre "
+        "partite restano come sono.",
+        'ここから本当に続ける場合(うまく動かない場所を越えた後など): 練習用セーブが、ほかのゲームとは別の新しい'
+        'ゲームになり、ゲームが再起動してコンティニューはそこから始まります。ほかのゲームはそのままです。'),
+    'Keep the practice save as a new game? The game restarts and Continue starts there. Your other games stay as '
+    'they are.': L(
+        '¿Conservar la partida de práctica como una partida nueva? El juego se reinicia y Continuar empieza ahí. Tus '
+        'otras partidas se quedan como están.',
+        'Manter o jogo salvo de treino como um jogo novo? O jogo reinicia e Continuar começa ali. Seus outros jogos '
+        'ficam como estão.',
+        'Garder la sauvegarde d’entraînement comme nouvelle partie ? Le jeu redémarre et Continuer reprend là. Vos '
+        'autres parties restent telles quelles.',
+        'Den Übungsspielstand als neues Spiel behalten? Das Spiel startet neu und Fortsetzen beginnt dort. Deine '
+        'anderen Spiele bleiben, wie sie sind.',
+        "Mantenere il salvataggio di pratica come nuova partita? Il gioco si riavvia e Continua parte da lì. Le tue "
+        "altre partite restano come sono.",
+        '練習用セーブを新しいゲームとして残しますか？ゲームが再起動し、コンティニューはそこから始まります。'
+        'ほかのゲームはそのままです。'),
     'Yes, keep it': L('Sí, conservarla', 'Sim, manter', 'Oui, la garder', 'Ja, behalten', 'Sì, mantienilo',
                       'はい、残します'),
     'Jumping turns on practice mode: until the game restarts, it saves to a practice copy, not to your own save.': L(
@@ -711,6 +704,28 @@ TRANSLATIONS = {
                    'ゲームをセーブ'),
     'New save': L('Nueva partida guardada', 'Novo jogo salvo', 'Nouvelle sauvegarde', 'Neuer Spielstand',
                   'Nuovo salvataggio', '新規セーブ'),
+    'Where to save': L('Dónde guardar', 'Onde salvar', 'Où sauvegarder', 'Wo speichern', 'Dove salvare',
+                       'セーブ先'),
+    'Game {}': L('Partida {}', 'Jogo {}', 'Partie {}', 'Spiel {}', 'Partita {}', 'ゲーム {}'),
+    'Game {} - the one you are playing': L(
+        'Partida {} - la que estás jugando', 'Jogo {} - o que você está jogando', 'Partie {} - celle en cours',
+        'Spiel {} - das du gerade spielst', 'Partita {} - quella che stai giocando', 'ゲーム {} - プレイ中のゲーム'),
+    'No picture': L('Sin imagen', 'Sem imagem', 'Pas d’image', 'Kein Bild', 'Nessuna immagine', '画像なし'),
+    'Undo - Game {} as it was before it was saved over': L(
+        'Deshacer - la partida {} como estaba antes de guardar encima',
+        'Desfazer - o jogo {} como estava antes de salvar por cima',
+        'Annuler - la partie {} telle qu’elle était avant d’être écrasée',
+        'Rückgängig - Spiel {}, wie es vor dem Überspeichern war',
+        'Annulla - la partita {} com’era prima di salvarci sopra',
+        '元に戻す - 上書きされる前のゲーム {}'),
+    'Kept {}': L('Conservada {}', 'Guardado {}', 'Conservée {}', 'Aufbewahrt {}', 'Conservata {}', '保存日時 {}'),
+    "There is no room for another game: delete one in the game's save list first.": L(
+        'No hay sitio para otra partida: primero borra una en la lista de partidas del juego.',
+        'Não há espaço para outro jogo: apague um na lista de jogos salvos do jogo primeiro.',
+        'Il n’y a pas de place pour une autre partie : supprimez-en d’abord une dans la liste des sauvegardes du jeu.',
+        'Kein Platz für ein weiteres Spiel: Lösche zuerst eines in der Spielstandliste des Spiels.',
+        'Non c’è spazio per un’altra partita: eliminane prima una nell’elenco dei salvataggi del gioco.',
+        'これ以上ゲームを追加できません。先にゲームのセーブ一覧でひとつ削除してください。'),
     'OK': L('Aceptar', 'OK', 'OK', 'OK', 'OK', 'OK'),
     'Delete': L('Borrar', 'Apagar', 'Supprimer', 'Löschen', 'Elimina', '削除'),
     'Delete: press again': L('Borrar: pulsa otra vez', 'Apagar: pressione de novo', 'Supprimer : appuie encore',

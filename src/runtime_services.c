@@ -339,7 +339,6 @@ static struct { uint32_t mode; int waits, pick; void *user_data; char dir[32]; u
  * undo), so the game loads it with no restart. Index as in BbSaves (0-4 slots, 5 before
  * the last load, 6 story save). */
 #define SAVE_LIST_SLOTS 20
-#define SAVE_STORY_OF(n) (100+(n))   /* playthrough n's story save (bbport_saves.cpp) */
 #define SAVE_UNDO 200                /* the game kept before it was saved over (bbport_saves.cpp) */
 int bbport_saves_keep_before_overwrite(const char *dir);
 int bbport_saves_undo_name(char *out, size_t size);
@@ -349,12 +348,7 @@ int bbport_saves_campaign_digit(const char *dir);
 int bbport_saves_list_entry(int index, char *label, size_t label_size, char *picture, size_t picture_size);
 int bbport_saves_list_pick(int index);
 void bbport_saves_list_cancel(void);
-int bbport_saves_trash(int index);
-/* The Save game list (bbport_saves.cpp): slots 1-5 as places to save; the picked one gets a copy of the campaign
- * save once the game has written it. */
-int bbport_saves_save_entry(int index, char *label, size_t label_size, char *picture, size_t picture_size);
-void bbport_saves_save_pick(int index);
-void bbport_saves_save_cancel(void);
+int bbport_saves_trash_undo(void);
 /* runtime_exit_menu.c: the pause menu's Save Game was just picked (taken once). */
 int runtime_exit_menu_take_save_request(void);
 static struct {
@@ -382,7 +376,10 @@ static void save_choice_finish(int entry) {
     const int dir=entry-save_choice.offer_new, slot=dir-save_choice.count;
     const char (*one)[32]=NULL;
     if (entry<0) save_dialog.pick=-1;
-    else if (dir<0) save_dialog.pick=0;
+    else if (dir<0) {
+        save_dialog.pick=0;
+        if (save_choice.saving) bbgpu_thumbnail_by_hand();   /* New save from the pause menu: saved by hand */
+    }
     else if (slot>=0) {
         /* Undo: put back when the game opens that save next (bbport_saves_before_mount), so a load the game does not
          * go on with changes nothing. */
@@ -398,6 +395,8 @@ static void save_choice_finish(int entry) {
         }
     } else {
         one=(const char (*)[32])save_choice.dirs[dir];
+        /* Saved by hand (the pause menu's Save game): the save gets a picture of the play (bbport_thumbnail.cpp). */
+        if (save_choice.saving) bbgpu_thumbnail_by_hand();
         /* Saving over one of the games (Chapter Select, New Game, or Save game onto another than the one in play):
          * a copy first, for Undo. */
         if ((save_choice.saving || save_choice.choosing_game) && !runtime_checkpoint_practice() &&
@@ -455,8 +454,11 @@ static int save_choice_show(int focus) {
     if (!n) return 0;
     if (focus>=n) focus=n-1;
     if (focus<0) focus=0;
-    /* The games can be deleted here, as on the console (Triangle twice; moved to savedata-deleted, not erased). */
-    const int deletable=save_choice.count ? save_choice.offer_new : -1;
+    /* The games can be deleted here, as on the console (Triangle twice; moved to savedata-deleted, not erased), and
+     * the Undo copy: not the game in play, which is listed first (save_list) and not deletable. */
+    const int first_game=save_choice.offer_new;
+    const int playing_first=save_choice.count && !strncmp(save_choice.dirs[0],save_choice.campaign,32);
+    const int deletable=first_game+playing_first<n ? first_game+playing_first : -1;
     if (!bbgpu_choice_begin(save_choice.heading,labels,icons,sections,n,focus,deletable))
         return 0;
     printf("Runtime: SaveDataDialog list (%s): %d entries shown (%d save slots)\n",save_choice.heading,n,
@@ -506,7 +508,6 @@ static void save_list(const unsigned char *param) {
     /* The list, the focused entry selected. */
     memset(&save_choice,0,sizeof(save_choice));
     bbport_saves_list_cancel();   /* an Undo picked in an earlier list the game did not go on with */
-    bbport_saves_save_cancel();
     save_choice.saving=from_pause;
     save_choice.choosing_game=type==1 && !from_pause;
     save_choice.user=user;
@@ -523,9 +524,19 @@ static void save_list(const unsigned char *param) {
         char name[33]; memcpy(name,names[i],32); name[32]=0;
         if (bbport_saves_campaign_digit(name)<0) continue;
         if (!name[0] || !runtime_savedata_exists(user,save_choice.title,name)) continue;
-        if (save_dialog.pick>0 && !strncmp(name,save_dialog.dir,32)) focus_entry=save_choice.count+offer_new;
         memcpy(save_choice.dirs[save_choice.count++],name,32);
     }
+    /* The game in play first (it cannot be deleted: save_choice_show), the others in the game's order. */
+    for (int i=1;i<save_choice.count;++i) {
+        if (strncmp(save_choice.dirs[i],save_choice.campaign,32)) continue;
+        char in_play[32];
+        memcpy(in_play,save_choice.dirs[i],32);
+        memmove(save_choice.dirs[1],save_choice.dirs[0],(size_t)i*32);
+        memcpy(save_choice.dirs[0],in_play,32);
+        break;
+    }
+    for (int i=0;i<save_choice.count;++i)
+        if (save_dialog.pick>0 && !strncmp(save_choice.dirs[i],save_dialog.dir,32)) focus_entry=i+offer_new;
     if (!save_choice_show(focus_entry)) {
         printf("Runtime: SaveDataDialog list: %s; the focused entry is taken\n",
                save_choice.count || offer_new ? "no window" : "no saves");
@@ -538,15 +549,17 @@ static void save_choice_update(void) {
     const int choice=bbgpu_choice_poll();
     if (choice==-1) return;
     if (choice<=-3) {
-        /* Deleted from the list: a save of the game moves to savedata-deleted, a slot (1-5) to the slots' deleted
-         * folder; "Undo last load" stays. The list shows again. */
+        /* Deleted from the list: a game moves to savedata-deleted, the Undo copy to the backups' deleted folder (never
+         * erased); the game in play is not deleted (the list offers no Delete on it). The list shows again. */
         const int entry=-3-choice, dir=entry-save_choice.offer_new, slot=dir-save_choice.count;
-        if (dir>=0 && dir<save_choice.count && !runtime_savedata_trash(save_choice.user,save_choice.title,save_choice.dirs[dir])) {
+        if (dir>=0 && dir<save_choice.count && !strncmp(save_choice.dirs[dir],save_choice.campaign,32)) {
+            printf("Runtime: SaveDataDialog list: the game in play is not deleted\n");
+        } else if (dir>=0 && dir<save_choice.count &&
+                   !runtime_savedata_trash(save_choice.user,save_choice.title,save_choice.dirs[dir])) {
             memmove(save_choice.dirs[dir],save_choice.dirs[dir+1],(size_t)(save_choice.count-dir-1)*32);
             --save_choice.count;
-        } else if (slot>=0 && slot<save_choice.slot_count) {
-            if (save_choice.slots[slot]<5) bbport_saves_trash(save_choice.slots[slot]);
-            else printf("Runtime: SaveDataDialog list: Undo last load is not deleted here\n");
+        } else if (slot>=0 && slot<save_choice.slot_count && save_choice.slots[slot]==SAVE_UNDO) {
+            bbport_saves_trash_undo();
         }
         save_choice.choosing=0;
         if (!save_choice_show(entry)) save_choice_finish(-1);
