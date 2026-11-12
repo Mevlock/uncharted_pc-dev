@@ -1499,7 +1499,21 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         if (dialog) { hov=choice; have_hov=have_choice; }
     }
     pthread_mutex_unlock(&u3_lock);
-    if (info) have_hov=0;   /* an information box: the menu below is left alone */
+    /* U2's Yes/No over the chapter carousel (Chapter Select's "Player stats, trophies ... are disabled in this mode. Continue?"
+     * for Explorer): the cursor on one of two emphasised choices of the same size side by side (210x40 each, 100 apart). Its
+     * box has the size of a locked reward's information box, the carousel stays drawn behind it and its lists lose the focus to
+     * it as to a window: the choice is kept through those three rules. */
+    int u2_choice_pair=0;
+    if (u2m && have_hov && hov.front && hov.w<=300.0f) {
+        pthread_mutex_lock(&u3_lock);
+        for (int i=0;i<U3_ROWS && !u2_choice_pair;++i) {
+            const U3Row *r=&u3_rows[i];
+            if (!r->us || now-r->us>=100000 || !r->front || fabsf(r->x-hov.x)<1.0f) continue;
+            u2_choice_pair=fabsf(r->y-hov.y)<2.0f && fabsf(r->w-hov.w)<1.0f && fabsf(r->h-hov.h)<1.0f;
+        }
+        pthread_mutex_unlock(&u3_lock);
+    }
+    if (info && !u2_choice_pair) have_hov=0;   /* an information box: the menu below is left alone */
     /* U2's drop-down choice (Options > Game > Difficulty: Easy .. Brutal over the page): a focused list of a few values with no
      * rectangle of its own whose texts the menu hooks do not see. It opens level with the lit row, one value per 29.2 below,
      * right of that row's label. The cursor there picks the value (the page behind is left alone: its hidden "On" took the click) */
@@ -1529,7 +1543,7 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
         int lists=0, focused=0;
         pthread_mutex_lock(&u3_lock);
         for (int i=0;i<16;++i) { const U2List *l=&u2_lists[i]; if (l->us && now-l->us<150000 && l->vis>=3 && l->rh>=70.0f) { ++lists; if (l->focused) ++focused; } }   /* (a settings row's selector is a control of one row, 34 tall: not a list) */
-        if (lists && !focused) {
+        if (lists && !focused && !u2_choice_pair) {
             have_hov=0;
             /* the window's own button (an unlocked skin's Enable): its lit row, under the cursor anywhere on the window's panel (a panel
              * drawn in the last 150 ms holding the lit row's centre) -> the click presses it */
@@ -1577,7 +1591,17 @@ static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
     /* U2's chapter carousel (antikmewzik's): the rows behind it are left alone; a click on its panel left of the pictures presses
      * left, right of them right, on the picture in the middle cross (choose) */
     static struct { uint32_t dir; uint64_t until; } car;
-    const int carousel=u2m && u2_popup_us && now-u2_popup_us<700000 && u2_popup_us<=now+1000000;
+    /* (a Yes/No over it, Explorer's warning: its choices are the targets, not the carousel) */
+    const int carousel=u2m && u2_popup_us && now-u2_popup_us<700000 && u2_popup_us<=now+1000000 && !u2_choice_pair;
+    if (u2m && mouse_debug()) {   /* (debug) the rules that leave the rows alone, when they change */
+        static int last=-1;
+        const int state=u2_choice_pair | info<<1 | (u2_popup_us && now-u2_popup_us<700000)<<2 | have_hov<<3;
+        if (state!=last) {
+            last=state;
+            printf("Menu mouse: U2 rules: Yes/No pair %d, information box %d, carousel %d -> cursor row %s\n",u2_choice_pair,info,
+                   (state>>2)&1,have_hov ? "kept" : "none");
+        }
+    }
     if (carousel) {
         have_hov=0;
         if (clicked && ux>=298.0f && ux<=980.0f && uy>=156.0f && uy<=475.0f) {
