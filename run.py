@@ -19,6 +19,33 @@ from pathlib import Path
 import subprocess
 import sys
 
+
+class _QuietStream:
+    """stdout/stderr that never fail: started without a usable console (the launcher, Steam, a game switch
+    from the collection menu), a print raised OSError [Errno 22] and the game switch stopped (upstream #830)."""
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, text):
+        try:
+            return self.stream.write(text) if self.stream else len(text)
+        except (OSError, ValueError):
+            return len(text)
+
+    def flush(self):
+        try:
+            if self.stream:
+                self.stream.flush()
+        except (OSError, ValueError):
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+sys.stdout, sys.stderr = _QuietStream(sys.stdout), _QuietStream(sys.stderr)
+
 PORT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PORT / 'scripts'))
 import cheats
