@@ -7,8 +7,9 @@
  * addresses; US CUSA02320 1.02 = EU CUSA02343 1.02) and 1.00 (EU CUSA02343 1.00 = US CUSA02320 1.00: the same code
  * moved, located by masked signatures). Every hook site and every game function it calls is checked against the
  * original bytes first; a game code that does not match keeps the menus as they are (logged). Not taken: his menu
- * keys (Enter, Esc, Alt, Backspace; the port keeps its own bindings), the keyboard row of the Controls menu (the port has no
- * bindings window to open), the probes (F7/F8/F9). His compare-with-friends removal, the photo mode row, the Treasures model
+ * keys (Enter, Esc, Alt, Backspace; the port keeps its own bindings), the probes (F7/F8/F9). His Keyboard / Mouse row of
+ * Options > Controls is in (2026-11-13: it opens the overlay's Controls tab, the port's bindings page; the row is added in
+ * runtime_exit_menu.c, its label below at "Keyboard / Mouse"). His compare-with-friends removal, the photo mode row, the Treasures model
  * turned with the mouse, U3's chapter carousel and Yes/No by value and U2's controller picture are in (both codes, see
  * "antikmewzik's other menu changes" below). BB_MENU_MOUSE=0: off. */
 #include "runtime_menumouse.h"
@@ -2506,10 +2507,97 @@ CB(u3_dialog_cb) {
 static const unsigned char u3_dialog_102_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xf8,0x04,0x00,0x00,0x48,0x89,0x95,0x38,0xfb,0xff,0xff,0x49,0x89,0xf4};
 static const unsigned char u3_dialog_100_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x68,0x05,0x00,0x00,0x48,0x89,0xd3,0x48,0x89,0x9d,0xc8,0xfa,0xff,0xff};
 
+/* ---- antikmewzik's "Keyboard / Mouse" row of Options > Controls (his 89c68b3 U2, b523a72 U3, d1de70c + 4fb3467 the label in
+ * the game's language; U1 on his u1-mkb-qol branch): the row itself is added by runtime_exit_menu.c (U1: the options builder's
+ * AddToPage; U2, U3: the menu data, a copy of the Controller Layout record), and picking it opens the overlay's Controls page.
+ * Its label is a game text that is never shown in the port, written over in the game's text bank: U1 "Left/Right Sticks"
+ * (0x1b124bb7), U2 and U3 the PlayStation Network chat restriction message (0x62501513). Same length or shorter, so the
+ * bank's layout stays as it is. port: the label's language is the game's (BB_LANGUAGE), not read back from the game's texts
+ * as he does (that knew four languages); a label whose letters the bank may not have (accents, Cyrillic) is used only when
+ * the borrowed text has such letters too. BB_KBM_ROW=0: no row. */
+int runtime_kbm_row_on(void) {
+    static int on=-1;
+    if (on<0) { const char *e=getenv("BB_KBM_ROW"); on=!(e && e[0]=='0'); if (!on) puts("Menus: no Keyboard / Mouse row in Options > Controls (BB_KBM_ROW=0)"); }
+    return on;
+}
+const char *runtime_kbm_label(const char *host, size_t room) {
+    static const char *const english[]={"Keyboard / Mouse","Keyboard/Mouse","Keys/Mouse","Keys",NULL};
+    static const char *const french[]={"Touches clavier / souris","Clavier / souris","Clavier/souris","Clavier",NULL};
+    static const char *const german[]={"Tastatur / Maus","Tastatur/Maus","Tastatur",NULL};
+    static const char *const italian[]={"Tastiera / mouse","Tastiera/mouse","Tastiera",NULL};
+    static const char *const spanish[]={"Teclado / rat\xc3\xb3n","Teclado/rat\xc3\xb3n","Teclado",NULL};
+    static const char *const latin_spanish[]={"Teclado / mouse","Teclado/mouse","Teclado",NULL};
+    static const char *const portuguese[]={"Teclado / rato","Teclado/rato","Teclado",NULL};
+    static const char *const brazilian[]={"Teclado / mouse","Teclado/mouse","Teclado",NULL};
+    static const char *const dutch[]={"Toetsenbord / muis","Toetsenbord/muis","Toetsenbord",NULL};
+    static const char *const russian[]={"\xd0\x9a\xd0\xbb\xd0\xb0\xd0\xb2\xd0\xb8\xd0\xb0\xd1\x82\xd1\x83\xd1\x80\xd0\xb0 / \xd0\xbc\xd1\x8b\xd1\x88\xd1\x8c",
+                                       "\xd0\x9a\xd0\xbb\xd0\xb0\xd0\xb2\xd0\xb8\xd0\xb0\xd1\x82\xd1\x83\xd1\x80\xd0\xb0",NULL};   /* Клавиатура / мышь */
+    static const char *const polish[]={"Klawiatura / mysz","Klawiatura/mysz","Klawiatura",NULL};
+    static const char *const turkish[]={"Klavye / fare","Klavye/fare","Klavye",NULL};
+    const char *e=getenv("BB_LANGUAGE");
+    const int id=e && *e ? atoi(e) : 1;
+    const char *const *list=id==2 || id==22 ? french : id==4 ? german : id==5 ? italian : id==3 ? spanish : id==20 ? latin_spanish :
+                            id==7 ? portuguese : id==17 ? brazilian : id==6 ? dutch : id==8 ? russian : id==16 ? polish :
+                            id==19 ? turkish : english;
+    int host_utf8=0, host_cyrillic=0;
+    for (const unsigned char *p=(const unsigned char *)host;p && *p;++p) { if (*p>=0x80) host_utf8=1; if (*p==0xd0 || *p==0xd1) host_cyrillic=1; }
+    for (int pass=0;pass<2;++pass) {   /* the game's language, then English (a bank without the letters, a borrowed text too short) */
+        for (const char *const *l=pass ? english : list;*l;++l) {
+            int utf8=0, cyrillic=0;
+            for (const unsigned char *p=(const unsigned char *)*l;*p;++p) { if (*p>=0x80) utf8=1; if (*p==0xd0 || *p==0xd1) cyrillic=1; }
+            if ((utf8 && !host_utf8) || (cyrillic && !host_cyrillic)) continue;
+            if (strlen(*l)<=room) return *l;
+        }
+    }
+    return NULL;
+}
+#define KBM_HOST_TEXT 0x62501513u   /* U2, U3: the text the row borrows */
+static int kbm_label_hook;           /* U2, U3: the lookup below is hooked */
+int runtime_menumouse_kbm_label_hook(void) { return kbm_label_hook; }
+/* The game asks table `table` (and, first, its parent) for the borrowed text: where it is in this table is found once (the entries
+ * {id, offset}: count +0, entries +8, string base +0x10, valid +0x38), then checked again at each lookup (a language change loads
+ * fresh banks, perhaps at the same address), and the label is written over it. A lookup of that id happens only when our row is
+ * drawn (or the chat restriction notice, never shown in the port). */
+static void kbm_label_patch(uint64_t table) {
+    static struct { uint64_t table, entries, base; uint32_t index, count; } known[8];
+    static int next, told;
+    uint32_t count=0; uint64_t entries=0, base=0; uint8_t valid=0;
+    if (!safe_read(&count,table,4) || !safe_read(&entries,table+8,8) || !safe_read(&base,table+0x10,8) || !safe_read(&valid,table+0x38,1) ||
+        !valid || !count || count>400000 || entries<0x10000 || base<0x10000) return;
+    int k=-1;
+    for (int i=0;i<8;++i) if (known[i].table==table && known[i].entries==entries && known[i].base==base && known[i].count==count) { k=i; break; }
+    uint32_t pair[2]={0,0};
+    if (k>=0 && (known[k].index>=count || !safe_read(pair,entries+8u*known[k].index,8) || pair[0]!=KBM_HOST_TEXT)) k=-1;
+    if (k<0) {
+        uint32_t *all=malloc((size_t)count*8);
+        if (!all) return;
+        uint32_t index=count;
+        if (safe_read(all,entries,(size_t)count*8)) for (uint32_t i=0;i<count;++i) if (all[2*i]==KBM_HOST_TEXT) { index=i; break; }
+        free(all);
+        if (index==count) return;   /* (in its parent, which the game asks too) */
+        k=next; next=(next+1)%8;
+        known[k].table=table; known[k].entries=entries; known[k].base=base; known[k].count=count; known[k].index=index;
+        safe_read(pair,entries+8u*index,8);
+    }
+    const uint64_t text=base+pair[1];
+    char cur[160]={0};
+    size_t n=sizeof(cur)-1;
+    while (n>0 && !safe_read(cur,text,n)) --n;
+    cur[n]=0;
+    const size_t len=strlen(cur);
+    const char *label=runtime_kbm_label(cur,len);
+    if (!label || !strcmp(cur,label)) {
+        if (!label && told<4) { ++told; printf("Menus: the Keyboard / Mouse row: the borrowed text is too short for a label (%zu bytes)\n",len); }
+        return;
+    }
+    if (safe_write(text,label,strlen(label)+1) && told<8) { ++told; printf("Menus: Keyboard / Mouse row label \"%s\" (text bank %#llx)\n",label,(unsigned long long)table); }
+}
+
 /* U2's text lookup (table, text id): "Reset camera", "Photo mode", "Swap shoulder when aiming" are only on the controller picture */
 CB(u2_text_lookup_cb) {
     (void)rdi; (void)base; (void)r14; (void)regs;
     const uint32_t k=(uint32_t)rsi;
+    if (k==KBM_HOST_TEXT && runtime_kbm_row_on()) kbm_label_patch(rdi);
     if (u2m && (k==0x4158a30du || k==0x9ef63173u || k==0x36fc7ed5u) && !runtime_mouselook_camera_recent()) u2_layout_us=now_us();   /* (not a HUD hint in play) */
 }
 static const unsigned char u2_text_lookup_code[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x89,0xf3,0x49,0x89,0xfe,0x49,0x8b,0x7e,0x58,0x48,0x85,0xff,0x74};   /* (both codes) */
@@ -2540,14 +2628,14 @@ static const unsigned char u2_text_lookup_code[]={0x55,0x48,0x89,0xe5,0x41,0x56,
     SITE("U3 1.02 Treasures scene (menu mouse)",0x65f010,u3_scene_102_code,6,u3_scene_cb), \
     SITE("U3 1.02 Treasures model (menu mouse)",0x65f6b0,u3_model_102_code,8,u3_model_102_cb), \
     SITE("U3 1.02 chapter carousel draw (menu mouse)",0x5eccb0,u3_carousel_102_code,8,u3_carousel_cb), \
-    SITE("U3 1.02 Yes/No choices draw (menu mouse)",0x5e0de0,u3_dialog_102_code,8,u3_dialog_cb)
+    SITE("U3 1.02 Yes/No choices draw (menu mouse)",0x5e0de0,u3_dialog_102_code,8,u3_dialog_cb),     SITE("U3 1.02 text lookup (Keyboard / Mouse row label) (menu mouse)",0xf32ae0,u2_text_lookup_code,6,u2_text_lookup_cb)
 #define U3_SITES_100 \
     PATCH("U3 1.00 compare-with-friends prompt (skip) (menu mouse)",0x1c7191,u3_compare_100_code,u3_compare_100_patch), \
     SITE("U3 1.00 prompt bar flags (menu mouse)",0x1c6ecb,u3_bar_flags_100_code,6,u3_bar_flags_100_cb), \
     SITE("U3 1.00 Treasures scene (menu mouse)",0x1f6e10,u3_scene_100_code,6,u3_scene_cb), \
     SITE("U3 1.00 Treasures model (menu mouse)",0x1f74f8,u3_model_100_code,8,u3_model_100_cb), \
     SITE("U3 1.00 chapter carousel draw (menu mouse)",0x1a0490,u3_carousel_100_code,8,u3_carousel_cb), \
-    SITE("U3 1.00 Yes/No choices draw (menu mouse)",0x197fc0,u3_dialog_100_code,8,u3_dialog_cb)
+    SITE("U3 1.00 Yes/No choices draw (menu mouse)",0x197fc0,u3_dialog_100_code,8,u3_dialog_cb),     SITE("U3 1.00 text lookup (Keyboard / Mouse row label) (menu mouse)",0x5d4120,u2_text_lookup_code,6,u2_text_lookup_cb)
 
 static const RuntimeGuestCallback u1_more_102[]={U1_SITES_102}, u1_more_100[]={U1_SITES_100};
 static const RuntimeGuestCallback u2_more_102[]={U2_SITES_102}, u2_more_100[]={U2_SITES_100};
@@ -2572,6 +2660,11 @@ const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
             puts("Menu mouse: U3 1.00 prompt bar frame differs: its SELECT stays");
             continue;
         }
+        if (b[i].callback==u2_text_lookup_cb && !code_is(b[i].offset,b[i].signature,b[i].signature_size)) {
+            printf("Menu mouse: %s: the code differs: no Keyboard / Mouse row\n",b[i].name);
+            continue;
+        }
+        if (b[i].callback==u2_text_lookup_cb) kbm_label_hook=1;
         mm_sites[n++]=b[i];
     }
     *count=n;

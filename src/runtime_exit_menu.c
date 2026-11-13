@@ -6,7 +6,12 @@
  * (id 0x18, label text 0x7c894f27), and at the next AddToPage call (the game goes on building its other pages)
  * appends a Quit item (AddItem with id 0x7e00, which no menu uses) to that page. The menu's item handler
  * (a switch on the item id) is hooked at its start: id 0x7e00 ends the game through runtime_quit, after a save
- * that is being written has finished. */
+ * that is being written has finished.
+ *
+ * Also here: antikmewzik's "Keyboard / Mouse" row of Options > Controls (after the game's Controller Layout row), which opens
+ * the overlay's Controls page (the keyboard and mouse bindings). U1: added by the same AddToPage hook, between the Controller
+ * Layout row and Reset to Defaults; U2, U3: a copy of the Controller Layout record in the menu data, going to the menu handler.
+ * Its label: runtime_menumouse.c (runtime_kbm_label). BB_KBM_ROW=0: no row. */
 #include "runtime.h"
 #include <inttypes.h>
 #include <stdio.h>
@@ -30,10 +35,11 @@
 typedef struct {
     const char *name;
     uint64_t add_item, alloc, add_to_page, go_to_page, toggle;
+    uint64_t text_lookup, text_table;   /* the game's text lookup (table, id) -> string, and its text table (the row's label) */
 } U1Build;
 static const U1Build u1_builds[]={
-    {"Uncharted 1 EU",0x129ed0,0x35dbb0,0x132d70,0x14a480,0xabbaf4},
-    {"Uncharted 1 1.02",0x12a020,0x4542b0,0x132f00,0x14a940,0xa7f9f8},
+    {"Uncharted 1 EU",0x129ed0,0x35dbb0,0x132d70,0x14a480,0xabbaf4,0x49cea0,0x99efc8},
+    {"Uncharted 1 1.02",0x12a020,0x4542b0,0x132f00,0x14a940,0xa7f9f8,0x5caac0,0x9687d8},
 };
 
 typedef void *(__attribute__((sysv_abi)) *Alloc)(uint64_t size);
@@ -68,8 +74,91 @@ static U1Spot u1_spots[]={
 };
 static int adding;
 
+/* The Keyboard / Mouse row (U1): the options builder adds the Controls page's Controller Layout row (id 0x412, label text
+ * 0xdd40dc7b) and right after it Reset to Defaults (0x426, 0xb69a538a) to the same page, in 1.00 and 1.02 (checked in both
+ * builders, 1.02 0x145876 / 1.00 0x145471). At that second AddToPage our row (id 0x7e02, which no menu uses: the item handler
+ * gets it) is added first, its label a copy of the Controller Layout's with the text 0x1b124bb7 ("Left/Right Sticks", shown
+ * nowhere), written over in the game's text bank (runtime_kbm_label; each time the page is built, so a language change keeps it).
+ * A page holds 20 items (+0xa0, the page's own fields from +0x140): never more. */
+#define U1_LAYOUT_ID 0x412u
+#define U1_LAYOUT_TEXT 0xdd40dc7bu
+#define U1_RESET_ID 0x426u
+#define U1_RESET_TEXT 0xb69a538au
+#define U1_KBM_ID 0x7e02u
+#define U1_KBM_TEXT 0x1b124bb7u
+static unsigned char *u1_kbm_page, u1_kbm_label[0x18];
+static void *u1_kbm_owner;
+typedef const char *(__attribute__((sysv_abi)) *TextLookup)(uint64_t table, uint64_t id);
+static void u1_kbm_label_text(const U1Build *b, uint64_t image) {
+    static const unsigned char lookup_code[]={0x55,0x48,0x89,0xe5,0x53,0x50,0x48,0x89,0xfb,0xe8,0x92,0xff,0xff,0xff,0x48,0x85};
+    static int told;
+    if (memcmp((const void *)(uintptr_t)(image+b->text_lookup),lookup_code,sizeof(lookup_code))) {
+        if (!told++) printf("Exit menu: %s: the text lookup code differs: the Keyboard / Mouse row keeps the game's text\n",b->name);
+        return;
+    }
+    const char *s=((TextLookup)(uintptr_t)(image+b->text_lookup))(image+b->text_table,U1_KBM_TEXT);
+    const char *standard;   /* (the table's default text: the id is not in the bank) */
+    memcpy(&standard,(const void *)(uintptr_t)(image+b->text_table+0x10),sizeof(standard));
+    if (!s || s==standard) return;
+    char old[96];
+    const size_t len=strnlen(s,sizeof(old));
+    if (len<4 || len>=sizeof(old)) return;
+    memcpy(old,s,len+1);
+    const char *label=runtime_kbm_label(old,len);
+    if (!label) return;
+    char padded[96];   /* the same length: the rest blank (antikmewzik's keys_label_here) */
+    memset(padded,' ',len);
+    memcpy(padded,label,strlen(label));
+    if (memcmp(padded,old,len)) {
+        memcpy((void *)(uintptr_t)s,padded,len);
+        printf("Exit menu: %s: Keyboard / Mouse row label \"%s\" (over \"%s\")\n",b->name,label,old);
+    }
+}
+static void u1_kbm_row(const U1Build *b, uint64_t image, unsigned char *page, unsigned char *item) {
+    uint32_t id, text;
+    unsigned char *label;
+    memcpy(&id,item+0xa8,4);
+    memcpy(&label,item+8,sizeof(label));
+    if (!label) { u1_kbm_page=NULL; return; }
+    memcpy(&text,label+8,4);
+    if (id==U1_LAYOUT_ID && text==U1_LAYOUT_TEXT) {
+        u1_kbm_page=page;
+        memcpy(u1_kbm_label,label,0x18);
+        memcpy(&u1_kbm_owner,item+0xa0,sizeof(u1_kbm_owner));
+        return;
+    }
+    unsigned char *const after=u1_kbm_page;
+    u1_kbm_page=NULL;
+    if (page!=after || id!=U1_RESET_ID || text!=U1_RESET_TEXT) return;
+    int32_t count;
+    memcpy(&count,page+0x98,4);
+    if (count<1 || count>=19) { printf("Exit menu: %s: the Controls page holds %d items: no Keyboard / Mouse row\n",b->name,count); return; }
+    for (int32_t i=0;i<count;++i) {
+        unsigned char *other;
+        uint32_t other_id;
+        memcpy(&other,page+0xa0+8*(size_t)i,sizeof(other));
+        if (!other) continue;
+        memcpy(&other_id,other+0xa8,4);
+        if (other_id==U1_KBM_ID) return;   /* (built again into the same page) */
+    }
+    u1_kbm_label_text(b,image);
+    unsigned char *row=((Alloc)(uintptr_t)(image+b->alloc))(0x108);
+    unsigned char *row_label=((Alloc)(uintptr_t)(image+b->alloc))(0x18);
+    if (!row || !row_label) return;
+    memcpy(row_label,u1_kbm_label,0x18);
+    const uint64_t row_text=U1_KBM_TEXT;
+    memcpy(row_label+8,&row_text,sizeof(row_text));
+    ((AddItem)(uintptr_t)(image+b->add_item))(row,u1_kbm_owner,U1_KBM_ID,row_label,0);
+    adding=1;
+    ((AddToPage)(uintptr_t)(image+b->add_to_page))(page,row);
+    adding=0;
+    static int told;
+    if (told++<3) printf("Exit menu: %s: Keyboard / Mouse row added to Options > Controls (%d items)\n",b->name,count+1);
+}
+
 static void u1_add_to_page(const U1Build *b, uint64_t image, unsigned char *page, unsigned char *item) {
     if (adding) return;  /* our own AddToPage call below */
+    if (item && runtime_kbm_row_on()) u1_kbm_row(b,image,page,item);
     for (size_t s=0;s<sizeof(u1_spots)/sizeof(*u1_spots);++s) {
         U1Spot *spot=&u1_spots[s];
         if (!spot->page || spot->added || page==spot->page) continue;
@@ -151,6 +240,7 @@ static void quit_from_menu(const char *game) {
 static void u1_handler(const U1Build *b, uint64_t image, unsigned char *host, uint32_t id) {
     note_item(b->name, id, id == U1_SAVE_GAME_ID);
     if (id==QUIT_ID) quit_from_menu("Uncharted 1");
+    if (id==U1_KBM_ID) { printf("Exit menu: %s: Keyboard / Mouse picked: the overlay's Controls page\n",b->name); bbgpu_open_controls(); }
     if (id!=PAUSE_QUIT_ID || !host) return;
     int32_t toggle;
     memcpy(&toggle,(void *)(uintptr_t)(image+b->toggle),4);
@@ -317,6 +407,78 @@ static void dc_drop_photo_row(const DcLayout *l, unsigned char *menu) {
     if (!dropped && !told++) printf("Exit menu: %s: no photo mode row found in the menus\n",l->name);
 }
 
+/* The Keyboard / Mouse row (U2, U3; antikmewzik's u2_menu_def_patch / u3_row_walk): in every page that holds the Controller
+ * Layout record (label text 0xdd40dc7b, the row of the controller picture; the page's title and the Options entry have other
+ * texts), a copy of it right after it, with an id of its own (no target page: it goes to the menu handler) and the borrowed
+ * label text 0x62501513 (runtime_menumouse.c writes the label over it). Only when that label can be written (the text lookup
+ * hook of the menu mouse is in). */
+#define DC_LAYOUT_TEXT 0xdd40dc7bu
+#define DC_KBM_ID 0x3a1a91d1u
+#define DC_KBM_TEXT 0x62501513u
+static void dc_add_kbm_row(const DcLayout *l, unsigned char *menu) {
+    if (!runtime_kbm_row_on()) return;
+    static int told_hook;
+    if (!runtime_menumouse_kbm_label_hook()) {
+        if (!told_hook++) printf("Exit menu: %s: no Keyboard / Mouse row (the menu mouse's text lookup hook is not in)\n",l->name);
+        return;
+    }
+    uint32_t pages;
+    unsigned char *page_array;
+    memcpy(&pages,menu,4);
+    memcpy(&page_array,menu+8,sizeof(page_array));
+    if (!page_array || pages>4096) return;
+    int found=0;
+    for (uint32_t p=0;p<pages;++p) {
+        unsigned char *page=page_array+(size_t)p*l->page_stride, *header;
+        memcpy(&header,page+l->page_items,sizeof(header));
+        if (!header) continue;
+        uint32_t count;
+        unsigned char *items;
+        memcpy(&count,header,4);
+        memcpy(&items,header+8,sizeof(items));
+        if (!items || count==0 || count>256) continue;
+        int at=-1, have=0;
+        for (uint32_t i=0;i<count;++i) {
+            uint32_t id, label;
+            memcpy(&id,items+(size_t)i*l->item_stride+8,4);
+            memcpy(&label,items+(size_t)i*l->item_stride+0x28,4);
+            if (id==DC_KBM_ID) have=1;
+            if (label==DC_LAYOUT_TEXT && at<0) at=(int)i;
+        }
+        if (at<0) continue;
+        ++found;
+        if (have) continue;   /* (the data looked up again) */
+        /* Kept for the life of the process, as the Quit items. */
+        unsigned char *copy=calloc((size_t)count+1,l->item_stride), *new_header=calloc(1,16);
+        if (!copy || !new_header) { free(copy); free(new_header); return; }
+        const size_t head=(size_t)(at+1)*l->item_stride;
+        memcpy(copy,items,head);
+        memcpy(copy+head,items+(size_t)at*l->item_stride,l->item_stride);
+        memcpy(copy+head+l->item_stride,items+head,(size_t)count*l->item_stride-head);
+        unsigned char *row=copy+head;
+        static const char name[]="BUTTON_KEYBOARD_MOUSE", label_name[]="BP_MENU_KEYBOARD_MOUSE";
+        const char *name_ptr=name, *label_ptr=label_name;
+        const uint32_t id=DC_KBM_ID, text=DC_KBM_TEXT, target=0;
+        uint32_t type;
+        memcpy(&type,row+0x10,4);
+        memcpy(row,&name_ptr,sizeof(name_ptr));
+        memcpy(row+8,&id,4);
+        memcpy(row+0x20,&label_ptr,sizeof(label_ptr));
+        memcpy(row+0x28,&text,4);
+        memcpy(row+0x50,&target,4);
+        const uint32_t new_count=count+1;
+        memcpy(new_header,&new_count,4);
+        memcpy(new_header+8,&copy,sizeof(copy));
+        memcpy(page+l->page_items,&new_header,sizeof(new_header));
+        uint32_t sid;
+        memcpy(&sid,page+8,4);
+        printf("Exit menu: %s: Keyboard / Mouse row added to page %08x after item %d (type %u; %u items)\n",l->name,sid,at+1,
+               type,new_count);
+    }
+    static int told;
+    if (!found && !told++) printf("Exit menu: %s: no Controller Layout row in the menus: no Keyboard / Mouse row\n",l->name);
+}
+
 /* BB_EXIT_MENU_PAGES=1 (diagnosis): every page of the menu data that holds the game's own "Quit to Main Menu"
  * (0xfdcd24df) or Load Game (0xf7a5b490), with its items' ids, once per lookup. */
 static void dc_list_pages(const DcLayout *l, unsigned char *menu) {
@@ -364,6 +526,7 @@ static void dc_add_quit(const DcLayout *l, unsigned char *menu) {
     if (!menu) return;
     dc_list_pages(l,menu);
     dc_drop_photo_row(l,menu);
+    dc_add_kbm_row(l,menu);
     /* Main menu: closes the game at once (nothing to lose there). */
     dc_add_item(l,menu,DC_PROFILE_PAGE,DC_LOADGAME_ID,"BUTTON_QUIT_GAME",DC_QUIT_ID,0,"main menu");
     /* Pause menus: opens the game's Yes/No page, set up by the handler hook below. Every page that ends in one of the
@@ -406,6 +569,7 @@ static void dc_add_quit(const DcLayout *l, unsigned char *menu) {
 static void dc_handler(const DcLayout *l, unsigned char *host, uint32_t id) {
     note_item(l->name, id, id == DC_SAVEGAME_ID);
     if (id==DC_QUIT_ID) quit_from_menu(l->name);
+    if (id==DC_KBM_ID) { printf("Exit menu: %s: Keyboard / Mouse picked: the overlay's Controls page\n",l->name); bbgpu_open_controls(); }
     if (id!=DC_PAUSE_QUIT_ID || !host) return;
     unsigned char *dialog;
     memcpy(&dialog,host+l->dialog,sizeof(dialog));

@@ -118,6 +118,16 @@ void __attribute__((ms_abi)) runtime_exit_menu_u1_eu_handler(uint64_t rdi, uint6
 void __attribute__((ms_abi)) runtime_exit_menu_u1_us_handler(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                              const uint64_t *regs);
 void runtime_menumouse_u2_host(uint64_t host);   /* runtime_menumouse.c: U2's menu host, from the menu builder */
+/* The "Keyboard / Mouse" row of Options > Controls (antikmewzik's; runtime_exit_menu.c adds it, runtime_menumouse.c gives it its
+ * label): on unless BB_KBM_ROW=0. */
+int runtime_kbm_row_on(void);
+/* The row's label in the game's language (BB_LANGUAGE) that fits `room` bytes, written over `host` (the game text it borrows:
+ * its current text, to tell whether the bank has the label's letters); NULL: none fits. */
+const char *runtime_kbm_label(const char *host, size_t room);
+/* U2/U3: the text lookup hook that gives the row its label is installed (the row is added only then). */
+int runtime_menumouse_kbm_label_hook(void);
+/* The row was picked: the overlay's Controls page opens (gpu/shim/bbport_overlay.cpp). */
+void bbgpu_open_controls(void);
 void __attribute__((ms_abi)) runtime_exit_menu_u2_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
     const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_exit_menu_u3_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
