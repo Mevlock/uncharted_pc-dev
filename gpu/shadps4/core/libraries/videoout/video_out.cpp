@@ -455,6 +455,13 @@ s32 PS4_SYSV_ABI sceVideoOutAdjustColor(s32 handle, const SceVideoOutColorSettin
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
+    // bbport: the gamma the game asks for (Uncharted 2 photo mode Brightness: deep-fried colours at 100).
+    static float logged = -1.0f;
+    if (settings->gamma != logged) {
+        logged = settings->gamma;
+        std::printf("Video out: adjust colour gamma %g (words %08x %08x %08x)\n", settings->gamma,
+                    settings->reserved[0], settings->reserved[1], settings->reserved[2]);
+    }
     presenter->GetPPSettingsRef().gamma = settings->gamma;
     return ORBIS_OK;
 }

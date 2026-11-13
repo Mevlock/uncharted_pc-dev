@@ -16,10 +16,17 @@ layout (push_constant) uniform settings {
 } pp;
 
 const float cutoff = 0.0031308, a = 1.055, b = 0.055, d = 12.92;
+// The game's display gamma (sceVideoOutAdjustColor, 0.1..2.0; 1 = sRGB) changes the curve's exponent.
+// bbport: the linear toe below the cutoff meets the curve at the cutoff for every gamma. It was
+// d * rgb / gamma: at gamma 0.1 (Uncharted 2 photo mode Brightness 100) the darkest values rose ~3x
+// above the curve, so a channel just under the cutoff came out brighter than one just over it and
+// dark colours scrambled ("deep-fried"). At gamma 1 the slope is d, as before.
 vec3 gamma(vec3 rgb) {
+    const float e = 1.0 / (2.4 + 1.0 - pp.gamma);
+    const float slope = pp.gamma == 1.0 ? d : (a * pow(cutoff, e) - b) / cutoff;
     return mix(
-        a * pow(rgb, vec3(1.0 / (2.4 + 1.0 - pp.gamma))) - b,
-        d * rgb / pp.gamma,
+        a * pow(rgb, vec3(e)) - b,
+        slope * rgb,
         lessThan(rgb, vec3(cutoff))
     );
 }
