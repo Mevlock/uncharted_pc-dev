@@ -218,6 +218,18 @@ static void old_frame(const OldBuild *b, uint64_t image) {
     }
     const int active=b->is_active ? ((TaskTest)(uintptr_t)(image+b->is_active))(t)
                                   : **(int *const *)((unsigned char *)t+0x40)==1;
+    if (active) {
+        /* From El Dorado (michelle, f50cbbcd): a jump to the task that is already running does nothing. The game's own
+         * sequence only calls ResetTasks there, which empties the scene (no Nate, no enemies, no HUD) and never starts it
+         * again (the checkpoint you are at picked again). BB_CHECKPOINT_RESET_ACTIVE=1: the reset as before. */
+        const char *e=getenv("BB_CHECKPOINT_RESET_ACTIVE");
+        if (!(e && e[0]=='1')) {
+            printf("Checkpoints: task %08x (%s) is already the active task: no jump\n",task,b->name);
+            fflush(stdout);
+            atomic_store(&result,1);
+            return;
+        }
+    }
     printf("Checkpoints: jumping to task %08x (%s%s)\n",task,b->name,active ? ", already the active task: reset" : "");
     fflush(stdout);
     bbgpu_thumbnail_jump(); /* save pictures: like a load */

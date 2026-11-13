@@ -549,8 +549,10 @@ void CheckpointsPage() {
             if (ImGui::Selectable(label.c_str(), i == picked || (is_current && picked < 0),
                                   ImGuiSelectableFlags_AllowDoubleClick)) {
                 picked = i;
-                // A double click goes there at once (the same as picking it and pressing Go there).
-                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                // A double click goes there at once (the same as picking it and pressing Go there), but never to the
+                // checkpoint the player is at (from El Dorado, michelle: the game's task reset there leaves the scene
+                // without its characters).
+                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !(now.known && list[i].task == now.task)) {
                     BbSaves::Jump(list[i], message);
                 }
             }
@@ -563,8 +565,9 @@ void CheckpointsPage() {
         }
     }
     ImGui::EndChild();
-    ImGui::BeginDisabled(picked < 0);
-    if (ImGui::Button(TI("Go there")) && picked >= 0) {
+    const bool already_here = picked >= 0 && now.known && list[picked].task == now.task;
+    ImGui::BeginDisabled(picked < 0 || already_here);
+    if (ImGui::Button(TI("Go there")) && picked >= 0 && !already_here) {
         BbSaves::Jump(list[picked], message);
     }
     ImGui::EndDisabled();
