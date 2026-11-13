@@ -78,7 +78,7 @@ FSR 4.1.1 assets have separate 1080p/2160p tiers and standard/Ultra models:
 `t1080_m0`, `t1080_m1`, `t2160_m0`, `t2160_m1`. Outputs above 1080p need the 2160
 tier, irrespective of the preset. A missing `t2160_m0/spd.spv` means missing
 assets, not a GPU feature failure. These assets are not bundled: build the full
-set with `tools/fsr4cap/build_assets.sh` and put it in `BB_FSR411_DIR` or the
+set with `tools/fsr4cap/build_assets.sh` (removed in 0.3.6.55; in git history) and put it in `BB_FSR411_DIR` or the
 packaged data directory's `fsr4_411`. Fatal asset failures now select FSR 3.1 in
 the live settings, so the menu shows the active provider, retains the error, and
 allows retrying FSR 4 after changing the output/installing assets.

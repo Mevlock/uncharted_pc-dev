@@ -35,6 +35,7 @@ sys.path.insert(0, str(PORT_DIR / 'scripts'))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import trophies  # noqa: E402  (scripts/trophies.py: the games' trophy lists)
 import uncharted_i18n
+import fsr4_opt  # noqa: E402  (the opt-in FSR 4 download)
 
 DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
 # expanduser, not Path.home(): started without USERPROFILE or HOME, the launcher still opens.
@@ -746,6 +747,17 @@ def render_resolution(s):
     return sizes[0] if sizes else None
 
 
+FSR4_DIR = PORT_DIR / 'fsr4_shaders'
+
+
+def fsr4_tools():
+    """The folder with spirv-cross.exe and glslangValidator.exe: the package's bin, else the PATH (developers)."""
+    if (PORT_DIR / 'bin' / 'spirv-cross.exe').is_file() and (PORT_DIR / 'bin' / 'glslangValidator.exe').is_file():
+        return PORT_DIR / 'bin'
+    found = [shutil.which(name) for name in ('spirv-cross', 'glslangValidator')]
+    return Path(found[0]).parent if all(found) and Path(found[0]).parent == Path(found[1]).parent else None
+
+
 def fsr411_assets():
     """FSR 4.1.1 needs its model assets, built from AMD's DLL (docs/upscaler.md)."""
     return bool(os.environ.get('BB_FSR411_DIR')) or any(
@@ -1196,6 +1208,12 @@ class Launcher:
                 on_change()
         box.bind('<<ComboboxSelected>>', selected)
         var.trace_add('write', show)
+
+        def set_options(new_options):
+            values[:] = [v for v, _t in new_options]
+            box.configure(values=[_(t) for _v, t in new_options])
+            show()
+        box.set_options = set_options
         return box
 
     def next_row(self, parent):
@@ -1915,8 +1933,7 @@ class Launcher:
         self.row(f, _('Sharpening'), self.choice(f, 'sharpening', SHARPENING, 34),
                  _('AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).'))
         self.section(f, _('Anti-aliasing'))
-        modes = ANTI_ALIASING + ([FSR411] if fsr411_assets() else []) + ([XESS] if xess_available() else [])
-        self.row(f, _('Anti-aliasing'), self.choice(f, 'anti_aliasing', modes, 34),
+        self.aa_box = self.row(f, _('Anti-aliasing'), self.choice(f, 'anti_aliasing', self.aa_modes(), 34),
                  _('Temporal anti-aliasing with the games\' own motion vectors: smoother edges and less '
                    'shimmering than the games\' own. At Native render resolution DLSS is DLAA; with '
                    'Quality, Balanced or Performance DLSS or FSR also rebuilds the full size. DLSS needs '
@@ -1924,6 +1941,25 @@ class Launcher:
                    'first time FSR 4 starts (and after a graphics driver update) the game can pause for '
                    'about 10 seconds while the driver prepares it. Intel XeSS runs on any GPU (best on '
                    'Intel Arc).'))
+        # FSR 4 v07 is not part of the package: the player can download it (fsr4_opt.py).
+        card = self.target(f)
+        r = self.next_row(card)
+        self.ttk.Label(card, text=_('AMD FSR 4 files')).grid(row=r, column=0, sticky='nw', padx=(0, 24), pady=(9, 0))
+        holder = self.tk.Frame(card, bg=CARD)
+        holder.grid(row=r, column=1, sticky='w', pady=(5, 0))
+        self.fsr4_button = self.pill(holder, _('Download FSR 4 files'), self.download_fsr4)
+        self.fsr4_button.pack(side='left')
+        self.fsr4_status = self.tk.Label(holder, text='', bg=CARD, fg=TEXT, font=self.font_ui, justify='left')
+        self.fsr4_status.pack(side='left', padx=(12, 0))
+        self.ttk.Label(card, text=_(
+            'FSR 4 is not included with the port. The button downloads the FSR 4 files published by FireBurn/Q2RTX '
+            "on GitHub (about 33 MB) into the fsr4_shaders folder, then builds the port's faster versions of two "
+            'of their passes on this PC. The files come from that third party, not from this port, and AMD has '
+            'not licensed them for this use: download them only if you are fine with that. Nothing is downloaded '
+            'unless you press the button.'), style='Muted.TLabel', wraplength=self.px(560), justify='left').grid(
+            row=r + 1, column=1, sticky='w', pady=(3, 4))
+        self.fsr4_busy = False
+        self.refresh_fsr4()
         self.row(f, _('DLSS model'), self.choice(f, 'dlss_model', DLSS_MODELS, 34),
                  _('With NVIDIA DLSS: the AI model it uses. K is NVIDIA\'s choice for this (DLAA) mode; '
                    'L and M are the newer DLSS 4.5 models, made for heavier upscaling. Compare them '
@@ -2607,6 +2643,49 @@ class Launcher:
         else:
             status = _('Connected · Vibration supported')
         self.controller_status.configure(text=status)
+
+    def aa_modes(self):
+        """The anti-aliasing choices: FSR 4 once its files are in fsr4_shaders (Display page download)."""
+        modes = [m for m in ANTI_ALIASING if m[0] != 'fsr4' or not fsr4_opt.missing(FSR4_DIR)]
+        return modes + ([FSR411] if fsr411_assets() else []) + ([XESS] if xess_available() else [])
+
+    def refresh_fsr4(self, text=None):
+        files, opt = fsr4_opt.missing(FSR4_DIR), fsr4_opt.opt_missing(FSR4_DIR)
+        if text is None:
+            text = (_('Installed') if not files and not opt else
+                    _('Downloaded; the faster passes are not built yet') if not files else
+                    _('Not installed') if len(files) == len(fsr4_opt.files()) else
+                    _('{} of {} files missing').format(len(files), len(fsr4_opt.files())))
+        self.fsr4_status.configure(text=text)
+        self.fsr4_button.configure(state='normal' if (files or opt) and not self.fsr4_busy else 'disabled')
+
+    def download_fsr4(self):
+        if self.fsr4_busy:
+            return
+        self.fsr4_busy = True
+        self.refresh_fsr4(_('Downloading…'))
+
+        def work():
+            error = None
+            try:
+                fsr4_opt.download(FSR4_DIR, lambda done, total: self.ui_calls.put(
+                    lambda: self.refresh_fsr4(_('Downloading… {} of {}').format(done, total))))
+                tools = fsr4_tools()
+                if not tools:
+                    raise OSError(_('spirv-cross.exe and glslangValidator.exe are missing from the bin folder'))
+                fsr4_opt.build_opt(FSR4_DIR, tools, lambda done, total: self.ui_calls.put(
+                    lambda: self.refresh_fsr4(_('Building the faster passes… {} of {}').format(done, total))))
+            except (OSError, ValueError, subprocess.CalledProcessError) as failure:
+                error = failure
+
+            def done():
+                self.fsr4_busy = False
+                self.refresh_fsr4()
+                self.aa_box.set_options(self.aa_modes())
+                if error:
+                    self.messagebox.showerror('FSR 4', _('FSR 4 download failed: {}').format(error))
+            self.ui_calls.put(done)
+        threading.Thread(target=work, daemon=True).start()
 
     def update_prep_status(self):
         """The Shader preparation line for the selected game."""
