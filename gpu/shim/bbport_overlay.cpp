@@ -131,6 +131,7 @@ const char* TI(const char* english) {
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
 std::atomic<bool> menu_open{false};
+std::atomic<bool> choice_active{false}; // the save list (ChoiceBox) is open
 bool l3_down = false, r3_down = false;
 bool dirty = false; // settings changed while open: saved on close
 // The game's text dialog (SetTextEntry), guarded by imgui_mutex.
@@ -314,7 +315,9 @@ void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
         return;
     }
-    ImGui::GetIO().MouseDrawCursor = value;
+    // ImGui draws its own cursor while the menu is open (antikmewzik's SetOpen): it shows in exclusive fullscreen too,
+    // where the system cursor may not; window.cpp hides the system one meanwhile (DrawsCursor). The save list draws it too.
+    ImGui::GetIO().MouseDrawCursor = value || choice_active;
     if (!value && dirty) {
         dirty = false;
         BbSettings::Save();
@@ -1230,7 +1233,6 @@ void TrophyToast() {
 // Delete. Controller: D-pad, Cross (A), Circle (B), Triangle (Y). A delete takes a second press (Delete, Triangle or
 // the button) on the same entry. Guarded by imgui_mutex.
 constexpr int ChoicePictureW = 456, ChoicePictureH = 256; // a save picture (bbport_thumbnail.h); icon0.png is smaller
-std::atomic<bool> choice_active{false};
 std::string choice_title;
 std::vector<std::string> choice_items;
 std::vector<std::string> choice_sections; // a heading above an entry (empty = none)
@@ -2195,6 +2197,10 @@ void NotifyTrophy(int grade, std::string game, std::string name, std::vector<uns
         toast_queue.push_back({grade, std::move(game), std::move(name), std::move(png)});
         toast_busy = true;
     }
+}
+
+bool DrawsCursor() {
+    return initialized && (menu_open || choice_active);
 }
 
 bool CapturesInput() {

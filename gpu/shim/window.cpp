@@ -384,8 +384,11 @@ bool WindowSDL::PollEvents() {
         }
         // Mouse look's relative mode hides the cursor itself; otherwise an idle cursor is hidden
         // while the game has the focus and nothing needs it (menu, text entry).
-        const bool hide = window_focused && !text_active && !BbOverlay::CapturesInput() &&
-                          SDL_GetTicksNS() - cursor_moved_ns > CursorIdleNs;
+        // While the overlay draws its own cursor (ImGui's), the system one is hidden: one cursor, also in exclusive
+        // fullscreen; it comes back with the rules above once the overlay closes.
+        const bool overlay_cursor = BbOverlay::DrawsCursor();
+        const bool hide = overlay_cursor || (window_focused && !text_active && !BbOverlay::CapturesInput() &&
+                                             SDL_GetTicksNS() - cursor_moved_ns > CursorIdleNs);
         // In a game menu the cursor shows a hand over what answers a click (the menu mouse): antikmewzik's golden
         // arrow (normal, hover, pressed), or the system arrow and hand.
         {
@@ -433,7 +436,7 @@ bool WindowSDL::PollEvents() {
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_EVENT_MOUSE_MOTION && !mouse_captured) {
             cursor_moved_ns = SDL_GetTicksNS();
-            if (cursor_hidden) { // back at once, not at the next poll
+            if (cursor_hidden && !BbOverlay::DrawsCursor()) { // back at once, not at the next poll
                 SDL_ShowCursor();
                 cursor_hidden = false;
             }

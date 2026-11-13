@@ -68,6 +68,8 @@ void PrintPreparationProgress();
 
 /// The menu is open or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();
+/// ImGui draws its own cursor (the menu or the save list is open): the system cursor is hidden meanwhile (window.cpp).
+bool DrawsCursor();
 
 /// Window thread: the game's text dialog (sceImeDialog). Shown as a box on screen until
 /// `active` is false; typing goes to the window (sdl_window), the box only displays it.
