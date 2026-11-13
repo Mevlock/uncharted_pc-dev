@@ -1,9 +1,11 @@
 // bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 #include <SDL3/SDL.h>
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -62,6 +64,87 @@ u32 MouseBit(u8 button) {
     case SDL_BUTTON_X2: return 16u;
     default: return 0u;
     }
+}
+
+#include "bbport_cursor_data.inc"
+
+// The golden arrow of the game menus, by antikmewzik (his window.cpp BuildMenuCursors / UpdateMenuCursor, branch
+// u2-mkb-qol; GPL-2.0-or-later, as this port): one 96x96 master picture per state (0 normal, 1 over something that
+// answers a click, 2 pressed), box-filtered to about 26 px high at 1080p (16..128) and made SDL colour cursors, built
+// again when the window's height changes. Shown while a game menu is on screen and the overlay does not have the input
+// (its own cursor is ImGui's); the system arrow and hand when they cannot be made. BB_MENU_CURSOR=0: the system ones.
+SDL_Cursor* golden_cursors[3]{};
+int golden_size = 0;
+bool golden_failed = false;
+
+bool GoldenCursorsOn() {
+    static const bool on = [] {
+        const char* e = std::getenv("BB_MENU_CURSOR");
+        return !(e && e[0] == '0');
+    }();
+    return on && !golden_failed;
+}
+
+void FreeGoldenCursors() {
+    for (SDL_Cursor*& c : golden_cursors) {
+        if (c) {
+            SDL_DestroyCursor(c);
+            c = nullptr;
+        }
+    }
+}
+
+// Every state built at `size` px, or none (false).
+bool BuildGoldenCursors(int size) {
+    FreeGoldenCursors();
+    golden_size = size;
+    constexpr int master = CursorMasterSize;
+    std::vector<unsigned char> pixels(static_cast<size_t>(size) * size * 4);
+    for (int s = 0; s < 3; ++s) {
+        // box filter on premultiplied colours (the picture is larger than the cursor)
+        for (int y = 0; y < size; ++y) {
+            for (int x = 0; x < size; ++x) {
+                const int x0 = x * master / size, x1 = std::max(x0 + 1, (x + 1) * master / size);
+                const int y0 = y * master / size, y1 = std::max(y0 + 1, (y + 1) * master / size);
+                float r = 0, g = 0, b = 0, a = 0;
+                int n = 0;
+                for (int yy = y0; yy < y1 && yy < master; ++yy) {
+                    for (int xx = x0; xx < x1 && xx < master; ++xx) {
+                        const unsigned char* p = &CursorPixels[s][(yy * master + xx) * 4];
+                        const float pa = p[3] / 255.0f;
+                        r += p[0] * pa;
+                        g += p[1] * pa;
+                        b += p[2] * pa;
+                        a += pa;
+                        ++n;
+                    }
+                }
+                unsigned char* q = &pixels[(static_cast<size_t>(y) * size + x) * 4];
+                if (a > 0.0f && n > 0) {
+                    q[0] = static_cast<unsigned char>(std::min(255.0f, r / a));
+                    q[1] = static_cast<unsigned char>(std::min(255.0f, g / a));
+                    q[2] = static_cast<unsigned char>(std::min(255.0f, b / a));
+                    q[3] = static_cast<unsigned char>(std::min(255.0f, a / n * 255.0f));
+                } else {
+                    q[0] = q[1] = q[2] = q[3] = 0;
+                }
+            }
+        }
+        SDL_Surface* surface =
+            SDL_CreateSurfaceFrom(size, size, SDL_PIXELFORMAT_RGBA32, pixels.data(), size * 4);
+        if (surface) {
+            golden_cursors[s] = SDL_CreateColorCursor(surface, CursorHotX * size / master,
+                                                      CursorHotY * size / master);
+            SDL_DestroySurface(surface);
+        }
+        if (!golden_cursors[s]) {
+            std::printf("Window: the golden menu cursor could not be made (%s): system cursors\n", SDL_GetError());
+            FreeGoldenCursors();
+            return false;
+        }
+    }
+    std::printf("Window: golden menu cursor built at %d px (antikmewzik's; BB_MENU_CURSOR=0: system cursors)\n", size);
+    return true;
 }
 } // namespace
 
@@ -303,19 +386,35 @@ bool WindowSDL::PollEvents() {
         // while the game has the focus and nothing needs it (menu, text entry).
         const bool hide = window_focused && !text_active && !BbOverlay::CapturesInput() &&
                           SDL_GetTicksNS() - cursor_moved_ns > CursorIdleNs;
-        // In a game menu the cursor shows a hand over what answers a click (the menu mouse).
+        // In a game menu the cursor shows a hand over what answers a click (the menu mouse): antikmewzik's golden
+        // arrow (normal, hover, pressed), or the system arrow and hand.
         {
             static SDL_Cursor* arrow = nullptr;
             static SDL_Cursor* hand = nullptr;
-            static int shown = -1;
-            const int state = menu_cursor ? cursor_state.load() : 0;
-            const int want_shape = state == 0 ? 0 : 1;
+            static int shown = -1; // 0 arrow, 1 hand, 10 + n golden n
+            const int state = menu_cursor ? std::clamp(cursor_state.load(), 0, 2) : 0;
+            int want_shape = state == 0 ? 0 : 1;
+            if (menu_cursor && GoldenCursorsOn() && !BbOverlay::CapturesInput()) {
+                int w = 0, h = 0;
+                SDL_GetWindowSizeInPixels(window, &w, &h);
+                const int size = std::clamp(static_cast<int>(h * 26.0f / 1080.0f + 0.5f), 16, 128);
+                if (size != golden_size || !golden_cursors[0]) {
+                    if (shown >= 10) { // (the one shown is about to be freed)
+                        SDL_SetCursor(SDL_GetDefaultCursor());
+                        shown = -1;
+                    }
+                    golden_failed = !BuildGoldenCursors(size);
+                }
+                if (!golden_failed) {
+                    want_shape = 10 + state;
+                }
+            }
             if (want_shape != shown) {
                 if (!arrow) {
                     arrow = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_DEFAULT);
                     hand = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER);
                 }
-                if (SDL_Cursor* c = want_shape ? hand : arrow) {
+                if (SDL_Cursor* c = want_shape >= 10 ? golden_cursors[want_shape - 10] : want_shape ? hand : arrow) {
                     SDL_SetCursor(c);
                 }
                 shown = want_shape;
