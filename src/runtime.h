@@ -126,6 +126,8 @@ int runtime_kbm_row_on(void);
 const char *runtime_kbm_label(const char *host, size_t room);
 /* U2/U3: the text lookup hook that gives the row its label is installed (the row is added only then). */
 int runtime_menumouse_kbm_label_hook(void);
+/* Writes guest memory that may not be writable (a game text): 0 when it could not. */
+int runtime_menumouse_write(uint64_t dst, const void *src, size_t size);
 /* The row was picked: the overlay's Controls page opens (gpu/shim/bbport_overlay.cpp). */
 void bbgpu_open_controls(void);
 void __attribute__((ms_abi)) runtime_exit_menu_u2_data(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,

@@ -109,8 +109,7 @@ static void u1_kbm_label_text(const U1Build *b, uint64_t image) {
     char padded[96];   /* the same length: the rest blank (antikmewzik's keys_label_here) */
     memset(padded,' ',len);
     memcpy(padded,label,strlen(label));
-    if (memcmp(padded,old,len)) {
-        memcpy((void *)(uintptr_t)s,padded,len);
+    if (memcmp(padded,old,len) && runtime_menumouse_write((uint64_t)(uintptr_t)s,padded,len)) {
         printf("Exit menu: %s: Keyboard / Mouse row label \"%s\" (over \"%s\")\n",b->name,label,old);
     }
 }

@@ -2555,6 +2555,7 @@ const char *runtime_kbm_label(const char *host, size_t room) {
 #define KBM_HOST_TEXT 0x62501513u   /* U2, U3: the text the row borrows */
 static int kbm_label_hook;           /* U2, U3: the lookup below is hooked */
 int runtime_menumouse_kbm_label_hook(void) { return kbm_label_hook; }
+int runtime_menumouse_write(uint64_t dst, const void *src, size_t size) { return safe_write(dst,src,size); }
 /* The game asks table `table` (and, first, its parent) for the borrowed text: where it is in this table is found once (the entries
  * {id, offset}: count +0, entries +8, string base +0x10, valid +0x38), then checked again at each lookup (a language change loads
  * fresh banks, perhaps at the same address), and the label is written over it. A lookup of that id happens only when our row is
