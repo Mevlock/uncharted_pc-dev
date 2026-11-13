@@ -566,6 +566,49 @@ static volatile int input_reload;
 static int layout_logged;   /* the layout keys were logged (log_layout_keys), again after a reload */
 void runtime_input_reload(void) { __atomic_store_n(&input_reload,1,__ATOMIC_RELEASE); }
 
+/* antikmewzik's menu keys, added to the player's own: while a game menu is on screen (runtime_menumouse_active), Enter (and
+ * keypad Enter) also confirms like Cross and Backspace also goes back like Circle (his u2-mkb-qol runtime_pad.c
+ * menu_key_action_down; port: added to the bindings, which keep working, not in their place; his Alt and Esc are not taken).
+ * In a menu these keys are only the menu keys: an action bound to one of them (Return is a default key of Options) does not get
+ * it there, or Enter would also close the pause. A key held when a menu comes up counts only once released (the Enter that
+ * opened the pause must not also pick its first row), and one used in a menu is kept from the play's bindings until released
+ * (the Enter that picked Resume must not open the pause again). Never in play, never while the overlay, the game's text box or
+ * the save list has the input (sample_host returns before). Alt+Enter (window <-> fullscreen) is not a menu key. BB_MENU_KEYS=0: off. */
+static int menu_keys_on(void) {
+    static int on=-1;
+    if (on<0) {
+        const char *e=getenv("BB_MENU_KEYS");
+        on=!(e && e[0]=='0');
+        printf("Runtime: menu keys %s (Enter confirms, Backspace goes back in the game menus; BB_MENU_KEYS=0: off)\n",on ? "on" : "off");
+    }
+    return on;
+}
+/* k: the keyboard (NULL: none); menu: a game menu is on screen. Returns the keyboard the bindings read (the menu keys taken out
+ * while they are the menu's) and sets the buttons the menu keys press. */
+static const bool *menu_keys(const bool *k, int menu, uint32_t *buttons) {
+    static bool held_out[SDL_SCANCODE_COUNT];
+    static int armed, latched;
+    *buttons=0;
+    if (!k || !menu_keys_on()) { armed=latched=0; return k; }
+    const int alt=k[SDL_SCANCODE_LALT] || k[SDL_SCANCODE_RALT] || bbgpu_window_enter_swallowed();
+    const int enter=(k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_KP_ENTER]) && !alt;
+    const int back=k[SDL_SCANCODE_BACKSPACE];
+    const int any=k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_KP_ENTER] || back;
+    if (!any) latched=0;
+    if (menu) {
+        if (!any) armed=1;
+        if (armed) {
+            if (enter) *buttons|=BTN_CROSS;
+            if (back) *buttons|=BTN_CIRCLE;
+            if (*buttons) latched=1;
+        }
+    } else armed=0;
+    if (!menu && !latched) return k;
+    memcpy(held_out,k,sizeof(held_out));
+    held_out[SDL_SCANCODE_RETURN]=held_out[SDL_SCANCODE_KP_ENTER]=held_out[SDL_SCANCODE_BACKSPACE]=false;
+    return held_out;
+}
+
 static uint64_t wheel_until_us[2]; /* wheel up, wheel down: held briefly for the game to see */
 static int bind_down(const Bind *b, const bool *k, uint32_t mouse, uint64_t now) {
     switch (b->kind) {
@@ -1399,6 +1442,8 @@ static void sample_host(PadData *d) {
             if (!pad_background) g=0;
             k=NULL; mouse=0; wheel=0; captured=0; wheel_until_us[0]=wheel_until_us[1]=0;
         }
+        uint32_t menu_key_buttons=0;
+        k=menu_keys(k,menu,&menu_key_buttons);
         if (g) {
             for (int a=0;a<16;++a) {
                 const int b=input.pad[a];
@@ -1428,7 +1473,7 @@ static void sample_host(PadData *d) {
      * it moves more than a few pixels. */
     const int pad_used=g && (d->buttons || d->l2>60 || d->r2>60 || abs(d->left_x-128)>64 ||
                              abs(d->left_y-128)>64 || abs(d->right_x-128)>64 || abs(d->right_y-128)>64);
-    int keys_used=mouse || wheel || (captured && SDL_fabsf(mdx)+SDL_fabsf(mdy)>3.0f);
+    int keys_used=mouse || wheel || menu_key_buttons || (captured && SDL_fabsf(mdx)+SDL_fabsf(mdy)>3.0f);
     if (menu) {   /* in a menu the cursor is free (no relative motion): its moves count as the mouse in use */
         static float last_x=-1.0f, last_y=-1.0f;
         float x=0.0f, y=0.0f;
@@ -1450,6 +1495,7 @@ static void sample_host(PadData *d) {
     }
         /* Keyboard and mouse, together with the controller. */
         for (int a=0;a<16;++a) if (action_down(a,k,mouse,now)) d->buttons|=actions[a].ps;
+        d->buttons|=menu_key_buttons;
         if (d->buttons & BTN_L2) d->l2=255;
         if (d->buttons & BTN_R2) d->r2=255;
         // The touchpad button without a finger on a touch surface is a left-side click.

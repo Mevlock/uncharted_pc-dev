@@ -6,8 +6,9 @@
  * differs): the loader's callbacks (probe.c) and this port's pad read (runtime_pad.c); both game codes, 1.02 (his
  * addresses; US CUSA02320 1.02 = EU CUSA02343 1.02) and 1.00 (EU CUSA02343 1.00 = US CUSA02320 1.00: the same code
  * moved, located by masked signatures). Every hook site and every game function it calls is checked against the
- * original bytes first; a game code that does not match keeps the menus as they are (logged). Not taken: his menu
- * keys (Enter, Esc, Alt, Backspace; the port keeps its own bindings), the probes (F7/F8/F9). His Keyboard / Mouse row of
+ * original bytes first; a game code that does not match keeps the menus as they are (logged). Not taken: his Esc
+ * and Alt menu keys (the port keeps its own bindings; his Enter and Backspace are in, added to the bindings: runtime_pad.c
+ * menu_keys), the probes (F7/F8/F9). His Keyboard / Mouse row of
  * Options > Controls is in (2026-11-13: it opens the overlay's Controls tab, the port's bindings page; the row is added in
  * runtime_exit_menu.c, its label below at "Keyboard / Mouse"). His compare-with-friends removal, the photo mode row, the Treasures model
  * turned with the mouse, U3's chapter carousel and Yes/No by value and U2's controller picture are in (both codes, see
