@@ -809,6 +809,21 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     Shader::g_srt_read_check = [](const Shader::SrtReadLog& log) {
         return busy_check->SyncSrtReads(log);
     };
+    // bbport (U3 chapter 14 red deck trim, 2026-11-13): where the recording thread was when a walk began. A copy it
+    // finished after the walk read the tables (U3's ship matrices, copied every frame) was no longer pending when the
+    // walk was checked, and the walk kept the old bytes: the depth pass drew the ship where it was a frame before and
+    // the colour pass's equal depth test failed over the deck (red). BB_SRT_WALK_SNAPSHOT=0: as before.
+    static const bool walk_snapshot = [] {
+        const char* env = std::getenv("BB_SRT_WALK_SNAPSHOT");
+        return !(env && env[0] == '0');
+    }();
+    if (walk_snapshot) {
+        Shader::g_srt_walk_begin = [] {
+            if (busy_check->draw_pipe && busy_check->OnStageA()) {
+                busy_check->srt_walk_start = busy_check->draw_pipe->Consumed();
+            }
+        };
+    }
 }
 
 extern "C" void BbLateWriteNoteKind(u64 address, u64 size, u32 kind); // diagnosis, below
@@ -829,6 +844,16 @@ bool Rasterizer::SyncSrtReads(const Shader::SrtReadLog& log) {
         if (log.reads[i].address) {
             BbLateWriteNoteKind(log.reads[i].address, log.reads[i].bytes, 2); // BB_LATE_WRITE_CHECK: table walks
         }
+    }
+    // Writes stage B finished after the walk began count as pending here (the walk may have read before them).
+    struct CapScope {
+        Rasterizer& r;
+        ~CapScope() {
+            r.pending_done_cap = ~0ull;
+        }
+    } cap_scope{*this};
+    if (Shader::g_srt_walk_begin) {
+        pending_done_cap = srt_walk_start;
     }
     // Stale pointers in the tables log addresses outside guest memory: the range set check
     // below is safe for any address (the page tracker is not).
@@ -1362,7 +1387,7 @@ void Rasterizer::PrunePendingWrites() {
     // pending_done, and Reached() decides a hit.)
     if ((pending_refresh++ & 15) == 0 ||
         (pending_first == pending_writes.size() && pending_big_writes.empty())) {
-        pending_done = draw_pipe->Consumed();
+        pending_done = std::min(draw_pipe->Consumed(), pending_done_cap);
     }
     // Positions grow in note order (a merge below only raises a recent entry's: it then leaves
     // later, never too early).
@@ -1499,7 +1524,7 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
                 return write.position <= pending_done;
             });
             for (const auto& write : pending_big_writes) {
-                if (address < write.end && write.begin < end && !draw_pipe->Reached(write.position)) {
+                if (address < write.end && write.begin < end && !PendingReached(write.position)) {
                     return true;
                 }
             }
@@ -1523,7 +1548,7 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
         for (size_t i = pending_first; i < pending_writes.size(); ++i) {
             const auto& write = pending_writes[i];
             if (address < write.end && write.begin < end && write.position > pending_done &&
-                !draw_pipe->Reached(write.position)) {
+                !PendingReached(write.position)) {
                 return true;
             }
         }
@@ -1535,7 +1560,7 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
     // Now and then drop entries whose writes the recording thread has done: the bounds shrink.
     if ((++pending_checks & 63) == 0) {
         std::erase_if(pending_writes, [&](const PendingWrite& write) {
-            return draw_pipe->Reached(write.position);
+            return PendingReached(write.position);
         });
         pending_min = ~VAddr{0};
         pending_max = 0;
@@ -1548,11 +1573,15 @@ bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
     ++pending_stats[2];
     pending_stats[3] += pending_writes.size();
     for (const auto& write : pending_writes) {
-        if (address < write.end && write.begin < end && !draw_pipe->Reached(write.position)) {
+        if (address < write.end && write.begin < end && !PendingReached(write.position)) {
             return true;
         }
     }
     return false;
+}
+
+bool Rasterizer::PendingReached(u64 position) const {
+    return position <= std::min(draw_pipe->Consumed(), pending_done_cap);
 }
 
 bool Rasterizer::AppendDrawBatch(const GraphicsPipeline* pipeline,

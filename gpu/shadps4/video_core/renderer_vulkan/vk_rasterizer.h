@@ -730,6 +730,11 @@ private:
     /// list (U3 market: ~1M checks a second scanning 50-70 entries each).
     std::vector<PendingWrite> pending_big_writes;
     void PrunePendingWrites();
+    /// bbport (U3 chapter 14 red deck trim): a pending write counts as done once stage B ran it, and while a resource
+    /// table walk is checked (SyncSrtReads) only if that was before the walk began (pending_done_cap).
+    bool PendingReached(u64 position) const;
+    u64 pending_done_cap = ~0ull;
+    u64 srt_walk_start = 0;
     alignas(64) u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< bbport: extra bias of this draw's samplers
     bool material_draw = false;    ///< bbport: writes 5+ targets (G-buffer: scene materials)

@@ -332,6 +332,9 @@ struct Info : InfoPersistent {
         // stays valid if a fault jumps out of the walker.
         static thread_local SrtReadLog log;
         log.count = 0;
+        if (g_srt_walk_begin) {
+            g_srt_walk_begin();
+        }
         SrtReadLog* previous = SwapSrtReadLog(&log);
         srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
         SwapSrtReadLog(previous);
