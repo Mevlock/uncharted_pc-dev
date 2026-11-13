@@ -2662,6 +2662,7 @@ const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
             puts("Menu mouse: U3 1.00 prompt bar frame differs: its SELECT stays");
             continue;
         }
+        if (b[i].callback==u2_text_lookup_cb && u3m && !runtime_kbm_row_on()) continue;   /* (U3 has it only for the row's label) */
         if (b[i].callback==u2_text_lookup_cb && !code_is(b[i].offset,b[i].signature,b[i].signature_size)) {
             printf("Menu mouse: %s: the code differs: no Keyboard / Mouse row\n",b[i].name);
             continue;
