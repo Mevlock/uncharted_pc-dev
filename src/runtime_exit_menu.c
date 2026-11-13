@@ -268,12 +268,14 @@ static void dc_add_item(const DcLayout *l, unsigned char *menu, uint32_t page_si
 }
 
 /* The photo mode row of the Options' Game pages (antikmewzik; label text 0xa3da9f13, "Photo Mode Enable", the last item of
- * its page): the port has no photo mode, so the row is left out of every page that holds it (the count one less when it is the
- * last item, else a copy of the items without it). BB_PHOTO_ROW=1 keeps it. */
+ * its page). Photo mode works in the port (d-pad down in play once the row is on; on keyboard and mouse the d-pad is the
+ * arrows and the wheel, which is why antikmewzik took it out), and the game's own row keeps it off unless the player turns it
+ * on, so the row stays (2026-11-13). BB_PHOTO_ROW=0 leaves it out of every page that holds it (the count one less when it
+ * is the last item, else a copy of the items without it). */
 #define DC_PHOTO_TEXT 0xa3da9f13u
 static void dc_drop_photo_row(const DcLayout *l, unsigned char *menu) {
     const char *keep=getenv("BB_PHOTO_ROW");
-    if (keep && keep[0]=='1') return;
+    if (!keep || keep[0]!='0') return;
     uint32_t pages;
     unsigned char *page_array;
     memcpy(&pages,menu,4);

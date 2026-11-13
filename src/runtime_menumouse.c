@@ -2360,7 +2360,8 @@ static const unsigned char u3_bar_flags_100_code[]={0x8b,0xbd,0x50,0xfd,0xff,0xf
 static const unsigned char u3_bar_100_frame[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xe8,0x02,0x00,0x00};   /* 0x1c6c30: the frame the 1.00 hook relies on */
 #define PATCH(name,at,sig,p) {name,at,sig,sizeof(sig),sizeof(p),NULL,p}
 /* U1 Options > Game: the photo mode row (text 0xa3da9f13) is made by three blocks of the options builder (one per menu that holds it);
- * each ends with the add-to-menu call (1.02 0x132f00, 1.00 0x132d70), here made a 5-byte nop: the row is built and never added. */
+ * each ends with the add-to-menu call (1.02 0x132f00, 1.00 0x132d70), with BB_PHOTO_ROW=0 made a 5-byte nop: the row is built and
+ * never added. By default the row stays (photo mode works; see runtime_exit_menu.c). */
 static const unsigned char u1_photo_102_1_code[]={0x4c,0x89,0xf7,0x4c,0x89,0xee,0xe8,0xba,0xe0,0xfe,0xff};   /* mov rdi,r14; mov rsi,r13; call 0x132f00 */
 static const unsigned char u1_photo_102_1_patch[]={0x4c,0x89,0xf7,0x4c,0x89,0xee,0x0f,0x1f,0x44,0x00,0x00};
 static const unsigned char u1_photo_102_2_code[]={0x48,0x8b,0xbd,0x10,0xff,0xff,0xff,0x48,0x89,0xde,0xe8,0x1d,0xde,0xfe,0xff};
@@ -2563,7 +2564,10 @@ const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
 #undef TAKE
     size_t n=0;
     for (size_t i=0;i<na && n<64;++i) mm_sites[n++]=a[i];
+    const char *photo=getenv("BB_PHOTO_ROW");
+    const int drop_photo=photo && photo[0]=='0';
     for (size_t i=0;i<nb && n<64;++i) {
+        if (!drop_photo && b[i].name && strstr(b[i].name,"photo mode row")) continue; /* the U1 row stays */
         if (b[i].callback==u3_bar_flags_100_cb && !code_is(0x1c6c30,u3_bar_100_frame,sizeof(u3_bar_100_frame))) {
             puts("Menu mouse: U3 1.00 prompt bar frame differs: its SELECT stays");
             continue;
