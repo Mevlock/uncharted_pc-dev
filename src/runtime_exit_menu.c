@@ -414,6 +414,7 @@ static void dc_drop_photo_row(const DcLayout *l, unsigned char *menu) {
 #define DC_LAYOUT_TEXT 0xdd40dc7bu
 #define DC_KBM_ID 0x3a1a91d1u
 #define DC_KBM_TEXT 0x62501513u
+#define DC_CONTROLS_PAGE 0x5c717aadu
 static void dc_add_kbm_row(const DcLayout *l, unsigned char *menu) {
     if (!runtime_kbm_row_on()) return;
     static int told_hook;
@@ -431,6 +432,11 @@ static void dc_add_kbm_row(const DcLayout *l, unsigned char *menu) {
         unsigned char *page=page_array+(size_t)p*l->page_stride, *header;
         memcpy(&header,page+l->page_items,sizeof(header));
         if (!header) continue;
+        /* Only Options > Controls (page 5c717aad in U2 and U3, 1.00 and 1.02). U2 also has a 3-row page 9400ffbb with
+         * Controller Layout that players could not find in any menu (2026-11-13): it stays as it is. */
+        uint32_t page_id;
+        memcpy(&page_id,page+8,4);
+        if (page_id!=DC_CONTROLS_PAGE) continue;
         uint32_t count;
         unsigned char *items;
         memcpy(&count,header,4);
