@@ -30,6 +30,8 @@ Starting
 - Display page -> Anti-aliasing: TAA, AMD FSR 3.1, AMD FSR 4, NVIDIA DLSS (DLAA) or Intel XeSS smooth the
   games' 1920x1080 picture with their own motion vectors, before their post-processing.
   DLSS needs a GeForce RTX. Upscaling to a larger window or screen stays with FSR 1.
+  FSR 4 is not included: Display page -> "Download FSR 4 files" downloads it from a third party
+  (FireBurn/Q2RTX on GitHub) if you choose to; AMD has not licensed those files for this use.
 - Display page -> Frame generation: AMD FSR 3 Frame Generation (any GPU, 2x) or NVIDIA DLSS
   Frame Generation (GeForce RTX 40: 2x, RTX 50: up to 4x) shows frames made between two of the
   game's: 60 FPS becomes 120 (or 240). Use the Mailbox or Immediate presentation and a display

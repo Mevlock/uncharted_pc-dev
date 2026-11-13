@@ -63,13 +63,6 @@ jobs:
           key: ccache-${{ runner.os }}-${{ github.sha }}
           restore-keys: ccache-${{ runner.os }}-
 
-      - name: FSR 4 asset cache
-        id: fsr4_cache
-        uses: actions/cache@v4
-        with:
-          path: fsr4_shaders
-          key: fsr4-${{ hashFiles('tools/fetch_fsr4_assets.sh', 'tools/fsr4_optimize.sh') }}
-
       # Profile-guided build: pgo/merged.profdata comes from play sessions with an instrumented
       # build (BB_PGO=generate). The runner's clang must read it (an older clang than the one that
       # wrote it cannot); a missing or unreadable profile stops the build instead of shipping
@@ -112,12 +105,6 @@ jobs:
           [[ -n $DLSS_GENERATOR ]]
           unset CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER
           DLSS_SDK_ROOT="$(cygpath -u "$GITHUB_WORKSPACE")/dlss-sdk" bash packaging/windows/build_dlss.sh
-
-      - name: FSR 4 assets
-        if: steps.fsr4_cache.outputs.cache-hit != 'true'
-        shell: msys2 {0}
-        # Windows' own curl: MSYS2's is updated with every run and once crashed (exit 139).
-        run: CURL=/c/Windows/System32/curl.exe bash tools/fetch_fsr4_assets.sh
 
       - name: Intel XeSS runtime
         shell: msys2 {0}

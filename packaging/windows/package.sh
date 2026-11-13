@@ -26,7 +26,7 @@ out/pyenv/Scripts/python.exe -m pip install -q --disable-pip-version-check pyins
 # The scripts run inside Uncharted.exe (--script): the standard modules they import come along.
 hidden=()
 for module in argparse base64 collections hashlib json re shutil struct tempfile zlib ctypes.wintypes cheats \
-              uncharted_art uncharted_fonts uncharted_i18n uncharted_widgets bbport_steam PIL.ImageTk iced_x86; do
+              uncharted_art uncharted_fonts uncharted_i18n uncharted_widgets bbport_steam fsr4_opt PIL.ImageTk iced_x86; do
     hidden+=(--hidden-import "$module")
 done
 out/pyenv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN --windowed \
@@ -68,8 +68,19 @@ mkdir -p "$dest/notes"
 ls docs/releases/v*.md | grep -vi draft | sort -V | tail -5 | while read -r note; do cp "$note" "$dest/notes/"; done
 mkdir -p "$dest/licenses"
 cp packaging/windows/licenses/*.txt "$dest/licenses/" 2>/dev/null || true
-# FSR 4 (the v07 INT8 model) when its assets are in fsr4_shaders/ (tools/fetch_fsr4_assets.sh).
-if [[ -d fsr4_shaders ]]; then cp -r fsr4_shaders "$dest/"; fi
+# FSR 4 (the v07 INT8 model) is not packaged: the launcher downloads it on the player's request from the
+# third party that published it and builds fsr4_shaders/opt/ there with the open-source spirv-cross and
+# glslangValidator shipped here (launcher/fsr4_opt.py).
+for exe in spirv-cross.exe glslangValidator.exe; do
+    cp "/clang64/bin/$exe" "$dest/bin/"
+done
+ldd "$dest/bin/spirv-cross.exe" "$dest/bin/glslangValidator.exe" |
+    awk '/\/clang64\/bin\// {print $3}' | sort -u | while read -r dll; do
+        cp -u "$dll" "$dest/bin/"
+    done
+for licence in glslang/LICENSE.txt spirv-cross/LICENSE spirv-tools/LICENSE; do
+    cp "/clang64/share/licenses/$licence" "$dest/licenses/${licence%%/*}-LICENSE.txt"
+done
 # DLSS and DLSS Frame Generation (NVIDIA RTX): the MSVC-built bridge and NVIDIA's runtimes, next
 # to bb-probe.exe (packaging/windows/build_dlss.sh). Without them those options stay unavailable.
 if [[ -f out/bbport_dlss.dll && -f out/nvngx_dlss.dll ]]; then
