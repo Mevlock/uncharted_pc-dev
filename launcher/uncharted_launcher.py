@@ -751,9 +751,12 @@ FSR4_DIR = PORT_DIR / 'fsr4_shaders'
 
 
 def fsr4_tools():
-    """The folder with spirv-cross.exe and glslangValidator.exe: the package's bin, else the PATH (developers)."""
-    if (PORT_DIR / 'bin' / 'spirv-cross.exe').is_file() and (PORT_DIR / 'bin' / 'glslangValidator.exe').is_file():
-        return PORT_DIR / 'bin'
+    """The folder with spirv-cross.exe and glslangValidator.exe: the package's bin, else (developers) MSYS2's
+    CLANG64 or the PATH. The Vulkan SDK's spirv-cross 1.4.341 cannot decompile the passes ('Cannot resolve
+    expression type'); the package ships MSYS2's."""
+    for folder in (PORT_DIR / 'bin', Path('C:/msys64/clang64/bin')):
+        if (folder / 'spirv-cross.exe').is_file() and (folder / 'glslangValidator.exe').is_file():
+            return folder
     found = [shutil.which(name) for name in ('spirv-cross', 'glslangValidator')]
     return Path(found[0]).parent if all(found) and Path(found[0]).parent == Path(found[1]).parent else None
 

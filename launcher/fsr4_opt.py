@@ -168,18 +168,22 @@ def build_opt(folder, tools, progress=None):
     opt = folder / 'opt'
     opt.mkdir(parents=True, exist_ok=True)
     todo = opt_missing(folder)
+
+    def run(command):
+        result = subprocess.run(command, capture_output=True, text=True, errors='replace', creationflags=NO_WINDOW)
+        if result.returncode:
+            raise OSError(f'{Path(command[0]).name} failed on {name}: '
+                          f'{(result.stderr or result.stdout).strip()[:300]}')
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         for done, (name, rewrite, entry) in enumerate(todo, 1):
-            subprocess.run([str(tools / 'spirv-cross.exe'), str(folder / name), '--vulkan-semantics', '--entry',
-                            entry, '--output', str(tmp / 'in.comp')], check=True, capture_output=True,
-                           creationflags=NO_WINDOW)
+            run([str(tools / 'spirv-cross.exe'), str(folder / name), '--vulkan-semantics', '--entry', entry,
+                 '--output', str(tmp / 'in.comp')])
             # Windows builds of spirv-cross write CRLF; the rewrites match LF lines.
             text = (tmp / 'in.comp').read_bytes().decode('utf-8').replace('\r', '')
             (tmp / 'out.comp').write_bytes(rewrite(text).encode('utf-8'))
-            subprocess.run([str(tools / 'glslangValidator.exe'), '-V', '--target-env', 'vulkan1.3', '-S', 'comp',
-                            '-e', entry, '--source-entrypoint', 'main', str(tmp / 'out.comp'), '-o',
-                            str(tmp / 'out.spv')], check=True, capture_output=True, creationflags=NO_WINDOW)
+            run([str(tools / 'glslangValidator.exe'), '-V', '--target-env', 'vulkan1.3', '-S', 'comp', '-e', entry,
+                 '--source-entrypoint', 'main', str(tmp / 'out.comp'), '-o', str(tmp / 'out.spv')])
             (tmp / 'out.spv').replace(opt / name)
             if progress:
                 progress(done, len(todo))
