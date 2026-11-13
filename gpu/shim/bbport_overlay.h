@@ -68,6 +68,8 @@ void PrintPreparationProgress();
 
 /// The menu is open or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();
+/// Any thread: opens the menu on its Controls tab (the games' Options > Controls > Keyboard / Mouse row).
+void OpenControls();
 /// ImGui draws its own cursor (the menu or the save list is open): the system cursor is hidden meanwhile (window.cpp).
 bool DrawsCursor();
 

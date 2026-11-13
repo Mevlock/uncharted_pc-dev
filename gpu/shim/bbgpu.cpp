@@ -549,6 +549,10 @@ extern "C" int bbgpu_overlay_captures_input(void) {
     return BbOverlay::CapturesInput() ? 1 : 0;
 }
 
+extern "C" void bbgpu_open_controls(void) {
+    BbOverlay::OpenControls();
+}
+
 extern "C" int bbgpu_preparation_screen(void) {
     return BbOverlay::PreparationScreenActive() ? 1 : 0;
 }

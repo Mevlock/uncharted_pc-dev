@@ -697,6 +697,406 @@ void SavesPage() {
                "changed."));
 }
 
+// ---- Controls page: the keyboard and mouse bindings and the mouse settings of the launcher's Controls page
+// (launcher/uncharted_launcher.py build_controls), in the same input.ini (BB_INPUT_CONFIG, read by src/runtime_pad.c
+// load_input). A change is written at once and the game takes the file in again before its next pad read
+// (runtime_input_reload): it works straight away. The file's first line says the in-game menu wrote it, and the launcher
+// takes those settings over at its next start (import_game_controls). Opened also by the "Keyboard / Mouse" row of the
+// games' Options > Controls (antikmewzik's, runtime_exit_menu.c). Guarded by imgui_mutex (the capture: the window thread).
+
+// The actions in the launcher's order (BUTTON_ACTIONS, STICK_ACTIONS) with their default keys ("A|B": two).
+struct KeyAction {
+    const char* name;
+    const char* title;
+    const char* keys;
+};
+constexpr KeyAction KeyActions[] = {
+    {"cross", N_("Cross ✕"), "Space"},
+    {"circle", N_("Circle ○"), "C"},
+    {"square", N_("Square □"), "F"},
+    {"triangle", N_("Triangle △"), "E"},
+    {"l1", "L1", "Q"},
+    {"r1", "R1", "G"},
+    {"l2", N_("L2 (aim)"), "Mouse Right"},
+    {"r2", N_("R2 (fire)"), "Mouse Left"},
+    {"l3", "L3", "Left Shift"},
+    {"r3", "R3", "V"},
+    {"options", N_("Options"), "Escape|Return"},
+    {"touchpad", N_("Touchpad"), "Tab"},
+    {"up", N_("D-pad up"), "Up"},
+    {"down", N_("D-pad down"), "Down"},
+    {"left", N_("D-pad left"), "Left|Wheel Up"},
+    {"right", N_("D-pad right"), "Right|Wheel Down"},
+    {"ls_up", N_("Move forward"), "W"},
+    {"ls_down", N_("Move back"), "S"},
+    {"ls_left", N_("Move left"), "A"},
+    {"ls_right", N_("Move right"), "D"},
+    {"rs_up", N_("Look up"), "I"},
+    {"rs_down", N_("Look down"), "K"},
+    {"rs_left", N_("Look left"), "J"},
+    {"rs_right", N_("Look right"), "L"},
+    {"rotate_ccw", N_("Turn valve / wheel counter-clockwise (hold)"), "R"},
+    {"rotate_cw", N_("Turn valve / wheel clockwise (hold)"), "T"},
+    {"walk", N_("Walk (hold with the movement keys)"), "Left Ctrl"},
+};
+constexpr int KeyActionCount = int(sizeof(KeyActions) / sizeof(KeyActions[0]));
+constexpr const char* GameControlsHeader = "# Uncharted controls (written by the game's in-game menu, Controls page)";
+
+extern "C" void runtime_input_reload(void); // runtime_pad.c
+
+struct ControlsState {
+    bool loaded = false;
+    std::string path;                         // BB_INPUT_CONFIG ("": the game was not started by the launcher)
+    std::vector<std::string> lines;           // the file as read (other settings, the controller's, kept as they are)
+    std::string keys[KeyActionCount][2];
+    bool mouse_look = true, invert_y = false;
+    float sensitivity = 2.8f, aim = 0.6f, vertical = 1.0f, camera_vertical = 2.0f;
+    int walk_speed = 65;
+    int capture_action = -1, capture_slot = 0; // a binding waits for a key (the window thread takes it)
+    u64 capture_since_ms = 0;
+    std::string message;                      // the last change, or why it was not saved
+};
+ControlsState controls;
+std::atomic<bool> controls_tab_request{false}; // the next frame selects the Controls tab (OpenControls)
+
+void SplitKeys(const std::string& value, std::string out[2]) {
+    out[0].clear();
+    out[1].clear();
+    const size_t bar = value.find('|');
+    out[0] = value.substr(0, bar);
+    if (bar != std::string::npos) {
+        out[1] = value.substr(bar + 1);
+    }
+    for (int i = 0; i < 2; ++i) {
+        while (!out[i].empty() && out[i].back() == ' ') out[i].pop_back();
+        while (!out[i].empty() && out[i].front() == ' ') out[i].erase(0, 1);
+    }
+}
+
+void ControlsDefaults() {
+    for (int a = 0; a < KeyActionCount; ++a) {
+        SplitKeys(KeyActions[a].keys, controls.keys[a]);
+    }
+}
+
+// The file (or the defaults the game uses without one, as load_input).
+void ControlsLoad() {
+    controls = ControlsState{};
+    controls.loaded = true;
+    ControlsDefaults();
+    const char* path = std::getenv("BB_INPUT_CONFIG");
+    controls.path = path && path[0] ? path : "";
+    if (controls.path.empty()) {
+        return;
+    }
+    FILE* f = std::fopen(controls.path.c_str(), "rb");
+    if (!f) {
+        return;
+    }
+    char buffer[512];
+    while (std::fgets(buffer, sizeof(buffer), f)) {
+        std::string line(buffer);
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+        controls.lines.push_back(line);
+        const size_t eq = line.find('=');
+        if (line.empty() || line[0] == '#' || eq == std::string::npos) {
+            continue;
+        }
+        const std::string key = line.substr(0, eq), value = line.substr(eq + 1);
+        if (key == "mouse_look") controls.mouse_look = std::atoi(value.c_str()) != 0;
+        else if (key == "mouse_invert_y") controls.invert_y = std::atoi(value.c_str()) != 0;
+        else if (key == "mouse_sensitivity") controls.sensitivity = float(std::atof(value.c_str()));
+        else if (key == "mouse_aim_sensitivity") controls.aim = float(std::atof(value.c_str()));
+        else if (key == "mouse_vertical") controls.vertical = float(std::atof(value.c_str()));
+        else if (key == "mouse_camera_vertical") controls.camera_vertical = float(std::atof(value.c_str()));
+        else if (key == "walk_speed") controls.walk_speed = std::clamp(std::atoi(value.c_str()), 50, 100);
+        else if (key.rfind("key.", 0) == 0) {
+            for (int a = 0; a < KeyActionCount; ++a) {
+                if (key.compare(4, std::string::npos, KeyActions[a].name) == 0) {
+                    SplitKeys(value, controls.keys[a]);
+                }
+            }
+        }
+    }
+    std::fclose(f);
+    // as the launcher writes them (its slider ranges)
+    controls.sensitivity = std::clamp(controls.sensitivity > 0.0f ? controls.sensitivity : 2.8f, 0.1f, 10.0f);
+    controls.aim = std::clamp(controls.aim > 0.0f ? controls.aim : 0.6f, 0.25f, 4.0f);
+    controls.vertical = std::clamp(controls.vertical > 0.0f ? controls.vertical : 1.0f, 0.25f, 4.0f);
+    controls.camera_vertical = std::clamp(controls.camera_vertical > 0.0f ? controls.camera_vertical : 2.0f, 0.25f, 8.0f);
+}
+
+// Writes the file (the lines it had, ours changed or added) and has the game read it again.
+void ControlsSave() {
+    if (controls.path.empty()) {
+        controls.message = T("The game was not started from the launcher (no input.ini): changes are not saved.");
+        return;
+    }
+    std::vector<std::pair<std::string, std::string>> values = {
+        {"mouse_look", controls.mouse_look ? "1" : "0"},
+        {"mouse_sensitivity", fmt::format("{:.2f}", controls.sensitivity)},
+        {"mouse_aim_sensitivity", fmt::format("{:.2f}", controls.aim)},
+        {"mouse_vertical", fmt::format("{:.2f}", controls.vertical)},
+        {"mouse_camera_vertical", fmt::format("{:.2f}", controls.camera_vertical)},
+        {"mouse_invert_y", controls.invert_y ? "1" : "0"},
+        {"walk_speed", std::to_string(controls.walk_speed)},
+    };
+    for (int a = 0; a < KeyActionCount; ++a) {
+        const std::string& k0 = controls.keys[a][0];
+        const std::string& k1 = controls.keys[a][1];
+        values.emplace_back(std::string("key.") + KeyActions[a].name,
+                            k0.empty() ? k1 : k1.empty() ? k0 : k0 + "|" + k1);
+    }
+    std::vector<bool> written(values.size(), false);
+    std::string text = std::string(GameControlsHeader) + "\n";
+    for (const std::string& line : controls.lines) {
+        if (!line.empty() && line[0] == '#') {
+            continue; // (the header: ours)
+        }
+        const size_t eq = line.find('=');
+        std::string out = line;
+        if (eq != std::string::npos) {
+            for (size_t i = 0; i < values.size(); ++i) {
+                if (line.compare(0, eq, values[i].first) == 0 && eq == values[i].first.size()) {
+                    out = values[i].first + "=" + values[i].second;
+                    written[i] = true;
+                }
+            }
+        }
+        text += out + "\n";
+    }
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (!written[i]) {
+            text += values[i].first + "=" + values[i].second + "\n";
+        }
+    }
+    // tmp + rename: the game and the launcher never read half a file
+    const std::string tmp = controls.path + ".tmp";
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    bool ok = f && std::fwrite(text.data(), 1, text.size(), f) == text.size();
+    if (f) {
+        ok = std::fclose(f) == 0 && ok;
+    }
+#ifdef _WIN32
+    ok = ok && MoveFileExA(tmp.c_str(), controls.path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+#else
+    ok = ok && std::rename(tmp.c_str(), controls.path.c_str()) == 0;
+#endif
+    if (!ok) {
+        std::remove(tmp.c_str());
+        controls.message = T("Could not write input.ini.");
+        return;
+    }
+    // the lines as now written, for the next change
+    controls.lines.clear();
+    size_t start = 0;
+    for (size_t end; (end = text.find('\n', start)) != std::string::npos; start = end + 1) {
+        controls.lines.push_back(text.substr(start, end - start));
+    }
+    runtime_input_reload();
+    std::printf("Overlay: controls saved to %s\n", controls.path.c_str());
+}
+
+// One key for one binding: the key `name` given to `action`'s `slot` is taken from any other action that had it (the
+// launcher's rule), and a lone second binding moves to the first place.
+void ControlsSetKey(int action, int slot, const std::string& name) {
+    if (!name.empty()) {
+        for (int a = 0; a < KeyActionCount; ++a) {
+            for (int i = 0; i < 2; ++i) {
+                if ((a != action || i != slot) && controls.keys[a][i] == name) {
+                    controls.keys[a][i].clear();
+                }
+            }
+            if (controls.keys[a][0].empty() && !controls.keys[a][1].empty()) {
+                controls.keys[a][0].swap(controls.keys[a][1]);
+            }
+        }
+    }
+    controls.keys[action][slot] = name;
+    if (controls.keys[action][0].empty() && !controls.keys[action][1].empty()) {
+        controls.keys[action][0].swap(controls.keys[action][1]);
+    }
+    controls.capture_action = -1;
+    controls.message = std::string(T(KeyActions[action].title)) + ": " + (name.empty() ? T("binding removed") : name);
+    ControlsSave();
+}
+
+// The name of a pressed key as input.ini has it (the launcher's names, which runtime_pad.c parse_bind reads): a character
+// key by the character the keyboard layout gives it ("Z" on the key labelled Z), any other key by its SDL name ("Left
+// Shift", "Keypad 8", "F5"); "" for keys that cannot be bound here.
+std::string KeyName(const SDL_KeyboardEvent& key) {
+    const char* layout = SDL_GetKeyName(key.key);
+    if (layout && layout[0] && !layout[1] && static_cast<unsigned char>(layout[0]) > ' ' &&
+        static_cast<unsigned char>(layout[0]) < 127) {
+        return std::string(1, char(std::toupper(static_cast<unsigned char>(layout[0]))));
+    }
+    const char* name = SDL_GetScancodeName(key.scancode);
+    return name && name[0] ? name : "";
+}
+
+// Window thread, while a binding waits for a key: the event is taken (true) as the binding, or as Esc to cancel.
+bool ControlsCaptureEvent(const SDL_Event& event) {
+    if (controls.capture_action < 0) {
+        return false;
+    }
+    const int action = controls.capture_action, slot = controls.capture_slot;
+    switch (event.type) {
+    case SDL_EVENT_KEY_DOWN:
+        if (event.key.repeat) {
+            return true;
+        }
+        if (event.key.key == SDLK_ESCAPE) {
+            controls.capture_action = -1;
+            controls.message = T("Cancelled.");
+        } else if (event.key.key == SDLK_INSERT) {
+            controls.message = T("Insert opens the in-game settings menu.");
+        } else if (event.key.scancode == SDL_SCANCODE_LALT) {
+            controls.message = T("Left Alt frees the mouse cursor while held.");
+        } else if (const std::string name = KeyName(event.key); !name.empty()) {
+            ControlsSetKey(action, slot, name);
+        }
+        return true;
+    case SDL_EVENT_KEY_UP:
+        return true;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+        // (the click that started the capture is over by then: ImGui buttons act on the release; a short grace anyway)
+        if (SDL_GetTicks() - controls.capture_since_ms < 150) {
+            return true;
+        }
+        const char* name = event.button.button == SDL_BUTTON_LEFT     ? "Mouse Left"
+                           : event.button.button == SDL_BUTTON_RIGHT  ? "Mouse Right"
+                           : event.button.button == SDL_BUTTON_MIDDLE ? "Mouse Middle"
+                           : event.button.button == SDL_BUTTON_X1     ? "Mouse 4"
+                           : event.button.button == SDL_BUTTON_X2     ? "Mouse 5"
+                                                                      : nullptr;
+        if (name) {
+            ControlsSetKey(action, slot, name);
+        }
+        return true;
+    }
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+        // the release of the press just bound (or of the click that started the capture) must not reach ImGui as a click
+        return true;
+    case SDL_EVENT_MOUSE_WHEEL:
+        if (event.wheel.y != 0.0f) {
+            ControlsSetKey(action, slot, event.wheel.y > 0.0f ? "Wheel Up" : "Wheel Down");
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+
+void ControlsPage() {
+    if (!controls.loaded) {
+        ControlsLoad();
+    }
+    TextGrey(T("Keyboard and mouse: the same settings as the launcher's Controls page, saved in input.ini. Changes "
+               "work at once; the launcher takes them over the next time it starts."));
+    if (controls.path.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
+                           T("The game was not started from the launcher (no input.ini): changes are not saved."));
+    }
+
+    ImGui::SeparatorText(T("Mouse"));
+    bool changed = false;
+    changed |= ImGui::Checkbox(TI("Look around with the mouse"), &controls.mouse_look);
+    Hint(T("The cursor stays in the game window; hold Left Alt (or switch windows) to free it."));
+    const ImGuiSliderFlags log = ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp;
+    // The sliders turn the camera at once (runtime_mouse_set) and are written when let go.
+    if (ImGui::SliderFloat(TI("Mouse sensitivity"), &controls.sensitivity, 0.1f, 10.0f, "%.2f", log)) {
+        runtime_mouse_set(controls.sensitivity, 0.0f, 0.0f);
+    }
+    changed |= ImGui::IsItemDeactivatedAfterEdit();
+    if (ImGui::SliderFloat(TI("Aiming sensitivity"), &controls.aim, 0.25f, 4.0f, "%.2f", log)) {
+        runtime_mouse_set(0.0f, controls.aim, 0.0f);
+    }
+    changed |= ImGui::IsItemDeactivatedAfterEdit();
+    if (ImGui::SliderFloat(TI("Vertical sensitivity"), &controls.vertical, 0.25f, 4.0f, "%.2f", log)) {
+        runtime_mouse_set(0.0f, 0.0f, controls.vertical);
+    }
+    changed |= ImGui::IsItemDeactivatedAfterEdit();
+    if (ImGui::SliderFloat(TI("Camera up and down"), &controls.camera_vertical, 0.25f, 8.0f, "%.2f", log)) {
+        runtime_mouse_camera_vertical_set(controls.camera_vertical);
+    }
+    changed |= ImGui::IsItemDeactivatedAfterEdit();
+    Hint(T("Aiming: times the mouse sensitivity while aiming (1.00 the same as looking around). Vertical: "
+           "times it for up and down. Camera up and down: the normal camera's up and down only (it moves along "
+           "the game's arc, slower than sideways). Ctrl+click to type a value."));
+    changed |= ImGui::Checkbox(TI("Invert the mouse vertically"), &controls.invert_y);
+
+    ImGui::SeparatorText(T("Keyboard and mouse buttons"));
+    TextGrey(T("Click a box, then press a key or a mouse button (the wheel counts too); Esc cancels. "
+               "x removes a binding. Each action can have two."));
+    if (controls.capture_action >= 0 && !ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
+        controls.capture_action = -1; // (another window took the focus)
+    }
+    if (ImGui::BeginTable("##keys", 3, ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("##action", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+        ImGui::TableSetupColumn("##first", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("##second", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        const float clear_w = ImGui::GetFrameHeight();
+        for (int a = 0; a < KeyActionCount; ++a) {
+            ImGui::PushID(a);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(T(KeyActions[a].title));
+            for (int slot = 0; slot < 2; ++slot) {
+                ImGui::TableNextColumn();
+                ImGui::PushID(slot);
+                const bool waiting = controls.capture_action == a && controls.capture_slot == slot;
+                const std::string& key = controls.keys[a][slot];
+                const float w = ImGui::GetContentRegionAvail().x - clear_w - ImGui::GetStyle().ItemSpacing.x;
+                if (waiting) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.65f, 0.25f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.06f, 0.03f, 1.0f));
+                }
+                const std::string text = waiting ? std::string(T("Press a key…")) : key.empty() ? std::string("—") : key;
+                if (ImGui::Button((text + "###bind").c_str(), ImVec2(std::max(w, 40.0f), 0.0f))) {
+                    controls.capture_action = a;
+                    controls.capture_slot = slot;
+                    controls.capture_since_ms = SDL_GetTicks();
+                    controls.message.clear();
+                }
+                if (waiting) {
+                    ImGui::PopStyleColor(2);
+                }
+                ImGui::SameLine();
+                ImGui::BeginDisabled(key.empty());
+                if (ImGui::Button("x###clear", ImVec2(clear_w, 0.0f))) {
+                    ControlsSetKey(a, slot, "");
+                }
+                ImGui::EndDisabled();
+                ImGui::PopID();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button(TI("Default keys"))) {
+        ControlsDefaults();
+        controls.capture_action = -1;
+        controls.message = T("Default keys");
+        changed = true;
+    }
+    if (!controls.message.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", controls.message.c_str());
+    }
+    int walk = controls.walk_speed;
+    if (ImGui::SliderInt(TI("Walk speed"), &walk, 50, 100, "%d%%")) {
+        controls.walk_speed = walk;
+    }
+    changed |= ImGui::IsItemDeactivatedAfterEdit();
+    Hint(T("How far the walk key pushes the stick. Default is 65%; below about 55% the games do not move the "
+           "character."));
+    TextGrey(T("The controller's buttons, vibration and the button pictures: in the launcher's Controls page."));
+    if (changed) {
+        ControlsSave();
+    }
+}
+
 void Menu() {
     auto& s = BbSettings::Get();
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -805,30 +1205,7 @@ void Menu() {
            "input latency; menus and cutscene videos are not generated. The launcher's Frame rate "
            "limit counts generated frames."));
 
-    // The mouse: the sensitivities live in the runtime (runtime_pad.c); a change turns the next frame's motion.
-    ImGui::SeparatorText(T("Mouse"));
-    {
-        float look = 1.0f, aim = 1.0f, vertical = 1.0f;
-        runtime_mouse_get(&look, &aim, &vertical);
-        const ImGuiSliderFlags log = ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp;
-        if (ImGui::SliderFloat(TI("Mouse sensitivity"), &look, 0.1f, 10.0f, "%.2f", log)) {
-            runtime_mouse_set(look, 0.0f, 0.0f);
-        }
-        if (ImGui::SliderFloat(TI("Aiming sensitivity"), &aim, 0.25f, 4.0f, "%.2f", log)) {
-            runtime_mouse_set(0.0f, aim, 0.0f);
-        }
-        if (ImGui::SliderFloat(TI("Vertical sensitivity"), &vertical, 0.25f, 4.0f, "%.2f", log)) {
-            runtime_mouse_set(0.0f, 0.0f, vertical);
-        }
-        float camera = runtime_mouse_camera_vertical();
-        if (ImGui::SliderFloat(TI("Camera up and down"), &camera, 0.25f, 8.0f, "%.2f", log)) {
-            runtime_mouse_camera_vertical_set(camera);
-        }
-        Hint(T("Aiming: times the mouse sensitivity while aiming (1.00 the same as looking around). Vertical: "
-               "times it for up and down. Camera up and down: the normal camera's up and down only (it moves along "
-               "the game's arc, slower than sideways). Ctrl+click to type a value."));
-    }
-
+    // The mouse's settings are on the Controls tab (saved in input.ini there).
     ImGui::SeparatorText(T("Other"));
     Checkbox(TI("FPS counter in the corner"), s.show_fps);
     ImGui::BeginDisabled(!s.show_fps);
@@ -882,6 +1259,16 @@ void Menu() {
         }
     }
     ImGui::EndTabItem();
+    }
+    {
+        // the Controls tab: keyboard and mouse (also opened by the games' Options > Controls > Keyboard / Mouse)
+        const ImGuiTabItemFlags flags = controls_tab_request.exchange(false) ? ImGuiTabItemFlags_SetSelected : 0;
+        if (ImGui::BeginTabItem(TI("Controls"), nullptr, flags)) {
+            ControlsPage();
+            ImGui::EndTabItem();
+        } else if (controls.capture_action >= 0) {
+            controls.capture_action = -1;
+        }
     }
     // Checkpoints and Saves: Uncharted 1, 2 and 3 (the collection's menu has no campaign save).
     if (BbSaves::Game() && ImGui::BeginTabItem(TI("Checkpoints"))) {
@@ -1750,6 +2137,9 @@ bool HandleEvent(const SDL_Event& event) {
     if (choice_active && !menu_open) {
         return HandleChoiceEvent(event);
     }
+    if (menu_open && ControlsCaptureEvent(event)) {
+        return true;
+    }
     ImGuiIO& io = ImGui::GetIO();
     const bool is_open = menu_open;
     switch (event.type) {
@@ -2197,6 +2587,15 @@ void NotifyTrophy(int grade, std::string game, std::string name, std::vector<uns
         toast_queue.push_back({grade, std::move(game), std::move(name), std::move(png)});
         toast_busy = true;
     }
+}
+
+void OpenControls() {
+    std::scoped_lock lock{imgui_mutex};
+    if (!initialized) {
+        return;
+    }
+    controls_tab_request = true;
+    SetOpen(true);
 }
 
 bool DrawsCursor() {

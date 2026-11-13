@@ -518,6 +518,7 @@ static void load_input(void) {
     input.mouse_look=1; input.mouse_sensitivity=2.8f;   /* (0.3.6.51 defaults: the old mouse look's feel, see the launcher) */
     input.mouse_aim_sensitivity=0.6f; input.mouse_vertical=1.0f; input.mouse_camera_vertical=2.0f;
     input.pad_vibration=1; input.pad_vibration_strength=100; input.walk_speed=65;
+    input.mouse_invert_y=0; input.pad_invert_y=0;   /* (read again: runtime_input_reload) */
     const char *path=getenv("BB_INPUT_CONFIG");
     FILE *f=path && *path ? fopen(path,"r") : NULL;
     if (f) {
@@ -558,6 +559,12 @@ static void load_input(void) {
     if (input.pad_vibration_strength>100) input.pad_vibration_strength=100;
     bbgpu_mouse_configure(input.mouse_look);
 }
+
+/* The overlay's Controls page wrote input.ini (gpu/shim/bbport_overlay.cpp): the pad read takes it in again before its next
+ * read (sample_host, the thread that reads the bindings), so a new binding works at once. */
+static volatile int input_reload;
+static int layout_logged;   /* the layout keys were logged (log_layout_keys), again after a reload */
+void runtime_input_reload(void) { __atomic_store_n(&input_reload,1,__ATOMIC_RELEASE); }
 
 static uint64_t wheel_until_us[2]; /* wheel up, wheel down: held briefly for the game to see */
 static int bind_down(const Bind *b, const bool *k, uint32_t mouse, uint64_t now) {
@@ -1342,6 +1349,7 @@ static void sample_host(PadData *d) {
     d->timestamp=runtime_guest_monotonic_us(); /* the game's clock (BB_TIME_SCALE) */
     static int loaded;
     if (!loaded) { load_input(); loaded=1; }
+    else if (__atomic_exchange_n(&input_reload,0,__ATOMIC_ACQ_REL)) { load_input(); layout_logged=0; }
     PadSnap pad;
     pad_snapshot(&pad);
     int g=pad.present;   /* a controller is there (its state: pad, read on the pad thread) */
@@ -1375,7 +1383,6 @@ static void sample_host(PadData *d) {
         if (wheel>0) wheel_until_us[0]=now+80000;
         if (wheel<0) wheel_until_us[1]=now+80000;
         const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
-    static int layout_logged;
     if (k && !layout_logged) { layout_logged=1; log_layout_keys(); }
         /* SDL delivers gamepad events in the background too (window.cpp): the game takes them
          * only while its window is in front, unless the player chose the controller to keep working

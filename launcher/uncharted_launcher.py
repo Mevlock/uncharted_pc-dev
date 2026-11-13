@@ -776,6 +776,43 @@ def key_bindings(s):
     return keys
 
 
+# The first line of input.ini when the game's in-game menu wrote it (its Controls page, gpu/shim/bbport_overlay.cpp).
+GAME_CONTROLS_HEADER = "# Uncharted controls (written by the game's in-game menu, Controls page)"
+GAME_CONTROLS_VALUES = ('mouse_sensitivity', 'mouse_aim_sensitivity', 'mouse_vertical', 'mouse_camera_vertical', 'walk_speed')
+
+
+def import_game_controls(s):
+    """The in-game menu's Controls page writes input.ini itself (keys, mouse settings): those settings are taken into the
+    launcher's, so that the next write_input_ini keeps them. Returns the settings taken ([] when the launcher wrote the
+    file last)."""
+    try:
+        lines = input_ini_path().read_text(encoding='utf-8').splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    if not lines or lines[0].strip() != GAME_CONTROLS_HEADER:
+        return []
+    keys = dict(s.get('key_bindings') or {})
+    taken = []
+    for line in lines[1:]:
+        key, sep, value = line.partition('=')
+        key, value = key.strip(), value.strip()
+        if not sep:
+            continue
+        if key.startswith('key.') and key[4:] in DEFAULT_KEYS:
+            if value == DEFAULT_KEYS[key[4:]]:
+                keys.pop(key[4:], None)
+            else:
+                keys[key[4:]] = value
+        elif key in ('mouse_look', 'mouse_invert_y'):
+            s[key] = value == '1'
+            taken.append(key)
+        elif key in GAME_CONTROLS_VALUES:
+            s[key] = value
+            taken.append(key)
+    s['key_bindings'] = keys
+    return taken + ['key_bindings']
+
+
 def write_input_ini(s):
     """input.ini: the keyboard, mouse and controller bindings the game reads at start."""
     keys = key_bindings(s)
@@ -830,6 +867,7 @@ def game_frame_cap(s):
 def game_environment(s, start=None):
     env = dict(os.environ)
     try:
+        import_game_controls(s)   # (the in-game menu changed them since: kept)
         env['BB_INPUT_CONFIG'] = str(write_input_ini(s))
     except OSError:
         pass
@@ -990,7 +1028,15 @@ def load_settings():
         if (value := scaled('mouse_aim_sensitivity', 0.6, MOUSE_RATIO_MIN, MOUSE_RATIO_MAX)) is not None:
             saved['mouse_aim_sensitivity'] = value
         saved['mouse_camera_vertical'] = '2.0'
-    return {**APP_DEFAULTS, **saved}
+    settings = {**APP_DEFAULTS, **saved}
+    if import_game_controls(settings):   # the in-game menu's Controls page changed them in the last game
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            write_atomic(CONFIG_FILE, json.dumps(settings, indent=2) + '\n')
+            write_input_ini(settings)   # (the launcher's again: the change is in its settings now)
+        except OSError:
+            pass
+    return settings
 
 
 class Launcher:
@@ -2169,6 +2215,15 @@ class Launcher:
         self.set_key(*self.capturing, 'Wheel Up' if event.delta > 0 else 'Wheel Down')
         return 'break'
 
+    def show_imported_controls(self):
+        """After game_environment took the in-game menu's controls in (import_game_controls): the Controls page shows
+        them, so a later collect() keeps them."""
+        for key in ('mouse_look', 'mouse_invert_y') + GAME_CONTROLS_VALUES:
+            if key in self.vars:
+                self.vars[key].set(self.app[key])
+        if getattr(self, 'key_buttons', None):
+            self.show_keys()
+
     def reset_keys(self):
         self.app['key_bindings'] = {}
         self.capturing = None
@@ -2660,6 +2715,7 @@ class Launcher:
             return
         self.set_log('')
         env = game_environment(self.app)
+        self.show_imported_controls()
         if prepare:
             # No window and no game (BB_PREPARE_ONLY): the progress comes back as PREP lines for the bar.
             env['BB_PREPARE_ONLY'] = '1'
@@ -2761,6 +2817,13 @@ class Launcher:
                     if prepared:
                         self.prep_bar.pack_forget()
                     self.refresh()
+                    if import_game_controls(self.app):   # changed in the game's menu: shown here, kept
+                        self.show_imported_controls()
+                        self.save_settings()
+                        try:
+                            write_input_ini(self.app)   # (the launcher's again: a change made here now is not taken back)
+                        except OSError:
+                            pass
                     self.detect_controller()
                     if prepared and code == 0 and not self.stopping:
                         self.status.configure(text=_('Shaders prepared.'), fg=GOLD)

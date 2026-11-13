@@ -13,6 +13,89 @@ def L(es, pt, fr, de, it, ja):
 
 
 TRANSLATIONS = {
+    # ---- Controls page (keyboard and mouse; texts shared with the launcher's Controls page) ---------------------
+    'Cross ✕': L(
+        'Cruz ✕', 'Cruz ✕', 'Croix ✕', 'Kreuz ✕', 'Croce ✕', 'バツ ×'),
+    'Circle ○': L(
+        'Círculo ○', 'Círculo ○', 'Rond ○', 'Kreis ○', 'Cerchio ○', 'マル ○'),
+    'Square □': L(
+        'Cuadrado □', 'Quadrado □', 'Carré □', 'Quadrat □', 'Quadrato □', 'シカク'),
+    'Triangle △': L(
+        'Triángulo △', 'Triângulo △', 'Triangle △', 'Dreieck △', 'Triangolo △', 'サンカク △'),
+    'L2 (aim)': L(
+        'L2 (apuntar)', 'L2 (mirar)', 'L2 (viser)', 'L2 (zielen)', 'L2 (mira)', 'L2（照準）'),
+    'R2 (fire)': L(
+        'R2 (disparar)', 'R2 (atirar)', 'R2 (tirer)', 'R2 (schießen)', 'R2 (spara)', 'R2（ショット）'),
+    'Options': L(
+        'Options', 'Options', 'Options', 'Options', 'Options', 'OPTIONS'),
+    'Touchpad': L(
+        'Panel táctil', 'Touchpad', 'Pavé tactile', 'Touchpad', 'Touchpad', 'タッチパッド'),
+    'D-pad up': L(
+        'Cruceta arriba', 'Direcional para cima', 'Croix directionnelle haut', 'Steuerkreuz oben', 'Croce direzionale su', '方向キー上'),
+    'D-pad down': L(
+        'Cruceta abajo', 'Direcional para baixo', 'Croix directionnelle bas', 'Steuerkreuz unten', 'Croce direzionale giù', '方向キー下'),
+    'D-pad left': L(
+        'Cruceta izquierda', 'Direcional para a esquerda', 'Croix directionnelle gauche', 'Steuerkreuz links', 'Croce direzionale sinistra', '方向キー左'),
+    'D-pad right': L(
+        'Cruceta derecha', 'Direcional para a direita', 'Croix directionnelle droite', 'Steuerkreuz rechts', 'Croce direzionale destra', '方向キー右'),
+    'Move forward': L(
+        'Avanzar', 'Mover para frente', 'Avancer', 'Vorwärts gehen', 'Muoviti avanti', '前に移動'),
+    'Move back': L(
+        'Retroceder', 'Mover para trás', 'Reculer', 'Rückwärts gehen', 'Muoviti indietro', '後ろに移動'),
+    'Move left': L(
+        'Moverse a la izquierda', 'Mover para a esquerda', 'Aller à gauche', 'Nach links gehen', 'Muoviti a sinistra', '左に移動'),
+    'Move right': L(
+        'Moverse a la derecha', 'Mover para a direita', 'Aller à droite', 'Nach rechts gehen', 'Muoviti a destra', '右に移動'),
+    'Look up': L(
+        'Mirar arriba', 'Olhar para cima', 'Regarder en haut', 'Nach oben schauen', 'Guarda in alto', '上を見る'),
+    'Look down': L(
+        'Mirar abajo', 'Olhar para baixo', 'Regarder en bas', 'Nach unten schauen', 'Guarda in basso', '下を見る'),
+    'Look left': L(
+        'Mirar a la izquierda', 'Olhar para a esquerda', 'Regarder à gauche', 'Nach links schauen', 'Guarda a sinistra', '左を見る'),
+    'Look right': L(
+        'Mirar a la derecha', 'Olhar para a direita', 'Regarder à droite', 'Nach rechts schauen', 'Guarda a destra', '右を見る'),
+    'Turn valve / wheel counter-clockwise (hold)': L(
+        'Girar válvula / rueda en sentido antihorario (mantener)', 'Girar válvula / roda no sentido anti-horário (segurar)', 'Tourner une vanne / roue dans le sens antihoraire (maintenir)', 'Ventil / Rad gegen den Uhrzeigersinn drehen (halten)', 'Girare valvola / ruota in senso antiorario (tenere premuto)', 'バルブ／ハンドルを左回りに回す（押したまま）'),
+    'Turn valve / wheel clockwise (hold)': L(
+        'Girar válvula / rueda en sentido horario (mantener)', 'Girar válvula / roda no sentido horário (segurar)', 'Tourner une vanne / roue dans le sens horaire (maintenir)', 'Ventil / Rad im Uhrzeigersinn drehen (halten)', 'Girare valvola / ruota in senso orario (tenere premuto)', 'バルブ／ハンドルを右回りに回す（押したまま）'),
+    'Walk (hold with the movement keys)': L(
+        'Caminar (mantener con las teclas de movimiento)', 'Andar (segurar com as teclas de movimento)', 'Marcher (maintenir avec les touches de déplacement)', 'Gehen (mit den Bewegungstasten halten)', 'Camminare (tenere premuto con i tasti di movimento)', 'あるく（移動キーと同時に押したまま）'),
+    'The game was not started from the launcher (no input.ini): changes are not saved.': L(
+        'El juego no se inició desde el launcher (no hay input.ini): los cambios no se guardan.', 'O jogo não foi iniciado pelo launcher (sem input.ini): as mudanças não são salvas.', 'Le jeu n’a pas été lancé depuis le launcher (pas d’input.ini) : les changements ne sont pas enregistrés.', 'Das Spiel wurde nicht über den Launcher gestartet (keine input.ini): Änderungen werden nicht gespeichert.', 'Il gioco non è stato avviato dal launcher (nessun input.ini): le modifiche non vengono salvate.', 'ゲームがランチャーから起動されていません（input.ini がありません）。変更は保存されません。'),
+    'Could not write input.ini.': L(
+        'No se pudo escribir input.ini.', 'Não foi possível gravar o input.ini.', 'Impossible d’écrire input.ini.', 'input.ini konnte nicht geschrieben werden.', 'Impossibile scrivere input.ini.', 'input.ini を書き込めませんでした。'),
+    'binding removed': L(
+        'asignación quitada', 'atribuição removida', 'touche retirée', 'Belegung entfernt', 'assegnazione rimossa', 'キーの設定を削除しました'),
+    'Cancelled.': L(
+        'Cancelado.', 'Cancelado.', 'Annulé.', 'Abgebrochen.', 'Annullato.', 'キャンセルしました。'),
+    'Insert opens the in-game settings menu.': L(
+        'Insert abre el menú de ajustes del juego.', 'Insert abre o menu de configurações dentro do jogo.', 'Insert ouvre le menu des paramètres en jeu.', 'Insert öffnet das Einstellungsmenü im Spiel.', 'Insert apre il menu delle impostazioni nel gioco.', 'Insert でゲーム内の設定メニューが開きます。'),
+    'Left Alt frees the mouse cursor while held.': L(
+        'Alt izquierdo libera el cursor del ratón mientras lo mantienes pulsado.', 'Alt esquerdo libera o cursor do mouse enquanto você o segura.', 'Alt gauche libère le curseur de la souris tant que vous le maintenez.', 'Linkes Alt gibt den Mauszeiger frei, solange du es hältst.', 'Alt sinistro libera il cursore del mouse finché lo tieni premuto.', '左 Alt を押している間はマウスカーソルを使えます。'),
+    "Keyboard and mouse: the same settings as the launcher's Controls page, saved in input.ini. Changes work at once; the launcher takes them over the next time it starts.": L(
+        'Teclado y ratón: los mismos ajustes que la página Controles del launcher, guardados en input.ini. Los cambios funcionan al instante; el launcher los adopta la próxima vez que se inicie.', 'Teclado e mouse: as mesmas configurações da página Controles do launcher, salvas no input.ini. As mudanças valem na hora; o launcher as adota na próxima vez que iniciar.', 'Clavier et souris : les mêmes réglages que la page Commandes du launcher, enregistrés dans input.ini. Les changements s’appliquent tout de suite ; le launcher les reprend à son prochain démarrage.', 'Tastatur und Maus: dieselben Einstellungen wie auf der Seite Steuerung des Launchers, gespeichert in input.ini. Änderungen wirken sofort; der Launcher übernimmt sie beim nächsten Start.', 'Tastiera e mouse: le stesse impostazioni della pagina Comandi del launcher, salvate in input.ini. Le modifiche valgono subito; il launcher le adotta al prossimo avvio.', 'キーボードとマウス: ランチャーの Controls ページと同じ設定で、input.ini に保存されます。変更はすぐに反映され、ランチャーは次回の起動時にそれを使います。'),
+    'Look around with the mouse': L(
+        'Mover la cámara con el ratón', 'Mover a câmera com o mouse', 'Orienter la caméra avec la souris', 'Mit der Maus umsehen', 'Guarda intorno con il mouse', 'マウスでカメラを動かす'),
+    'The cursor stays in the game window; hold Left Alt (or switch windows) to free it.': L(
+        'El cursor se queda en la ventana del juego; mantén Alt izquierdo (o cambia de ventana) para liberarlo.', 'O cursor fica na janela do jogo; segure Alt esquerdo (ou troque de janela) para liberá-lo.', 'Le curseur reste dans la fenêtre du jeu ; maintenez Alt gauche (ou changez de fenêtre) pour le libérer.', 'Der Mauszeiger bleibt im Spielfenster; halte linkes Alt (oder wechsle das Fenster), um ihn freizugeben.', 'Il cursore resta nella finestra del gioco; tieni premuto Alt sinistro (o cambia finestra) per liberarlo.', 'カーソルはゲームのウィンドウ内にとどまります。左 Alt を押している間（またはウィンドウを変えると）使えます。'),
+    'Invert the mouse vertically': L(
+        'Invertir verticalmente el ratón', 'Inverter o mouse verticalmente', 'Inverser verticalement la souris', 'Maus vertikal umkehren', 'Inverti verticalmente il mouse', 'マウスの上下を反転'),
+    'Keyboard and mouse buttons': L(
+        'Teclado y botones del ratón', 'Teclado e botões do mouse', 'Clavier et boutons de la souris', 'Tastatur- und Maustasten', 'Tasti di tastiera e mouse', 'キーボードとマウスのボタン'),
+    'Click a box, then press a key or a mouse button (the wheel counts too); Esc cancels. x removes a binding. Each action can have two.': L(
+        'Haz clic en una casilla y pulsa una tecla o un botón del ratón (la rueda también cuenta); Esc cancela. x quita una asignación. Cada acción puede tener dos.', 'Clique em uma caixa e pressione uma tecla ou um botão do mouse (a roda também conta); Esc cancela. x remove uma atribuição. Cada ação pode ter duas.', 'Cliquez sur une case, puis appuyez sur une touche ou un bouton de la souris (la molette compte aussi) ; Échap annule. x retire une touche. Chaque action peut en avoir deux.', 'Klicke auf ein Feld und drücke dann eine Taste oder Maustaste (das Mausrad zählt auch); Esc bricht ab. x entfernt eine Belegung. Jede Aktion kann zwei haben.', "Fai clic su una casella, poi premi un tasto o un pulsante del mouse (vale anche la rotellina); Esc annulla. x rimuove un'assegnazione. Ogni azione può averne due.", 'ボックスをクリックしてから、キーまたはマウスのボタンを押してください（ホイールも使えます）。Esc でキャンセルします。x でキーの設定を削除します。それぞれ2つまで設定できます。'),
+    'Press a key…': L(
+        'Pulsa una tecla…', 'Pressione uma tecla…', 'Appuyez sur une touche…', 'Drücke eine Taste…', 'Premi un tasto…', 'キーを押してください…'),
+    'Default keys': L(
+        'Teclas predeterminadas', 'Teclas padrão', 'Touches par défaut', 'Standardtasten', 'Tasti predefiniti', 'キーを元に戻す'),
+    'Walk speed': L(
+        'Velocidad al caminar', 'Velocidade ao andar', 'Vitesse de marche', 'Gehgeschwindigkeit', 'Velocità di camminata', 'あるくスピード'),
+    'How far the walk key pushes the stick. Default is 65%; below about 55% the games do not move the character.': L(
+        'Cuánto empuja el stick la tecla de caminar. El valor predeterminado es 65%; por debajo de un 55% los juegos no mueven al personaje.', 'Quanto a tecla de andar empurra o analógico. O padrão é 65%; abaixo de uns 55% os jogos não movem o personagem.', 'Jusqu’où la touche de marche pousse le stick. Par défaut 65 % ; en dessous d’environ 55 %, les jeux ne déplacent pas le personnage.', 'Wie weit die Gehtaste den Stick drückt. Standard ist 65 %; unter etwa 55 % bewegen die Spiele die Figur nicht.', 'Quanto il tasto per camminare spinge la levetta. Il predefinito è 65%; sotto circa il 55% i giochi non muovono il personaggio.', 'あるくキーでスティックをどこまで動かすか。初めは65%です。約55%未満ではキャラクターが動きません。'),
+    "The controller's buttons, vibration and the button pictures: in the launcher's Controls page.": L(
+        'Los botones del mando, la vibración y las imágenes de los botones: en la página Controles del launcher.', 'Os botões do controle, a vibração e as imagens dos botões: na página Controles do launcher.', 'Les boutons de la manette, les vibrations et les images des boutons : dans la page Commandes du launcher.', 'Die Tasten des Controllers, die Vibration und die Tastenbilder: auf der Seite Steuerung des Launchers.', 'I pulsanti del controller, la vibrazione e le immagini dei pulsanti: nella pagina Comandi del launcher.', 'コントローラーのボタン、バイブレーション、ボタンの画像: ランチャーの Controls ページで設定します。'),
+    'Controls': L(
+        'Controles', 'Controles', 'Commandes', 'Steuerung', 'Comandi', 'コントロール'),
     # ---- Settings page -------------------------------------------------------------------------------------------
     'Uncharted — settings  (Insert / L3+R3)': L(
         'Uncharted — ajustes  (Insert / L3+R3)', 'Uncharted — configurações  (Insert / L3+R3)',
