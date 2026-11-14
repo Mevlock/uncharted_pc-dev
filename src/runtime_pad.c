@@ -1235,7 +1235,24 @@ static const unsigned char u3_eu_menu_handler[]={0x55,0x48,0x89,0xe5,0x41,0x57,0
                                                  0x48,0x81,0xec,0x08,0x03,0x00,0x00,0x89,0x95,0xfc,0xfc};
 static const unsigned char u3_us_menu_handler[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
                                                  0x48,0x81,0xec,0xe8,0x02,0x00,0x00,0x89,0x95,0x24,0xfd};
+/* BB_NPC_LOG diagnosis (runtime_npcdiag.c): inside U2 1.02 NpcLog, after its va_list is built (mov rdi,[rbx+0x21b0]). */
+static const unsigned char u2_npclog_102[]={0x48,0x8b,0xbb,0xb0,0x21,0x00,0x00,0x48,0x85,0xff,0x74,0x0f};
+void __attribute__((ms_abi)) runtime_npclog_line(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
+/* U2 companions jitter after reaching their combat spot (runtime_buddyzone.c; BB_U2_BUDDY_ZONE=0: off): 1.02 the in-zone
+ * test inlined in BuddyOpenCombatSkill (vmulss xmm1,xmm1,xmm1; vpermilps xmm1,xmm1,0 moved; then vcmpltps, vmovmskps,
+ * cmp eax,0xf, jne), 1.00 Npc::IsInZone after Zone::Contains (mov rcx,[r14]; cmp rcx,[rbp-0x18] moved; jne; add rsp). */
+static const unsigned char u2_buddy_zone_102[]={0xc5,0xf2,0x59,0xc9,0xc4,0xe3,0x79,0x04,0xc9,0x00,0xc5,0xf0,0xc2,0xc0,0x01,
+                                               0xc5,0xf8,0x50,0xc0,0x83,0xf8,0x0f,0x0f,0x85};
+static const unsigned char u2_buddy_zone_100[]={0x49,0x8b,0x0e,0x48,0x3b,0x4d,0xe8,0x75,0x09,0x48,0x83,0xc4,0x40};
+void __attribute__((ms_abi)) runtime_u2_buddy_zone_102(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_u2_buddy_zone_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
+static const unsigned char u2_navcmd_102[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0x00,0x00,0x00,0x49,0x89,0xf4};
+void __attribute__((ms_abi)) runtime_npclog_command(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
 static const RuntimeGuestCallback guest_callbacks[]={
+    {"U2 buddy zone: Siege #257 Tenzin (1.02)",0x30d4a3,u2_buddy_zone_102,sizeof(u2_buddy_zone_102),10,runtime_u2_buddy_zone_102,NULL},
+    {"U2 buddy zone: Siege #257 Tenzin (1.00)",0x2c393,u2_buddy_zone_100,sizeof(u2_buddy_zone_100),7,runtime_u2_buddy_zone_100,NULL},
+    {"U2 NPC navigation command (diagnosis, 1.02)",0x383ef0,u2_navcmd_102,sizeof(u2_navcmd_102),6,runtime_npclog_command,NULL},
+    {"U2 NPC debug log (diagnosis, 1.02)",0x214c50,u2_npclog_102,sizeof(u2_npclog_102),7,runtime_npclog_line,NULL},
     {"U2 main menu Quit (EU)",0x29d7da,u2_eu_menu_store,sizeof(u2_eu_menu_store),7,runtime_exit_menu_u2_data,NULL},
     {"U2 main menu Quit (1.02)",0x5c5433,u2_us_menu_store,sizeof(u2_us_menu_store),7,runtime_exit_menu_u2_data,NULL},
     {"U3 main menu Quit (EU)",0x1e408a,u3_eu_menu_store,sizeof(u3_eu_menu_store),7,runtime_exit_menu_u3_data,NULL},

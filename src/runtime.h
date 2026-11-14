@@ -194,6 +194,8 @@ typedef struct {
     const unsigned char *patch;
 } RuntimeGuestCallback;
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
+/* A callback's view of the guest's saved xmm register `x` (0-7; 4 floats), written back when the callback returns. */
+float *runtime_callback_xmm(const uint64_t *regs, int x);
 /* BB_PAD_TIMING=1 (diagnosis): blocking waits noted per thread (name, start, duration); the pad
  * read prints the ones since the last read. runtime_wait_begin returns 0 when off. */
 double runtime_wait_begin(void);

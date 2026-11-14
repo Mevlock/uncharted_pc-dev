@@ -1043,6 +1043,12 @@ static int callback_thunk_to(unsigned char *f, size_t moved, const void *callbac
     callback_thunks_used+=(k+15)&~(size_t)15;
     return 1;
 }
+/* The guest's xmm0-7 as the thunk saved them (and restores them after the callback): a callback may change them.
+ * `regs` is the callback's 5th argument (the thunk's rsp after its pushes); the thunk aligned it down to 16, took
+ * 0xb0 off and stored xmm x at +0x30 + 16 x. */
+float *runtime_callback_xmm(const uint64_t *regs, int x) {
+    return (float *)(((uintptr_t)regs & ~(uintptr_t)15) - 0xb0 + 0x30 + 16u * (unsigned)x);
+}
 static int callback_thunk(unsigned char *f, size_t moved, const void *callback) {
     return callback_thunk_to(f,moved,callback,NULL);
 }
@@ -1080,13 +1086,16 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
             if (skipped) { printf("Callbacks: %s at %#" PRIx64 " SKIPPED (BB_SKIP_CALLBACKS)\n",c->name,c->offset); continue; }
         }
         /* Single fixes with a switch of their own (name contains the text, the variable is 0: left out). */
-        static const struct { const char *text, *env; } switches[]={{"light ortho guard","BB_LIGHT_ORTHO_GUARD"}};
+        static const struct { const char *text, *env; } switches[]={{"light ortho guard","BB_LIGHT_ORTHO_GUARD"},
+                                                                      {"buddy zone","BB_U2_BUDDY_ZONE"}};
         const char *off=NULL;
         for (size_t k=0;k<sizeof(switches)/sizeof(*switches);++k) {
             const char *e=getenv(switches[k].env);
             if (strstr(c->name,switches[k].text) && e && e[0]=='0') off=switches[k].env;
         }
         if (off) { printf("Callbacks: %s at %#" PRIx64 " off (%s=0)\n",c->name,c->offset,off); continue; }
+        /* Diagnosis hooks (name contains "(diagnosis"): only with BB_NPC_LOG=1 (runtime_npcdiag.c). */
+        if (strstr(c->name,"(diagnosis")) { const char *e=getenv("BB_NPC_LOG"); if (!(e && e[0]=='1')) continue; }
         if (!c->callback) {
             memcpy(image+c->offset,c->patch,c->moved);
             if (is_stub) stub_in=1;
