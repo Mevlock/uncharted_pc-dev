@@ -851,6 +851,60 @@ void NoteMovieFrame() {
                          std::memory_order_relaxed);
 }
 
+// bbport: the last movie pictures decoded (a game cycles a few output buffers): address and end.
+// Written by the decode thread, read by the draw threads; an entry is replaced whole only after
+// pictures stopped for 300 ms, so a torn read is at worst one frame's wrong answer.
+namespace {
+constexpr u32 MoviePictureSlots = 16;
+std::array<std::atomic<u64>, MoviePictureSlots> movie_picture_start{};
+std::array<std::atomic<u64>, MoviePictureSlots> movie_picture_end{};
+std::atomic<u32> movie_picture_next{0};
+} // namespace
+
+std::atomic<bool> g_movie_pictures_live{false};
+
+void NoteMoviePicture(const void* address, u64 size) {
+    const u64 start = reinterpret_cast<u64>(address);
+    if (!start || !size) {
+        return;
+    }
+    bool known = false;
+    for (u32 i = 0; i < MoviePictureSlots && !known; ++i) {
+        known = movie_picture_start[i].load(std::memory_order_relaxed) == start &&
+                movie_picture_end[i].load(std::memory_order_relaxed) == start + size;
+    }
+    if (!known) {
+        const u32 slot = movie_picture_next.fetch_add(1, std::memory_order_relaxed) %
+                         MoviePictureSlots;
+        movie_picture_start[slot].store(start, std::memory_order_relaxed);
+        movie_picture_end[slot].store(start + size, std::memory_order_relaxed);
+    }
+    g_movie_pictures_live.store(true, std::memory_order_release);
+}
+
+bool ReadsMoviePicture(u64 address, u64 size) {
+    for (u32 i = 0; i < MoviePictureSlots; ++i) {
+        const u64 start = movie_picture_start[i].load(std::memory_order_relaxed);
+        if (start && address < movie_picture_end[i].load(std::memory_order_relaxed) &&
+            address + size > start) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MoviePicturesExpire() {
+    if (!g_movie_pictures_live.load(std::memory_order_relaxed) ||
+        MovieActive(std::chrono::steady_clock::now())) {
+        return;
+    }
+    g_movie_pictures_live.store(false, std::memory_order_relaxed);
+    for (u32 i = 0; i < MoviePictureSlots; ++i) {
+        movie_picture_start[i].store(0, std::memory_order_relaxed);
+        movie_picture_end[i].store(0, std::memory_order_relaxed);
+    }
+}
+
 s64 LastFlipIntervalNs() {
     return last_flip_interval_ns.load(std::memory_order_relaxed);
 }

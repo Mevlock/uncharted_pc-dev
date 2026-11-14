@@ -47,6 +47,7 @@
 // bbport: the render size BB_RENDER_RES patched in (runtime_ultrawide.c), 0 without it.
 #include <immintrin.h>
 extern "C" unsigned runtime_render_width, runtime_render_height;
+extern "C" int runtime_ultrawide_fill;
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 
 namespace Vulkan {
@@ -6839,9 +6840,57 @@ bool BindMemoCeiling() {
 }
 } // namespace
 
+/// bbport: draws and dispatches that read a movie picture (the decoder's NV12 output) since the
+/// last frame was prepared: the frame shows a movie (TakeSceneFrame keeps it 16:9).
+std::atomic<u32> g_frame_movie_reads{0};
+
+/// bbport: while movie pictures are live (decoded in the last 300 ms), whether this stage reads
+/// one as a texture or a buffer. The first read by each shader is logged.
+static void NoteMovieReads(const Shader::Info& stage, const PreparedStage* prepared, bool images) {
+    bool reads = false;
+    const char* kind = "texture";
+    if (images) {
+        for (u32 i = 0; i < stage.images.size() && !reads; ++i) {
+            const auto t =
+                prepared ? prepared->image_sharps[i] : stage.images[i].GetSharp(stage);
+            reads = !stage.images[i].is_written &&
+                    Libraries::VideoOut::ReadsMoviePicture(t.Address(), 1);
+        }
+    } else {
+        kind = "buffer";
+        for (u32 i = 0; i < stage.buffers.size() && !reads; ++i) {
+            const auto& desc = stage.buffers[i];
+            if (desc.IsSpecial() || desc.is_written) {
+                continue;
+            }
+            const auto v = prepared ? prepared->buffer_sharps[i] : desc.GetSharp(stage);
+            reads = v.base_address && Libraries::VideoOut::ReadsMoviePicture(
+                                          v.base_address, std::max<u64>(v.GetSize(), 1));
+        }
+    }
+    if (!reads) {
+        return;
+    }
+    g_frame_movie_reads.fetch_add(1, std::memory_order_relaxed);
+    if (runtime_ultrawide_fill) {
+        static std::mutex mutex;
+        static std::vector<u32> seen;
+        std::scoped_lock lock{mutex};
+        if (std::find(seen.begin(), seen.end(), u32(stage.pgm_hash)) == seen.end() &&
+            seen.size() < 32) {
+            seen.push_back(u32(stage.pgm_hash));
+            std::printf("Ultrawide: movie picture read by shader %08x (stage %u, %s)\n",
+                        u32(stage.pgm_hash), u32(stage.sw_stage), kind);
+        }
+    }
+}
+
 void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* prepared,
                              Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data, u32& write_index) {
+    if (Libraries::VideoOut::g_movie_pictures_live.load(std::memory_order_relaxed)) {
+        NoteMovieReads(stage, prepared, false);
+    }
     const u64 alignment = instance.StorageMinAlignment();
     BindMemoEntry* memo_entry = nullptr;
     u64 memo_key = 0;
@@ -7560,6 +7609,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                               Shader::Backend::Bindings& binding, u32& write_index,
                               bool& barrier, bool on_helper) {
     const u32 first_image_idx = image_infos.size();
+    if (Libraries::VideoOut::g_movie_pictures_live.load(std::memory_order_relaxed)) {
+        NoteMovieReads(stage, prepared, true);
+    }
     // bbport diagnosis: BB_TRACE_SHADER=<hash> prints the T# of every texture binding of that
     // shader (first 8 draws).
     static const u64 trace_hash = [] {
@@ -8800,9 +8852,12 @@ u32 SceneExitDraws() {
     return draws;
 }
 
+
 bool Rasterizer::TakeSceneFrame() noexcept {
     const u32 scene_draws = g_frame_scene_draws.exchange(0, std::memory_order_relaxed);
     const u32 menu_draws = g_frame_menu_draws.exchange(0, std::memory_order_relaxed);
+    const u32 movie_reads = g_frame_movie_reads.exchange(0, std::memory_order_relaxed);
+    Libraries::VideoOut::MoviePicturesExpire();
     static bool gameplay = false;
     const bool raw = scene_draws >= (gameplay ? SceneExitDraws() : SceneFrameDraws()) &&
                      menu_draws == 0;
@@ -8832,16 +8887,69 @@ bool Rasterizer::TakeSceneFrame() noexcept {
         const char* env = std::getenv("BB_ULTRAWIDE_EXIT_FRAMES");
         return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 30u;
     }();
+    // A frame that reads a movie picture (the decoder's output: a prerecorded cutscene, U1's
+    // cutscenes nearly all) shows the movie: 16:9 at once instead of after the 30 frames, which
+    // showed the movie's first half second stretched over the window. After the movie the first
+    // gameplay frame fills the window again (1 frame instead of 3: menus never reach the scene
+    // threshold), and the camera stays widened through the movie and 120 frames after it, so the
+    // game (building its camera a frame or two ahead) has the first frames after it widened
+    // already. BB_ULTRAWIDE_MOVIE=0: movies as before (the draw count alone).
+    static const bool movie_switch = [] {
+        const char* env = std::getenv("BB_ULTRAWIDE_MOVIE");
+        return !(env && env[0] == '0');
+    }();
+    const bool movie = movie_switch && movie_reads != 0;
+    static u32 after_movie = ~0u; // frames since the last movie frame
+    after_movie = movie ? 0 : after_movie + (after_movie != ~0u);
+    const bool after_movie_window = after_movie <= 120;
     static u32 run = 0;
-    if (raw == gameplay) {
+    if (movie) {
         run = 0;
-    } else if (++run >= (gameplay ? exit_frames : 3u)) {
+        if (gameplay) {
+            gameplay = false;
+            if (runtime_ultrawide_fill) {
+                std::printf("Ultrawide: movie, 16:9 (last frame: %u scene draws)\n", scene_draws);
+            }
+        }
+    } else if (raw == gameplay) {
+        run = 0;
+    } else if (++run >= (gameplay ? exit_frames : after_movie_window ? 1u : 3u)) {
         gameplay = raw;
         run = 0;
         if (runtime_ultrawide_fill) {
             std::printf("Ultrawide: %s (last frame: %u scene draws, %u menu backdrop draws)\n",
                         gameplay ? "gameplay, wide" : "menu or loading, 16:9", scene_draws,
                         menu_draws);
+        }
+    }
+    // BB_ULTRAWIDE_MOVIE_LOG=1 (diagnosis): a line per frame from the first movie picture read
+    // until 120 frames after the last, with the mode the draw count alone gave (before the
+    // movie switch).
+    static const bool movie_log = [] {
+        const char* env = std::getenv("BB_ULTRAWIDE_MOVIE_LOG");
+        return env && env[0] == '1';
+    }();
+    if (movie_log && runtime_ultrawide_fill) {
+        static bool old_gameplay = false;
+        static u32 old_run = 0, log_left = 0;
+        static u64 frame = 0;
+        ++frame;
+        const bool old_raw = scene_draws >= (old_gameplay ? SceneExitDraws() : SceneFrameDraws()) &&
+                             menu_draws == 0;
+        if (old_raw == old_gameplay) {
+            old_run = 0;
+        } else if (++old_run >= (old_gameplay ? exit_frames : 3u)) {
+            old_gameplay = old_raw;
+            old_run = 0;
+        }
+        if (movie_reads) {
+            log_left = 120;
+        }
+        if (log_left) {
+            --log_left;
+            std::printf("Ultrawide frame %llu: %u scene draws, %u movie reads, shown %s, before %s\n",
+                        static_cast<unsigned long long>(frame), scene_draws, movie_reads,
+                        gameplay ? "wide" : "16:9", old_gameplay ? "wide" : "16:9");
         }
     }
     // BB_ULTRAWIDE=always (launcher: Always fill): the camera stays widened and every frame fills
@@ -8853,8 +8961,9 @@ bool Rasterizer::TakeSceneFrame() noexcept {
     }();
     g_last_frame_scene.store(gameplay, std::memory_order_relaxed);
     const bool scene = always || gameplay;
-    // The game's camera: widened for gameplay, its own for menus and title screens.
-    runtime_ultrawide_select(scene ? 1 : 0);
+    // The game's camera: widened for gameplay (and through movies), its own for menus and title
+    // screens.
+    runtime_ultrawide_select(scene || (movie_switch && after_movie_window) ? 1 : 0);
     return scene;
 }
 

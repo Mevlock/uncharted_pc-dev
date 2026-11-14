@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
 #include <functional>
 
@@ -23,6 +24,20 @@ namespace Libraries::VideoOut {
 /// bbport: steady_clock time (ns) of the last prerecorded movie frame decoded (Videodec2).
 /// While movies play, the present thread shows the guest a 60 Hz display (see PresentThread).
 void NoteMovieFrame();
+
+/// bbport: the picture a movie decode wrote (Videodec2: NV12 at `address`, `size` bytes). The
+/// ultrawide switch (Rasterizer::TakeSceneFrame) shows a frame at 16:9 when a shader read one.
+void NoteMoviePicture(const void* address, u64 size);
+
+/// bbport: set by NoteMoviePicture, cleared by MoviePicturesExpire 300 ms after the last decode:
+/// while it is clear the draws do not look for movie pictures (one relaxed load per bind).
+extern std::atomic<bool> g_movie_pictures_live;
+
+/// bbport: whether [address, address + size) overlaps a movie picture (while live).
+bool ReadsMoviePicture(u64 address, u64 size);
+
+/// bbport: once per presented frame: clears g_movie_pictures_live 300 ms after the last decode.
+void MoviePicturesExpire();
 
 /// bbport diagnosis: the time (ns) between the guest's last two flip submissions.
 s64 LastFlipIntervalNs();
