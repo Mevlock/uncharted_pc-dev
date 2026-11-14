@@ -1185,19 +1185,9 @@ static int kernel_va_shadow_on(void) {
     return 0;
 #endif
 }
-/* sleeping: patch_job_sleep put the idle workers to sleep. Their 1000 idle checks before the wait then went through
- * SwitchToThread each, so on a busy small CPU (8 threads, where they sleep) a worker could hand its core away and
- * pick up a frame's next jobs late, and how late varied by frame: U1 measures each frame with the real clock and
- * caps the step at 1/60 s, so the pans and the jeep juddered (U1 ch7, 8-thread laptop at 60 FPS; Bilal's port,
- * whose workers sleep the same way without the yield, did not). Sleeping workers no longer yield; spinning ones
- * (more than 8 threads) still do. BB_JOB_YIELD=1: they yield either way, 0: never. */
-static void install_job_idle_yield(uint64_t image_size, int sleeping) {
+static void install_job_idle_yield(uint64_t image_size) {
     const char *env=getenv("BB_JOB_YIELD");
     if (env && env[0]=='0') { printf("Job workers: idle ones do not yield (BB_JOB_YIELD=0)\n"); return; }
-    if (!(env && env[0]=='1') && sleeping) {
-        printf("Job workers: idle ones sleep and do not yield before (BB_JOB_YIELD=1 yields)\n");
-        return;
-    }
     if (!(env && env[0]=='1') && kernel_va_shadow_on()) {
         printf("Job workers: idle ones do not yield (kernel VA shadow on: kernel calls are slow; BB_JOB_YIELD=1 yields)\n");
         return;
@@ -1542,59 +1532,17 @@ static void patch_u1_sticky(uint64_t image_size) {
         printf("U1 physics: artificial damping %.4f / %.4f per 60 FPS step, the same loss per second at any rate\n",
                u1_damp_v0,u1_damp_w0);
 }
-/* U1 frame time (issue: U1 chapter 7 jeep judder on an 8-thread laptop at 60 FPS). The game times each frame with
- * the CPU clock (rdtsc between two passes of its main loop, US/EU 1.02 0x9d419) and its clock update (1.02 0xfac70,
- * 1.00 0xfab40) takes min(1 / "Minimum Framerate", dt * scale) as the frame's step. Drake's Fortune sets the
- * minimum to 60 (0x4d0620), so no step is longer than 1/60 s. On the PS4 every frame starts on the vblank and dt is
- * 1/60 to the microsecond. Here a frame's start wanders by a few milliseconds (job workers woken from their sleep,
- * the 8-thread default, see patch_job_sleep; Windows scheduling): a frame 16.7 + e ms after the last is cut to 16.7
- * and the next one, 16.7 - e, stays short, so the world moves less in it and the game loses that time (a steady
- * pan: every ~4th frame a third of the others, with even presents). The time the cap cuts off a frame now tops up
- * the next one, so two frames of 16.7 + e and 16.7 - e become two even steps. No step is longer than the cap, the
- * cut-off time lives one frame only (a hitch of two caps or more, a load or a pause carries nothing), and a game that
- * really runs below 60 FPS slows down as before.
- * BB_U1_DT_CARRY=0: the game's own cap. With BB_FRAME_STATS=1 a line every 300 frames: real and game time per
- * frame, steps under 3/4 of the cap, frames the cap cut. */
-static int u1_dt_carry_on, u1_dt_stats_on, u1_dt_snap_on;
-static float u1_dt_carry, u1_dt_period, u1_dt_acc, u1_dt_ema;
+/* BB_U1_FRAME_STATS=1 (diagnosis): Uncharted 1's frame steps. The game times each frame with the CPU clock (rdtsc
+ * between two passes of its main loop, 1.02 0x9d419) and its clock update (1.02 0xfac70, 1.00 0xfab40) takes
+ * min(1 / "Minimum Framerate", dt * scale) as the frame's step: with frames that start unevenly the world moves
+ * unevenly per shown frame, at an even present rate (U1 ch7 jeep judder, sleeping job workers, patch_job_sleep).
+ * Every 300 frames a line with the step's mean, spread and range; BB_U1_DT_LOG=<file>: one line per frame
+ * (host ms, the game's dt and step in ms). */
+static int u1_dt_stats_on;
 static FILE *u1_dt_log;
-static struct { uint32_t frames, cut, short_steps, long_steps, snapped; double want, out, sq, lo, hi; } u1_dt_stats;
+static struct { uint32_t frames, cut; double want, out, sq, lo, hi; } u1_dt_stats;
 static ABI float u1_frame_time(float want, float cap) {
-    const float raw=cap<want ? cap : want;               /* vminss xmm0, xmm2, xmm0: the game's step */
-    float out=raw;
-    int snapped=0;
-    /* Only a frame within two caps of the last (no hitch, load or pause: a step of 0) is topped up, never past the cap,
-     * and only with the previous frame's own cut-off time: what a frame cannot take is dropped, not carried on. */
-    if (u1_dt_carry_on && want>0.0f && cap>0.0f && want<2.0f*cap) {
-        const float t=want+u1_dt_carry;
-        out=t<cap ? t : cap;
-        u1_dt_carry=want>cap ? want-cap : 0.0f;
-    } else {
-        u1_dt_carry=0.0f;
-    }
-    /* BB_U1_DT_SNAP=1 (test): while the frames average a whole number of present periods (the game keeps the
-     * display's pace), each step is whole periods, the rest kept for the next frame (no drift). */
-    if (u1_dt_snap_on && u1_dt_period>0.0f) {
-        const float P=u1_dt_period;
-        if (want>0.0f && want<0.25f) {
-            u1_dt_ema=u1_dt_ema>0.0f ? u1_dt_ema*0.9f+want*0.1f : want;
-            const float k=(float)(int)(u1_dt_ema/P+0.5f);
-            if (k>=1.0f && k<=4.0f && (u1_dt_ema>k*P ? u1_dt_ema-k*P : k*P-u1_dt_ema)<0.03f*k*P) {
-                u1_dt_acc+=want;
-                float n=(float)(int)(u1_dt_acc/P+0.5f);
-                if (n<1.0f) n=1.0f;
-                out=n*P;
-                u1_dt_acc-=out;
-                if (u1_dt_acc>P || u1_dt_acc<-P) u1_dt_acc=0.0f;
-                if (out>cap) out=cap;
-                snapped=1;
-            } else {
-                u1_dt_acc=0.0f;
-            }
-        } else {
-            u1_dt_acc=0.0f; u1_dt_ema=0.0f;
-        }
-    }
+    const float out=cap<want ? cap : want;               /* vminss xmm0, xmm2, xmm0: the game's step */
     if (u1_dt_log) {
         struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
         fprintf(u1_dt_log,"%.3f %.3f %.3f\n",(double)ts.tv_sec*1000.0+ts.tv_nsec/1e6,want*1000.0,out*1000.0);
@@ -1606,13 +1554,11 @@ static ABI float u1_frame_time(float want, float cap) {
         if (out<u1_dt_stats.lo) u1_dt_stats.lo=out;
         if (out>u1_dt_stats.hi) u1_dt_stats.hi=out;
         if (want>cap) ++u1_dt_stats.cut;
-        u1_dt_stats.snapped+=snapped;
         if (u1_dt_stats.frames>=300) {
             const double n=u1_dt_stats.frames, mean=u1_dt_stats.out/n, sd=sqrt(fmax(0.0,u1_dt_stats.sq/n-mean*mean));
-            printf("U1 frame time: %u frames, real %.2f ms, game step %.2f ms (sd %.2f, %.2f-%.2f), %u cut by the cap "
-                   "(%.0f ms)%s%s\n",u1_dt_stats.frames,u1_dt_stats.want/n*1000.0,mean*1000.0,sd*1000.0,
-                   u1_dt_stats.lo*1000.0,u1_dt_stats.hi*1000.0,u1_dt_stats.cut,cap*1000.0,
-                   u1_dt_carry_on ? "; carry on" : "",u1_dt_snap_on ? (u1_dt_stats.snapped ? "; snapped to the present period" : "; snap idle") : "");
+            printf("U1 frame time: %u frames, step %.2f ms (sd %.2f, %.2f-%.2f), %u cut by the %.0f ms cap\n",
+                   u1_dt_stats.frames,mean*1000.0,sd*1000.0,u1_dt_stats.lo*1000.0,u1_dt_stats.hi*1000.0,
+                   u1_dt_stats.cut,cap*1000.0);
             fflush(stdout);
             memset(&u1_dt_stats,0,sizeof(u1_dt_stats));
         }
@@ -1620,18 +1566,10 @@ static ABI float u1_frame_time(float want, float cap) {
     return out;
 }
 static void patch_u1_frame_time(uint64_t image_size) {
-    const char *env=getenv("BB_U1_DT_CARRY"), *stats=getenv("BB_FRAME_STATS");
-    u1_dt_carry_on=!(env && env[0]=='0');
+    const char *stats=getenv("BB_U1_FRAME_STATS"), *log=getenv("BB_U1_DT_LOG");
     u1_dt_stats_on=stats && stats[0]=='1';
-    const char *snap=getenv("BB_U1_DT_SNAP"), *log=getenv("BB_U1_DT_LOG");
-    u1_dt_snap_on=snap && snap[0]=='1';
-    {   /* the present period: the frame limit, else the vblank (BB_VBLANK_HZ 0: 480 Hz, unpaced without a limit) */
-        const char *hz=getenv("BB_VBLANK_HZ"), *limit=getenv("BB_FPS_LIMIT");
-        const long v=hz ? atol(hz) : 60, l=limit ? atol(limit) : 0;
-        u1_dt_period=l>0 ? 1.0f/(float)l : v>0 ? 1.0f/(float)v : 0.0f;
-    }
     if (log && *log) u1_dt_log=fopen(log,"w");
-    if (!u1_dt_carry_on && !u1_dt_stats_on && !u1_dt_snap_on && !u1_dt_log) return;
+    if (!u1_dt_stats_on && !u1_dt_log) return;
     /* vminss xmm0,xmm2,xmm0; vmovss [rbx+8],xmm0; lea rax,[settings]; vmovss xmm2,[rax+0x47e4] ("forcefps");
      * vxorps xmm3,xmm3,xmm3 (1.02 0xfad1c, 1.00 0xfabec; the same bytes in EU and US) */
     const int64_t at=find_masked("c5ea5dc0 c5fa114308 488d05???????? c5fa1090e4470000 c5e057db",image_size);
@@ -1669,9 +1607,7 @@ static void patch_u1_frame_time(uint64_t image_size) {
     t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&back,8); k+=8; /* jmp [rip]: p+9 */
     const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+5));
     p[0]=0xe9; memcpy(p+1,&to,4); memset(p+5,0x90,4);
-    printf("U1 frame time: %s (clock update %#" PRIx64 ")\n",
-           u1_dt_carry_on ? "the time the 1/60 s step cap cuts off goes into the next frame (BB_U1_DT_CARRY=0: off)"
-                          : "the game's own step cap (BB_U1_DT_CARRY=0), measured",(uint64_t)at);
+    printf("U1 frame time: steps measured (clock update %#" PRIx64 ")\n",(uint64_t)at);
 }
 static void patch_unlock_chapters(uint64_t image_size) {
     const char *on=getenv("BB_UNLOCK_CHAPTERS");
@@ -1785,10 +1721,9 @@ static int install_job_sticky(int64_t recheck, int64_t submission) {
            (uint64_t)wait_call,(uint64_t)signal_call);
     return 1;
 }
-/* 1: the idle workers now sleep. */
-static int patch_job_sleep(uint64_t image_size) {
+static void patch_job_sleep(uint64_t image_size) {
     const char *env=getenv("BB_JOB_SLEEP");
-    if (env && env[0]=='0') { printf("Job workers: idle ones spin (BB_JOB_SLEEP=0)\n"); return 0; }
+    if (env && env[0]=='0') { printf("Job workers: idle ones spin (BB_JOB_SLEEP=0)\n"); return; }
     /* Sleeping workers make the camera judder: U1-U3 run their camera and pad work in jobs, and
      * the main thread waits for each job phase, so a frame's work starts late by a varying
      * amount and the game, which times frames with the real clock, turns the camera unevenly per
@@ -1806,7 +1741,7 @@ static int patch_job_sleep(uint64_t image_size) {
 #endif
         if (threads>8) {
             printf("Job workers: idle ones spin (%ld hardware threads; BB_JOB_SLEEP=1 sleeps)\n",threads);
-            return 0;
+            return;
         }
     }
     static const unsigned char nop2[]={0x66,0x90}, nop6[]={0x66,0x0f,0x1f,0x44,0x00,0x00};
@@ -1825,7 +1760,7 @@ static int patch_job_sleep(uint64_t image_size) {
             const int64_t f=find_masked(sites[s][a].hex,image_size);
             if (f>=0) { at[s]=f; use[s]=&sites[s][a]; }
         }
-        if (at[s]<0) { printf("Job workers: site %d not found, they keep spinning\n",s); return 0; }
+        if (at[s]<0) { printf("Job workers: site %d not found, they keep spinning\n",s); return; }
     }
     for (int s=0; s<3; ++s) memcpy(image+at[s]+use[s]->at,use[s]->with,(size_t)use[s]->len);
     /* The worker then waits up to 10 ms without looking at the queue again: a job submitted after
@@ -1833,11 +1768,16 @@ static int patch_job_sleep(uint64_t image_size) {
      * a frame late (U3's mine: the flashlight's light missing for a frame). The wait after the
      * re-check (mov edx, 10) is shortened to BB_JOB_SLEEP_MS (default 1, 10 the game's). */
     /* The wake-up is not lost instead (install_job_sticky below), so the worker can keep the game's
-     * 1000 spins and 10 ms wait. BB_JOB_STICKY=0: off (the 50000 spins and 1 ms waits). */
+     * 1000 spins. BB_JOB_STICKY=0: off (the 50000 spins). The wait stays 1 ms with them: at the game's
+     * 10 ms some of a frame's work still waited for a sleeping worker's timeout (who makes it runnable
+     * without a wake-up is not known yet), so the frames started up to ~10 ms late, by a different
+     * amount each, and U1, which times its frames with the real clock, stepped 6-23 ms at an even
+     * 60 FPS (ch7 jeep judder on an 8-thread laptop; this PC with BB_JOB_SLEEP=1, 2026-11-14: step
+     * sd 5.1 ms at 10 ms, 1.1 ms at 1 ms, 0.8 ms spinning). BB_JOB_SLEEP_MS=10: the game's wait. */
     const char *sticky_env=getenv("BB_JOB_STICKY");
     const int sticky=!(sticky_env && sticky_env[0]=='0') && install_job_sticky(at[1],at[2]);
     const char *ms_env=getenv("BB_JOB_SLEEP_MS");
-    const int ms=ms_env ? atoi(ms_env) : sticky ? 10 : 1;
+    const int ms=ms_env ? atoi(ms_env) : 1;
     /* EU: mov edx, 10 (milliseconds); US 1.02 (as CUSA02344): mov edx, 10000 (microseconds, another
      * timed wait). */
     unsigned char *wait=image+at[1]+17;
@@ -1861,7 +1801,6 @@ static int patch_job_sleep(uint64_t image_size) {
     printf("Job workers: idle ones sleep (0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 "), wait %d ms after %d spins\n",
            at[0],at[1],at[2],is_wait ? wait[1] : is_wait_us ? (int)(((uint32_t)wait[1]|(uint32_t)wait[2]<<8)/1000) : -1,
            (int)now_spins);
-    return 1;
 }
 /* The job system's counter wait (corelib job scheduling: until [counter+0x20] == or <= a target):
  * a job worker that finds the counter not there yet suspends its job (SuspendJob) and retries when
@@ -2468,12 +2407,13 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
         install_ndgi_hooks(image_end);
 #endif
+        install_job_idle_yield(image_end);
         patch_eop_tick_wait(image_end);
         patch_collection_skip(image_end);
         patch_unlock_chapters(image_end);
         patch_u1_sticky(image_end);
         patch_u1_frame_time(image_end);
-        install_job_idle_yield(image_end,patch_job_sleep(image_end)); /* other sites; the sleep decides the yield */
+        patch_job_sleep(image_end);
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
         patch_dev_menu_camera(image_end);
