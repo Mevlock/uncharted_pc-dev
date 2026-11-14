@@ -1679,6 +1679,7 @@ static int64_t find_masked(const char *hex, uint64_t size) {
  * and a worker about to wait while it is set clears it and returns at once instead (a spurious
  * wake-up, which the worker loop allows: it looks at the queues again). */
 static volatile unsigned char job_signal_pending;
+static uint64_t job_wake_stub; /* the sticky signal stub: sets the flag and broadcasts (install_job_resume_wake) */
 static int install_job_sticky(int64_t recheck, int64_t submission) {
     /* The wait: the first call after the re-check (mov rsi, rax; call at +0x19). The signal: EU, the
      * call after "add rsi, 0x60" (rsi = the mutex at +0x60, rdi = the condition at +0x80), +0x22;
@@ -1719,8 +1720,10 @@ static int install_job_sticky(int64_t recheck, int64_t submission) {
     memcpy(image+signal_call+1,&rel,4);
     printf("Job workers: sticky wake-ups (wait call 0x%" PRIx64 ", signal call 0x%" PRIx64 ")\n",
            (uint64_t)wait_call,(uint64_t)signal_call);
+    job_wake_stub=(uint64_t)(uintptr_t)signal_stub;
     return 1;
 }
+static int job_sleep_installed;
 static void patch_job_sleep(uint64_t image_size) {
     const char *env=getenv("BB_JOB_SLEEP");
     if (env && env[0]=='0') { printf("Job workers: idle ones spin (BB_JOB_SLEEP=0)\n"); return; }
@@ -1798,9 +1801,120 @@ static void patch_job_sleep(uint64_t image_size) {
     if (is_spin && spins>0 && spins<=0x7fffffff) { const int32_t v=(int32_t)spins; memcpy(spin+3,&v,4); }
     int32_t now_spins=-1;
     if (is_spin) memcpy(&now_spins,spin+3,4);
+    job_sleep_installed=1;
     printf("Job workers: idle ones sleep (0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 "), wait %d ms after %d spins\n",
            at[0],at[1],at[2],is_wait ? wait[1] : is_wait_us ? (int)(((uint32_t)wait[1]|(uint32_t)wait[2]<<8)/1000) : -1,
            (int)now_spins);
+}
+/* Resumed jobs wake the sleeping workers (U1 ch7 jeep judder, root cause). A job that waits for a counter (a
+ * fiber wait: WaitForCounter) sits in the job manager's wait list (+0x4ed8, +0x4ee0 entries). When the counter gets
+ * there, the thread that changed it calls the release (U1 1.02 0x45c950, 1.00 0x366690, from the counter update
+ * 1.02 0x449e80 and one more site), which moves the job into its priority's resume list (queues at +0x4f10, 0x2078
+ * apart, count at +0x2038) and wakes nobody: on the PS4 the workers never sleep. A worker picks it up when it next
+ * looks, so with idle workers asleep (patch_job_sleep) the job waited for a worker's timed wait to run out, up to
+ * 10 ms, and so did the frame: the counter is often changed outside the workers (the GPU end-of-pipe handler, the
+ * main thread), e.g. U1's render-frame job resumes when the GPU is done, and its end times U1's frame. The call
+ * sites of the release now go through job_release_wake, which broadcasts the workers' condition (through the
+ * sticky signal, so a worker on its way to the wait does not miss it) when the release moved a job.
+ * BB_JOB_RESUME_WAKE=0: off. BB_JOB_WAKE_STATS=1: every 5 s, releases per second and how many moved a job. */
+static uint64_t job_release_fn, job_manager_global;
+static volatile long job_release_calls, job_release_moved;
+static uint64_t job_resume_count(void) {
+    const uint64_t manager=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
+    if (!manager) return 0;
+    const uint64_t queues=*(const volatile uint64_t *)(uintptr_t)(manager+0x4f10);
+    if (!queues) return 0;
+    uint64_t n=0;
+    for (int q=0;q<8;++q) n+=*(const volatile uint64_t *)(uintptr_t)(queues+(uint64_t)q*0x2078+0x2038);
+    return n;
+}
+static ABI uint64_t job_release_wake(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    typedef uint64_t (ABI *Release)(uint64_t, uint64_t, uint64_t, uint64_t);
+    typedef int32_t (ABI *Broadcast)(uint64_t);
+    const uint64_t before=job_resume_count();
+    const uint64_t r=((Release)(uintptr_t)job_release_fn)(a,b,c,d);
+    const uint64_t after=job_resume_count();
+    __atomic_add_fetch(&job_release_calls,1,__ATOMIC_RELAXED);
+    if (after>before) {
+        __atomic_add_fetch(&job_release_moved,1,__ATOMIC_RELAXED);
+        const uint64_t manager=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
+        ((Broadcast)(uintptr_t)job_wake_stub)(manager+0x80);
+    }
+    return r;
+}
+static void *job_wake_stats(void *unused) {
+    (void)unused;
+    for (;;) {
+#ifdef _WIN32
+        Sleep(5000);
+#else
+        sleep(5);
+#endif
+        const long calls=__atomic_exchange_n(&job_release_calls,0,__ATOMIC_RELAXED);
+        const long moved=__atomic_exchange_n(&job_release_moved,0,__ATOMIC_RELAXED);
+        printf("Job wake: %.0f releases/s, %.0f/s moved a job and woke the workers\n",calls/5.0,moved/5.0);
+        fflush(stdout);
+    }
+    return NULL;
+}
+static void install_job_resume_wake(uint64_t image_size) {
+    const char *env=getenv("BB_JOB_RESUME_WAKE");
+    if (env && env[0]=='0') { printf("Job workers: resumed jobs do not wake them (BB_JOB_RESUME_WAKE=0)\n"); return; }
+    if (!job_sleep_installed) return; /* spinning workers find the jobs themselves */
+    if (!job_wake_stub) { printf("Job workers: resumed jobs do not wake them (no sticky wake-ups)\n"); return; }
+    /* the release: push rbp..rbx; sub rsp,0x38; mov [rbp-0x50],rsi; mov [rbp-0x40],rdi; mov rax,[stack guard];
+     * mov rax,[rax]; mov [rbp-0x30],rax; then within 0x30 bytes lea reg,[manager]; and cmp qword [rbx+0x4ee0],0 */
+    static const char head[]="554889e54157415641554154534883ec38488975b048897dc0488b05???????? 488b00 488945d0";
+    int64_t fn=-1;
+    for (uint64_t from=0;from<image_size;) {
+        /* find_masked returns -2 on several: scan by hand through the matches */
+        int64_t at=-1;
+        unsigned char bytes[64], mask[64]; int n=0;
+        for (const char *q=head;*q && n<64;) {
+            if (*q==' ') { ++q; continue; }
+            if (q[0]=='?') { bytes[n]=0; mask[n++]=0; q+=2; continue; }
+            unsigned v; sscanf(q,"%2x",&v); bytes[n]=(unsigned char)v; mask[n++]=1; q+=2;
+        }
+        for (uint64_t i=from;i+n+0x60<=image_size;++i) {
+            if (image[i]!=bytes[0]) continue;
+            int k=1; while (k<n && (!mask[k] || image[i+k]==bytes[k])) ++k;
+            if (k==n) { at=(int64_t)i; break; }
+        }
+        if (at<0) break;
+        from=(uint64_t)at+1;
+        int ok=0;
+        for (int o=n;o<n+0x30;++o) if (!memcmp(image+at+o,"\x48\x83\xbb\xe0\x4e\x00\x00\x00",8)) ok=1;
+        if (!ok) continue;
+        if (fn>=0) { printf("Job workers: resumed jobs do not wake them (release not unique)\n"); return; }
+        fn=at;
+    }
+    if (fn<0) { printf("Job workers: resumed jobs do not wake them (release not found)\n"); return; }
+    for (int o=0x1c;o<0x40 && !job_manager_global;++o) {
+        const unsigned char *c=image+fn+o;
+        if ((c[0]==0x4c || c[0]==0x48) && c[1]==0x8d && (c[2]&0xc7)==0x05) {
+            int32_t d; memcpy(&d,c+3,4);
+            job_manager_global=(uint64_t)(uintptr_t)(c+7+d);
+        }
+    }
+    if (!job_manager_global) { printf("Job workers: resumed jobs do not wake them (manager not found)\n"); return; }
+    job_release_fn=(uint64_t)(uintptr_t)(image+fn);
+    unsigned char *t=near_image_memory(64*16);
+    if (!t) { printf("Job workers: resumed jobs do not wake them (no thunk memory)\n"); return; }
+    const uintptr_t host=(uintptr_t)job_release_wake;
+    t[0]=0x48; t[1]=0xb8; memcpy(t+2,&host,8); t[10]=0xff; t[11]=0xe0;   /* movabs rax, job_release_wake; jmp rax */
+    int sites=0;
+    for (uint64_t i=0;i+5<=image_size;++i) {
+        if (image[i]!=0xe8) continue;
+        int32_t d; memcpy(&d,image+i+1,4);
+        if ((int64_t)i+5+d!=fn) continue;
+        const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(image+i+5));
+        memcpy(image+i+1,&to,4);
+        ++sites;
+    }
+    printf("Job workers: resumed jobs wake them (release %#" PRIx64 ", %d call sites; BB_JOB_RESUME_WAKE=0: off)\n",
+           (uint64_t)fn,sites);
+    const char *stats=getenv("BB_JOB_WAKE_STATS");
+    if (stats && stats[0]=='1') { pthread_t th; pthread_create(&th,NULL,job_wake_stats,NULL); }
 }
 /* The job system's counter wait (corelib job scheduling: until [counter+0x20] == or <= a target):
  * a job worker that finds the counter not there yet suspends its job (SuspendJob) and retries when
@@ -2414,6 +2528,7 @@ int main(int argc, char **argv) {
         patch_u1_sticky(image_end);
         patch_u1_frame_time(image_end);
         patch_job_sleep(image_end);
+        install_job_resume_wake(image_end);
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
         patch_dev_menu_camera(image_end);
