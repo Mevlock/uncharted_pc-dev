@@ -957,7 +957,9 @@ bool ControlsCaptureEvent(const SDL_Event& event) {
         }
         return true;
     case SDL_EVENT_KEY_UP:
-        return true;
+        // releases reach ImGui: a capture started from the keyboard (Enter/Space on a box) would leave that key held there,
+        // and the next press of it would do nothing. A release does nothing in ImGui on its own.
+        return false;
     case SDL_EVENT_MOUSE_BUTTON_DOWN: {
         // (the click that started the capture is over by then: ImGui buttons act on the release; a short grace anyway)
         if (SDL_GetTicks() - controls.capture_since_ms < 150) {

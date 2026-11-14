@@ -2733,7 +2733,7 @@ class Launcher:
                     raise OSError(_('spirv-cross.exe and glslangValidator.exe are missing from the bin folder'))
                 fsr4_opt.build_opt(FSR4_DIR, tools, lambda done, total: self.ui_calls.put(
                     lambda: self.refresh_fsr4(_('Building the faster passes… {} of {}').format(done, total))))
-            except (OSError, ValueError, subprocess.CalledProcessError) as failure:
+            except Exception as failure:  # any failure (a dropped connection is http.client.IncompleteRead): report, re-enable
                 error = failure
 
             def done():

@@ -585,9 +585,14 @@ static int menu_keys_on(void) {
 }
 /* k: the keyboard (NULL: none); menu: a game menu is on screen. Returns the keyboard the bindings read (the menu keys taken out
  * while they are the menu's) and sets the buttons the menu keys press. */
+static int menu_keys_armed, menu_keys_latched;
+/* The overlay, the save list or the game's text box took the input (sample_host returns early): the menu keys must be
+ * released before they count again, so an Enter that confirmed one of those is not the game menu's Cross once it closes. */
+static void menu_keys_disarm(void) { menu_keys_armed=0; menu_keys_latched=1; }
 static const bool *menu_keys(const bool *k, int menu, uint32_t *buttons) {
     static bool held_out[SDL_SCANCODE_COUNT];
-    static int armed, latched;
+#define armed menu_keys_armed
+#define latched menu_keys_latched
     *buttons=0;
     if (!k || !menu_keys_on()) { armed=latched=0; return k; }
     const int alt=k[SDL_SCANCODE_LALT] || k[SDL_SCANCODE_RALT] || bbgpu_window_enter_swallowed();
@@ -607,6 +612,8 @@ static const bool *menu_keys(const bool *k, int menu, uint32_t *buttons) {
     memcpy(held_out,k,sizeof(held_out));
     held_out[SDL_SCANCODE_RETURN]=held_out[SDL_SCANCODE_KP_ENTER]=held_out[SDL_SCANCODE_BACKSPACE]=false;
     return held_out;
+#undef armed
+#undef latched
 }
 
 static uint64_t wheel_until_us[2]; /* wheel up, wheel down: held briefly for the game to see */
@@ -1399,7 +1406,7 @@ static void sample_host(PadData *d) {
     float mdx=0, mdy=0;
     uint32_t mouse=0;
     int wheel=0, captured=bbgpu_mouse_sample(&mdx,&mdy,&mouse,&wheel);
-    if (bbgpu_overlay_captures_input()) return; /* settings menu open: neutral input */
+    if (bbgpu_overlay_captures_input()) { menu_keys_disarm(); return; } /* settings menu open: neutral input */
     /* Scripted runs (BB_PAD_FILE) ignore the player's controller and keyboard: a pad in use on
      * the same PC reached the test window (BB_PAD_HOST=1 keeps them). */
     static int scripted=-1;

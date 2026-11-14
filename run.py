@@ -43,8 +43,13 @@ class _QuietStream:
     def __getattr__(self, name):
         return getattr(self.stream, name)
 
+    def __bool__(self):
+        return bool(self.stream)
 
-sys.stdout, sys.stderr = _QuietStream(sys.stdout), _QuietStream(sys.stderr)
+
+# No stream at all (pythonw): left as None, which print() already skips and main()'s `if stream:` checks.
+sys.stdout = _QuietStream(sys.stdout) if sys.stdout else sys.stdout
+sys.stderr = _QuietStream(sys.stderr) if sys.stderr else sys.stderr
 
 PORT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PORT / 'scripts'))

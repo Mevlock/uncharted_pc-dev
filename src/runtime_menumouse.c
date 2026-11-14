@@ -2569,6 +2569,7 @@ static void kbm_label_patch(uint64_t table) {
     int k=-1;
     for (int i=0;i<8;++i) if (known[i].table==table && known[i].entries==entries && known[i].base==base && known[i].count==count) { k=i; break; }
     uint32_t pair[2]={0,0};
+    if (k>=0 && known[k].index==UINT32_MAX) return;   /* a table without the text (the parent the game asks first): known */
     if (k>=0 && (known[k].index>=count || !safe_read(pair,entries+8u*known[k].index,8) || pair[0]!=KBM_HOST_TEXT)) k=-1;
     if (k<0) {
         uint32_t *all=malloc((size_t)count*8);
@@ -2576,9 +2577,11 @@ static void kbm_label_patch(uint64_t table) {
         uint32_t index=count;
         if (safe_read(all,entries,(size_t)count*8)) for (uint32_t i=0;i<count;++i) if (all[2*i]==KBM_HOST_TEXT) { index=i; break; }
         free(all);
-        if (index==count) return;   /* (in its parent, which the game asks too) */
         k=next; next=(next+1)%8;
-        known[k].table=table; known[k].entries=entries; known[k].base=base; known[k].count=count; known[k].index=index;
+        known[k].table=table; known[k].entries=entries; known[k].base=base; known[k].count=count;
+        /* not in this table (the game asks the parent first): remembered, so it is not copied and scanned again each frame */
+        known[k].index=index==count ? UINT32_MAX : index;
+        if (index==count) return;
         safe_read(pair,entries+8u*index,8);
     }
     const uint64_t text=base+pair[1];

@@ -102,13 +102,9 @@ static int side_allowed(void) {
     if (allowed < 0) { const char *e = getenv("BB_PREAD_SIDE"); allowed = !(e && e[0] == '0'); }
     return allowed;
 }
-static HANDLE side_handle(int fd, HANDLE main) {
-    if (fd < 0 || fd >= SIDE_SLOTS || !side_allowed()) return NULL;
-    HANDLE found = NULL;
-    AcquireSRWLockShared(&side_slots[fd].lock);
-    if (side_slots[fd].main == main) found = side_slots[fd].side;
-    ReleaseSRWLockShared(&side_slots[fd].lock);
-    if (found) return found == INVALID_HANDLE_VALUE ? NULL : found;
+/* Makes the slot's second handle for this file if it has none (or one of another file: the descriptor number used again).
+ * Exclusive: only the first pread of a file comes here. */
+static void side_make(int fd, HANDLE main) {
     AcquireSRWLockExclusive(&side_slots[fd].lock);
     if (side_slots[fd].main != main) {
         if (side_slots[fd].side && side_slots[fd].side != INVALID_HANDLE_VALUE) CloseHandle(side_slots[fd].side);
@@ -116,9 +112,7 @@ static HANDLE side_handle(int fd, HANDLE main) {
         side_slots[fd].main = main;
         side_slots[fd].side = side; /* INVALID_HANDLE_VALUE: refused, remembered for this file */
     }
-    found = side_slots[fd].side;
     ReleaseSRWLockExclusive(&side_slots[fd].lock);
-    return found == INVALID_HANDLE_VALUE ? NULL : found;
 }
 int compat_close(int fd) {
     if (fd >= 0 && fd < SIDE_SLOTS) {
@@ -152,8 +146,23 @@ ssize_t compat_pread(int fd, void *buffer, size_t size, int64_t offset) {
     HANDLE h = (HANDLE)_get_osfhandle(fd);
     if (h == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
     if (offset < 0) { errno = EINVAL; return -1; }
-    HANDLE side = side_handle(fd, h);
-    return side ? side_read(side, buffer, size, offset) : positioned(fd, buffer, size, offset, 0);
+    if (fd < 0 || fd >= SIDE_SLOTS || !side_allowed()) return positioned(fd, buffer, size, offset, 0);
+    /* The read runs with the slot's lock held shared: reads of the same file still run at once, and compat_close (exclusive)
+     * waits for them, so the second handle is never closed (and its value reused by another file) under a read. */
+    for (int pass = 0; pass < 2; ++pass) {
+        AcquireSRWLockShared(&side_slots[fd].lock);
+        if (side_slots[fd].main == h) {
+            const HANDLE side = side_slots[fd].side;
+            ssize_t n = 0;
+            const int usable = side && side != INVALID_HANDLE_VALUE;
+            if (usable) n = side_read(side, buffer, size, offset);
+            ReleaseSRWLockShared(&side_slots[fd].lock);
+            return usable ? n : positioned(fd, buffer, size, offset, 0);
+        }
+        ReleaseSRWLockShared(&side_slots[fd].lock);
+        if (!pass) side_make(fd, h);
+    }
+    return positioned(fd, buffer, size, offset, 0);
 }
 ssize_t compat_pwrite(int fd, const void *buffer, size_t size, int64_t offset) { return positioned(fd, (void *)buffer, size, offset, 1); }
 
