@@ -147,8 +147,8 @@ EXTRA_TRANSLATIONS = {
         'Shows at most this many frames per second, generated frames included. It only lowers the rate: a limit at or above what the frame rate (and frame generation) give changes nothing. Lower it for a steadier picture on a slower PC or to save power.':
         'Zeigt höchstens so viele Bilder pro Sekunde, generierte Bilder eingeschlossen. Sie senkt die Rate nur: Eine Grenze auf oder über dem, was Bildrate (und Frame-Generierung) liefern, ändert nichts. Senke sie für ein gleichmäßigeres Bild auf einem langsameren PC oder um Strom zu sparen.',
         'Idle game threads': 'Wartende Spiel-Threads',
-        'Spinning keeps the camera turn smooth but uses several CPU cores. Sleeping saves them (best for 4-8 thread CPUs) but the camera judders slightly when turning.':
-        'Aktives Warten (Spin) hält Kameradrehungen flüssig, belegt aber mehrere CPU-Kerne. Schlafen (Sleep) spart sie (am besten für CPUs mit 4-8 Threads), aber die Kamera ruckelt beim Drehen leicht.',
+        'Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them (best for 4-8 thread CPUs) and is just as smooth.':
+        'Aktives Warten (Spin) belegt mehrere CPU-Kerne, während das Spiel auf Arbeit wartet. Schlafen (Sleep) spart sie (am besten für CPUs mit 4-8 Threads) und ist genauso flüssig.',
         "The window's size in windowed mode. With Render resolution at 1920 × 1080, a larger window, or fullscreen on a 1440p or 4K screen, gets the image upscaled to fit.":
         'Die Fenstergröße im Fenstermodus. Bei einer Renderauflösung von 1920 × 1080 wird das Bild in einem größeren Fenster oder im Vollbildmodus auf einem 1440p- oder 4K-Bildschirm passend hochskaliert.',
         'Render resolution': 'Renderauflösung',
@@ -305,7 +305,7 @@ EXTRA_TRANSLATIONS = {
         'Off (the frame rate above)': 'Aus (die Bildrate oben)',
         'Automatic (spin on CPUs with more than 8 threads)': 'Automatisch (aktives Warten auf CPUs mit mehr als 8 Threads)',
         'Spin (smoothest camera)': 'Aktiv warten (flüssigste Kamera)',
-        'Sleep (saves CPU, slight camera judder)': 'Schlafen (spart CPU, leichtes Kameraruckeln)',
+        'Sleep (saves CPU)': 'Schlafen (spart CPU)',
         "1920 × 1080 (the games' own)": '1920 × 1080 (Original der Spiele)',
         "1920 × 1080 (the game's own)": '1920 × 1080 (Original des Spiels)',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': 'Automatisch (nativ; 1920 × 1080 bei Karten mit 6 GB oder weniger)',
@@ -564,8 +564,8 @@ EXTRA_TRANSLATIONS = {
         'Shows at most this many frames per second, generated frames included. It only lowers the rate: a limit at or above what the frame rate (and frame generation) give changes nothing. Lower it for a steadier picture on a slower PC or to save power.':
         "Mostra al massimo questo numero di fotogrammi al secondo, inclusi quelli generati. Può solo abbassare la frequenza: un limite pari o superiore a quanto danno la frequenza fotogrammi (e la generazione fotogrammi) non cambia nulla. Abbassalo per un'immagine più stabile su un PC più lento o per risparmiare energia.",
         'Idle game threads': 'Thread del gioco in attesa',
-        'Spinning keeps the camera turn smooth but uses several CPU cores. Sleeping saves them (best for 4-8 thread CPUs) but the camera judders slightly when turning.':
-        "L'attesa attiva (spin) mantiene fluida la rotazione della telecamera ma usa diversi core della CPU. La sospensione (sleep) li risparmia (ideale per CPU da 4-8 thread) ma la telecamera scatta leggermente quando gira.",
+        'Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them (best for 4-8 thread CPUs) and is just as smooth.':
+        "L'attesa attiva (spin) tiene occupati diversi core della CPU mentre il gioco attende lavoro. La sospensione (sleep) li risparmia (ideale per CPU da 4-8 thread) ed è altrettanto fluida.",
         "The window's size in windowed mode. With Render resolution at 1920 × 1080, a larger window, or fullscreen on a 1440p or 4K screen, gets the image upscaled to fit.":
         "La dimensione della finestra in modalità finestra. Con la risoluzione di rendering a 1920 × 1080, in una finestra più grande o a schermo intero su uno schermo 1440p o 4K, l'immagine viene ingrandita per adattarsi.",
         'Render resolution': 'Risoluzione di rendering',
@@ -721,7 +721,7 @@ EXTRA_TRANSLATIONS = {
         'Off (the frame rate above)': 'Disattivo (la frequenza fotogrammi sopra)',
         'Automatic (spin on CPUs with more than 8 threads)': 'Automatico (attesa attiva su CPU con più di 8 thread)',
         'Spin (smoothest camera)': 'Attesa attiva (telecamera più fluida)',
-        'Sleep (saves CPU, slight camera judder)': 'Sospensione (risparmia CPU, lievi scatti della telecamera)',
+        'Sleep (saves CPU)': 'Sospensione (risparmia CPU)',
         "1920 × 1080 (the games' own)": '1920 × 1080 (originale dei giochi)',
         "1920 × 1080 (the game's own)": '1920 × 1080 (originale del gioco)',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': 'Automatica (nativa; 1920 × 1080 su schede con 6 GB o meno)',
@@ -980,8 +980,8 @@ EXTRA_TRANSLATIONS = {
         'Shows at most this many frames per second, generated frames included. It only lowers the rate: a limit at or above what the frame rate (and frame generation) give changes nothing. Lower it for a steadier picture on a slower PC or to save power.':
         '生成フレームを含め、1秒あたり最大でこのフレーム数まで表示します。レートを下げるだけなので、フレームレート(とフレーム生成)で得られる値以上の上限では何も変わりません。性能の低い PC で表示を安定させたいときや、省電力にしたいときに下げてください。',
         'Idle game threads': '待機中のゲームスレッド',
-        'Spinning keeps the camera turn smooth but uses several CPU cores. Sleeping saves them (best for 4-8 thread CPUs) but the camera judders slightly when turning.':
-        'スピンはカメラの回転を滑らかに保ちますが、複数の CPU コアを使用します。スリープはコアを節約します(4〜8 スレッドの CPU に最適)が、回転時にカメラがわずかにカクつきます。',
+        'Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them (best for 4-8 thread CPUs) and is just as smooth.':
+        'スピンはゲームが処理を待つ間、複数の CPU コアを使い続けます。スリープはコアを節約し(4〜8 スレッドの CPU に最適)、同じように滑らかです。',
         "The window's size in windowed mode. With Render resolution at 1920 × 1080, a larger window, or fullscreen on a 1440p or 4K screen, gets the image upscaled to fit.":
         'ウィンドウモードでのウィンドウサイズ。レンダリング解像度が 1920 × 1080 の場合、より大きなウィンドウや 1440p・4K 画面でのフルスクリーンでは、画像が合うようにアップスケールされます。',
         'Render resolution': 'レンダリング解像度',
@@ -1131,7 +1131,7 @@ EXTRA_TRANSLATIONS = {
         'Off (the frame rate above)': 'オフ（上のフレームレート）',
         'Automatic (spin on CPUs with more than 8 threads)': '自動（8 スレッドを超える CPU ではスピン）',
         'Spin (smoothest camera)': 'スピン（カメラが最も滑らか）',
-        'Sleep (saves CPU, slight camera judder)': 'スリープ（CPU を節約、カメラがわずかにカクつく）',
+        'Sleep (saves CPU)': 'スリープ（CPU を節約）',
         "1920 × 1080 (the games' own)": '1920 × 1080（ゲーム本来）',
         "1920 × 1080 (the game's own)": '1920 × 1080（ゲーム本来）',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': '自動（ネイティブ、6 GB 以下のグラフィックカードでは 1920 × 1080）',
@@ -1290,8 +1290,8 @@ EXTRA_TRANSLATIONS = {
         'Shows at most this many frames per second, generated frames included. It only lowers the rate: a limit at or above what the frame rate (and frame generation) give changes nothing. Lower it for a steadier picture on a slower PC or to save power.':
         'Muestra como máximo esta cantidad de cuadros por segundo, incluidos los generados. Solo reduce la frecuencia: un límite igual o superior a lo que dan la frecuencia de cuadros (y la generación de cuadros) no cambia nada. Bájalo para una imagen más estable en un PC más lento o para ahorrar energía.',
         'Idle game threads': 'Hilos del juego en espera',
-        'Spinning keeps the camera turn smooth but uses several CPU cores. Sleeping saves them (best for 4-8 thread CPUs) but the camera judders slightly when turning.':
-        'Girar (spin) mantiene fluido el giro de la cámara, pero ocupa varios núcleos de la CPU. Dormir los ahorra (mejor para CPU de 4-8 hilos), pero la cámara da pequeños saltos al girar.',
+        'Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them (best for 4-8 thread CPUs) and is just as smooth.':
+        'Girar (spin) mantiene ocupados varios núcleos de la CPU mientras el juego espera trabajo. Dormir los ahorra (mejor para CPU de 4-8 hilos) y es igual de fluido.',
         "The window's size in windowed mode. With Render resolution at 1920 × 1080, a larger window, or fullscreen on a 1440p or 4K screen, gets the image upscaled to fit.":
         'El tamaño de la ventana en modo ventana. Con la resolución de renderizado en 1920 × 1080, en una ventana mayor o a pantalla completa en 1440p o 4K, la imagen se reescala para ajustarse.',
         'Render resolution': 'Resolución de renderizado',
@@ -1446,7 +1446,7 @@ EXTRA_TRANSLATIONS = {
         'Off (the frame rate above)': 'Desactivado (la frecuencia de cuadros de arriba)',
         'Automatic (spin on CPUs with more than 8 threads)': 'Automático (espera activa en CPU con más de 8 hilos)',
         'Spin (smoothest camera)': 'Espera activa (cámara más fluida)',
-        'Sleep (saves CPU, slight camera judder)': 'Reposo (ahorra CPU, leves tirones de cámara)',
+        'Sleep (saves CPU)': 'Reposo (ahorra CPU)',
         "1920 × 1080 (the games' own)": '1920 × 1080 (original de los juegos)',
         "1920 × 1080 (the game's own)": '1920 × 1080 (original del juego)',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': 'Automática (nativa; 1920 × 1080 en tarjetas con 6 GB o menos)',
@@ -1605,8 +1605,8 @@ EXTRA_TRANSLATIONS = {
         'Shows at most this many frames per second, generated frames included. It only lowers the rate: a limit at or above what the frame rate (and frame generation) give changes nothing. Lower it for a steadier picture on a slower PC or to save power.':
         'Exibe no máximo esta quantidade de quadros por segundo, incluindo os gerados. Ele só reduz a taxa: um limite igual ou acima do que a taxa de quadros (e a geração de quadros) oferecem não muda nada. Diminua para uma imagem mais estável em um PC mais lento ou para economizar energia.',
         'Idle game threads': 'Threads ociosas do jogo',
-        'Spinning keeps the camera turn smooth but uses several CPU cores. Sleeping saves them (best for 4-8 thread CPUs) but the camera judders slightly when turning.':
-        'Girar (spin) mantém o giro da câmera suave, mas usa vários núcleos da CPU. Dormir os economiza (melhor para CPUs de 4-8 threads), mas a câmera dá pequenos trancos ao girar.',
+        'Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them (best for 4-8 thread CPUs) and is just as smooth.':
+        'Girar (spin) mantém vários núcleos da CPU ocupados enquanto o jogo espera trabalho. Dormir os economiza (melhor para CPUs de 4-8 threads) e é igualmente suave.',
         "The window's size in windowed mode. With Render resolution at 1920 × 1080, a larger window, or fullscreen on a 1440p or 4K screen, gets the image upscaled to fit.":
         'O tamanho da janela no modo janela. Com a resolução de renderização em 1920 × 1080, em uma janela maior ou em tela cheia a 1440p ou 4K, a imagem é ampliada para caber.',
         'Render resolution': 'Resolução de renderização',
@@ -1762,7 +1762,7 @@ EXTRA_TRANSLATIONS = {
         'Off (the frame rate above)': 'Desligado (a taxa de quadros acima)',
         'Automatic (spin on CPUs with more than 8 threads)': 'Automático (espera ativa em CPUs com mais de 8 threads)',
         'Spin (smoothest camera)': 'Espera ativa (câmera mais suave)',
-        'Sleep (saves CPU, slight camera judder)': 'Repouso (economiza CPU, leves trancos na câmera)',
+        'Sleep (saves CPU)': 'Repouso (economiza CPU)',
         "1920 × 1080 (the games' own)": '1920 × 1080 (original dos jogos)',
         "1920 × 1080 (the game's own)": '1920 × 1080 (original do jogo)',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': 'Automática (nativa; 1920 × 1080 em placas com 6 GB ou menos)',
@@ -1921,8 +1921,8 @@ EXTRA_TRANSLATIONS = {
         'Shows at most this many frames per second, generated frames included. It only lowers the rate: a limit at or above what the frame rate (and frame generation) give changes nothing. Lower it for a steadier picture on a slower PC or to save power.':
         'Affiche au maximum ce nombre d’images par seconde, images générées comprises. Elle ne fait que réduire la cadence : une limite égale ou supérieure à ce que donnent la fréquence d’images (et la génération d’images) ne change rien. Baissez-la pour une image plus stable sur un PC plus lent ou pour économiser de l’énergie.',
         'Idle game threads': 'Threads du jeu inactifs',
-        'Spinning keeps the camera turn smooth but uses several CPU cores. Sleeping saves them (best for 4-8 thread CPUs) but the camera judders slightly when turning.':
-        'L’attente active (spin) garde la rotation de la caméra fluide mais occupe plusieurs cœurs du processeur. La mise en veille (sleep) les économise (idéal pour les processeurs de 4 à 8 threads) mais la caméra saccade légèrement en tournant.',
+        'Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them (best for 4-8 thread CPUs) and is just as smooth.':
+        'L’attente active (spin) occupe plusieurs cœurs du processeur pendant que le jeu attend du travail. La mise en veille (sleep) les économise (idéal pour les processeurs de 4 à 8 threads) et reste tout aussi fluide.',
         "The window's size in windowed mode. With Render resolution at 1920 × 1080, a larger window, or fullscreen on a 1440p or 4K screen, gets the image upscaled to fit.":
         'La taille de la fenêtre en mode fenêtré. Avec la résolution de rendu à 1920 × 1080, dans une fenêtre plus grande ou en plein écran sur un écran 1440p ou 4K, l’image est agrandie pour s’adapter.',
         'Render resolution': 'Résolution de rendu',
@@ -2079,7 +2079,7 @@ EXTRA_TRANSLATIONS = {
         'Off (the frame rate above)': 'Désactivé (la fréquence d’images ci-dessus)',
         'Automatic (spin on CPUs with more than 8 threads)': 'Automatique (attente active sur les processeurs de plus de 8 threads)',
         'Spin (smoothest camera)': 'Attente active (caméra la plus fluide)',
-        'Sleep (saves CPU, slight camera judder)': 'Veille (économise le processeur, légers à-coups de la caméra)',
+        'Sleep (saves CPU)': 'Veille (économise le processeur)',
         "1920 × 1080 (the games' own)": '1920 × 1080 (d’origine)',
         "1920 × 1080 (the game's own)": '1920 × 1080 (d’origine)',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': 'Automatique (native ; 1920 × 1080 sur les cartes de 6 Go ou moins)',
@@ -2547,10 +2547,10 @@ EXTRA_TRANSLATIONS = {
         'Shows more of the scene in every direction, also when aiming and in cutscenes.': 'Показывает больше сцены во все стороны, также при прицеливании и в роликах.',
         'Skip intro logos': 'Пропускать логотипы при запуске',
         "Skip the friends' stats notice": 'Пропускать сообщение о статистике друзей',
-        'Sleep (saves CPU, slight camera judder)': 'Сон (экономит процессор, камера слегка дёргается)',
+        'Sleep (saves CPU)': 'Сон (экономит процессор)',
         'Speed': 'Скорость',
         'Spin (smoothest camera)': 'Ожидание в цикле (самая плавная камера)',
-        'Spinning keeps the camera turn smooth but uses several CPU cores. Sleeping saves them (best for 4-8 thread CPUs) but the camera judders slightly when turning.': 'Ожидание в цикле сохраняет плавность поворота камеры, но занимает несколько ядер процессора. Сон их экономит (лучше для процессоров с 4–8 потоками), но камера слегка дёргается при повороте.',
+        'Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them (best for 4-8 thread CPUs) and is just as smooth.': 'Ожидание в цикле занимает несколько ядер процессора, пока игра ждёт работы. Сон экономит их (лучше всего для процессоров с 4-8 потоками) и так же плавен.',
         'Starting…': 'Запуск…',
         'Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos and their music (they cannot be skipped with a button). All three games.': 'Запуск сразу с титульного экрана, без логотипов Sony, Naughty Dog и Bluepoint и их музыки (их нельзя пропустить кнопкой). Все три игры.',
         'Step 1 of 2: finding the shaders in your game files (only this once)': 'Шаг 1 из 2: поиск шейдеров в файлах игры (только один раз)',

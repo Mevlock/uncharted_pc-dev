@@ -81,7 +81,7 @@ FRAME_RATES = [('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FP
 # 30 or 45 for a slower PC or a laptop on battery, 90 for a 90 Hz screen.
 # The game's idle job threads (BB_JOB_SLEEP): spinning keeps the camera smooth; sleeping saves CPU.
 JOB_THREADS = [('auto', 'Automatic (spin on CPUs with more than 8 threads)'), ('spin', 'Spin (smoothest camera)'),
-               ('sleep', 'Sleep (saves CPU, slight camera judder)')]
+               ('sleep', 'Sleep (saves CPU)')]
 FPS_LIMITS = [('0', 'Off (the frame rate above)'), ('30', '30 FPS'), ('45', '45 FPS'),
               ('60', '60 FPS'), ('90', '90 FPS'), ('120', '120 FPS'), ('144', '144 FPS')]
 # The games render 1920x1080; the window (or the screen in fullscreen) gets that image scaled
@@ -1931,8 +1931,8 @@ class Launcher:
                    'lowers the rate: a limit at or above what the frame rate (and frame generation) give '
                    'changes nothing. Lower it for a steadier picture on a slower PC or to save power.'))
         self.row(f, _('Idle game threads'), self.choice(f, 'job_threads', JOB_THREADS, 34),
-                 _('Spinning keeps the camera turn smooth but uses several CPU cores. Sleeping saves them '
-                   '(best for 4-8 thread CPUs) but the camera judders slightly when turning.'))
+                 _('Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them '
+                   '(best for 4-8 thread CPUs) and is just as smooth.'))
         self.section(f, _('Resolution'))
         self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
                  _('The window\'s size in windowed mode. With Render resolution at 1920 × 1080, a larger '
