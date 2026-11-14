@@ -1863,8 +1863,9 @@ static void install_job_resume_wake(uint64_t image_size) {
     if (!job_sleep_installed) return; /* spinning workers find the jobs themselves */
     if (!job_wake_stub) { printf("Job workers: resumed jobs do not wake them (no sticky wake-ups)\n"); return; }
     /* the release: push rbp..rbx; sub rsp,0x38; mov [rbp-0x50],rsi; mov [rbp-0x40],rdi; mov rax,[stack guard];
-     * mov rax,[rax]; mov [rbp-0x30],rax; then within 0x30 bytes lea reg,[manager]; and cmp qword [rbx+0x4ee0],0 */
-    static const char head[]="554889e54157415641554154534883ec38488975b048897dc0488b05???????? 488b00 488945d0";
+     * (U3: lea rax,[stack guard]); mov rax,[rax]; mov [rbp-0x30],rax; then within 0x30 bytes lea reg,[manager]; and
+     * cmp qword [rbx+0x4ee0],0. Found in U1 1.02 0x45c950 / 1.00 0x366690, U2 0xb3bbf0 / 0x4ebbc0, U3 0xda5c20 / 0x49e1e0. */
+    static const char head[]="554889e54157415641554154534883ec38488975b048897dc048??05???????? 488b00 488945d0";
     int64_t fn=-1;
     for (uint64_t from=0;from<image_size;) {
         /* find_masked returns -2 on several: scan by hand through the matches */
