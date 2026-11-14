@@ -2679,6 +2679,7 @@ const RuntimeGuestCallback *runtime_menumouse_callbacks(size_t *count) {
 
 /* A menu is open. U1: the pause (the game's frame time is 0), the credits, or menu rows drawn lately (title, main menu, game
  * selection); in play no menu row is drawn (hints are free texts). U3: a focused menu page, or a lit menu row. */
+volatile int runtime_title_shown;
 int runtime_menumouse_active(void) {
     if (!u1m && !u3m && !u2m) return 0;
     const uint64_t now=now_us();
@@ -2692,6 +2693,7 @@ int runtime_menumouse_active(void) {
     } else open=u3_menu_open(now);
     if (open!=menu_mode) {
         menu_mode=open;
+        if (open) runtime_title_shown=1;   /* the fast boot's vblank boost ends (videoout driver.cpp) */
         printf("Menu mouse: %s\n",open ? "menu on screen: the cursor is free" : "menu gone");
     }
     return open;

@@ -349,7 +349,8 @@ static int commit_file(const File *f) {
 #endif
     return 0;
 }
-/* BB_SKIP_INTRO=1: the logo movie the three Uncharted games play at boot (Sony, Naughty Dog and
+/* BB_SKIP_INTRO=1 (the fallback: probe.c patch_skip_intro_movie keeps the games from asking for the movie at all,
+   when it finds the movie manager): the logo movie the three Uncharted games play at boot (Sony, Naughty Dog and
    Bluepoint: shareddata/movies/ps4/sce-ndi-logos.bsf, a raw H.264 stream of 689 frames, black
    for its first 49) opens as a stand-in that keeps only those 49 black pictures, padded to the
    original size. The logos cannot be skipped with a button. Reported missing, opened empty or
