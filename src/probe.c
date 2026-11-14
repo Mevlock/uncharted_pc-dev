@@ -2182,6 +2182,55 @@ static void patch_u2_convoy_sink(uint64_t image_size) {
     memcpy(image+at+1,code,sizeof(code));
     printf("Convoy sink: animation node flag uses only bit 0 of its bool (%#" PRIx64 ")\n",(uint64_t)at+1);
 }
+/* Package loads that wait a whole second (U1/U2 boot: particle.pak, hud.pak ~3-4 s each). The package
+ * manager's blocking load (package-mgr.cpp; the loop that ends with ReleaseLoadedVramPages) repeats
+ * sceKernelUsleep(1000); the VRAM manager's update (it moves at most 5 MB, three 2 MB pages, per call);
+ * ConsumeData(time slice 1.0 s); release the pages the update finished. ConsumeData returns early when it
+ * waits for file data, but once all of the package's data is read and pages still wait for the VRAM
+ * manager, it polls until the slice is over: only the caller's next update frees them. On the PS4 the
+ * disc/HDD reads take longer than the updates, so few pages queue up and the slice rarely runs out; here
+ * the whole file is read in a few ms, 10-20 pages queue, and every three of them cost a full second
+ * (traced: U2 hud.pak, 3 pages per 1.0 s step, ~4 s). The slice the loop passes becomes one PS4 frame
+ * (1/60 s): the same loop, the same order of work; it only gets back to the update sooner. The game's
+ * per-frame package streaming already calls ConsumeData with short slices. Found by its code (all six
+ * releases): the float load right before the ConsumeData call that precedes the "ReleaseLoadedVramPages"
+ * assertion, loading 1.0f. BB_LOAD_SLICE_MS=<ms> (diagnosis) other value, 0: off. */
+static void patch_package_load_slice(uint64_t image_size) {
+    const char *env=getenv("BB_LOAD_SLICE_MS");
+    const float slice=env ? (float)atof(env)/1000.0f : 1.0f/60.0f;
+    if (env && !(slice>0.0f)) return;
+    static const char name[]="ReleaseLoadedVramPages";
+    int64_t text=-1;
+    for (uint64_t i=0;i+sizeof(name)<=image_size;++i)
+        if (image[i]=='R' && !memcmp(image+i,name,sizeof(name))) { text=(int64_t)i; break; }
+    if (text<0) return; /* not a Naughty Dog engine game */
+    int64_t site=-1; int sites=0;
+    for (uint64_t i=0;i+7<=image_size;++i) {
+        /* lea r64, [rip+disp32] to the name */
+        if ((image[i]!=0x48 && image[i]!=0x4c) || image[i+1]!=0x8d || (image[i+2]&0xc7)!=0x05) continue;
+        int32_t disp; memcpy(&disp,image+i+3,4);
+        if ((int64_t)i+7+disp!=text) continue;
+        /* vmovss xmm0, [rip+disp32]; call rel32 within 0x180 bytes before it, the float 1.0 */
+        for (uint64_t o=i>0x180 ? i-0x180 : 0;o+13<=i;++o) {
+            if (image[o]!=0xc5 || image[o+1]!=0xfa || image[o+2]!=0x10 || image[o+3]!=0x05 || image[o+8]!=0xe8) continue;
+            int32_t d; memcpy(&d,image+o+4,4);
+            const int64_t t=(int64_t)o+8+d;
+            float v; if (t<0 || (uint64_t)t+4>image_size) continue;
+            memcpy(&v,image+t,4);
+            if (v!=1.0f) continue;
+            if (site!=(int64_t)o) { site=(int64_t)o; ++sites; }
+        }
+    }
+    if (sites!=1) { printf("Package loads: blocking-load time slice %s, not patched\n",sites ? "not unique" : "not found"); return; }
+    float *value=(float *)near_image_memory(64);
+    if (!value) { printf("Package loads: no memory near the image, not patched\n"); return; }
+    *value=slice;
+    const int64_t rel=(int64_t)(uintptr_t)value-(int64_t)(uintptr_t)(image+site+8);
+    if (rel!=(int32_t)rel) { printf("Package loads: slice out of reach, not patched\n"); return; }
+    const int32_t disp=(int32_t)rel;
+    memcpy(image+site+4,&disp,4);
+    printf("Package loads: blocking-load time slice 1 s -> %.1f ms (%#" PRIx64 ")\n",slice*1000.0f,(uint64_t)site);
+}
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
  * released before the new process opens its own. */
@@ -2559,6 +2608,7 @@ int main(int argc, char **argv) {
             if ((segments[s].flags&1) && segments[s].address==0) { runtime_patch_ultrawide(image, segments[s].size, image_end); runtime_patch_resolution(image, segments[s].size, image_end); break; }
         patch_u2_convoy_ticks(image_end);
         patch_u2_convoy_sink(image_end);
+        patch_package_load_slice(image_end);
     }
     /* Before the red-zone patch (red_zone.c moves code into thunks; the table holds the original
      * places). The stubs step 256 bytes below rsp before saving anything, past the red zone. */
