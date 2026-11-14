@@ -1185,9 +1185,19 @@ static int kernel_va_shadow_on(void) {
     return 0;
 #endif
 }
-static void install_job_idle_yield(uint64_t image_size) {
+/* sleeping: patch_job_sleep put the idle workers to sleep. Their 1000 idle checks before the wait then went through
+ * SwitchToThread each, so on a busy small CPU (8 threads, where they sleep) a worker could hand its core away and
+ * pick up a frame's next jobs late, and how late varied by frame: U1 measures each frame with the real clock and
+ * caps the step at 1/60 s, so the pans and the jeep juddered (U1 ch7, 8-thread laptop at 60 FPS; Bilal's port,
+ * whose workers sleep the same way without the yield, did not). Sleeping workers no longer yield; spinning ones
+ * (more than 8 threads) still do. BB_JOB_YIELD=1: they yield either way, 0: never. */
+static void install_job_idle_yield(uint64_t image_size, int sleeping) {
     const char *env=getenv("BB_JOB_YIELD");
     if (env && env[0]=='0') { printf("Job workers: idle ones do not yield (BB_JOB_YIELD=0)\n"); return; }
+    if (!(env && env[0]=='1') && sleeping) {
+        printf("Job workers: idle ones sleep and do not yield before (BB_JOB_YIELD=1 yields)\n");
+        return;
+    }
     if (!(env && env[0]=='1') && kernel_va_shadow_on()) {
         printf("Job workers: idle ones do not yield (kernel VA shadow on: kernel calls are slow; BB_JOB_YIELD=1 yields)\n");
         return;
@@ -1532,6 +1542,97 @@ static void patch_u1_sticky(uint64_t image_size) {
         printf("U1 physics: artificial damping %.4f / %.4f per 60 FPS step, the same loss per second at any rate\n",
                u1_damp_v0,u1_damp_w0);
 }
+/* U1 frame time (issue: U1 chapter 7 jeep judder on an 8-thread laptop at 60 FPS). The game times each frame with
+ * the CPU clock (rdtsc between two passes of its main loop, US/EU 1.02 0x9d419) and its clock update (1.02 0xfac70,
+ * 1.00 0xfab40) takes min(1 / "Minimum Framerate", dt * scale) as the frame's step. Drake's Fortune sets the
+ * minimum to 60 (0x4d0620), so no step is longer than 1/60 s. On the PS4 every frame starts on the vblank and dt is
+ * 1/60 to the microsecond. Here a frame's start wanders by a few milliseconds (job workers woken from their sleep,
+ * the 8-thread default, see patch_job_sleep; Windows scheduling): a frame 16.7 + e ms after the last is cut to 16.7
+ * and the next one, 16.7 - e, stays short, so the world moves less in it and the game loses that time (a steady
+ * pan: every ~4th frame a third of the others, with even presents). The time the cap cuts off a frame now tops up
+ * the next one, so two frames of 16.7 + e and 16.7 - e become two even steps. No step is longer than the cap, the
+ * cut-off time lives one frame only (a hitch of two caps or more, a load or a pause carries nothing), and a game that
+ * really runs below 60 FPS slows down as before.
+ * BB_U1_DT_CARRY=0: the game's own cap. With BB_FRAME_STATS=1 a line every 300 frames: real and game time per
+ * frame, steps under 3/4 of the cap, frames the cap cut. */
+static int u1_dt_carry_on, u1_dt_stats_on;
+static float u1_dt_carry;
+static struct { uint32_t frames, cut, short_steps; double want, out; } u1_dt_stats;
+static ABI float u1_frame_time(float want, float cap) {
+    const float raw=cap<want ? cap : want;               /* vminss xmm0, xmm2, xmm0: the game's step */
+    float out=raw;
+    /* Only a frame within two caps of the last (no hitch, load or pause: a step of 0) is topped up, never past the cap,
+     * and only with the previous frame's own cut-off time: what a frame cannot take is dropped, not carried on. */
+    if (u1_dt_carry_on && want>0.0f && cap>0.0f && want<2.0f*cap) {
+        const float t=want+u1_dt_carry;
+        out=t<cap ? t : cap;
+        u1_dt_carry=want>cap ? want-cap : 0.0f;
+    } else {
+        u1_dt_carry=0.0f;
+    }
+    if (u1_dt_stats_on) {
+        ++u1_dt_stats.frames;
+        u1_dt_stats.want+=want; u1_dt_stats.out+=out;
+        if (want>cap) ++u1_dt_stats.cut;
+        if (cap>0.0f && out<0.75f*cap) ++u1_dt_stats.short_steps;
+        if (u1_dt_stats.frames>=300) {
+            const double n=u1_dt_stats.frames;
+            printf("U1 frame time: %u frames, real %.2f ms, game %.2f ms per frame (%.1f%% behind), %u steps under 3/4 of "
+                   "the cap (%.2f ms), %u cut by it; carry %s\n",u1_dt_stats.frames,u1_dt_stats.want/n*1000.0,
+                   u1_dt_stats.out/n*1000.0,u1_dt_stats.want>0 ? (1.0-u1_dt_stats.out/u1_dt_stats.want)*100.0 : 0.0,
+                   u1_dt_stats.short_steps,cap*1000.0,u1_dt_stats.cut,u1_dt_carry_on ? "on" : "off (BB_U1_DT_CARRY=0)");
+            fflush(stdout);
+            memset(&u1_dt_stats,0,sizeof(u1_dt_stats));
+        }
+    }
+    return out;
+}
+static void patch_u1_frame_time(uint64_t image_size) {
+    const char *env=getenv("BB_U1_DT_CARRY"), *stats=getenv("BB_FRAME_STATS");
+    u1_dt_carry_on=!(env && env[0]=='0');
+    u1_dt_stats_on=stats && stats[0]=='1';
+    if (!u1_dt_carry_on && !u1_dt_stats_on) return;
+    /* vminss xmm0,xmm2,xmm0; vmovss [rbx+8],xmm0; lea rax,[settings]; vmovss xmm2,[rax+0x47e4] ("forcefps");
+     * vxorps xmm3,xmm3,xmm3 (1.02 0xfad1c, 1.00 0xfabec; the same bytes in EU and US) */
+    const int64_t at=find_masked("c5ea5dc0 c5fa114308 488d05???????? c5fa1090e4470000 c5e057db",image_size);
+    if (at==-2) { printf("U1 frame time: clock update not unique, not changed\n"); return; }
+    if (at<0) return; /* not Uncharted 1 */
+    unsigned char *t=near_image_memory(256);
+    if (!t) { printf("U1 frame time: no thunk memory, not changed\n"); return; }
+    unsigned char *p=image+at;
+    size_t k=0;
+    /* push rdi rsi rax rcx rdx r8-r11 (9: rsp was 16-aligned here, now 8 off); sub rsp,0x108; movdqu [rsp+16n],xmmN */
+    static const unsigned char save[]={0x57,0x56,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53};
+    memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
+    static const unsigned char sub_rsp[]={0x48,0x81,0xec,0x08,0x01,0x00,0x00}, add_rsp[]={0x48,0x81,0xc4,0x08,0x01,0x00,0x00};
+    memcpy(t+k,sub_rsp,sizeof(sub_rsp)); k+=sizeof(sub_rsp);
+    for (int n=0;n<16;++n) {
+        const int32_t disp=n*16;
+        t[k++]=0xf3; if (n>=8) t[k++]=0x44; t[k++]=0x0f; t[k++]=0x7f;  /* movdqu [rsp+disp32], xmmN */
+        t[k++]=(unsigned char)(0x84|((n&7)<<3)); t[k++]=0x24; memcpy(t+k,&disp,4); k+=4;
+    }
+    t[k++]=0xc5; t[k++]=0xf8; t[k++]=0x28; t[k++]=0xca;   /* vmovaps xmm1, xmm2: u1_frame_time(want xmm0, cap xmm1) */
+    const uintptr_t host=(uintptr_t)u1_frame_time;
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8; /* movabs rax, u1_frame_time */
+    t[k++]=0xff; t[k++]=0xd0;                            /* call rax */
+    t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x11; t[k++]=0x04; t[k++]=0x24; /* movss [rsp], xmm0: the result into xmm0's slot */
+    for (int n=0;n<16;++n) {
+        const int32_t disp=n*16;
+        t[k++]=0xf3; if (n>=8) t[k++]=0x44; t[k++]=0x0f; t[k++]=0x6f;  /* movdqu xmmN, [rsp+disp32] */
+        t[k++]=(unsigned char)(0x84|((n&7)<<3)); t[k++]=0x24; memcpy(t+k,&disp,4); k+=4;
+    }
+    memcpy(t+k,add_rsp,sizeof(add_rsp)); k+=sizeof(add_rsp);
+    static const unsigned char restore[]={0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5a,0x59,0x58,0x5e,0x5f};
+    memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
+    memcpy(t+k,p+4,5); k+=5;                             /* vmovss [rbx+8], xmm0 */
+    const uint64_t back=(uint64_t)(uintptr_t)(p+9);
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&back,8); k+=8; /* jmp [rip]: p+9 */
+    const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+5));
+    p[0]=0xe9; memcpy(p+1,&to,4); memset(p+5,0x90,4);
+    printf("U1 frame time: %s (clock update %#" PRIx64 ")\n",
+           u1_dt_carry_on ? "the time the 1/60 s step cap cuts off goes into the next frame (BB_U1_DT_CARRY=0: off)"
+                          : "the game's own step cap (BB_U1_DT_CARRY=0), measured",(uint64_t)at);
+}
 static void patch_unlock_chapters(uint64_t image_size) {
     const char *on=getenv("BB_UNLOCK_CHAPTERS");
     if (!on || on[0]!='1') return;
@@ -1644,9 +1745,10 @@ static int install_job_sticky(int64_t recheck, int64_t submission) {
            (uint64_t)wait_call,(uint64_t)signal_call);
     return 1;
 }
-static void patch_job_sleep(uint64_t image_size) {
+/* 1: the idle workers now sleep. */
+static int patch_job_sleep(uint64_t image_size) {
     const char *env=getenv("BB_JOB_SLEEP");
-    if (env && env[0]=='0') { printf("Job workers: idle ones spin (BB_JOB_SLEEP=0)\n"); return; }
+    if (env && env[0]=='0') { printf("Job workers: idle ones spin (BB_JOB_SLEEP=0)\n"); return 0; }
     /* Sleeping workers make the camera judder: U1-U3 run their camera and pad work in jobs, and
      * the main thread waits for each job phase, so a frame's work starts late by a varying
      * amount and the game, which times frames with the real clock, turns the camera unevenly per
@@ -1664,7 +1766,7 @@ static void patch_job_sleep(uint64_t image_size) {
 #endif
         if (threads>8) {
             printf("Job workers: idle ones spin (%ld hardware threads; BB_JOB_SLEEP=1 sleeps)\n",threads);
-            return;
+            return 0;
         }
     }
     static const unsigned char nop2[]={0x66,0x90}, nop6[]={0x66,0x0f,0x1f,0x44,0x00,0x00};
@@ -1683,7 +1785,7 @@ static void patch_job_sleep(uint64_t image_size) {
             const int64_t f=find_masked(sites[s][a].hex,image_size);
             if (f>=0) { at[s]=f; use[s]=&sites[s][a]; }
         }
-        if (at[s]<0) { printf("Job workers: site %d not found, they keep spinning\n",s); return; }
+        if (at[s]<0) { printf("Job workers: site %d not found, they keep spinning\n",s); return 0; }
     }
     for (int s=0; s<3; ++s) memcpy(image+at[s]+use[s]->at,use[s]->with,(size_t)use[s]->len);
     /* The worker then waits up to 10 ms without looking at the queue again: a job submitted after
@@ -1719,6 +1821,7 @@ static void patch_job_sleep(uint64_t image_size) {
     printf("Job workers: idle ones sleep (0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 "), wait %d ms after %d spins\n",
            at[0],at[1],at[2],is_wait ? wait[1] : is_wait_us ? (int)(((uint32_t)wait[1]|(uint32_t)wait[2]<<8)/1000) : -1,
            (int)now_spins);
+    return 1;
 }
 /* The job system's counter wait (corelib job scheduling: until [counter+0x20] == or <= a target):
  * a job worker that finds the counter not there yet suspends its job (SuspendJob) and retries when
@@ -2325,12 +2428,12 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
         install_ndgi_hooks(image_end);
 #endif
-        install_job_idle_yield(image_end);
         patch_eop_tick_wait(image_end);
         patch_collection_skip(image_end);
         patch_unlock_chapters(image_end);
         patch_u1_sticky(image_end);
-        patch_job_sleep(image_end);
+        patch_u1_frame_time(image_end);
+        install_job_idle_yield(image_end,patch_job_sleep(image_end)); /* other sites; the sleep decides the yield */
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
         patch_dev_menu_camera(image_end);
