@@ -36,7 +36,9 @@ static void zlock(void) { while (__atomic_exchange_n(&lock_word,1,__ATOMIC_ACQUI
 static void zunlock(void) { __atomic_store_n(&lock_word,0,__ATOMIC_RELEASE); }
 
 enum { SLOTS=64 };
-static struct { uint32_t id; float cx, cz, r; int reached; uint64_t seen; } slots[SLOTS];
+/* per NPC: its zone (full center and radius: any change starts over) and reached (inside, or a finished move to it:
+ * the band counts) */
+static struct { uint32_t id; float cx, cy, cz, r; int reached; uint64_t seen; } slots[SLOTS];
 static uint64_t stamp;
 static unsigned long long kicks;
 
@@ -64,7 +66,7 @@ static int siege_tenzin(const unsigned char *npc, const float *center, float r) 
 /* d: the xz distance to the zone center (the game's own number), r the radius. 1: count the companion as in the zone.
  * The hysteresis is followed for every companion (it decides nothing by itself); only the #257 case gets the answer.
  * BB_BUDDY_ZONE_LOG=1 prints each place where it would decide "reached" (it changes nothing there). */
-static int zone_reached(const unsigned char *npc, const float *center, float r, float d) {
+static int zone_reached(const unsigned char *npc, const float *center, float r, float d, int inside) {
     static int on=-1, log_all=-1;
     if (on<0) { const char *e=getenv("BB_U2_BUDDY_ZONE"); on=!(e && e[0]=='0'); }
     if (log_all<0) { const char *e=getenv("BB_BUDDY_ZONE_LOG"); log_all=e && e[0]=='1'; }
@@ -78,12 +80,17 @@ static int zone_reached(const unsigned char *npc, const float *center, float r, 
     ++stamp;
     int i=0, oldest=0;
     for (;i<SLOTS;++i) { if (slots[i].id==id) break; if (slots[i].seen<slots[oldest].seen) oldest=i; }
-    if (i==SLOTS) { i=oldest; slots[i].id=id; slots[i].reached=0; slots[i].cx=center[0]; slots[i].cz=center[2]; slots[i].r=r; }
-    slots[i].seen=stamp;
-    if (fabsf(slots[i].cx-center[0])>0.01f || fabsf(slots[i].cz-center[2])>0.01f || fabsf(slots[i].r-r)>0.01f) {
-        slots[i].cx=center[0]; slots[i].cz=center[2]; slots[i].r=r; slots[i].reached=0;   /* another zone */
+    if (i==SLOTS) {
+        i=oldest; slots[i].id=id; slots[i].reached=0;
+        slots[i].cx=center[0]; slots[i].cy=center[1]; slots[i].cz=center[2]; slots[i].r=r;
     }
-    if (d<=r) slots[i].reached=1;                      /* inside: the game says so too */
+    slots[i].seen=stamp;
+    if (fabsf(slots[i].cx-center[0])>0.01f || fabsf(slots[i].cy-center[1])>0.01f || fabsf(slots[i].cz-center[2])>0.01f ||
+        fabsf(slots[i].r-r)>0.01f) {                    /* another zone: nothing carries over */
+        slots[i].cx=center[0]; slots[i].cy=center[1]; slots[i].cz=center[2]; slots[i].r=r;
+        slots[i].reached=0;
+    }
+    if (inside || d<=r) slots[i].reached=1;            /* inside: the game says so too */
     else if (d>r+ZONE_SLACK) slots[i].reached=0;       /* left the band: the zone must be reached again */
     else if (slots[i].reached) would=1;
     else if (state==MOVE_STATE) { slots[i].reached=1; would=1; kick=1; ++kicks; }
@@ -110,7 +117,7 @@ void __attribute__((ms_abi)) runtime_u2_buddy_zone_102(uint64_t rdi, uint64_t rs
     float *x0=runtime_callback_xmm(regs,0), *x1=runtime_callback_xmm(regs,1);
     float center[4]; memcpy(center,npc+0x3fc0+zi,16);
     const float r=x1[0], d=sqrtf(x0[0]);
-    if (zone_reached(npc,center,r,d)) x1[0]=r+ZONE_SLACK;
+    if (zone_reached(npc,center,r,d,0)) x1[0]=r+ZONE_SLACK;
 }
 
 /* 1.00, at 0x2c393 in Npc::IsInZone (rbx = the NPC; al = Zone::Contains' answer; the position tested at rsp+0x20,
@@ -131,8 +138,8 @@ void __attribute__((ms_abi)) runtime_u2_buddy_zone_100(uint64_t rdi, uint64_t rs
             fflush(stdout);
         }
     }
-    if (regs[7]&0xff) return;   /* in the zone already */
     if (ret!=image+0xa4052) return;   /* not BuddyOpenCombatSkill's test */
+    const int inside=(regs[7]&0xff)!=0;   /* the game's answer: in the zone (recorded, as on 1.02) */
     const unsigned char *npc=(const unsigned char *)(uintptr_t)regs[0];
     if ((uintptr_t)npc<0x10000) return;
     uint32_t zi; memcpy(&zi,npc+0x3fb0,4);
@@ -140,8 +147,8 @@ void __attribute__((ms_abi)) runtime_u2_buddy_zone_100(uint64_t rdi, uint64_t rs
     float pos[4], zone[6];
     memcpy(pos,(const void *)(uintptr_t)(rsp+0x20),16); memcpy(zone,npc+0x3fc0+32*zi,24);
     const float dx=pos[0]-zone[0], dy=pos[1]-zone[1], dz=pos[2]-zone[2];
-    if (fabsf(dy)>zone[5]+0.5f) return;   /* out by height: as the game decided */
-    if (zone_reached(npc,zone,zone[4],sqrtf(dx*dx+dz*dz)))
+    if (!inside && fabsf(dy)>zone[5]+0.5f) return;   /* out by height: as the game decided (1.02 never gets here then) */
+    if (zone_reached(npc,zone,zone[4],sqrtf(dx*dx+dz*dz),inside) && !inside)
         ((uint64_t *)regs)[7]=(regs[7]&~(uint64_t)0xff)|1;
 }
 

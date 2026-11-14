@@ -1095,7 +1095,11 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         }
         if (off) { printf("Callbacks: %s at %#" PRIx64 " off (%s=0)\n",c->name,c->offset,off); continue; }
         /* Diagnosis hooks (name contains "(diagnosis"): only with BB_NPC_LOG=1 (runtime_npcdiag.c). */
-        if (strstr(c->name,"(diagnosis")) { const char *e=getenv("BB_NPC_LOG"); if (!(e && e[0]=='1')) continue; }
+        /* (BB_BUDDY_ZONE_TRACE=1 also installs the buddy zone ones, runtime_buddyzone.c) */
+        if (strstr(c->name,"(diagnosis")) {
+            const char *e=getenv("BB_NPC_LOG"), *t=getenv("BB_BUDDY_ZONE_TRACE");
+            if (!(e && e[0]=='1') && !(strstr(c->name,"buddy") && t && t[0]=='1')) continue;
+        }
         if (!c->callback) {
             memcpy(image+c->offset,c->patch,c->moved);
             if (is_stub) stub_in=1;
