@@ -1326,6 +1326,7 @@ uint64_t runtime_guest_tsc(void);
 int runtime_time_scaled(void);
 static int rdtsc_patched;
 void runtime_patch_ultrawide(unsigned char *code, uint64_t size, uint64_t image_end);
+extern int runtime_ultrawide_fill;
 void runtime_patch_resolution(unsigned char *code, uint64_t size, uint64_t image_end);
 static void patch_rdtsc(uint64_t image_size) {
 #ifndef _WIN32
@@ -1409,24 +1410,35 @@ static void patch_collection_skip(uint64_t image_size) {
     memcpy(image+jump+1,&rel,4);
     printf("Collection menu: skipped once, U1's front end opens first\n");
 }
-/* BB_SKIP_INTRO=1: no logo movie at boot. The three games boot through a task list whose movie task
- * (TaskManagerPlayMovie) asks the movie manager to play shareddata/movies/ps4/sce-ndi-logos (the Sony, Naughty
- * Dog and Bluepoint logos) and moves on when it no longer plays. The manager (one class in all six executables:
- * its fields at +0x2256c state, +0x22570 request pending) has Start(manager, name, flags, volume) at vtable +0x10,
- * which only stores the request (the movie thread opens the file later), and IsPlaying at +0x38: state or
- * request. Start returns 1 at once for that name, so nothing is asked for: the movie task finds nothing
- * playing on its next update and ends the normal way (as at the movie's end), the boot goes on to the title,
- * which waits for its own loads as before. The music over the logos is started by the movie player with the
- * movie, so it is not played either. Without this patch (code not found): the stand-in movie of
- * runtime_file.c. Found by IsPlaying's code (unique in each executable), its one vtable slot and Start's
- * prologue (push rbp; mov rbp,rsp; push r15: the 6 bytes moved). */
-static void __attribute__((ms_abi)) intro_movie_skipped(void) {
-    static int told;
-    if (!told++) printf("Intro: logo movie not asked for (BB_SKIP_INTRO): the boot goes on to the title\n");
+/* The movie manager's Start (all six executables: one class; its fields at +0x2256c state, +0x22570 request
+ * pending): Start(manager, name, flags, volume) at vtable +0x10 only stores the request, the movie thread opens
+ * the stream and decodes the first picture some frames later. Each call goes through movie_start_called first:
+ * the ultrawide switch (vk_rasterizer.cpp TakeSceneFrame) takes it as the movie about to start. Found by
+ * IsPlaying's code (vtable +0x38, unique in each executable), its one vtable slot and Start's prologue (push
+ * rbp; mov rbp,rsp; push r15: the 6 bytes moved).
+ * Fast boot (BB_SKIP_INTRO=1): the three games boot through a task list whose movie task (TaskManagerPlayMovie)
+ * asks for shareddata/movies/ps4/sce-ndi-logos (the Sony, Naughty Dog and Bluepoint logos) and moves on when
+ * IsPlaying is false. For that name Start answers 1 at once without the request: the task finds nothing playing on
+ * its next update and ends the normal way (as at the movie's end), the boot goes on to the title, which waits for its
+ * own loads as before; no movie file, decoder or logo music (the movie player starts it with the movie). Without
+ * the hook (code not found): the stand-in movie of runtime_file.c. */
+volatile int runtime_movie_starts;
+static int skip_intro_on(void) {
+    static int on=-1;
+    if (on<0) { const char *e=getenv("BB_SKIP_INTRO"); on=e && e[0]=='1'; }
+    return on;
 }
-static void patch_skip_intro_movie(uint64_t image_size) {
-    const char *skip=getenv("BB_SKIP_INTRO");
-    if (!skip || skip[0]!='1') return;
+static int __attribute__((ms_abi)) movie_start_called(const char *name, void *manager) {
+    (void)manager;
+    if (skip_intro_on() && name && !strcmp(name,"sce-ndi-logos")) {
+        printf("Intro: logo movie not asked for (BB_SKIP_INTRO): the boot goes on to the title\n");
+        return 1;
+    }
+    __atomic_add_fetch(&runtime_movie_starts,1,__ATOMIC_RELEASE);
+    printf("Movie: Start(%.64s)\n",name ? name : "?");
+    return 0; /* nonzero: not asked for (Start answers 1 at once) */
+}
+static void patch_movie_start(uint64_t image_size) {
     /* IsPlaying: mov al,1; cmp dword [rdi+0x2256c],0; jne; cmp byte [rdi+0x22570],0; setne al; ret */
     const int64_t playing=find_masked("b0 01 83 bf 6c 25 02 00 00 75 ?? 80 bf 70 25 02 00 00 0f 95 c0 c3",image_size);
     uint64_t start=0;
@@ -1445,36 +1457,47 @@ static void patch_skip_intro_movie(uint64_t image_size) {
     }
     static const unsigned char prologue[]={0x55,0x48,0x89,0xe5,0x41,0x57};
     if (playing<0 || slots!=1 || start>=image_size || memcmp(image+start,prologue,sizeof(prologue))) {
-        printf("Intro: movie manager not found (%lld, %d slots): the stand-in logo movie plays\n",(long long)playing,slots);
+        printf("Movie: the movie manager's Start not found (%lld, %d slots): the ultrawide switch waits for the "
+               "first movie picture; BB_SKIP_INTRO plays the stand-in logo movie\n",(long long)playing,slots);
         return;
     }
-    unsigned char *t=near_image_memory(128);
-    if (!t) { printf("Intro: no thunk memory: the stand-in logo movie plays\n"); return; }
+    unsigned char *t=near_image_memory(160);
+    if (!t) { printf("Movie: no thunk memory for the Start hook\n"); return; }
+    /* The guest's arguments (rdi rsi rdx rcx r8 r9, xmm0 xmm1) kept around a Microsoft x64 call of
+       movie_start_called(name, manager); nonzero: return 1 (asked for) without the original. */
     static const unsigned char head[]={
-        0x48,0xb8,'s','c','e','-','n','d','i','-',                     /* movabs rax, "sce-ndi-" */
-        0x48,0x39,0x06,                                                /* cmp [rsi], rax */
-        0x75,0x00,                                                     /* jne original (rel at 14) */
-        0x81,0x7e,0x08,'l','o','g','o',                                /* cmp dword [rsi+8], "logo" */
-        0x75,0x00,                                                     /* jne original (rel at 23) */
-        0x66,0x81,0x7e,0x0c,'s',0x00,                                  /* cmp word [rsi+12], "s\0" */
-        0x75,0x00,                                                     /* jne original (rel at 31) */
-        0x55,0x48,0x89,0xe5,0x48,0x83,0xe4,0xf0,0x48,0x83,0xec,0x20,   /* push rbp; mov rbp,rsp; and rsp,-16; sub rsp,32 */
-        0x48,0xb8,0,0,0,0,0,0,0,0,                                     /* movabs rax, intro_movie_skipped (at 46) */
-        0xff,0xd0,                                                     /* call rax (Microsoft x64: keeps rbx rbp r12-r15) */
-        0x48,0x89,0xec,0x5d,                                           /* mov rsp,rbp; pop rbp */
-        0xb8,0x01,0x00,0x00,0x00,0xc3,                                 /* mov eax,1; ret: asked for, as Start answers */
+        0x55,0x48,0x89,0xe5,                                           /* push rbp; mov rbp,rsp */
+        0x57,0x56,0x52,0x51,0x41,0x50,0x41,0x51,                       /* push rdi rsi rdx rcx r8 r9 */
+        0x48,0x83,0xec,0x40,                                           /* sub rsp,64 */
+        0xf3,0x0f,0x7f,0x45,0xc0,                                      /* movdqu [rbp-64],xmm0 */
+        0xf3,0x0f,0x7f,0x4d,0xb0,                                      /* movdqu [rbp-80],xmm1 */
+        0x48,0x83,0xe4,0xf0,0x48,0x83,0xec,0x20,                       /* and rsp,-16; sub rsp,32 */
+        0x48,0x89,0xf1,0x48,0x89,0xfa,                                 /* mov rcx,rsi; mov rdx,rdi */
+        0x48,0xb8,0,0,0,0,0,0,0,0,                                     /* movabs rax, movie_start_called (at 42) */
+        0xff,0xd0,                                                     /* call rax */
+        0xf3,0x0f,0x6f,0x45,0xc0,                                      /* movdqu xmm0,[rbp-64] */
+        0xf3,0x0f,0x6f,0x4d,0xb0,                                      /* movdqu xmm1,[rbp-80] */
+        0x48,0x8d,0x65,0xd0,                                           /* lea rsp,[rbp-48] */
+        0x41,0x59,0x41,0x58,0x59,0x5a,0x5e,0x5f,0x5d,                  /* pop r9 r8 rcx rdx rsi rdi rbp */
+        0x85,0xc0,                                                     /* test eax,eax */
+        0x75,0x00,                                                     /* jnz skip (rel at 78) */
     };
+    _Static_assert(sizeof(head)==79,"movie Start thunk layout");
     size_t k=sizeof(head);
     memcpy(t,head,k);
-    const uintptr_t note=(uintptr_t)intro_movie_skipped;
-    memcpy(t+46,&note,8);
-    t[14]=(unsigned char)(k-15); t[23]=(unsigned char)(k-24); t[31]=(unsigned char)(k-32);
-    memcpy(t+k,image+start,sizeof(prologue)); k+=sizeof(prologue);   /* any other movie: Start as it is */
+    const uintptr_t note=(uintptr_t)movie_start_called;
+    memcpy(t+42,&note,8);
+    memcpy(t+k,image+start,sizeof(prologue)); k+=sizeof(prologue);   /* Start as it is */
     int32_t rel=(int32_t)((int64_t)(uintptr_t)(image+start+sizeof(prologue))-(int64_t)(uintptr_t)(t+k+5));
     t[k++]=0xe9; memcpy(t+k,&rel,4); k+=4;
+    t[78]=(unsigned char)(k-79);
+    static const unsigned char skip[]={0xb8,0x01,0x00,0x00,0x00,0xc3}; /* mov eax,1; ret */
+    memcpy(t+k,skip,sizeof(skip)); k+=sizeof(skip);
     rel=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(image+start+5));
     image[start]=0xe9; memcpy(image+start+1,&rel,4); image[start+5]=0x90;
-    printf("Intro: the logo movie will not be asked for (BB_SKIP_INTRO; the movie manager's Start at %#" PRIx64 ")\n",start);
+    printf("Movie: the movie manager's Start at %#" PRIx64 " hooked (%s)\n",start,
+           runtime_ultrawide_fill ? (skip_intro_on() ? "the ultrawide switch, the logo skip" : "the ultrawide switch")
+                                  : "the logo skip");
 }
 /* Every chapter in Chapter Select and Brutal from the start (BB_UNLOCK_CHAPTERS=1, all three
  * games). From BilalReloaded's Uncharted port (tools/probe_uncharted.py UNLOCK_PATCHES,
@@ -2612,7 +2635,6 @@ int main(int argc, char **argv) {
         install_job_idle_yield(image_end);
         patch_eop_tick_wait(image_end);
         patch_collection_skip(image_end);
-        patch_skip_intro_movie(image_end);
         patch_unlock_chapters(image_end);
         patch_u1_sticky(image_end);
         patch_u1_frame_time(image_end);
@@ -2625,6 +2647,9 @@ int main(int argc, char **argv) {
         /* Ultrawide and field of view (runtime_ultrawide.c): the code segment at address 0. */
         for (uint64_t s=0;s<ns;++s)
             if ((segments[s].flags&1) && segments[s].address==0) { runtime_patch_ultrawide(image, segments[s].size, image_end); runtime_patch_resolution(image, segments[s].size, image_end); break; }
+        /* The movie manager's Start (the ultrawide switch to 16:9 before a movie, when frames fill the window; the
+         * fast boot's logo skip, BB_SKIP_INTRO=1). */
+        if (runtime_ultrawide_fill || skip_intro_on()) patch_movie_start(image_end);
         patch_u2_convoy_ticks(image_end);
         patch_u2_convoy_sink(image_end);
     }

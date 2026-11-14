@@ -349,7 +349,7 @@ static int commit_file(const File *f) {
 #endif
     return 0;
 }
-/* BB_SKIP_INTRO=1 (the fallback: probe.c patch_skip_intro_movie keeps the games from asking for the movie at all,
+/* BB_SKIP_INTRO=1 (the fallback: probe.c movie_start_called keeps the games from asking for the movie at all,
    when it finds the movie manager): the logo movie the three Uncharted games play at boot (Sony, Naughty Dog and
    Bluepoint: shareddata/movies/ps4/sce-ndi-logos.bsf, a raw H.264 stream of 689 frames, black
    for its first 49) opens as a stand-in that keeps only those 49 black pictures, padded to the
@@ -368,6 +368,15 @@ static int skip_intro_file(const char *guest,const char *file) {
     return skip_intro_enabled() && name && !strcmp(name+1,file);
 }
 static int skip_intro_movie(const char *guest) { return skip_intro_file(guest,"sce-ndi-logos.bsf"); }
+/* Movie streams (.bsf) opened so far: the ultrawide switch (vk_rasterizer.cpp TakeSceneFrame) takes an
+   open as a movie about to start (its first picture follows a few frames later). */
+volatile int runtime_movie_opens;
+static void note_movie_open(const char *guest) {
+    const size_t n=strlen(guest);
+    if (n<4 || strcmp(guest+n-4,".bsf")) return;
+    __atomic_add_fetch(&runtime_movie_opens,1,__ATOMIC_RELEASE);
+    printf("Runtime: movie stream opened: %s\n",guest);
+}
 /* All operations return >=0 or -(host errno); wrappers adapt the convention. */
 static int64_t do_open(const char *guest,int flags,int mode) {
     if (game_path(guest) && (flags & (3|0x8|0x400|0x800))) return -EROFS;
@@ -379,6 +388,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     char path[1024];
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
+    note_movie_open(guest);
     /* bbport (variant list prototype, BB_OPEN_LOG=1): when each game file is opened (wall-clock ms, as the
        compile log's), to measure how far ahead of their shaders' first use the level paks arrive. */
     static int open_log=-1;
