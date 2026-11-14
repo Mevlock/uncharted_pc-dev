@@ -48,6 +48,10 @@
 #include <immintrin.h>
 extern "C" unsigned runtime_render_width, runtime_render_height;
 extern "C" int runtime_ultrawide_fill;
+// src/runtime_file.c: movie streams (.bsf) opened so far.
+extern "C" volatile int runtime_movie_opens;
+// src/probe.c patch_movie_start: calls of the movie manager's Start so far.
+extern "C" volatile int runtime_movie_starts;
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 
 namespace Vulkan {
@@ -8899,16 +8903,31 @@ bool Rasterizer::TakeSceneFrame() noexcept {
         return !(env && env[0] == '0');
     }();
     const bool movie = movie_switch && movie_reads != 0;
+    // The movie manager's Start was called (probe.c patch_movie_start) and the movie's first
+    // picture not read yet: the movie is about to start. A frame without the 3D scene then (the
+    // black before the movie) switches to 16:9 at once, so the movie's first picture is already
+    // shown 16:9.
+    static int seen_starts = 0, seen_opens = 0;
+    static u32 since_start = ~0u; // frames since a Start whose picture was not read yet
+    const int starts = __atomic_load_n(&runtime_movie_starts, __ATOMIC_ACQUIRE);
+    const int opens = __atomic_load_n(&runtime_movie_opens, __ATOMIC_ACQUIRE);
+    const bool started = starts != seen_starts, opened = opens != seen_opens;
+    seen_starts = starts;
+    seen_opens = opens;
+    since_start = movie_reads ? ~0u : started ? 0u : since_start + (since_start != ~0u);
+    const bool pending = movie_switch && since_start <= 600;
+    const bool pending_black = pending && scene_draws < SceneExitDraws();
     static u32 after_movie = ~0u; // frames since the last movie frame
     after_movie = movie ? 0 : after_movie + (after_movie != ~0u);
     const bool after_movie_window = after_movie <= 120;
     static u32 run = 0;
-    if (movie) {
+    if (movie || pending_black) {
         run = 0;
         if (gameplay) {
             gameplay = false;
             if (runtime_ultrawide_fill) {
-                std::printf("Ultrawide: movie, 16:9 (last frame: %u scene draws)\n", scene_draws);
+                std::printf("Ultrawide: %s, 16:9 (last frame: %u scene draws)\n",
+                            movie ? "movie" : "movie about to start", scene_draws);
             }
         }
     } else if (raw == gameplay) {
@@ -8942,14 +8961,17 @@ bool Rasterizer::TakeSceneFrame() noexcept {
             old_gameplay = old_raw;
             old_run = 0;
         }
-        if (movie_reads || Libraries::VideoOut::g_movie_pictures_live.load(std::memory_order_relaxed)) {
+        if (movie_reads || since_start <= 600 ||
+            Libraries::VideoOut::g_movie_pictures_live.load(std::memory_order_relaxed)) {
             log_left = 120;
         }
         if (log_left) {
             --log_left;
-            std::printf("Ultrawide frame %llu: %u scene draws, %u movie reads, shown %s, before %s\n",
+            std::printf("Ultrawide frame %llu: %u scene draws, %u movie reads, shown %s, before "
+                        "%s%s%s\n",
                         static_cast<unsigned long long>(frame), scene_draws, movie_reads,
-                        gameplay ? "wide" : "16:9", old_gameplay ? "wide" : "16:9");
+                        gameplay ? "wide" : "16:9", old_gameplay ? "wide" : "16:9",
+                        started ? ", Start" : "", opened ? ", stream opened" : "");
         }
     }
     // BB_ULTRAWIDE=always (launcher: Always fill): the camera stays widened and every frame fills

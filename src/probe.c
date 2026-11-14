@@ -1326,6 +1326,7 @@ uint64_t runtime_guest_tsc(void);
 int runtime_time_scaled(void);
 static int rdtsc_patched;
 void runtime_patch_ultrawide(unsigned char *code, uint64_t size, uint64_t image_end);
+extern int runtime_ultrawide_fill;
 void runtime_patch_resolution(unsigned char *code, uint64_t size, uint64_t image_end);
 static void patch_rdtsc(uint64_t image_size) {
 #ifndef _WIN32
@@ -1408,6 +1409,78 @@ static void patch_collection_skip(uint64_t image_size) {
     rel=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(image+jump+5));
     memcpy(image+jump+1,&rel,4);
     printf("Collection menu: skipped once, U1's front end opens first\n");
+}
+/* The movie manager's Start (all six executables: one class; its fields at +0x2256c state, +0x22570 request
+ * pending): Start(manager, name, flags, volume) at vtable +0x10 only stores the request, the movie thread opens
+ * the stream and decodes the first picture some frames later. Each call goes through movie_start_called first:
+ * the ultrawide switch (vk_rasterizer.cpp TakeSceneFrame) takes it as the movie about to start. Found by
+ * IsPlaying's code (vtable +0x38, unique in each executable), its one vtable slot and Start's prologue (push
+ * rbp; mov rbp,rsp; push r15: the 6 bytes moved). The same hook point as the fast-boot logo skip. */
+volatile int runtime_movie_starts;
+static int __attribute__((ms_abi)) movie_start_called(const char *name, void *manager) {
+    (void)manager;
+    __atomic_add_fetch(&runtime_movie_starts,1,__ATOMIC_RELEASE);
+    printf("Movie: Start(%.64s)\n",name ? name : "?");
+    return 0; /* nonzero: not asked for (Start answers 1 at once) */
+}
+static void patch_movie_start(uint64_t image_size) {
+    /* IsPlaying: mov al,1; cmp dword [rdi+0x2256c],0; jne; cmp byte [rdi+0x22570],0; setne al; ret */
+    const int64_t playing=find_masked("b0 01 83 bf 6c 25 02 00 00 75 ?? 80 bf 70 25 02 00 00 0f 95 c0 c3",image_size);
+    uint64_t start=0;
+    int slots=0;
+    if (playing>=0) {
+        const uint64_t want=(uint64_t)(uintptr_t)image+(uint64_t)playing;
+        for (uint64_t a=0x28;a+8<=image_size;a+=8) {
+            uint64_t v;
+            memcpy(&v,image+a,8);
+            if (v!=want) continue;
+            uint64_t s;
+            memcpy(&s,image+a-0x28,8);
+            ++slots;
+            start=s-(uint64_t)(uintptr_t)image;
+        }
+    }
+    static const unsigned char prologue[]={0x55,0x48,0x89,0xe5,0x41,0x57};
+    if (playing<0 || slots!=1 || start>=image_size || memcmp(image+start,prologue,sizeof(prologue))) {
+        printf("Movie: the movie manager's Start not found (%lld, %d slots): the ultrawide switch waits for the "
+               "first movie picture\n",(long long)playing,slots);
+        return;
+    }
+    unsigned char *t=near_image_memory(160);
+    if (!t) { printf("Movie: no thunk memory for the Start hook\n"); return; }
+    /* The guest's arguments (rdi rsi rdx rcx r8 r9, xmm0 xmm1) kept around a Microsoft x64 call of
+       movie_start_called(name, manager); nonzero: return 1 (asked for) without the original. */
+    static const unsigned char head[]={
+        0x55,0x48,0x89,0xe5,                                           /* push rbp; mov rbp,rsp */
+        0x57,0x56,0x52,0x51,0x41,0x50,0x41,0x51,                       /* push rdi rsi rdx rcx r8 r9 */
+        0x48,0x83,0xec,0x40,                                           /* sub rsp,64 */
+        0xf3,0x0f,0x7f,0x45,0xc0,                                      /* movdqu [rbp-64],xmm0 */
+        0xf3,0x0f,0x7f,0x4d,0xb0,                                      /* movdqu [rbp-80],xmm1 */
+        0x48,0x83,0xe4,0xf0,0x48,0x83,0xec,0x20,                       /* and rsp,-16; sub rsp,32 */
+        0x48,0x89,0xf1,0x48,0x89,0xfa,                                 /* mov rcx,rsi; mov rdx,rdi */
+        0x48,0xb8,0,0,0,0,0,0,0,0,                                     /* movabs rax, movie_start_called (at 42) */
+        0xff,0xd0,                                                     /* call rax */
+        0xf3,0x0f,0x6f,0x45,0xc0,                                      /* movdqu xmm0,[rbp-64] */
+        0xf3,0x0f,0x6f,0x4d,0xb0,                                      /* movdqu xmm1,[rbp-80] */
+        0x48,0x8d,0x65,0xd0,                                           /* lea rsp,[rbp-48] */
+        0x41,0x59,0x41,0x58,0x59,0x5a,0x5e,0x5f,0x5d,                  /* pop r9 r8 rcx rdx rsi rdi rbp */
+        0x85,0xc0,                                                     /* test eax,eax */
+        0x75,0x00,                                                     /* jnz skip (rel at 78) */
+    };
+    _Static_assert(sizeof(head)==79,"movie Start thunk layout");
+    size_t k=sizeof(head);
+    memcpy(t,head,k);
+    const uintptr_t note=(uintptr_t)movie_start_called;
+    memcpy(t+42,&note,8);
+    memcpy(t+k,image+start,sizeof(prologue)); k+=sizeof(prologue);   /* Start as it is */
+    int32_t rel=(int32_t)((int64_t)(uintptr_t)(image+start+sizeof(prologue))-(int64_t)(uintptr_t)(t+k+5));
+    t[k++]=0xe9; memcpy(t+k,&rel,4); k+=4;
+    t[78]=(unsigned char)(k-79);
+    static const unsigned char skip[]={0xb8,0x01,0x00,0x00,0x00,0xc3}; /* mov eax,1; ret */
+    memcpy(t+k,skip,sizeof(skip)); k+=sizeof(skip);
+    rel=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(image+start+5));
+    image[start]=0xe9; memcpy(image+start+1,&rel,4); image[start+5]=0x90;
+    printf("Movie: the movie manager's Start at %#" PRIx64 " hooked (the ultrawide switch)\n",start);
 }
 /* Every chapter in Chapter Select and Brutal from the start (BB_UNLOCK_CHAPTERS=1, all three
  * games). From BilalReloaded's Uncharted port (tools/probe_uncharted.py UNLOCK_PATCHES,
@@ -2557,6 +2630,8 @@ int main(int argc, char **argv) {
         /* Ultrawide and field of view (runtime_ultrawide.c): the code segment at address 0. */
         for (uint64_t s=0;s<ns;++s)
             if ((segments[s].flags&1) && segments[s].address==0) { runtime_patch_ultrawide(image, segments[s].size, image_end); runtime_patch_resolution(image, segments[s].size, image_end); break; }
+        /* The movie manager's Start (the ultrawide switch to 16:9 before a movie): only when frames fill the window. */
+        if (runtime_ultrawide_fill) patch_movie_start(image_end);
         patch_u2_convoy_ticks(image_end);
         patch_u2_convoy_sink(image_end);
     }
