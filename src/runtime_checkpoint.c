@@ -253,4 +253,12 @@ static void old_frame(const OldBuild *b, uint64_t image) {
 OLD_FRAME(runtime_checkpoint_frame_u1_eu,0)
 OLD_FRAME(runtime_checkpoint_frame_u1_us,1)
 OLD_FRAME(runtime_checkpoint_frame_u2_eu,2)
-OLD_FRAME(runtime_checkpoint_frame_u2_us,3)
+void runtime_npcdiag_frame(uint64_t image, int code);
+void runtime_npclog_frame(uint64_t image);
+void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_us(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                           const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)r14; (void)regs;
+    runtime_npcdiag_frame(image,3); /* BB_NPC_DUMP diagnosis (runtime_npcdiag.c) */
+    runtime_npclog_frame(image);    /* BB_NPC_LOG diagnosis */
+    old_frame(&old_builds[3],image);
+}
