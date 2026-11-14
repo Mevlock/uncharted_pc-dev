@@ -118,9 +118,20 @@ void __attribute__((ms_abi)) runtime_u2_buddy_zone_102(uint64_t rdi, uint64_t rs
 void __attribute__((ms_abi)) runtime_u2_buddy_zone_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                        const uint64_t *regs) {
     (void)rdi; (void)rsi; (void)r14;
-    if (regs[7]&0xff) return;   /* in the zone already */
+    static int trace=-1;
+    if (trace<0) { const char *e=getenv("BB_BUDDY_ZONE_TRACE"); trace=e && e[0]=='1'; }
     const uint64_t rsp=(uint64_t)(uintptr_t)&regs[25];
     uint64_t ret; memcpy(&ret,(const void *)(uintptr_t)(rsp+0x58),8);
+    if (trace) {
+        static unsigned long long calls, mine;
+        ++calls; if (ret==image+0xa4052) ++mine;
+        if ((calls&1023)==0 || (ret==image+0xa4052 && (mine&63)==1)) {
+            printf("U2 buddy zone trace: %llu IsInZone calls, %llu from the skill; last from +%#llx, in zone %d\n",calls,mine,
+                   (unsigned long long)(ret-image),(int)(regs[7]&0xff));
+            fflush(stdout);
+        }
+    }
+    if (regs[7]&0xff) return;   /* in the zone already */
     if (ret!=image+0xa4052) return;   /* not BuddyOpenCombatSkill's test */
     const unsigned char *npc=(const unsigned char *)(uintptr_t)regs[0];
     if ((uintptr_t)npc<0x10000) return;
@@ -132,4 +143,23 @@ void __attribute__((ms_abi)) runtime_u2_buddy_zone_100(uint64_t rdi, uint64_t rs
     if (fabsf(dy)>zone[5]+0.5f) return;   /* out by height: as the game decided */
     if (zone_reached(npc,zone,zone[4],sqrtf(dx*dx+dz*dz)))
         ((uint64_t *)regs)[7]=(regs[7]&~(uint64_t)0xff)|1;
+}
+
+/* BB_BUDDY_ZONE_TRACE=1 (diagnosis, 1.00): the skill's MoveToPoint (the helper 0x11180, rdi = the NPC, rsi = the point,
+ * called from the skill at 0xa44bb): NPC, point, position, xz distance to its zone. */
+void __attribute__((ms_abi)) runtime_u2_buddy_move_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                       const uint64_t *regs) {
+    (void)r14;
+    static int trace=-1;
+    if (trace<0) { const char *e=getenv("BB_BUDDY_ZONE_TRACE"); trace=e && e[0]=='1'; }
+    if (!trace || regs[25]!=image+0xa44c0 || rdi<0x10000 || rsi<0x10000) return;
+    const unsigned char *npc=(const unsigned char *)(uintptr_t)rdi;
+    uint32_t id, zi; memcpy(&id,npc+0x44,4); memcpy(&zi,npc+0x3fb0,4);
+    float t[4], p[4], z[6]={0}; memcpy(t,(const void *)(uintptr_t)rsi,16); memcpy(p,npc+0x110,16);
+    if (zi<8) memcpy(z,npc+0x3fc0+32*zi,24);
+    const float dx=p[0]-z[0], dz=p[2]-z[2];
+    printf("U2 buddy zone trace: %08x MoveToPoint (%.3f %.3f %.3f) from (%.3f %.3f %.3f), zone (%.3f %.3f %.3f r %.2f) xz %.3f\n",
+           id,(double)t[0],(double)t[1],(double)t[2],(double)p[0],(double)p[1],(double)p[2],(double)z[0],(double)z[1],
+           (double)z[2],(double)z[4],(double)sqrtf(dx*dx+dz*dz));
+    fflush(stdout);
 }
