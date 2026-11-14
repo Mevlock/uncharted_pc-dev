@@ -173,6 +173,9 @@ if [[ ${1:-} == --test ]]; then
     out/sema-test
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test
+    # U1's ultrawide camera check (the flashlight's square camera kept, mirrored reflections widened): runs the emitted stubs.
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror tests/test_ultrawide_u1_guard.c -o out/ultrawide-u1-test
+    out/ultrawide-u1-test
     # The emulator against the real instructions (skips on a CPU without BMI1/LZCNT/MOVBE/F16C) and the site locator.
     "$CC" -std=c11 -O1 -g -Wall -Wextra -Werror -mbmi -mlzcnt -mmovbe -mf16c -Isrc tests/test_isa_emulate.c out/isa_emulate.o -o out/isa-emulate-test
     out/isa-emulate-test

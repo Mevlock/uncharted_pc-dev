@@ -448,6 +448,17 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
         printf("Ultrawide: no room at the end of the game code, not applied\n");
         return;
     }
+    if (screen_only && u1_guard) {
+        /* The guard's length does not depend on the camera or the bounds; its longest form (an r12 base: SIB bytes)
+         * plus the original read (up to 10 bytes), the vmulss and the jump back (13) must fit in one stub. */
+        uint8_t trial[0x200];
+        const uint64_t used = (uint64_t)(emit_u1_camera_guard(trial, trial, 12, field, 0, 0) - trial);
+        if (used + 10 + 13 > stride) {
+            printf("Ultrawide: the U1 camera check (%llu bytes) does not fit its stub, not applied\n",
+                   (unsigned long long)used);
+            return;
+        }
+    }
     /* Constants: k, 1/k (after a division), k/fov, fov/k. They live in a writable block near the
      * code so the presenter can switch them per frame (runtime_ultrawide_select): menus, title
      * screens and loading get the game's own view (all 1), gameplay the widened one. Without such
