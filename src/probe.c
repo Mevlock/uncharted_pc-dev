@@ -1532,6 +1532,83 @@ static void patch_u1_sticky(uint64_t image_size) {
         printf("U1 physics: artificial damping %.4f / %.4f per 60 FPS step, the same loss per second at any rate\n",
                u1_damp_v0,u1_damp_w0);
 }
+/* BB_U1_FRAME_STATS=1 (diagnosis): Uncharted 1's frame steps. The game times each frame with the CPU clock (rdtsc
+ * between two passes of its main loop, 1.02 0x9d419) and its clock update (1.02 0xfac70, 1.00 0xfab40) takes
+ * min(1 / "Minimum Framerate", dt * scale) as the frame's step: with frames that start unevenly the world moves
+ * unevenly per shown frame, at an even present rate (U1 ch7 jeep judder, sleeping job workers, patch_job_sleep).
+ * Every 300 frames a line with the step's mean, spread and range; BB_U1_DT_LOG=<file>: one line per frame
+ * (host ms, the game's dt and step in ms). */
+static int u1_dt_stats_on;
+static FILE *u1_dt_log;
+static struct { uint32_t frames, cut; double want, out, sq, lo, hi; } u1_dt_stats;
+static ABI float u1_frame_time(float want, float cap) {
+    const float out=cap<want ? cap : want;               /* vminss xmm0, xmm2, xmm0: the game's step */
+    if (u1_dt_log) {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+        fprintf(u1_dt_log,"%.3f %.3f %.3f\n",(double)ts.tv_sec*1000.0+ts.tv_nsec/1e6,want*1000.0,out*1000.0);
+    }
+    if (u1_dt_stats_on) {
+        if (!u1_dt_stats.frames) { u1_dt_stats.lo=1e9; u1_dt_stats.hi=0; }
+        ++u1_dt_stats.frames;
+        u1_dt_stats.want+=want; u1_dt_stats.out+=out; u1_dt_stats.sq+=(double)out*out;
+        if (out<u1_dt_stats.lo) u1_dt_stats.lo=out;
+        if (out>u1_dt_stats.hi) u1_dt_stats.hi=out;
+        if (want>cap) ++u1_dt_stats.cut;
+        if (u1_dt_stats.frames>=300) {
+            const double n=u1_dt_stats.frames, mean=u1_dt_stats.out/n, sd=sqrt(fmax(0.0,u1_dt_stats.sq/n-mean*mean));
+            printf("U1 frame time: %u frames, step %.2f ms (sd %.2f, %.2f-%.2f), %u cut by the %.0f ms cap\n",
+                   u1_dt_stats.frames,mean*1000.0,sd*1000.0,u1_dt_stats.lo*1000.0,u1_dt_stats.hi*1000.0,
+                   u1_dt_stats.cut,cap*1000.0);
+            fflush(stdout);
+            memset(&u1_dt_stats,0,sizeof(u1_dt_stats));
+        }
+    }
+    return out;
+}
+static void patch_u1_frame_time(uint64_t image_size) {
+    const char *stats=getenv("BB_U1_FRAME_STATS"), *log=getenv("BB_U1_DT_LOG");
+    u1_dt_stats_on=stats && stats[0]=='1';
+    if (log && *log) u1_dt_log=fopen(log,"w");
+    if (!u1_dt_stats_on && !u1_dt_log) return;
+    /* vminss xmm0,xmm2,xmm0; vmovss [rbx+8],xmm0; lea rax,[settings]; vmovss xmm2,[rax+0x47e4] ("forcefps");
+     * vxorps xmm3,xmm3,xmm3 (1.02 0xfad1c, 1.00 0xfabec; the same bytes in EU and US) */
+    const int64_t at=find_masked("c5ea5dc0 c5fa114308 488d05???????? c5fa1090e4470000 c5e057db",image_size);
+    if (at==-2) { printf("U1 frame time: clock update not unique, not changed\n"); return; }
+    if (at<0) return; /* not Uncharted 1 */
+    unsigned char *t=near_image_memory(256);
+    if (!t) { printf("U1 frame time: no thunk memory, not changed\n"); return; }
+    unsigned char *p=image+at;
+    size_t k=0;
+    /* push rdi rsi rax rcx rdx r8-r11 (9: rsp was 16-aligned here, now 8 off); sub rsp,0x108; movdqu [rsp+16n],xmmN */
+    static const unsigned char save[]={0x57,0x56,0x50,0x51,0x52,0x41,0x50,0x41,0x51,0x41,0x52,0x41,0x53};
+    memcpy(t+k,save,sizeof(save)); k+=sizeof(save);
+    static const unsigned char sub_rsp[]={0x48,0x81,0xec,0x08,0x01,0x00,0x00}, add_rsp[]={0x48,0x81,0xc4,0x08,0x01,0x00,0x00};
+    memcpy(t+k,sub_rsp,sizeof(sub_rsp)); k+=sizeof(sub_rsp);
+    for (int n=0;n<16;++n) {
+        const int32_t disp=n*16;
+        t[k++]=0xf3; if (n>=8) t[k++]=0x44; t[k++]=0x0f; t[k++]=0x7f;  /* movdqu [rsp+disp32], xmmN */
+        t[k++]=(unsigned char)(0x84|((n&7)<<3)); t[k++]=0x24; memcpy(t+k,&disp,4); k+=4;
+    }
+    t[k++]=0xc5; t[k++]=0xf8; t[k++]=0x28; t[k++]=0xca;   /* vmovaps xmm1, xmm2: u1_frame_time(want xmm0, cap xmm1) */
+    const uintptr_t host=(uintptr_t)u1_frame_time;
+    t[k++]=0x48; t[k++]=0xb8; memcpy(t+k,&host,8); k+=8; /* movabs rax, u1_frame_time */
+    t[k++]=0xff; t[k++]=0xd0;                            /* call rax */
+    t[k++]=0xf3; t[k++]=0x0f; t[k++]=0x11; t[k++]=0x04; t[k++]=0x24; /* movss [rsp], xmm0: the result into xmm0's slot */
+    for (int n=0;n<16;++n) {
+        const int32_t disp=n*16;
+        t[k++]=0xf3; if (n>=8) t[k++]=0x44; t[k++]=0x0f; t[k++]=0x6f;  /* movdqu xmmN, [rsp+disp32] */
+        t[k++]=(unsigned char)(0x84|((n&7)<<3)); t[k++]=0x24; memcpy(t+k,&disp,4); k+=4;
+    }
+    memcpy(t+k,add_rsp,sizeof(add_rsp)); k+=sizeof(add_rsp);
+    static const unsigned char restore[]={0x41,0x5b,0x41,0x5a,0x41,0x59,0x41,0x58,0x5a,0x59,0x58,0x5e,0x5f};
+    memcpy(t+k,restore,sizeof(restore)); k+=sizeof(restore);
+    memcpy(t+k,p+4,5); k+=5;                             /* vmovss [rbx+8], xmm0 */
+    const uint64_t back=(uint64_t)(uintptr_t)(p+9);
+    t[k++]=0xff; t[k++]=0x25; memset(t+k,0,4); k+=4; memcpy(t+k,&back,8); k+=8; /* jmp [rip]: p+9 */
+    const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(p+5));
+    p[0]=0xe9; memcpy(p+1,&to,4); memset(p+5,0x90,4);
+    printf("U1 frame time: steps measured (clock update %#" PRIx64 ")\n",(uint64_t)at);
+}
 static void patch_unlock_chapters(uint64_t image_size) {
     const char *on=getenv("BB_UNLOCK_CHAPTERS");
     if (!on || on[0]!='1') return;
@@ -1602,6 +1679,7 @@ static int64_t find_masked(const char *hex, uint64_t size) {
  * and a worker about to wait while it is set clears it and returns at once instead (a spurious
  * wake-up, which the worker loop allows: it looks at the queues again). */
 static volatile unsigned char job_signal_pending;
+static uint64_t job_wake_stub; /* the sticky signal stub: sets the flag and broadcasts (install_job_resume_wake) */
 static int install_job_sticky(int64_t recheck, int64_t submission) {
     /* The wait: the first call after the re-check (mov rsi, rax; call at +0x19). The signal: EU, the
      * call after "add rsi, 0x60" (rsi = the mutex at +0x60, rdi = the condition at +0x80), +0x22;
@@ -1642,8 +1720,10 @@ static int install_job_sticky(int64_t recheck, int64_t submission) {
     memcpy(image+signal_call+1,&rel,4);
     printf("Job workers: sticky wake-ups (wait call 0x%" PRIx64 ", signal call 0x%" PRIx64 ")\n",
            (uint64_t)wait_call,(uint64_t)signal_call);
+    job_wake_stub=(uint64_t)(uintptr_t)signal_stub;
     return 1;
 }
+static int job_sleep_installed;
 static void patch_job_sleep(uint64_t image_size) {
     const char *env=getenv("BB_JOB_SLEEP");
     if (env && env[0]=='0') { printf("Job workers: idle ones spin (BB_JOB_SLEEP=0)\n"); return; }
@@ -1691,11 +1771,16 @@ static void patch_job_sleep(uint64_t image_size) {
      * a frame late (U3's mine: the flashlight's light missing for a frame). The wait after the
      * re-check (mov edx, 10) is shortened to BB_JOB_SLEEP_MS (default 1, 10 the game's). */
     /* The wake-up is not lost instead (install_job_sticky below), so the worker can keep the game's
-     * 1000 spins and 10 ms wait. BB_JOB_STICKY=0: off (the 50000 spins and 1 ms waits). */
+     * 1000 spins. BB_JOB_STICKY=0: off (the 50000 spins). The wait stays 1 ms with them: at the game's
+     * 10 ms some of a frame's work still waited for a sleeping worker's timeout (who makes it runnable
+     * without a wake-up is not known yet), so the frames started up to ~10 ms late, by a different
+     * amount each, and U1, which times its frames with the real clock, stepped 6-23 ms at an even
+     * 60 FPS (ch7 jeep judder on an 8-thread laptop; this PC with BB_JOB_SLEEP=1, 2026-11-14: step
+     * sd 5.1 ms at 10 ms, 1.1 ms at 1 ms, 0.8 ms spinning). BB_JOB_SLEEP_MS=10: the game's wait. */
     const char *sticky_env=getenv("BB_JOB_STICKY");
     const int sticky=!(sticky_env && sticky_env[0]=='0') && install_job_sticky(at[1],at[2]);
     const char *ms_env=getenv("BB_JOB_SLEEP_MS");
-    const int ms=ms_env ? atoi(ms_env) : sticky ? 10 : 1;
+    const int ms=ms_env ? atoi(ms_env) : 1;
     /* EU: mov edx, 10 (milliseconds); US 1.02 (as CUSA02344): mov edx, 10000 (microseconds, another
      * timed wait). */
     unsigned char *wait=image+at[1]+17;
@@ -1716,9 +1801,121 @@ static void patch_job_sleep(uint64_t image_size) {
     if (is_spin && spins>0 && spins<=0x7fffffff) { const int32_t v=(int32_t)spins; memcpy(spin+3,&v,4); }
     int32_t now_spins=-1;
     if (is_spin) memcpy(&now_spins,spin+3,4);
+    job_sleep_installed=1;
     printf("Job workers: idle ones sleep (0x%" PRIx64 ", 0x%" PRIx64 ", 0x%" PRIx64 "), wait %d ms after %d spins\n",
            at[0],at[1],at[2],is_wait ? wait[1] : is_wait_us ? (int)(((uint32_t)wait[1]|(uint32_t)wait[2]<<8)/1000) : -1,
            (int)now_spins);
+}
+/* Resumed jobs wake the sleeping workers (U1 ch7 jeep judder, root cause). A job that waits for a counter (a
+ * fiber wait: WaitForCounter) sits in the job manager's wait list (+0x4ed8, +0x4ee0 entries). When the counter gets
+ * there, the thread that changed it calls the release (U1 1.02 0x45c950, 1.00 0x366690, from the counter update
+ * 1.02 0x449e80 and one more site), which moves the job into its priority's resume list (queues at +0x4f10, 0x2078
+ * apart, count at +0x2038) and wakes nobody: on the PS4 the workers never sleep. A worker picks it up when it next
+ * looks, so with idle workers asleep (patch_job_sleep) the job waited for a worker's timed wait to run out, up to
+ * 10 ms, and so did the frame: the counter is often changed outside the workers (the GPU end-of-pipe handler, the
+ * main thread), e.g. U1's render-frame job resumes when the GPU is done, and its end times U1's frame. The call
+ * sites of the release now go through job_release_wake, which broadcasts the workers' condition (through the
+ * sticky signal, so a worker on its way to the wait does not miss it) when the release moved a job.
+ * BB_JOB_RESUME_WAKE=0: off. BB_JOB_WAKE_STATS=1: every 5 s, releases per second and how many moved a job. */
+static uint64_t job_release_fn, job_manager_global;
+static volatile long job_release_calls, job_release_moved;
+static uint64_t job_resume_count(void) {
+    const uint64_t manager=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
+    if (!manager) return 0;
+    const uint64_t queues=*(const volatile uint64_t *)(uintptr_t)(manager+0x4f10);
+    if (!queues) return 0;
+    uint64_t n=0;
+    for (int q=0;q<8;++q) n+=*(const volatile uint64_t *)(uintptr_t)(queues+(uint64_t)q*0x2078+0x2038);
+    return n;
+}
+static ABI uint64_t job_release_wake(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    typedef uint64_t (ABI *Release)(uint64_t, uint64_t, uint64_t, uint64_t);
+    typedef int32_t (ABI *Broadcast)(uint64_t);
+    const uint64_t before=job_resume_count();
+    const uint64_t r=((Release)(uintptr_t)job_release_fn)(a,b,c,d);
+    const uint64_t after=job_resume_count();
+    __atomic_add_fetch(&job_release_calls,1,__ATOMIC_RELAXED);
+    if (after>before) {
+        __atomic_add_fetch(&job_release_moved,1,__ATOMIC_RELAXED);
+        const uint64_t manager=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
+        ((Broadcast)(uintptr_t)job_wake_stub)(manager+0x80);
+    }
+    return r;
+}
+static void *job_wake_stats(void *unused) {
+    (void)unused;
+    for (;;) {
+#ifdef _WIN32
+        Sleep(5000);
+#else
+        sleep(5);
+#endif
+        const long calls=__atomic_exchange_n(&job_release_calls,0,__ATOMIC_RELAXED);
+        const long moved=__atomic_exchange_n(&job_release_moved,0,__ATOMIC_RELAXED);
+        printf("Job wake: %.0f releases/s, %.0f/s moved a job and woke the workers\n",calls/5.0,moved/5.0);
+        fflush(stdout);
+    }
+    return NULL;
+}
+static void install_job_resume_wake(uint64_t image_size) {
+    const char *env=getenv("BB_JOB_RESUME_WAKE");
+    if (env && env[0]=='0') { printf("Job workers: resumed jobs do not wake them (BB_JOB_RESUME_WAKE=0)\n"); return; }
+    if (!job_sleep_installed) return; /* spinning workers find the jobs themselves */
+    if (!job_wake_stub) { printf("Job workers: resumed jobs do not wake them (no sticky wake-ups)\n"); return; }
+    /* the release: push rbp..rbx; sub rsp,0x38; mov [rbp-0x50],rsi; mov [rbp-0x40],rdi; mov rax,[stack guard];
+     * (U3: lea rax,[stack guard]); mov rax,[rax]; mov [rbp-0x30],rax; then within 0x30 bytes lea reg,[manager]; and
+     * cmp qword [rbx+0x4ee0],0. Found in U1 1.02 0x45c950 / 1.00 0x366690, U2 0xb3bbf0 / 0x4ebbc0, U3 0xda5c20 / 0x49e1e0. */
+    static const char head[]="554889e54157415641554154534883ec38488975b048897dc048??05???????? 488b00 488945d0";
+    int64_t fn=-1;
+    for (uint64_t from=0;from<image_size;) {
+        /* find_masked returns -2 on several: scan by hand through the matches */
+        int64_t at=-1;
+        unsigned char bytes[64], mask[64]; int n=0;
+        for (const char *q=head;*q && n<64;) {
+            if (*q==' ') { ++q; continue; }
+            if (q[0]=='?') { bytes[n]=0; mask[n++]=0; q+=2; continue; }
+            unsigned v; sscanf(q,"%2x",&v); bytes[n]=(unsigned char)v; mask[n++]=1; q+=2;
+        }
+        for (uint64_t i=from;i+n+0x60<=image_size;++i) {
+            if (image[i]!=bytes[0]) continue;
+            int k=1; while (k<n && (!mask[k] || image[i+k]==bytes[k])) ++k;
+            if (k==n) { at=(int64_t)i; break; }
+        }
+        if (at<0) break;
+        from=(uint64_t)at+1;
+        int ok=0;
+        for (int o=n;o<n+0x30;++o) if (!memcmp(image+at+o,"\x48\x83\xbb\xe0\x4e\x00\x00\x00",8)) ok=1;
+        if (!ok) continue;
+        if (fn>=0) { printf("Job workers: resumed jobs do not wake them (release not unique)\n"); return; }
+        fn=at;
+    }
+    if (fn<0) { printf("Job workers: resumed jobs do not wake them (release not found)\n"); return; }
+    for (int o=0x1c;o<0x40 && !job_manager_global;++o) {
+        const unsigned char *c=image+fn+o;
+        if ((c[0]==0x4c || c[0]==0x48) && c[1]==0x8d && (c[2]&0xc7)==0x05) {
+            int32_t d; memcpy(&d,c+3,4);
+            job_manager_global=(uint64_t)(uintptr_t)(c+7+d);
+        }
+    }
+    if (!job_manager_global) { printf("Job workers: resumed jobs do not wake them (manager not found)\n"); return; }
+    job_release_fn=(uint64_t)(uintptr_t)(image+fn);
+    unsigned char *t=near_image_memory(64*16);
+    if (!t) { printf("Job workers: resumed jobs do not wake them (no thunk memory)\n"); return; }
+    const uintptr_t host=(uintptr_t)job_release_wake;
+    t[0]=0x48; t[1]=0xb8; memcpy(t+2,&host,8); t[10]=0xff; t[11]=0xe0;   /* movabs rax, job_release_wake; jmp rax */
+    int sites=0;
+    for (uint64_t i=0;i+5<=image_size;++i) {
+        if (image[i]!=0xe8) continue;
+        int32_t d; memcpy(&d,image+i+1,4);
+        if ((int64_t)i+5+d!=fn) continue;
+        const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(image+i+5));
+        memcpy(image+i+1,&to,4);
+        ++sites;
+    }
+    printf("Job workers: resumed jobs wake them (release %#" PRIx64 ", %d call sites; BB_JOB_RESUME_WAKE=0: off)\n",
+           (uint64_t)fn,sites);
+    const char *stats=getenv("BB_JOB_WAKE_STATS");
+    if (stats && stats[0]=='1') { pthread_t th; pthread_create(&th,NULL,job_wake_stats,NULL); }
 }
 /* The job system's counter wait (corelib job scheduling: until [counter+0x20] == or <= a target):
  * a job worker that finds the counter not there yet suspends its job (SuspendJob) and retries when
@@ -2330,7 +2527,9 @@ int main(int argc, char **argv) {
         patch_collection_skip(image_end);
         patch_unlock_chapters(image_end);
         patch_u1_sticky(image_end);
+        patch_u1_frame_time(image_end);
         patch_job_sleep(image_end);
+        install_job_resume_wake(image_end);
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
         patch_dev_menu_camera(image_end);
