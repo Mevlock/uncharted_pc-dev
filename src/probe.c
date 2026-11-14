@@ -1555,12 +1555,14 @@ static void patch_u1_sticky(uint64_t image_size) {
  * really runs below 60 FPS slows down as before.
  * BB_U1_DT_CARRY=0: the game's own cap. With BB_FRAME_STATS=1 a line every 300 frames: real and game time per
  * frame, steps under 3/4 of the cap, frames the cap cut. */
-static int u1_dt_carry_on, u1_dt_stats_on;
-static float u1_dt_carry;
-static struct { uint32_t frames, cut, short_steps; double want, out; } u1_dt_stats;
+static int u1_dt_carry_on, u1_dt_stats_on, u1_dt_snap_on;
+static float u1_dt_carry, u1_dt_period, u1_dt_acc, u1_dt_ema;
+static FILE *u1_dt_log;
+static struct { uint32_t frames, cut, short_steps, long_steps, snapped; double want, out, sq, lo, hi; } u1_dt_stats;
 static ABI float u1_frame_time(float want, float cap) {
     const float raw=cap<want ? cap : want;               /* vminss xmm0, xmm2, xmm0: the game's step */
     float out=raw;
+    int snapped=0;
     /* Only a frame within two caps of the last (no hitch, load or pause: a step of 0) is topped up, never past the cap,
      * and only with the previous frame's own cut-off time: what a frame cannot take is dropped, not carried on. */
     if (u1_dt_carry_on && want>0.0f && cap>0.0f && want<2.0f*cap) {
@@ -1570,17 +1572,47 @@ static ABI float u1_frame_time(float want, float cap) {
     } else {
         u1_dt_carry=0.0f;
     }
+    /* BB_U1_DT_SNAP=1 (test): while the frames average a whole number of present periods (the game keeps the
+     * display's pace), each step is whole periods, the rest kept for the next frame (no drift). */
+    if (u1_dt_snap_on && u1_dt_period>0.0f) {
+        const float P=u1_dt_period;
+        if (want>0.0f && want<0.25f) {
+            u1_dt_ema=u1_dt_ema>0.0f ? u1_dt_ema*0.9f+want*0.1f : want;
+            const float k=(float)(int)(u1_dt_ema/P+0.5f);
+            if (k>=1.0f && k<=4.0f && (u1_dt_ema>k*P ? u1_dt_ema-k*P : k*P-u1_dt_ema)<0.03f*k*P) {
+                u1_dt_acc+=want;
+                float n=(float)(int)(u1_dt_acc/P+0.5f);
+                if (n<1.0f) n=1.0f;
+                out=n*P;
+                u1_dt_acc-=out;
+                if (u1_dt_acc>P || u1_dt_acc<-P) u1_dt_acc=0.0f;
+                if (out>cap) out=cap;
+                snapped=1;
+            } else {
+                u1_dt_acc=0.0f;
+            }
+        } else {
+            u1_dt_acc=0.0f; u1_dt_ema=0.0f;
+        }
+    }
+    if (u1_dt_log) {
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+        fprintf(u1_dt_log,"%.3f %.3f %.3f\n",(double)ts.tv_sec*1000.0+ts.tv_nsec/1e6,want*1000.0,out*1000.0);
+    }
     if (u1_dt_stats_on) {
+        if (!u1_dt_stats.frames) { u1_dt_stats.lo=1e9; u1_dt_stats.hi=0; }
         ++u1_dt_stats.frames;
-        u1_dt_stats.want+=want; u1_dt_stats.out+=out;
+        u1_dt_stats.want+=want; u1_dt_stats.out+=out; u1_dt_stats.sq+=(double)out*out;
+        if (out<u1_dt_stats.lo) u1_dt_stats.lo=out;
+        if (out>u1_dt_stats.hi) u1_dt_stats.hi=out;
         if (want>cap) ++u1_dt_stats.cut;
-        if (cap>0.0f && out<0.75f*cap) ++u1_dt_stats.short_steps;
+        u1_dt_stats.snapped+=snapped;
         if (u1_dt_stats.frames>=300) {
-            const double n=u1_dt_stats.frames;
-            printf("U1 frame time: %u frames, real %.2f ms, game %.2f ms per frame (%.1f%% behind), %u steps under 3/4 of "
-                   "the cap (%.2f ms), %u cut by it; carry %s\n",u1_dt_stats.frames,u1_dt_stats.want/n*1000.0,
-                   u1_dt_stats.out/n*1000.0,u1_dt_stats.want>0 ? (1.0-u1_dt_stats.out/u1_dt_stats.want)*100.0 : 0.0,
-                   u1_dt_stats.short_steps,cap*1000.0,u1_dt_stats.cut,u1_dt_carry_on ? "on" : "off (BB_U1_DT_CARRY=0)");
+            const double n=u1_dt_stats.frames, mean=u1_dt_stats.out/n, sd=sqrt(fmax(0.0,u1_dt_stats.sq/n-mean*mean));
+            printf("U1 frame time: %u frames, real %.2f ms, game step %.2f ms (sd %.2f, %.2f-%.2f), %u cut by the cap "
+                   "(%.0f ms)%s%s\n",u1_dt_stats.frames,u1_dt_stats.want/n*1000.0,mean*1000.0,sd*1000.0,
+                   u1_dt_stats.lo*1000.0,u1_dt_stats.hi*1000.0,u1_dt_stats.cut,cap*1000.0,
+                   u1_dt_carry_on ? "; carry on" : "",u1_dt_snap_on ? (u1_dt_stats.snapped ? "; snapped to the present period" : "; snap idle") : "");
             fflush(stdout);
             memset(&u1_dt_stats,0,sizeof(u1_dt_stats));
         }
@@ -1591,7 +1623,15 @@ static void patch_u1_frame_time(uint64_t image_size) {
     const char *env=getenv("BB_U1_DT_CARRY"), *stats=getenv("BB_FRAME_STATS");
     u1_dt_carry_on=!(env && env[0]=='0');
     u1_dt_stats_on=stats && stats[0]=='1';
-    if (!u1_dt_carry_on && !u1_dt_stats_on) return;
+    const char *snap=getenv("BB_U1_DT_SNAP"), *log=getenv("BB_U1_DT_LOG");
+    u1_dt_snap_on=snap && snap[0]=='1';
+    {   /* the present period: the frame limit, else the vblank (BB_VBLANK_HZ 0: 480 Hz, unpaced without a limit) */
+        const char *hz=getenv("BB_VBLANK_HZ"), *limit=getenv("BB_FPS_LIMIT");
+        const long v=hz ? atol(hz) : 60, l=limit ? atol(limit) : 0;
+        u1_dt_period=l>0 ? 1.0f/(float)l : v>0 ? 1.0f/(float)v : 0.0f;
+    }
+    if (log && *log) u1_dt_log=fopen(log,"w");
+    if (!u1_dt_carry_on && !u1_dt_stats_on && !u1_dt_snap_on && !u1_dt_log) return;
     /* vminss xmm0,xmm2,xmm0; vmovss [rbx+8],xmm0; lea rax,[settings]; vmovss xmm2,[rax+0x47e4] ("forcefps");
      * vxorps xmm3,xmm3,xmm3 (1.02 0xfad1c, 1.00 0xfabec; the same bytes in EU and US) */
     const int64_t at=find_masked("c5ea5dc0 c5fa114308 488d05???????? c5fa1090e4470000 c5e057db",image_size);
