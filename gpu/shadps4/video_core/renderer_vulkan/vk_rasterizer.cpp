@@ -8922,8 +8922,8 @@ bool Rasterizer::TakeSceneFrame() noexcept {
                         menu_draws);
         }
     }
-    // BB_ULTRAWIDE_MOVIE_LOG=1 (diagnosis): a line per frame from the first movie picture read
-    // until 120 frames after the last, with the mode the draw count alone gave (before the
+    // BB_ULTRAWIDE_MOVIE_LOG=1 (diagnosis): a line per frame from the first movie picture decoded
+    // until 120 frames after the last read or decode, with the mode the draw count alone gave (before the
     // movie switch).
     static const bool movie_log = [] {
         const char* env = std::getenv("BB_ULTRAWIDE_MOVIE_LOG");
@@ -8942,7 +8942,7 @@ bool Rasterizer::TakeSceneFrame() noexcept {
             old_gameplay = old_raw;
             old_run = 0;
         }
-        if (movie_reads) {
+        if (movie_reads || Libraries::VideoOut::g_movie_pictures_live.load(std::memory_order_relaxed)) {
             log_left = 120;
         }
         if (log_left) {
