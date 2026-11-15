@@ -312,7 +312,7 @@ private:
     /// upscaler runs on the HDR scene colour before the post-processing, as at the game's own
     /// 1920x1080 (Run at the trigger dispatch), not on the finished LDR frame. BB_NATIVE_BEFORE_POST=0: off.
     bool early_native = false;
-    /// bbport PROTOTYPE (DLSS rework 7, BB_PROJECTION_JITTER=1, Uncharted 3 EU 1.02): the jitter
+    /// bbport PROTOTYPE (DLSS rework 7, BB_PROJECTION_JITTER=1, Uncharted 1-3, 1.02): the jitter
     /// is in the game's projection (runtime_ultrawide.c); OnFrameStart writes the next one to the
     /// game's slot, the frame's own is read back from the velocity pass (UseProjectionJitter).
     /// (The game code is patched after the GPU starts: looked up at each use.)

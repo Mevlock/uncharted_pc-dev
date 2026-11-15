@@ -1224,36 +1224,84 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
 
 /* PROTOTYPE (DLSS rework 7, BB_PROJECTION_JITTER=1, off by default): the upscaler's sub-pixel jitter in the game's
  * own projection, as the inFAMOUS Second Son port does it (idea from Liondarkz/issn_pc), instead of a viewport
- * offset on the scene's draws. Uncharted 3 EU 1.02 only (the code is recognised by its bytes; nothing happens in any
- * other game or version).
+ * offset on the scene's draws. Uncharted 1, 2 and 3 version 1.02 (the game programs are the same in every region);
+ * the code is recognised by its bytes, nothing happens in any other version.
  *
- * The render camera's update (code offset 0x11c0d30, rbx = the camera) builds the projection rows (row vectors:
- * clip = view * P) in xmm12/xmm9/xmm7/xmm6, stores them at [rbx+0x90..0xc0] and joins at 0x11c1823 for view x
- * projection (and a second projection whose third row waits at [rbp-0x110]); the inverse is taken from [rbx+0x90..]
- * afterwards. At the join a stub adds (x, y, 0, 0) from a slot to the third row (register, stored copy and the second
- * projection's): clip x, y += offset * view z, a shift of the whole picture by `offset` in NDC. Perspective cameras
- * whose aspect field [rbx+0x250] is not 1 only: orthographic (sun shadows, [rbx+0x268]) and square cameras (cube
- * faces, spot shadow maps) keep their projection; a reflection camera with the screen's aspect is jittered too.
+ * Each game's render camera update (rbx = the camera) builds the projection rows (row vectors: clip = view * P) in
+ * four registers, stores them at [rbx+0x90..0xc0] and joins at one instruction (a load of the view matrix's first
+ * row from [rbx+0x50]) for view x projection, then view x a second projection whose third row waits on the stack
+ * (U2, U3) or is a constant loaded later (U1); the inverse is taken from [rbx+0x90..] afterwards. At the join a
+ * stub adds (x, y, 0, 0) from a slot to the third row (register, stored copy, the second projection's): clip x, y
+ * += offset * view z, a shift of the whole picture by that offset in NDC. Perspective cameras whose aspect field is
+ * not 1 only: orthographic ones (sun shadows) and square ones (cube faces, spot shadow maps, U1's flashlight) keep
+ * their projection; a reflection camera with the screen's aspect is jittered too.
  * The slot is written by the GPU thread once per shown frame (TemporalUpscaler::OnFrameStart); the game builds its
  * camera ahead of the frame drawn, so the jitter a frame really used is read back from the velocity pass's constants
  * (CameraMotion::OnVelocityConstants). */
 float *runtime_projection_jitter_slot;
 
+typedef struct {
+    const char *name;
+    uint64_t start;        /* the camera update */
+    uint8_t start_bytes[12];
+    uint64_t join;         /* the 5-byte load of [rbx+0x50] after the projection is stored */
+    uint8_t join_bytes[10];
+    uint32_t ortho;        /* [rbx + ortho] != 0: orthographic */
+    uint32_t aspect;       /* [rbx + aspect]: the aspect field (1: a square camera) */
+    uint8_t row;           /* xmm register of the projection's third row at the join (< 8) */
+    int32_t stack_row;     /* [rbp + stack_row]: the second projection's third row, or 0 */
+    uint64_t const_row;    /* or: its 8-byte load into xmm8 from a rip-relative constant (c5 78 28 05 rel32), or 0 */
+} ProjectionJitterGame;
+
+static const ProjectionJitterGame projection_jitter_games[] = {
+    {"Uncharted 1 1.02", 0x2c9660, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x81, 0xec, 0xc8, 0x00, 0x00, 0x00},
+     0x2c9c0a, {0xc5, 0xf8, 0x28, 0x63, 0x50, 0xc5, 0xf8, 0x28, 0x6b, 0x60}, 0x2a4, 0x290, 1, 0, 0x2c9d79},
+    {"Uncharted 2 1.02", 0x9dc750, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x81, 0xec, 0x28, 0x01, 0x00, 0x00},
+     0x9dcd4e, {0xc5, 0xf8, 0x28, 0x43, 0x50, 0xc4, 0xe3, 0x79, 0x04, 0xc8}, 0x280, 0x250, 2, -0x120, 0},
+    {"Uncharted 3 1.02", 0x11c0d30, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x81, 0xec, 0x08, 0x01, 0x00, 0x00},
+     0x11c1823, {0xc5, 0xf8, 0x28, 0x43, 0x50, 0xc4, 0xe3, 0x79, 0x04, 0xc8}, 0x268, 0x250, 7, -0x110, 0},
+};
+
+#ifdef _WIN32
+/* The stub's test: jumps to the skip label (its two rel8 bytes are returned for fixing up) unless the camera is a
+ * perspective one whose aspect is not 1. */
+static uint8_t *pj_emit_test(uint8_t *c, const ProjectionJitterGame *g, uint8_t **skip1, uint8_t **skip2) {
+    const float lo = 0.995f, hi = 1.005f;
+    *c++ = 0x80; *c++ = 0xbb; memcpy(c, &g->ortho, 4); c += 4; *c++ = 0x00;  /* cmp byte [rbx+ortho], 0 */
+    *c++ = 0x75; *skip1 = c++;                                               /* jne skip */
+    *c++ = 0x81; *c++ = 0xbb; memcpy(c, &g->aspect, 4); c += 4; memcpy(c, &lo, 4); c += 4; /* cmp dword [rbx+aspect], 0.995 */
+    *c++ = 0x72; uint8_t *apply = c++;                                       /* jb apply */
+    *c++ = 0x81; *c++ = 0xbb; memcpy(c, &g->aspect, 4); c += 4; memcpy(c, &hi, 4); c += 4; /* cmp dword [rbx+aspect], 1.005 */
+    *c++ = 0x76; *skip2 = c++;                                               /* jbe skip (square) */
+    *apply = (uint8_t)(c - (apply + 1));
+    return c;
+}
+
+static uint8_t *pj_rel(uint8_t *c, const void *target) {
+    const int32_t rel = (int32_t)((intptr_t)target - (intptr_t)(c + 4));
+    memcpy(c, &rel, 4);
+    return c + 4;
+}
+#endif
+
 void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     const char *env = getenv("BB_PROJECTION_JITTER");
     if (!env || env[0] != '1') return;
 #ifdef _WIN32
-    static const uint8_t start[12] = {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x81, 0xec, 0x08, 0x01, 0x00, 0x00};
-    static const uint8_t ortho[7] = {0x80, 0xbb, 0x68, 0x02, 0x00, 0x00, 0x00};
-    static const uint8_t join[5] = {0xc5, 0xf8, 0x28, 0x43, 0x50}; /* vmovaps xmm0, [rbx+0x50] */
-    static const uint8_t after[6] = {0xc4, 0xe3, 0x79, 0x04, 0xc8, 0x00}; /* vpermilps xmm1, xmm0, 0 */
-    const uint64_t at = 0x11c1823;
-    if (size < at + 0x400 || memcmp(code + 0x11c0d30, start, sizeof(start)) || memcmp(code + 0x11c0f02, ortho, sizeof(ortho)) ||
-        memcmp(code + at, join, sizeof(join)) || memcmp(code + at + 5, after, sizeof(after))) {
-        printf("Projection jitter (prototype): not this game/version (Uncharted 3 EU 1.02 only), not applied\n");
+    const ProjectionJitterGame *g = NULL;
+    for (unsigned i = 0; i < sizeof(projection_jitter_games) / sizeof(projection_jitter_games[0]) && !g; ++i) {
+        const ProjectionJitterGame *t = &projection_jitter_games[i];
+        static const uint8_t const_load[4] = {0xc5, 0x78, 0x28, 0x05}; /* vmovaps xmm8, [rip + rel32] */
+        if (size >= t->join + 0x400 && !memcmp(code + t->start, t->start_bytes, sizeof(t->start_bytes)) &&
+            !memcmp(code + t->join, t->join_bytes, sizeof(t->join_bytes)) &&
+            (!t->const_row || !memcmp(code + t->const_row, const_load, sizeof(const_load))))
+            g = t;
+    }
+    if (!g) {
+        printf("Projection jitter (prototype): not a known game version (Uncharted 1, 2, 3 version 1.02), not applied\n");
         return;
     }
-    /* An executable page within rel32 of the code: the stub, and the slot at +0x800. */
+    /* An executable page within rel32 of the code: the stubs, and the slot at +0x800. */
     uint8_t *page = NULL;
     const uintptr_t base = ((uintptr_t)code + size + 0xffff) & ~(uintptr_t)0xffff;
     for (uintptr_t step = 0; step < (1800ull << 20) && !page; step += 1u << 16)
@@ -1263,40 +1311,44 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
         return;
     }
     float *slot = (float *)(page + 0x800);
-    const float lo = 0.995f, hi = 1.005f;
-    uint8_t *c = page;
-#define PJ_BYTES(...) do { const uint8_t b_[] = {__VA_ARGS__}; memcpy(c, b_, sizeof(b_)); c += sizeof(b_); } while (0)
-#define PJ_REL(target) do { const int32_t r_ = (int32_t)((intptr_t)(target) - (intptr_t)(c + 4)); memcpy(c, &r_, 4); c += 4; } while (0)
-    PJ_BYTES(0x80, 0xbb, 0x68, 0x02, 0x00, 0x00, 0x00);  /* cmp byte [rbx+0x268], 0 (orthographic) */
-    PJ_BYTES(0x75, 0x00);                                /* jne skip */
-    uint8_t *skip1 = c - 1;
-    PJ_BYTES(0x81, 0xbb, 0x50, 0x02, 0x00, 0x00);        /* cmp dword [rbx+0x250], 0.995 */
-    memcpy(c, &lo, 4); c += 4;
-    PJ_BYTES(0x72, 0x00);                                /* jb apply */
-    uint8_t *apply1 = c - 1;
-    PJ_BYTES(0x81, 0xbb, 0x50, 0x02, 0x00, 0x00);        /* cmp dword [rbx+0x250], 1.005 */
-    memcpy(c, &hi, 4); c += 4;
-    PJ_BYTES(0x76, 0x00);                                /* jbe skip (square) */
-    uint8_t *skip2 = c - 1;
-    *apply1 = (uint8_t)(c - (apply1 + 1));
-    PJ_BYTES(0xc5, 0xc0, 0x58, 0x3d); PJ_REL(slot);      /* vaddps xmm7, xmm7, [slot] */
-    PJ_BYTES(0xc5, 0xf8, 0x29, 0xbb, 0xb0, 0x00, 0x00, 0x00); /* vmovaps [rbx+0xb0], xmm7 */
-    PJ_BYTES(0xc5, 0xf8, 0x28, 0x85, 0xf0, 0xfe, 0xff, 0xff); /* vmovaps xmm0, [rbp-0x110] */
-    PJ_BYTES(0xc5, 0xf8, 0x58, 0x05); PJ_REL(slot);      /* vaddps xmm0, xmm0, [slot] */
-    PJ_BYTES(0xc5, 0xf8, 0x29, 0x85, 0xf0, 0xfe, 0xff, 0xff); /* vmovaps [rbp-0x110], xmm0 */
+    uint8_t *c = page, *skip1, *skip2;
+    const uint8_t r = g->row;
+    c = pj_emit_test(c, g, &skip1, &skip2);
+    *c++ = 0xc5; *c++ = (uint8_t)(0x80 | ((~r & 15) << 3)); *c++ = 0x58; *c++ = (uint8_t)((r << 3) | 5);
+    c = pj_rel(c, slot);                                                  /* vaddps xmmR, xmmR, [slot] */
+    *c++ = 0xc5; *c++ = 0xf8; *c++ = 0x29; *c++ = (uint8_t)(0x83 | (r << 3));
+    *c++ = 0xb0; *c++ = 0x00; *c++ = 0x00; *c++ = 0x00;                   /* vmovaps [rbx+0xb0], xmmR */
+    if (g->stack_row) {
+        *c++ = 0xc5; *c++ = 0xf8; *c++ = 0x28; *c++ = 0x85; memcpy(c, &g->stack_row, 4); c += 4; /* vmovaps xmm0, [rbp+d] */
+        *c++ = 0xc5; *c++ = 0xf8; *c++ = 0x58; *c++ = 0x05; c = pj_rel(c, slot);                 /* vaddps xmm0, xmm0, [slot] */
+        *c++ = 0xc5; *c++ = 0xf8; *c++ = 0x29; *c++ = 0x85; memcpy(c, &g->stack_row, 4); c += 4; /* vmovaps [rbp+d], xmm0 */
+    }
     *skip1 = (uint8_t)(c - (skip1 + 1));
     *skip2 = (uint8_t)(c - (skip2 + 1));
-    memcpy(c, join, sizeof(join)); c += sizeof(join);    /* the replaced instruction */
-    PJ_BYTES(0xe9); PJ_REL(code + at + 5);               /* jmp back */
-#undef PJ_BYTES
-#undef PJ_REL
-    uint8_t *site = code + at;
-    const int32_t rel = (int32_t)((intptr_t)page - (intptr_t)(site + 5));
+    memcpy(c, g->join_bytes, 5); c += 5;                                  /* the replaced load */
+    *c++ = 0xe9; c = pj_rel(c, code + g->join + 5);                       /* jmp back */
+    uint8_t *site = code + g->join;
     site[0] = 0xe9;
-    memcpy(site + 1, &rel, 4);
+    pj_rel(site + 1, page);
+    if (g->const_row) {
+        /* The second projection's third row is a constant loaded into xmm8: the load, then the same test and add. */
+        uint8_t *stub = (c = page + 0x100);
+        uint8_t *load = code + g->const_row;
+        int32_t rel;
+        memcpy(&rel, load + 4, 4);
+        *c++ = 0xc5; *c++ = 0x78; *c++ = 0x28; *c++ = 0x05; c = pj_rel(c, load + 8 + rel); /* vmovaps xmm8, [constant] */
+        c = pj_emit_test(c, g, &skip1, &skip2);
+        *c++ = 0xc5; *c++ = 0x38; *c++ = 0x58; *c++ = 0x05; c = pj_rel(c, slot);           /* vaddps xmm8, xmm8, [slot] */
+        *skip1 = (uint8_t)(c - (skip1 + 1));
+        *skip2 = (uint8_t)(c - (skip2 + 1));
+        *c++ = 0xe9; c = pj_rel(c, load + 8);                                               /* jmp back */
+        load[0] = 0xe9;
+        pj_rel(load + 1, stub);
+        load[5] = 0x0f; load[6] = 0x1f; load[7] = 0x00;                                     /* 3-byte nop */
+    }
     runtime_projection_jitter_slot = slot;
     printf("Projection jitter (PROTOTYPE, BB_PROJECTION_JITTER=1): the game's projection takes the upscaler jitter "
-           "(Uncharted 3 EU 1.02, camera update at %#llx, stub at %p)\n", (unsigned long long)at, (void *)page);
+           "(%s, camera update join at %#llx, stub at %p)\n", g->name, (unsigned long long)g->join, (void *)page);
 #else
     (void)code;
     (void)size;
