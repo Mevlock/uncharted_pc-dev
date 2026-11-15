@@ -32,6 +32,7 @@
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "shader_recompiler/specialization.h"
+#include "shader_recompiler/ir/passes/srt.h"
 
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
@@ -659,6 +660,14 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
                         frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
+            // bbport diagnosis: the shaders' resource table walks (flat buffers with their
+            // per-lane read windows, srt.h): what the copies amount to per frame.
+            if (const u64 walks = Shader::g_flatbuf_walks.exchange(0)) {
+                const u64 dwords = Shader::g_flatbuf_dwords.exchange(0);
+                std::printf("Constant tables: %.0f walks/frame, %.1f KiB/frame (%.0f bytes each)\n",
+                            frames ? double(walks) / frames : 0.0,
+                            frames ? dwords * 4.0 / 1024.0 / frames : 0.0, dwords * 4.0 / walks);
+            }
             // bbport diagnosis: the guest's wait in sceGnmSubmitDone for GPU idle per frame, and
             // the done markers run mid-queue (BB_SUBMIT_MARKERS) or at the dry point.
             if (const u64 n = BbStats::submit_dones.exchange(0)) {

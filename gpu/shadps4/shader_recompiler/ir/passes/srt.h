@@ -10,6 +10,7 @@
 #include <boost/container/set.hpp>
 #include <boost/container/small_vector.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include "common/types.h"
 
@@ -24,14 +25,34 @@ PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
 
 // bbport: a ReadConst whose offset varies per lane (a constant block's pointer plus a per-pixel
 // offset, as addr64 buffer loads compute it) reads a window of the block's first dwords that the
-// walker copies to the flat buffer; its flags are the window's start with this bit.
+// walker copies to the flat buffer; its flags are the window's start with this bit, and the
+// window's dwords - 1 from bit ReadConstWindowSizeShift up (at most ReadConstMaxWindowDwords).
 constexpr u32 ReadConstWindowFlag = 1u << 16;
-/// bbport: a window of ReadConstSmallWindowDwords only (the flat buffer had no room for more).
-constexpr u32 ReadConstSmallWindowFlag = 1u << 17;
+constexpr u32 ReadConstWindowSizeShift = 17;
+constexpr u32 ReadConstMaxWindowDwords = 32768;
+/// bbport: the window of a read whose offset range is not known, in graphics stages (and where
+/// the flat buffer has no room for more).
 constexpr u32 ReadConstSmallWindowDwords = 256;
 
-/// bbport: dwords of a ReadConst window. 256 held ~4 lights of U2's tiled lighting compute
-/// shader (56 dwords each, up to 128 lights): the others read the window's last dword, passed
+/// bbport: a window is as long as the offsets of its reads can reach, where their arithmetic
+/// bounds them (a mask, a bit field, a minimum: flatten_extended_userdata_pass.cpp,
+/// OffsetUpperBound): no read is clamped then. Before, every window had the fixed sizes below
+/// and a read past it got the window's last dword: the games' floating dust and snow (vertex
+/// shader 6d41b681, all three games: each mote follows one of 32 path segments, 515 dwords of
+/// its block; with 256 dwords the motes on segments 11 to 31 all read one constant: dust stood
+/// still in clumps, snow fell in straight lines). The fixed sizes remain for offsets without a
+/// bound (one log line per such shader when it is translated).
+/// BB_READCONST_RANGE=0: fixed sizes for all, as before (another shader cache version).
+inline bool ReadConstRange() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_READCONST_RANGE");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
+/// bbport: dwords of a ReadConst window whose reads have no known range, in compute shaders.
+/// 256 held ~4 lights of U2's tiled lighting compute shader (56 dwords each, up to 128 lights): the others read the window's last dword, passed
 /// culling everywhere and lit every pixel (too bright, and ~26 ms a frame at a lamp-heavy view
 /// instead of ~2). 8192 dwords (32 KiB) hold them all; few shaders use windows (7 binds a frame
 /// in U2). BB_READCONST_WINDOW_DWORDS=N sets it (256: as before); the shader cache is rebuilt
@@ -45,6 +66,11 @@ inline u32 ReadConstWindowDwords() {
     }();
     return dwords;
 }
+
+/// bbport diagnosis (BB_FRAME_STATS): resource table walks and the dwords they filled (each
+/// shader stage's flat buffer, windows included), for the "Constant tables" line.
+inline const bool g_flatbuf_stats = std::getenv("BB_FRAME_STATS") != nullptr;
+inline std::atomic<u64> g_flatbuf_walks{0}, g_flatbuf_dwords{0};
 
 // bbport: the walker reads the resource tables in guest memory, where data the GPU wrote (and
 // has not copied back) is stale: character constants among them (screen-size triangles for
