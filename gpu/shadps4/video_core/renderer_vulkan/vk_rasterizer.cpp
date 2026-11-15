@@ -4535,7 +4535,25 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             camera_motion->InvalidateHistory();
         }
         camera_motion->SetJitter(upscaler->Jitter());
-        object_motion->OnFrameStart();
+        // bbport: once per shown frame. Uncharted draws into the display buffer several times a frame
+        // (the composite, its copies, the HUD): every one of them passed here and started a new object
+        // motion frame, so the positions stored during the scene were two or more "frames" old by the
+        // next scene and never matched: 0 draws with history, no character motion vectors at all
+        // (BB_FRAME_STATS: "Object motion: N draws, N stored, 0 with history"). Off until it has been
+        // looked at (it turns the character vectors on for the first time): BB_OBJECT_MOTION_FRAME=1
+        // turns it on, otherwise as before (every display draw).
+        {
+            static const bool per_flip = [] {
+                const char* env = std::getenv("BB_OBJECT_MOTION_FRAME");
+                return env && env[0] == '1';
+            }();
+            static u64 motion_flip = ~0ull;
+            const u64 flip = g_flips.load(std::memory_order_relaxed);
+            if (!per_flip || flip != motion_flip) {
+                motion_flip = flip;
+                object_motion->OnFrameStart();
+            }
+        }
         NoteFrameStart();
         static const char* scene_debug = std::getenv("BB_SCENE_DEBUG");
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
