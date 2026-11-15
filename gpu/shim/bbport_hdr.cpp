@@ -55,6 +55,8 @@ Tuning Current() {
     t.scene_mode = float(v.hdr_scene_mode.load(r));
     t.knee = v.hdr_knee.load(r);
     t.split = v.hdr_split.load(r);
+    t.strength = v.hdr_strength.load(r);
+    t.hud_vivid = v.hdr_hud_vivid.load(r) ? 1.0f : 0.0f;
     t.sdr_gamma = v.hdr_sdr_gamma.load(r);
     t.sdr_saturation = v.hdr_sdr_saturation.load(r);
     t.gamut_expansion = v.hdr_gamut_expansion.load(r);

@@ -428,13 +428,14 @@ void HdrSection(BbSettings::Values& s) {
         ImGui::TextUnformatted(T("Scene HDR (the game's own highlights)"));
         {
             int mode = s.hdr_scene_mode.load();
-            const char* modes[] = {"RenoDX tone mapping", "Game curve extended", "SDR + highlights"};
+            const char* modes[] = {T("RenoDX tone mapping"), T("Game curve extended"), T("SDR + highlights")};
             if (ImGui::Combo(TI("Tone mapping"), &mode, modes, 3)) {
                 s.hdr_scene_mode = mode;
                 dirty = true;
             }
             if (mode == 2) {
                 SliderIn(TI("Knee"), s.hdr_knee, 0.2f, 0.9f, "%.2f");
+                SliderIn(TI("Highlight strength"), s.hdr_strength, 0.0f, 1.0f, "%.2f");
             }
             SliderIn(TI("SDR|HDR compare"), s.hdr_split, 0.0f, 1.0f, "%.2f");
             Hint(T("RenoDX: the earlier mapping (the sliders below). Game curve extended: the game's "
@@ -442,6 +443,8 @@ void HdrSection(BbSettings::Values& s) {
                    "RenoDX's The Last of Us Part II mod). SDR + highlights: the game's SDR picture "
                    "exactly below the knee, the scene's own brightness above it. Compare: the left "
                    "part of the screen shows the SDR picture (0 = off)."));
+            Checkbox(TI("Vivid HUD"), s.hdr_hud_vivid);
+            Hint(T("The HUD in wider colours, as a wide-gamut monitor shows SDR. Off: the HUD's exact colours."));
         }
         SliderIn(TI("Exposure"), s.hdr_exposure, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
         SliderIn(TI("Highlights start"), s.hdr_highlight_start, 0.1f, 0.95f, "%.2f");

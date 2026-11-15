@@ -815,6 +815,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         pp_settings.sdr_saturation = float_display ? 1.0f : tuning.sdr_saturation;
         // Gamut expansion: the last step of both (the overlay keeps accurate colours).
         pp_settings.gamut_expansion = tuning.gamut_expansion;
+        // Vivid HUD: only the scene HDR composite carries the HUD's share in its alpha.
+        pp_settings.hud_expansion = float_display ? tuning.hud_vivid : 0.0f;
     }
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
                                  fsr_settings, frame->is_hdr && !encode_hdr);

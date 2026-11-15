@@ -1125,4 +1125,61 @@ TRANSLATIONS = {
         '0 = 正確なカラー、1 = P3 モニターと同じ、2 = HDR のカラーガマットいっぱい。明るさは変わりません。'),
     'Reset HDR settings': L('Restablecer ajustes HDR', 'Redefinir configurações HDR', 'Réinitialiser les réglages HDR',
                             'HDR-Einstellungen zurücksetzen', 'Ripristina le impostazioni HDR', 'HDR 設定をリセット'),
+    # ---- HDR section: scene tone mapping modes, compare, vivid HUD (0.3.6.57 HDR branch) ------------------------
+    'Tone mapping': L('Mapeo de tonos', 'Mapeamento de tons', 'Mappage tonal', 'Tone-Mapping', 'Mappatura dei toni',
+                      'トーンマッピング'),
+    'RenoDX tone mapping': L('Mapeo de tonos RenoDX', 'Mapeamento de tons RenoDX', 'Mappage tonal RenoDX',
+                             'RenoDX-Tone-Mapping', 'Mappatura dei toni RenoDX', 'RenoDX トーンマッピング'),
+    'Game curve extended': L('Curva del juego extendida', 'Curva do jogo estendida', 'Courbe du jeu prolongée',
+                             'Spielkurve verlängert', 'Curva del gioco estesa', 'ゲームのカーブを延長'),
+    'SDR + highlights': L('SDR + luces altas', 'SDR + realces', 'SDR + hautes lumières', 'SDR + Spitzlichter',
+                          'SDR + alte luci', 'SDR + ハイライト'),
+    'Knee': L('Punto de inflexión', 'Ponto de inflexão', 'Point d’inflexion', 'Knickpunkt', 'Punto di ginocchio',
+              'ニー'),
+    'Highlight strength': L('Intensidad de las luces altas', 'Intensidade dos realces', 'Intensité des hautes lumières',
+                            'Stärke der Spitzlichter', 'Intensità delle alte luci', 'ハイライトの強さ'),
+    'SDR|HDR compare': L('Comparar SDR|HDR', 'Comparar SDR|HDR', 'Comparer SDR|HDR', 'SDR|HDR-Vergleich',
+                         'Confronto SDR|HDR', 'SDR|HDR 比較'),
+    "RenoDX: the earlier mapping (the sliders below). Game curve extended: the game's own filmic curve exactly up to "
+    "its turning point, then straight on into HDR (as RenoDX's The Last of Us Part II mod). SDR + highlights: the "
+    "game's SDR picture exactly below the knee, the scene's own brightness above it. Compare: the left part of the "
+    'screen shows the SDR picture (0 = off).': L(
+        'RenoDX: el mapeo anterior (los controles de abajo). Curva del juego extendida: la curva fílmica del juego '
+        'exactamente hasta su punto de inflexión y después en línea recta hacia el HDR (como el mod RenoDX de The '
+        'Last of Us Part II). SDR + luces altas: la imagen SDR del juego exactamente por debajo del punto de '
+        'inflexión y el brillo propio de la escena por encima. Comparar: la parte izquierda de la pantalla muestra '
+        'la imagen SDR (0 = desactivado).',
+        'RenoDX: o mapeamento anterior (os controles abaixo). Curva do jogo estendida: a curva fílmica do jogo '
+        'exatamente até o ponto de inflexão e depois em linha reta para o HDR (como o mod RenoDX de The Last of Us '
+        'Part II). SDR + realces: a imagem SDR do jogo exatamente abaixo do ponto de inflexão e o brilho da própria '
+        'cena acima dele. Comparar: a parte esquerda da tela mostra a imagem SDR (0 = desligado).',
+        'RenoDX : le mappage précédent (les curseurs ci-dessous). Courbe du jeu prolongée : la courbe filmique du '
+        'jeu exactement jusqu’à son point d’inflexion, puis en ligne droite vers le HDR (comme le mod RenoDX de The '
+        'Last of Us Part II). SDR + hautes lumières : l’image SDR du jeu exactement sous le point d’inflexion, la '
+        'luminosité propre de la scène au-dessus. Comparer : la partie gauche de l’écran montre l’image SDR '
+        '(0 = désactivé).',
+        'RenoDX: das bisherige Mapping (die Regler unten). Spielkurve verlängert: die Filmkurve des Spiels genau bis '
+        'zu ihrem Wendepunkt, danach geradlinig weiter ins HDR (wie die RenoDX-Mod für The Last of Us Part II). '
+        'SDR + Spitzlichter: das SDR-Bild des Spiels unterhalb des Knickpunkts unverändert, darüber die Helligkeit '
+        'der Szene selbst. Vergleich: Der linke Teil des Bildschirms zeigt das SDR-Bild (0 = aus).',
+        'RenoDX: la mappatura precedente (i cursori qui sotto). Curva del gioco estesa: la curva filmica del gioco '
+        'esattamente fino al suo punto di flesso, poi in linea retta verso l’HDR (come la mod RenoDX di The Last of '
+        'Us Part II). SDR + alte luci: l’immagine SDR del gioco esattamente sotto il punto di ginocchio, la '
+        'luminosità propria della scena sopra. Confronto: la parte sinistra dello schermo mostra l’immagine SDR '
+        '(0 = disattivato).',
+        'RenoDX: これまでのマッピング(下のスライダー)。ゲームのカーブを延長: ゲームのフィルミックカーブを変曲点まで'
+        'そのまま使い、その先は直線で HDR へ伸ばします(RenoDX の The Last of Us Part II MOD と同じ方法)。'
+        'SDR + ハイライト: ニーより下はゲームの SDR 映像そのまま、上はシーン本来の明るさ。比較: 画面の左側に '
+        'SDR 映像を表示します(0 = オフ)。'),
+    'Vivid HUD': L('HUD vivo', 'HUD vívido', 'HUD éclatant', 'Kräftiges HUD', 'HUD vivido', '鮮やかな HUD'),
+    "The HUD in wider colours, as a wide-gamut monitor shows SDR. Off: the HUD's exact colours.": L(
+        'El HUD con colores más amplios, como un monitor de gama amplia muestra el SDR. Desactivado: los colores '
+        'exactos del HUD.',
+        'O HUD com cores mais amplas, como um monitor de gama ampla mostra o SDR. Desligado: as cores exatas do HUD.',
+        'Le HUD avec des couleurs plus étendues, comme un écran à large gamut affiche le SDR. Désactivé : les '
+        'couleurs exactes du HUD.',
+        'Das HUD in kräftigeren Farben, so wie ein Wide-Gamut-Monitor SDR zeigt. Aus: die exakten Farben des HUD.',
+        'L’HUD con colori più ampi, come un monitor wide gamut mostra l’SDR. Disattivato: i colori esatti dell’HUD.',
+        'ワイドガマットのモニターが SDR を表示する時のように、HUD をより広いカラーで表示します。オフ: HUD の正確な'
+        'カラー。'),
 }

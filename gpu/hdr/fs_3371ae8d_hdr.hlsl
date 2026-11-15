@@ -26,6 +26,7 @@
 #define BBHDR_SCENE_MODE asfloat(HdrSettings.Load(44))
 #define BBHDR_KNEE asfloat(HdrSettings.Load(48))
 #define BBHDR_SPLIT asfloat(HdrSettings.Load(52))
+#define BBHDR_STRENGTH asfloat(HdrSettings.Load(56))
 #include "draw.hlsl"
 ByteAddressBuffer ssbo_1_1 : register(t0, space0);
 ByteAddressBuffer ssbo_2_1 : register(t1, space0);
@@ -894,7 +895,8 @@ void frag_main()
         const float bb_ratio = max(BbLuma(renodx_scene * renodx_filmic_gain) * RENODX_TONE_MAP_EXPOSURE /
                                        max(BbLuma(renodx_neutral), 1e-4f), 1.0f);
         const float bb_w = smoothstep(BBHDR_KNEE, 1.0f, bb_ys);
-        const float bb_stops = log2(lerp(1.0f, bb_ratio, bb_w));
+        // Strength: the share of those stops shown (1: all of them).
+        const float bb_stops = log2(lerp(1.0f, bb_ratio, bb_w)) * saturate(BBHDR_STRENGTH);
         const float bb_room = log2(max(bb_top / max(bb_ys, 1e-4f), 1.0f));
         const float bb_gain = bb_room > 0.0f ? exp2(bb_room * (1.0f - exp(-bb_stops / bb_room))) : 1.0f;
         renodx_hdr = float4(bb_sdr * bb_gain, 1.0f);

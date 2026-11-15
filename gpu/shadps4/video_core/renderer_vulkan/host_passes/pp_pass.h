@@ -32,6 +32,7 @@ public:
         /// bbport (hdr 2, both the SDR picture and the scene HDR composite): gamut expansion,
         /// 0 accurate Rec. 709 in Rec. 2020, 1 read as Display P3, 2 read as Rec. 2020.
         float gamut_expansion = 0.0f;
+        float hud_expansion = 0.0f;
     };
     /// bbport: `hdr` values.
     static constexpr u32 HdrGuestPq = 1;

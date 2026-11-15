@@ -124,6 +124,10 @@ struct Values {
     /// Scene tone mapping (BbHdr::Tuning::scene_mode): 0 RenoDX, 1 extended game curve, 2 SDR + highlights.
     std::atomic<int> hdr_scene_mode{0};
     std::atomic<float> hdr_knee{0.5f};
+    /// Mode 2: the share of the scene's highlight range shown (in stops); 1 all of it.
+    std::atomic<float> hdr_strength{1.0f};
+    /// The HUD in wider colours (as a P3 screen shows SDR); scene HDR frames only.
+    std::atomic<bool> hdr_hud_vivid{false};
     /// SDR|HDR compare: share of the screen (from the left) showing the SDR picture; 0 off.
     std::atomic<float> hdr_split{0.0f};
     std::atomic<float> hdr_sdr_gamma{2.2f};

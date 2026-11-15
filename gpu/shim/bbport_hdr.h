@@ -39,7 +39,9 @@ struct Tuning {
     float knee;
     /// Compare: the left part of the screen (0-1) shows the game's SDR picture at paper white.
     float split;
-    float reserved[2];
+    /// Mode 2: the share (0-1) of the scene's highlight range shown, in stops.
+    float strength;
+    float reserved[1];
     // The game's SDR picture in HDR10 (post process pass): decode gamma, Oklab chroma scale.
     float sdr_gamma;
     float sdr_saturation;
@@ -47,6 +49,8 @@ struct Tuning {
     /// 0 accurate (Rec. 709 exactly in Rec. 2020), 1 the colours read as Display P3, 2 as
     /// Rec. 2020 (as wide-gamut screens stretch SDR); luminance kept.
     float gamut_expansion;
+    /// Scene HDR composite: the HUD's colours read as Display P3 (1) instead of Rec. 709 (0).
+    float hud_vivid;
 };
 [[nodiscard]] Tuning Current();
 

@@ -3,6 +3,8 @@
 
 EXTRA_TRANSLATIONS = {
     'de': {
+        'Auto (as Windows reports)':
+        'Auto (wie von Windows gemeldet)',
         'HDR':
         'HDR',
         'Peak brightness (nits)':
@@ -431,6 +433,8 @@ EXTRA_TRANSLATIONS = {
         'Puts every display, controls, cheats, game and advanced option back to its default. The game folders, the saves folder, the console and launcher languages, the player name and the cover art stay as they are. Your saves are not touched.': 'Setzt alle Optionen für Anzeige, Steuerung, Cheats, Spiel und Erweitert auf den Standard zurück. Die Spielordner, der Spielstandordner, die Konsolen- und Launcher-Sprache, der Spielername und die Cover bleiben, wie sie sind. Deine Spielstände werden nicht verändert.',
     },
     'it': {
+        'Auto (as Windows reports)':
+        'Auto (come indicato da Windows)',
         'HDR':
         'HDR',
         'Peak brightness (nits)':
@@ -859,6 +863,8 @@ EXTRA_TRANSLATIONS = {
         'Puts every display, controls, cheats, game and advanced option back to its default. The game folders, the saves folder, the console and launcher languages, the player name and the cover art stay as they are. Your saves are not touched.': 'Riporta ai valori predefiniti tutte le opzioni di schermo, controlli, trucchi, gioco e avanzate. Le cartelle dei giochi, la cartella dei salvataggi, la lingua della console e del launcher, il nome del giocatore e le copertine restano come sono. I tuoi salvataggi non vengono toccati.',
     },
     'ja': {
+        'Auto (as Windows reports)':
+        '自動 (Windows の報告値)',
         'HDR':
         'HDR',
         'Peak brightness (nits)':
@@ -1281,6 +1287,8 @@ EXTRA_TRANSLATIONS = {
         'Puts every display, controls, cheats, game and advanced option back to its default. The game folders, the saves folder, the console and launcher languages, the player name and the cover art stay as they are. Your saves are not touched.': '画面、操作、チート、ゲーム、詳細のすべてのオプションを初期値に戻します。ゲームフォルダー、セーブフォルダー、本体と起動ツールの言語、プレイヤー名、カバー画像はそのまま残ります。セーブデータには触れません。',
     },
     'es': {
+        'Auto (as Windows reports)':
+        'Automático (según Windows)',
         'HDR':
         'HDR',
         'Peak brightness (nits)':
@@ -1608,6 +1616,8 @@ EXTRA_TRANSLATIONS = {
         'Puts every display, controls, cheats, game and advanced option back to its default. The game folders, the saves folder, the console and launcher languages, the player name and the cover art stay as they are. Your saves are not touched.': 'Devuelve a su valor predeterminado todas las opciones de pantalla, controles, trucos, juego y avanzadas. Las carpetas de los juegos, la carpeta de partidas, los idiomas de la consola y del launcher, el nombre del jugador y las portadas se mantienen. Tus partidas guardadas no se tocan.',
     },
     'pt': {
+        'Auto (as Windows reports)':
+        'Automático (conforme o Windows)',
         'HDR':
         'HDR',
         'Peak brightness (nits)':
@@ -1936,6 +1946,8 @@ EXTRA_TRANSLATIONS = {
         'Puts every display, controls, cheats, game and advanced option back to its default. The game folders, the saves folder, the console and launcher languages, the player name and the cover art stay as they are. Your saves are not touched.': 'Volta ao padrão todas as opções de tela, controles, trapaças, jogo e avançadas. As pastas dos jogos, a pasta de jogos salvos, os idiomas do console e do launcher, o nome do jogador e as capas continuam como estão. Seus jogos salvos não são alterados.',
     },
     'fr': {
+        'Auto (as Windows reports)':
+        'Auto (valeur indiquée par Windows)',
         'HDR':
         'HDR',
         'Peak brightness (nits)':
@@ -2268,6 +2280,8 @@ EXTRA_TRANSLATIONS = {
     # where the English text is the same as ours, the rest translated for this port; the shared
     # launcher's Russian (bbport_lang) fills in the Steam texts. Not checked by native speakers yet.
     'ru': {
+        'Auto (as Windows reports)':
+        'Авто (по данным Windows)',
         # from PR #713 (poncho-ajmv)
         '\n— the game exited (code {}) —\n': '\n— игра завершилась (код {}) —\n',
         '144 FPS (experimental)': '144 кадра/с (экспериментально)',

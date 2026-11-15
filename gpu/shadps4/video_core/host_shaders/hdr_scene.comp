@@ -58,6 +58,7 @@ void main() {
         w = sy < 1.0 - 1e-5 ? 1.0 - (dy - sy) / (1.0 - sy) : 0.0;
     }
     w = clamp(w, 0.0, 1.0);
-    imageStore(target, pixel, vec4(max(d + (h - s) * w, 0.0), 1.0));
+    // Alpha: the HUD's share of the pixel (0: the scene alone), for the encode's vivid HUD.
+    imageStore(target, pixel, vec4(max(d + (h - s) * w, 0.0), 1.0 - w));
 #endif
 }

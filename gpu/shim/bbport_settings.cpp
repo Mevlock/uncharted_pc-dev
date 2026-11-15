@@ -146,6 +146,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.hdr_scene_mode = i < 0 ? 0 : i > 2 ? 2 : i;
     } else if (key == "hdr_knee") {
         v.hdr_knee = Clamp(f, 0.2f, 0.9f);
+    } else if (key == "hdr_strength") {
+        v.hdr_strength = Clamp(f, 0.0f, 1.0f);
+    } else if (key == "hdr_hud_vivid") {
+        v.hdr_hud_vivid = i != 0;
     } else if (key == "hdr_split") {
         v.hdr_split = Clamp(f, 0.0f, 1.0f);
     } else if (key == "hdr_sdr_gamma") {
@@ -219,6 +223,7 @@ void Load() {
         {"BB_HDR_GAMUT_EXPANSION", "hdr_gamut_expansion"},
         {"BB_HDR_SCENE_MODE", "hdr_scene_mode"},  {"BB_HDR_KNEE", "hdr_knee"},
         {"BB_HDR_SPLIT", "hdr_split"},
+        {"BB_HDR_STRENGTH", "hdr_strength"},      {"BB_HDR_HUD_VIVID", "hdr_hud_vivid"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env)) {
@@ -337,8 +342,9 @@ void Save() {
                  v.hdr_chrominance.load(), v.hdr_blowout.load(), v.hdr_hue_correction.load(),
                  int(v.hdr_per_channel.load()), v.hdr_sdr_gamma.load(), v.hdr_sdr_saturation.load(),
                  v.hdr_highlight_start.load(), v.hdr_gamut_expansion.load());
-    std::fprintf(file, "hdr_scene_mode=%d\nhdr_knee=%.2f\n", v.hdr_scene_mode.load(),
-                 v.hdr_knee.load());
+    std::fprintf(file, "hdr_scene_mode=%d\nhdr_knee=%.2f\nhdr_strength=%.2f\nhdr_hud_vivid=%d\n",
+                 v.hdr_scene_mode.load(), v.hdr_knee.load(), v.hdr_strength.load(),
+                 int(v.hdr_hud_vivid.load()));
     std::fclose(file);
 }
 
@@ -359,10 +365,12 @@ void ResetHdr() {
                                 {&v.hdr_sdr_saturation, defaults.hdr_sdr_saturation.load()},
                                 {&v.hdr_gamut_expansion, defaults.hdr_gamut_expansion.load()},
                                 {&v.hdr_knee, defaults.hdr_knee.load()},
+                                {&v.hdr_strength, defaults.hdr_strength.load()},
                                 {&v.hdr_split, defaults.hdr_split.load()}}) {
         field->store(value);
     }
     v.hdr_per_channel = defaults.hdr_per_channel.load();
+    v.hdr_hud_vivid = defaults.hdr_hud_vivid.load();
 }
 
 bool SetHdrKey(const std::string& key, const std::string& value, std::string& applied) {
@@ -372,6 +380,14 @@ bool SetHdrKey(const std::string& key, const std::string& value, std::string& ap
     std::strtof(value.c_str(), &end);
     if (end == value.c_str()) {
         return key.rfind("hdr_", 0) == 0; // not a number: left as it is
+    }
+    if (key == "hdr_hud_vivid") {
+        const bool before = v.hdr_hud_vivid.load();
+        Set(v, key, value);
+        if (v.hdr_hud_vivid.load() != before) {
+            applied = key + "=" + (v.hdr_hud_vivid.load() ? "1" : "0");
+        }
+        return true;
     }
     if (key == "hdr_scene_mode") {
         const int before = v.hdr_scene_mode.load();
@@ -404,6 +420,7 @@ bool SetHdrKey(const std::string& key, const std::string& value, std::string& ap
         {"hdr_highlight_start", &v.hdr_highlight_start},
         {"hdr_gamut_expansion", &v.hdr_gamut_expansion},
         {"hdr_knee", &v.hdr_knee},
+        {"hdr_strength", &v.hdr_strength},
         {"hdr_split", &v.hdr_split},
     };
     for (const auto& [name, field] : keys) {
