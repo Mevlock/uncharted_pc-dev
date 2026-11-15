@@ -203,7 +203,12 @@ s32 PS4_SYSV_ABI sceVideodec2Decode(OrbisVideodec2Decoder decoder,
     }
 
     Libraries::VideoOut::NoteMovieFrame();
-    return decoder->Decode(*input_data, *frame_buffer, *output_info);
+    const s32 result = decoder->Decode(*input_data, *frame_buffer, *output_info);
+    if (output_info->is_valid) {
+        Libraries::VideoOut::NoteMoviePicture(frame_buffer->frame_buffer,
+                                              frame_buffer->frame_buffer_size);
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceVideodec2Flush(OrbisVideodec2Decoder decoder,
@@ -225,7 +230,12 @@ s32 PS4_SYSV_ABI sceVideodec2Flush(OrbisVideodec2Decoder decoder,
         return ORBIS_VIDEODEC2_ERROR_STRUCT_SIZE;
     }
 
-    return decoder->Flush(*frame_buffer, *output_info);
+    const s32 result = decoder->Flush(*frame_buffer, *output_info);
+    if (output_info->is_valid) {
+        Libraries::VideoOut::NoteMoviePicture(frame_buffer->frame_buffer,
+                                              frame_buffer->frame_buffer_size);
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceVideodec2Reset(OrbisVideodec2Decoder decoder) {

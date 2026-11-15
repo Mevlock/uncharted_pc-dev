@@ -9,6 +9,8 @@ extern "C" {
 thread_local sigjmp_buf* runtime_fault_recover = nullptr;
 uint32_t runtime_disabled_optimizations = 0;
 int runtime_ultrawide_fill = 0;
+volatile int runtime_movie_opens = 0;
+volatile int runtime_movie_starts = 0;
 float runtime_ultrawide_scale = 1.0f;
 void runtime_ultrawide_select(int) {}
 uint64_t runtime_tsc_frequency() { return 1000000000; }

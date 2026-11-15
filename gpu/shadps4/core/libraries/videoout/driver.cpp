@@ -47,6 +47,62 @@ extern std::atomic<u32> g_bb_translations, g_bb_cs_pipelines, g_bb_gfx_pipelines
 
 extern "C" double runtime_time_scale_now(void);
 extern "C" volatile int runtime_freeze_flag; // runtime_thread.c: the game's threads are held (preparation page/hold)
+extern "C" volatile int runtime_title_shown; // runtime_menumouse.c: a game menu showed (the title, after the boot)
+
+// bbport: fast boot (BB_SKIP_INTRO=1, the launcher's "Skip intro logos"). From the end of the shader preparation (the
+// stored pipelines are in, the game's threads run again) to the title's first menu the games load the title's packages
+// one after another, a few frames each: that time follows the frame rate (U3 EU 1.02, resumed -> title: 2.6 s at 60 Hz,
+// 1.2 s at 144, 0.8 s at 240, 0.5 s at 480). The screen is black meanwhile, so the vblank runs at 480 Hz (as the
+// uncapped presets' vblank, BB_VBLANK_HZ=0) and without the frame limit until a game menu is on screen, at most 10 s;
+// then the configured rate. Not while the preparation page shows (its frames would take time from the build).
+// BB_BOOT_VBLANK_HZ=<hz>: another rate, 0: off.
+static u32 BootVblankHz() {
+    static const u32 hz = [] {
+        const char* skip = std::getenv("BB_SKIP_INTRO");
+        if (!skip || skip[0] != '1') {
+            return 0u;
+        }
+        const char* env = std::getenv("BB_BOOT_VBLANK_HZ");
+        const long value = env && *env ? std::strtol(env, nullptr, 10) : 480;
+        return value > long(EmulatorSettings.GetVblankFrequency()) && value <= 2000 ? u32(value) : 0u;
+    }();
+    return hz;
+}
+static bool BootVblankBoost(bool port_open) {
+    static int state = 0; // 0 before the preparation's end, 1 boosted, 2 done (PresentThread only)
+    static std::chrono::steady_clock::time_point since;
+    if (state == 2 || !BootVblankHz()) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (state == 0) {
+        if (runtime_title_shown) {
+            state = 2;
+            return false;
+        }
+        // from the end of the preparation hold (the game's threads were held and run again), or without a hold once the
+        // preparation finished
+        static bool held = false;
+        if (runtime_freeze_flag != 0 || BbOverlay::PreparationScreenActive()) {
+            held = true;
+            return false;
+        }
+        if (!port_open || !(held || BbOverlay::PreparationFinished())) {
+            return false;
+        }
+        state = 1;
+        since = now;
+        std::printf("VideoOut: boot vblank %u Hz until the title (BB_SKIP_INTRO)\n", BootVblankHz());
+    }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - since).count();
+    if (runtime_title_shown || ms > 10000) {
+        state = 2;
+        std::printf("VideoOut: %s after %lld ms: vblank %u Hz\n", runtime_title_shown ? "title on screen" : "no title",
+                    (long long)ms, EmulatorSettings.GetVblankFrequency());
+        return false;
+    }
+    return true;
+}
 
 namespace Vulkan {
 extern std::atomic<u64> g_flips;
@@ -851,6 +907,60 @@ void NoteMovieFrame() {
                          std::memory_order_relaxed);
 }
 
+// bbport: the last movie pictures decoded (a game cycles a few output buffers): address and end.
+// Written by the decode thread, read by the draw threads; an entry is replaced whole only after
+// pictures stopped for 300 ms, so a torn read is at worst one frame's wrong answer.
+namespace {
+constexpr u32 MoviePictureSlots = 16;
+std::array<std::atomic<u64>, MoviePictureSlots> movie_picture_start{};
+std::array<std::atomic<u64>, MoviePictureSlots> movie_picture_end{};
+std::atomic<u32> movie_picture_next{0};
+} // namespace
+
+std::atomic<bool> g_movie_pictures_live{false};
+
+void NoteMoviePicture(const void* address, u64 size) {
+    const u64 start = reinterpret_cast<u64>(address);
+    if (!start || !size) {
+        return;
+    }
+    bool known = false;
+    for (u32 i = 0; i < MoviePictureSlots && !known; ++i) {
+        known = movie_picture_start[i].load(std::memory_order_relaxed) == start &&
+                movie_picture_end[i].load(std::memory_order_relaxed) == start + size;
+    }
+    if (!known) {
+        const u32 slot = movie_picture_next.fetch_add(1, std::memory_order_relaxed) %
+                         MoviePictureSlots;
+        movie_picture_start[slot].store(start, std::memory_order_relaxed);
+        movie_picture_end[slot].store(start + size, std::memory_order_relaxed);
+    }
+    g_movie_pictures_live.store(true, std::memory_order_release);
+}
+
+bool ReadsMoviePicture(u64 address, u64 size) {
+    for (u32 i = 0; i < MoviePictureSlots; ++i) {
+        const u64 start = movie_picture_start[i].load(std::memory_order_relaxed);
+        if (start && address < movie_picture_end[i].load(std::memory_order_relaxed) &&
+            address + size > start) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MoviePicturesExpire() {
+    if (!g_movie_pictures_live.load(std::memory_order_relaxed) ||
+        MovieActive(std::chrono::steady_clock::now())) {
+        return;
+    }
+    g_movie_pictures_live.store(false, std::memory_order_relaxed);
+    for (u32 i = 0; i < MoviePictureSlots; ++i) {
+        movie_picture_start[i].store(0, std::memory_order_relaxed);
+        movie_picture_end[i].store(0, std::memory_order_relaxed);
+    }
+}
+
 s64 LastFlipIntervalNs() {
     return last_flip_interval_ns.load(std::memory_order_relaxed);
 }
@@ -933,10 +1043,17 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     constexpr std::chrono::nanoseconds movie_period{1000000000 / 60};
     auto next_movie_vblank = std::chrono::steady_clock::now();
 
+    // bbport: fast boot (BootVblankBoost): the boosted ticks run on a timer of their own
+    const std::chrono::nanoseconds boot_period(1000000000 / std::max<u32>(BootVblankHz(), 1));
+    Common::AccurateTimer boot_timer{boot_period};
+    Common::AccurateTimer& vblank_timer = timer;
+
     while (!token.stop_requested()) {
         BbThreads::SampleCore(BbThreads::CorePresent);
+        const bool boot_boost = BootVblankBoost(main_port.is_open);
+        Common::AccurateTimer& timer = boot_boost ? boot_timer : vblank_timer;
         timer.Start();
-        const auto tick_deadline = std::chrono::steady_clock::now() + vblank_period;
+        const auto tick_deadline = std::chrono::steady_clock::now() + (boot_boost ? boot_period : vblank_period);
 
         if (DebugState.IsGuestThreadsPaused()) {
             DrawLastFrame();
@@ -969,7 +1086,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
             next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
         }
-        const bool flip_slot = movie || !frame_limit || now >= next_flip;
+        const bool flip_slot = movie || !frame_limit || boot_boost || now >= next_flip;
         // bbport: while the game's threads are frozen (preparation page/hold) its clocks stand still
         // (runtime_kernel.c) and so do its vblanks: no count step and no events, so it resumes without a jump. A
         // host tick count paces the frames here meanwhile (the frozen vblank count would stall them).
