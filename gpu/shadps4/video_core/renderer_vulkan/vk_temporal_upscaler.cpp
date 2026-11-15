@@ -2899,6 +2899,37 @@ bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target,
     // In velocity mode only a pass whose color goes to the UI image too (UI tested against the
     // scene depth: prompts and markers in the world) takes the UI depth: the next frame's depth
     // prepass can come before the flip.
+    // bbport (DLSS rework 6, from BilalReloaded's Uncharted port #260 #225 #209, GPL-2.0-or-later):
+    // the treasure model (pickup popup, Treasures screen) is drawn into the display buffer with a
+    // render-size depth target of its own. Its colour went to the output-size UI image, its depth
+    // did not, so the pass had mismatched attachments (the model invisible with upscaling). In the
+    // velocity UI phase such a depth target now takes the output-size UI depth too, filled from it
+    // (clear + blit) when it is first used. BB_UI_DEPTH_ADOPT=0: off.
+    static const bool adopt_on = [] {
+        const char* env = std::getenv("BB_UI_DEPTH_ADOPT");
+        return !(env && env[0] == '0');
+    }();
+    if (adopt_on && ui_phase && velocity_ui && color_to_ui && depth && depth != ui_depth &&
+        ui_image && ui_width) {
+        const auto& image = texture_cache.GetImage(depth);
+        const bool depth_format = image.info.pixel_format == vk::Format::eD32SfloatS8Uint ||
+                                  image.info.pixel_format == vk::Format::eD32Sfloat ||
+                                  image.info.pixel_format == vk::Format::eD16Unorm;
+        if (depth_format && image.info.resources.levels == 1 &&
+            image.info.size.width <= ui_width && image.info.size.height <= ui_height &&
+            image.info.size.width * 2 >= render_width && image.info.size.height * 2 >= render_height) {
+            static u32 logged = 0;
+            if (logged < 4) {
+                ++logged;
+                std::printf("Upscaler: UI depth %#llx %ux%u follows the output size (%ux%u)\n",
+                            static_cast<unsigned long long>(image.info.guest_address),
+                            image.info.size.width, image.info.size.height, ui_width, ui_height);
+            }
+            EnsureUiResources(ui_width, ui_height, ui_format, image.info.pixel_format);
+            PrepareUiDepth(depth);
+            ui_depth = depth;
+        }
+    }
     if (!ui_phase || depth != ui_depth || (velocity_ui && !color_to_ui)) {
         return false;
     }
