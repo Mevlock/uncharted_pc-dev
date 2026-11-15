@@ -1448,6 +1448,13 @@ void TemporalUpscaler::Run() {
                 vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
                 vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eShaderRead);
 
+    // bbport (DLSS rework 3): camera cuts reset the history here too, as in the LDR path
+    // (RunScaledVelocity); this path left them to the zero motion of the cut frame.
+    if (camera_motion.VelocityMode() && camera_motion.ConsumeCut()) {
+        reset = true;
+        g_frames_since_cut = 0;
+        g_fade_cut_ns.store(1, std::memory_order_relaxed); // a new fade-in window (FadeReset)
+    }
     if (BbSettings::Get().upscaler != BbSettings::UpscalerTaa) {
         ClampSceneEdges(cmdbuf, input_color, w, h);
     }
