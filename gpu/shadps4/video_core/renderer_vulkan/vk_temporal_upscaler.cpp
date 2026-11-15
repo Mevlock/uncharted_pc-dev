@@ -44,6 +44,7 @@
 namespace Vulkan {
 extern std::atomic<long long> g_fade_cut_ns; // below (FadeReset)
 extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (prototype), or null
+extern "C" int runtime_uncharted_game;            // runtime_ultrawide.c: 1, 2, 3 once the game code is patched
 static int g_frames_since_cut = 100000; // bbport: frames since the last camera cut (dumps)
 void BbDrawLogNote(const char* text); // vk_rasterizer.cpp
 extern std::atomic<u64> g_flips;       // vk_rasterizer.cpp: flips so far
@@ -496,6 +497,20 @@ bool TemporalUpscaler::OnFrameStart() {
                 BbSettings::Get().upscaler.store(provider);
             }
             std::fclose(f);
+        }
+    }
+    // bbport (DLSS rework 3d): Uncharted 1 keeps the upscaler on the finished frame at Native unless
+    // BB_NATIVE_BEFORE_POST=1: before the post-processing its still picture measured about 4% softer
+    // than 0.3.6.57 even with the final-frame sharpening (U2 and U3: equal or crisper). The game is
+    // known once its code is patched, after this object is made: checked here, once.
+    if (static bool checked = false; !checked && runtime_uncharted_game != 0) {
+        checked = true;
+        const char* env = std::getenv("BB_NATIVE_BEFORE_POST");
+        if (runtime_uncharted_game == 1 && early_native && !(env && env[0] == '1')) {
+            early_native = false;
+            reset = true;
+            std::printf("Upscaler: Uncharted 1: native before post-processing not used (softer there); "
+                        "BB_NATIVE_BEFORE_POST=1 turns it on\n");
         }
     }
     const auto& settings = BbSettings::Get();

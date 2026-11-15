@@ -1241,6 +1241,8 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
 float *runtime_projection_jitter_slot;
 /* Set by the GPU side before the game code is patched: 1 on NVIDIA's driver, 0 on another, -1 not known yet. */
 int runtime_gpu_nvidia = -1;
+/* Which game's program was recognised when the code was patched (1, 2, 3; 0: none / not yet): read by the GPU side. */
+int runtime_uncharted_game;
 
 typedef struct {
     const char *name;
@@ -1297,6 +1299,14 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     /* On by default where it is known to work: a recognised game program on NVIDIA's driver (the only one it was
      * run on; the others keep the vertex shader jitter until someone has tried it there). BB_PROJECTION_JITTER=0:
      * off; =1: on with any GPU. Whenever it is not installed the upscaler jitters as 0.3.6.57 did, with its fixes. */
+#ifdef _WIN32
+    for (unsigned i = 0; i < sizeof(projection_jitter_games) / sizeof(projection_jitter_games[0]); ++i) {
+        const ProjectionJitterGame *t = &projection_jitter_games[i];
+        if (size >= t->join + 0x400 && !memcmp(code + t->start, t->start_bytes, sizeof(t->start_bytes)) &&
+            !memcmp(code + t->join, t->join_bytes, sizeof(t->join_bytes)))
+            runtime_uncharted_game = t->name[10] - '0'; /* "Uncharted N ..." */
+    }
+#endif
     const char *env = getenv("BB_PROJECTION_JITTER");
     if (env && env[0] == '0') {
         printf("Projection jitter: off (BB_PROJECTION_JITTER=0): the upscaler jitter and its fixes as in 0.3.6.57\n");
