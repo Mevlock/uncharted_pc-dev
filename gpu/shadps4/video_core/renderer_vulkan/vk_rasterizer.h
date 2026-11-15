@@ -499,6 +499,8 @@ private:
     // bbport: the wide HUD (hud_layout.h; BB_HUD_LAYOUT=wide): the in-game HUD draws over a
     // widened frame are drawn once per third of their 16:9 layout.
     bool hud_wide = false;               ///< BB_HUD_LAYOUT=wide at a screen wider than 16:9
+    int hud_state = -1;                  ///< HudWideOn decided: -1 not yet, 0 off, 1 on
+    bool HudWideOn();
     bool hud_trace = false;              ///< BB_HUD_TRACE=1: HUD draws and their extents in the log
     float hud_k = 1.0f;                  ///< the UI squeeze (runtime_ultrawide_scale)
     float hud_area = 1.0f;               ///< half width of the wide area in NDC (1: the screen)

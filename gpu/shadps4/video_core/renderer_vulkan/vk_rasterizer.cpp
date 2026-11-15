@@ -711,23 +711,6 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
                                                   : instance.GetDriverID() != vk::DriverId::eNvidiaProprietary;
         std::printf("Upscaler jitter: %s\n", Shader::ClipJitter::enabled ? "in the vertex shaders" : "viewport offset");
     }
-    // bbport: the wide HUD (hud_layout.h): BB_HUD_LAYOUT=wide at a screen wider than 16:9 (the UI
-    // squeeze runtime_ultrawide_scale below 1), BB_HUD_WIDE_ASPECT the area its sides fill.
-    hud_k = runtime_ultrawide_scale;
-    hud_wide = runtime_ultrawide_fill && hud_k > 0.0f && hud_k < 0.995f && HudLayout::WideFromEnv();
-    hud_trace = [] {
-        const char* env = std::getenv("BB_HUD_TRACE");
-        return env && env[0] == '1';
-    }();
-    if (const char* env = std::getenv("BB_HUDLESS_PS"); env && *env) {
-        hud_tracker.tonemap_ps = std::strtoull(env, nullptr, 16);
-    }
-    if (hud_wide) {
-        hud_area = HudLayout::AreaHalf((16.0f / 9.0f) / hud_k, HudLayout::AspectFromEnv(), hud_k);
-        std::printf("HUD: wide (side thirds at the edges of %.0f%% of the screen width, UI squeeze %.4f, "
-                    "after pixel shader %08llx)\n",
-                    hud_area * 100.0f, hud_k, static_cast<unsigned long long>(hud_tracker.tonemap_ps));
-    }
     // bbport: from here the stored pipelines load on background threads (the motion shaders
     // among them need the buffer addresses fixed just above).
     pipeline_cache.StartWarmUp();
@@ -4598,7 +4581,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // its own until it is known to join a run (then the run records it at its flush).
     // bbport: the wide HUD (hud_layout.h): an in-game HUD draw is recorded once per third of
     // its layout, never batched.
-    const bool hud_split = hud_wide && NoteHudDraw(pipeline, is_indexed, index_offset, true);
+    const bool hud_split = HudWideOn() && NoteHudDraw(pipeline, is_indexed, index_offset, true);
     const GraphicsPipeline* batch_variant =
         !hud_split && is_indexed && DrawBatchEnabled()
             ? pipeline->batch_variant.load(std::memory_order_acquire)
@@ -9292,6 +9275,34 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
                              instance.IsDynamicColorWriteMaskSupported(),
                              instance.IsAttachmentFeedbackLoopLayoutSupported(),
                              [&](auto&& command) { scheduler.Record(std::move(command)); });
+}
+
+// bbport: the wide HUD (hud_layout.h): BB_HUD_LAYOUT=wide at a screen wider than 16:9 (the UI squeeze
+// runtime_ultrawide_scale below 1), BB_HUD_WIDE_ASPECT the area its sides fill. Decided at the first draw:
+// the ultrawide patch (runtime_ultrawide.c) runs when the game is loaded, after the rasterizer exists.
+bool Rasterizer::HudWideOn() {
+    if (hud_state >= 0) {
+        return hud_state != 0;
+    }
+    hud_k = runtime_ultrawide_scale;
+    hud_wide = runtime_ultrawide_fill && hud_k > 0.0f && hud_k < 0.995f && HudLayout::WideFromEnv();
+    hud_trace = [] {
+        const char* env = std::getenv("BB_HUD_TRACE");
+        return env && env[0] == '1';
+    }();
+    if (const char* env = std::getenv("BB_HUDLESS_PS"); env && *env) {
+        hud_tracker.tonemap_ps = std::strtoull(env, nullptr, 16);
+    }
+    if (hud_wide) {
+        hud_area = HudLayout::AreaHalf((16.0f / 9.0f) / hud_k, HudLayout::AspectFromEnv(), hud_k);
+        std::printf("HUD: wide (side thirds at the edges of %.0f%% of the screen width, UI squeeze %.4f, "
+                    "after pixel shader %08llx)\n",
+                    hud_area * 100.0f, hud_k, static_cast<unsigned long long>(hud_tracker.tonemap_ps));
+    }
+    hud_state = hud_wide ? 1 : 0;
+    std::printf("HUD layout: %s (BB_HUD_LAYOUT %s, UI squeeze %.4f)\n", hud_wide ? "wide" : "16:9",
+                std::getenv("BB_HUD_LAYOUT") ? std::getenv("BB_HUD_LAYOUT") : "unset", hud_k);
+    return hud_wide;
 }
 
 // bbport: the wide HUD (hud_layout.h, from Ferosnow95's Uncharted 2 HUD in BilalReloaded's port):
