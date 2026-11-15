@@ -444,12 +444,17 @@ namespace {
 /// frame and with it kept alike (and with preset K too). U3 #389 checkpoint restart at 60 FPS: band gone; U2 #213
 /// (the fade stripes the reset is for) stays clean (0.04, reset with jitter 0.00, no reset 1.13). DLSS only.
 bool fade_was_resetting = false;
+/// With the jitter in the game's projection the fade fixes are off unless asked for (the user's tests, 2026-11-15):
+/// BB_DLSS_FADE_NOJITTER / BB_DLSS_FADE_RESET = 1 / 0 force them on / off; unset: on without projection jitter.
+bool FadeFixOn(const char* name) {
+    const char* env = std::getenv(name);
+    if (env && env[0]) {
+        return env[0] != '0';
+    }
+    return runtime_projection_jitter_slot == nullptr;
+}
 bool FadeNoJitter() {
-    static const bool on = [] {
-        const char* env = std::getenv("BB_DLSS_FADE_NOJITTER");
-        return !(env && env[0] == '0');
-    }();
-    return on;
+    return FadeFixOn("BB_DLSS_FADE_NOJITTER");
 }
 
 float Halton(u32 index, u32 base) {
@@ -1819,14 +1824,28 @@ bool TemporalUpscaler::ProjectionJitterOn() noexcept {
     static bool noted = false;
     if (on && !noted) {
         noted = true;
-        std::printf("Upscaler: PROTOTYPE projection jitter on (BB_PROJECTION_JITTER=1): jitter source = "
-                    "the game's projection, read back from the velocity pass; viewport / vertex "
-                    "shader jitter and the per-pass jitter fixes are off\n");
+        std::printf("Upscaler: projection jitter on: jitter source = the game's projection, read back "
+                    "from the velocity pass; viewport / vertex shader jitter and the per-pass jitter "
+                    "fixes are off\n");
     }
     return on;
 }
 
 void TemporalUpscaler::UseProjectionJitter(u32 w, u32 h) {
+    // The effective jitter set-up, once (the first upscaled scene frame: the game code is patched by then).
+    static bool stated = false;
+    if (!stated) {
+        stated = true;
+        const bool projection = runtime_projection_jitter_slot != nullptr;
+        const char* small = std::getenv("BB_JITTER_SMALL");
+        std::printf("Upscaler: jitter source = %s; fade reset %s, fade no-jitter %s, motion dead zone %.3f px, "
+                    "small-draw jitter %s (BB_DLSS_FADE_RESET, BB_DLSS_FADE_NOJITTER, BB_MOTION_DEADZONE, "
+                    "BB_JITTER_SMALL)\n",
+                    projection ? "the game's projection" : "viewport / vertex shaders (as 0.3.6.57)",
+                    FadeFixOn("BB_DLSS_FADE_RESET") ? "on" : "off",
+                    FadeFixOn("BB_DLSS_FADE_NOJITTER") ? "on" : "off", CameraMotion::MotionDeadzone(),
+                    projection ? "not needed (no raster jitter)" : small && small[0] == '0' ? "off" : "on");
+    }
     if (!ProjectionJitterOn()) {
         return;
     }
@@ -3209,11 +3228,7 @@ std::atomic<long long> g_fade_cut_ns{0}; // set at a camera cut (ConsumeCut)
 
 bool TemporalUpscaler::FadeReset(vk::CommandBuffer cmdbuf, const Dlss::Resource& color, bool reset) {
     fade_was_resetting = false; // set again below while a fade is on
-    static const bool enabled = [] {
-        const char* env = std::getenv("BB_DLSS_FADE_RESET");
-        return !(env && env[0] == '0');
-    }();
-    if (!enabled) {
+    if (!FadeFixOn("BB_DLSS_FADE_RESET")) {
         return false;
     }
     const auto now = std::chrono::steady_clock::now();

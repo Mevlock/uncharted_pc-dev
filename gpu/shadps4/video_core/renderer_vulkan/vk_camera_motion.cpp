@@ -615,12 +615,16 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
 
 /// bbport: BB_MOTION_DEADZONE=<pixels> (default 0.01; 0: off): velocity-pass motion below it is
 /// none (float rounding left +-0.0002 px alternating per column: DLSS drew stripes from it).
-static float motion_deadzone() {
-    static const float value = [] {
+/// With the jitter in the game's projection it is off unless set (the user's tests, 2026-11-15).
+float CameraMotion::MotionDeadzone() {
+    static const float set = [] {
         const char* env = std::getenv("BB_MOTION_DEADZONE");
-        return env && env[0] ? static_cast<float>(std::atof(env)) : 0.01f;
+        return env && env[0] ? static_cast<float>(std::atof(env)) : -1.0f;
     }();
-    return value;
+    return set >= 0.0f ? set : runtime_projection_jitter_slot ? 0.0f : 0.01f;
+}
+static float motion_deadzone() {
+    return CameraMotion::MotionDeadzone();
 }
 
 

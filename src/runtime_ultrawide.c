@@ -1224,8 +1224,8 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
 
 /* PROTOTYPE (DLSS rework 7, BB_PROJECTION_JITTER=1, off by default): the upscaler's sub-pixel jitter in the game's
  * own projection, as the inFAMOUS Second Son port does it (idea from Liondarkz/issn_pc), instead of a viewport
- * offset on the scene's draws. Uncharted 1, 2 and 3 version 1.02 (the game programs are the same in every region);
- * the code is recognised by its bytes, nothing happens in any other version.
+ * offset on the scene's draws. Uncharted 1, 2 and 3, versions 1.00 and 1.02 (the game programs are the same in every
+ * region); the code is recognised by its bytes, nothing happens in any other program.
  *
  * Each game's render camera update (rbx = the camera) builds the projection rows (row vectors: clip = view * P) in
  * four registers, stores them at [rbx+0x90..0xc0] and joins at one instruction (a load of the view matrix's first
@@ -1239,6 +1239,8 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
  * camera ahead of the frame drawn, so the jitter a frame really used is read back from the velocity pass's constants
  * (CameraMotion::OnVelocityConstants). */
 float *runtime_projection_jitter_slot;
+/* Set by the GPU side before the game code is patched: 1 on NVIDIA's driver, 0 on another, -1 not known yet. */
+int runtime_gpu_nvidia = -1;
 
 typedef struct {
     const char *name;
@@ -1260,6 +1262,13 @@ static const ProjectionJitterGame projection_jitter_games[] = {
      0x9dcd4e, {0xc5, 0xf8, 0x28, 0x43, 0x50, 0xc4, 0xe3, 0x79, 0x04, 0xc8}, 0x280, 0x250, 2, -0x120, 0},
     {"Uncharted 3 1.02", 0x11c0d30, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x81, 0xec, 0x08, 0x01, 0x00, 0x00},
      0x11c1823, {0xc5, 0xf8, 0x28, 0x43, 0x50, 0xc4, 0xe3, 0x79, 0x04, 0xc8}, 0x268, 0x250, 7, -0x110, 0},
+    /* Version 1.00: U1 and U2 as 1.02 at other addresses; U3 compiled with other registers. */
+    {"Uncharted 1 1.00", 0x2c9070, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x81, 0xec, 0xc8, 0x00, 0x00, 0x00},
+     0x2c961a, {0xc5, 0xf8, 0x28, 0x63, 0x50, 0xc5, 0xf8, 0x28, 0x6b, 0x60}, 0x2a4, 0x290, 1, 0, 0x2c9789},
+    {"Uncharted 2 1.00", 0x3e2c50, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x81, 0xec, 0x28, 0x01, 0x00, 0x00},
+     0x3e324d, {0xc5, 0xf8, 0x28, 0x43, 0x50, 0xc4, 0xe3, 0x79, 0x04, 0xc8}, 0x280, 0x250, 2, -0x120, 0},
+    {"Uncharted 3 1.00", 0x80a2f0, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x81, 0xec, 0x08, 0x01, 0x00, 0x00},
+     0x80af1b, {0xc5, 0xf8, 0x28, 0x43, 0x50, 0xc4, 0xe3, 0x79, 0x04, 0xc8}, 0x268, 0x250, 5, -0x110, 0},
 };
 
 #ifdef _WIN32
@@ -1285,8 +1294,21 @@ static uint8_t *pj_rel(uint8_t *c, const void *target) {
 #endif
 
 void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
+    /* On by default where it is known to work: a recognised game program on NVIDIA's driver (the only one it was
+     * run on; the others keep the vertex shader jitter until someone has tried it there). BB_PROJECTION_JITTER=0:
+     * off; =1: on with any GPU. Whenever it is not installed the upscaler jitters as 0.3.6.57 did, with its fixes. */
     const char *env = getenv("BB_PROJECTION_JITTER");
-    if (!env || env[0] != '1') return;
+    if (env && env[0] == '0') {
+        printf("Projection jitter: off (BB_PROJECTION_JITTER=0): the upscaler jitter and its fixes as in 0.3.6.57\n");
+        return;
+    }
+    const int forced = env && env[0] == '1';
+    if (!forced && runtime_gpu_nvidia != 1) {
+        printf("Projection jitter: not used on this GPU (%s; tested on NVIDIA only, BB_PROJECTION_JITTER=1 turns it "
+               "on): the upscaler jitter and its fixes as in 0.3.6.57\n",
+               runtime_gpu_nvidia == 0 ? "not NVIDIA's driver" : "GPU not known yet");
+        return;
+    }
 #ifdef _WIN32
     const ProjectionJitterGame *g = NULL;
     for (unsigned i = 0; i < sizeof(projection_jitter_games) / sizeof(projection_jitter_games[0]) && !g; ++i) {
@@ -1298,7 +1320,8 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
             g = t;
     }
     if (!g) {
-        printf("Projection jitter (prototype): not a known game version (Uncharted 1, 2, 3 version 1.02), not applied\n");
+        printf("Projection jitter: not a known game program (Uncharted 1, 2, 3 versions 1.00 and 1.02): the upscaler "
+               "jitter and its fixes as in 0.3.6.57\n");
         return;
     }
     /* An executable page within rel32 of the code: the stubs, and the slot at +0x800. */
@@ -1307,7 +1330,7 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     for (uintptr_t step = 0; step < (1800ull << 20) && !page; step += 1u << 16)
         page = VirtualAlloc((void *)(base + step), 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
     if (!page) {
-        printf("Projection jitter (prototype): no memory near the game code, not applied\n");
+        printf("Projection jitter: no memory near the game code: the upscaler jitter and its fixes as in 0.3.6.57\n");
         return;
     }
     float *slot = (float *)(page + 0x800);
@@ -1347,8 +1370,8 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
         load[5] = 0x0f; load[6] = 0x1f; load[7] = 0x00;                                     /* 3-byte nop */
     }
     runtime_projection_jitter_slot = slot;
-    printf("Projection jitter (PROTOTYPE, BB_PROJECTION_JITTER=1): the game's projection takes the upscaler jitter "
-           "(%s, camera update join at %#llx, stub at %p)\n", g->name, (unsigned long long)g->join, (void *)page);
+    printf("Projection jitter: the game's projection takes the upscaler jitter (%s, camera update join at %#llx, "
+           "stub at %p; BB_PROJECTION_JITTER=0 turns it off)\n", g->name, (unsigned long long)g->join, (void *)page);
 #else
     (void)code;
     (void)size;

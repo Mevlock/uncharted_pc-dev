@@ -54,6 +54,8 @@ extern "C" volatile int runtime_movie_opens;
 extern "C" volatile int runtime_movie_starts;
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 
+extern "C" int runtime_gpu_nvidia; // runtime_ultrawide.c: projection jitter is on by default on NVIDIA only
+
 namespace Vulkan {
 
 // bbport diagnosis: BB_CONST_CHECK=<shader hash>: the constants of that shader's draws as they
@@ -709,6 +711,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         Shader::ClipJitter::enabled = env && *env ? env[0] != '0'
                                                   : instance.GetDriverID() != vk::DriverId::eNvidiaProprietary;
         std::printf("Upscaler jitter: %s\n", Shader::ClipJitter::enabled ? "in the vertex shaders" : "viewport offset");
+        // Projection jitter (runtime_ultrawide.c) is on by default on NVIDIA's driver only.
+        runtime_gpu_nvidia = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ? 1 : 0;
     }
     // bbport: from here the stored pipelines load on background threads (the motion shaders
     // among them need the buffer addresses fixed just above).

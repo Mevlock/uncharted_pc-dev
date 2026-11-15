@@ -176,6 +176,8 @@ public:
     [[nodiscard]] std::array<float, 2> ProjectionJitter() const noexcept {
         return projection_jitter;
     }
+    /// The motion dead zone in pixels (BB_MOTION_DEADZONE; 0.01, or 0 with projection jitter).
+    static float MotionDeadzone();
     /// The jitter (NDC) just written to the game's slot, once per shown frame.
     void NoteAskedJitter(std::array<float, 2> ndc) noexcept {
         asked_jitter[asked_count++ % asked_jitter.size()] = ndc;
