@@ -4723,7 +4723,33 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             }
         }
     }
-    if (motion_draw && motion_geometry) {
+    // bbport (from BilalReloaded's Uncharted port, #84): the animated draws of Uncharted's
+    // G-buffer passes are the skinned ones, whose vertex buffers the GPU wrote this session (the
+    // skinning compute; the level's vertices stay as loaded). Its shaders read vertices from
+    // buffers (no vertex inputs): the draw's identity across frames comes from those buffers'
+    // sizes and strides, not their addresses (skinned vertices can move between frames). (The
+    // stencil's character bit differs between the games: Uncharted 2 sets it on the whole level.)
+    bool character_draw = false;
+    if (motion_draw && Shader::MotionVectors::characters) {
+        const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
+        u64 hash = 0x6a09e667f3bcc909ULL;
+        for (const auto& resource : vs.buffers) {
+            if (resource.IsSpecial()) continue;
+            const auto buffer = resource.GetSharp(vs);
+            if (!buffer.Valid()) continue;
+            hash = XXH3_64bits_withSeed(&buffer.num_records, sizeof(buffer.num_records),
+                                        hash ^ buffer.GetStride());
+            // Constant buffers (stride 16) are not vertices.
+            character_draw |= buffer.GetStride() != 16 &&
+                              buffer_cache.IsRangeGpuWritten(buffer.base_address,
+                                                             buffer.GetSize());
+        }
+        if (character_draw && !motion_geometry) {
+            motion_geometry = hash;
+        }
+    }
+    if (motion_draw && motion_geometry &&
+        (!Shader::MotionVectors::characters || character_draw)) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         const auto [base_vertex, first_instance] =
             GetDrawOffsets(regs, vs, pipeline->GetFetchShader());
@@ -4738,7 +4764,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             const char* value = std::getenv("BB_OBJECT_MOTION_ALL");
             return value && value[0] == '1';
         }();
-        bool gated = !all_motion;
+        bool gated = !all_motion && !character_draw;
         u64 palette = 0;
         for (const auto& resource : vs.buffers) {
             if (resource.IsSpecial()) continue;

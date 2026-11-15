@@ -592,6 +592,15 @@ bool TemporalUpscaler::OnFrameStart() {
     if (fade_was_resetting && FadeNoJitter() && BbSettings::Get().upscaler == BbSettings::UpscalerDlss) {
         jitter = {};
     }
+    // bbport diagnosis (BB_JITTER_OFF=1): no jitter at all (motion-vector error measurements
+    // compare consecutive frames pixel for pixel).
+    if (static const bool off = [] {
+            const char* env = std::getenv("BB_JITTER_OFF");
+            return env && env[0] == '1';
+        }();
+        off) {
+        jitter = {};
+    }
     // bbport diagnosis (BB_JITTER_DIAG=1): jitter steps per shown frame, and the distinct jitter
     // positions the upscaler was given over 5 s.
     if (static const bool diag = std::getenv("BB_JITTER_DIAG") != nullptr; diag) {
