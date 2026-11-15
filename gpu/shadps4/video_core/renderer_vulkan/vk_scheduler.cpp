@@ -198,12 +198,19 @@ void Scheduler::CreateBreadcrumbBuffer() {
     const auto requirements = device.getBufferMemoryRequirements(buffer);
     const auto properties = instance.GetPhysicalDevice().getMemoryProperties();
     const auto wanted = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
+    // System RAM first (BilalReloaded's 0.8.4): with resizable BAR the first host-visible type is video memory, and
+    // after the reset that follows a lost device it read 0 ("every checkpoint before 0 finished", RTX 5080). The
+    // counter must outlive the GPU's reset; video memory only when there is no host-visible system memory.
     u32 type = ~0u;
-    for (u32 i = 0; i < properties.memoryTypeCount; ++i) {
-        if ((requirements.memoryTypeBits & (1u << i)) &&
-            (properties.memoryTypes[i].propertyFlags & wanted) == wanted) {
-            type = i;
-            break;
+    for (int pass = 0; pass < 2 && type == ~0u; ++pass) {
+        for (u32 i = 0; i < properties.memoryTypeCount; ++i) {
+            const auto flags = properties.memoryTypes[i].propertyFlags;
+            const bool device_local = bool(flags & vk::MemoryPropertyFlagBits::eDeviceLocal);
+            if ((requirements.memoryTypeBits & (1u << i)) && (flags & wanted) == wanted &&
+                (pass == 1 || !device_local)) {
+                type = i;
+                break;
+            }
         }
     }
     if (type == ~0u) {

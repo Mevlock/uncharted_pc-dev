@@ -79,10 +79,23 @@ static void EmitVertexMotion(EmitContext& ctx) {
                                            ctx.push_data_block,
                                            ctx.ConstU32(PushData::MotionParamIndex));
     const Id param_index = ctx.OpLoad(u32_type, param_ptr);
-    const auto address = [&](u64 base, Id index, u32 stride) {
-        return ctx.OpIAdd(ctx.U64, ctx.Constant(ctx.U64, base),
-                          ctx.OpIMul(ctx.U64, ctx.OpUConvert(ctx.U64, index),
-                                     ctx.Constant(ctx.U64, u64(stride))));
+    // base + index * stride + extra: the offset in 32 bits (both buffers are far below 4 GiB), added to the low half
+    // of the base with its carry into the high half (BilalReloaded's 0.7.1, his #273 #272). AMD's compiler (RX 6600
+    // XT, RX 6800, Ryzen iGPU) dropped the high half of the same sum done in 64-bit integers: the parameter read
+    // lost its upper address bits and the device was lost on the first upscaled frame. The base stays one 64-bit
+    // constant, the stand-in PatchMotionAddresses swaps for the session's address.
+    const auto address = [&](u64 base, Id index, u32 stride, u32 extra = 0) {
+        Id offset = ctx.OpIMul(u32_type, index, ctx.ConstU32(stride));
+        if (extra) {
+            offset = ctx.OpIAdd(u32_type, offset, ctx.ConstU32(extra));
+        }
+        const Id halves = ctx.OpBitcast(ctx.U32[2], ctx.Constant(ctx.U64, base));
+        const Id sum = ctx.OpIAddCarry(ctx.full_result_u32x2,
+                                       ctx.OpCompositeExtract(u32_type, halves, 0u), offset);
+        const Id low = ctx.OpCompositeExtract(u32_type, sum, 0u);
+        const Id high = ctx.OpIAdd(u32_type, ctx.OpCompositeExtract(u32_type, halves, 1u),
+                                   ctx.OpCompositeExtract(u32_type, sum, 1u));
+        return ctx.OpBitcast(ctx.U64, ctx.OpCompositeConstruct(ctx.U32[2], low, high));
     };
     const Id u32x4_ptr = ctx.TypePointer(spv::StorageClass::PhysicalStorageBuffer, ctx.U32[4]);
     const Id f32x4_ptr = ctx.TypePointer(spv::StorageClass::PhysicalStorageBuffer, ctx.F32[4]);
@@ -120,15 +133,14 @@ static void EmitVertexMotion(EmitContext& ctx) {
     ctx.OpSelectionMerge(store_merge, spv::SelectionControlMask::MaskNone);
     ctx.OpBranchConditional(do_store, store_label, store_merge);
     ctx.AddLabel(store_label);
-    const Id store_address = address(MotionVectors::PositionsPlaceholder,
-                                     ctx.OpIAdd(u32_type, store_base, slot), 16);
+    const Id store_index = ctx.OpIAdd(u32_type, store_base, slot);
     // Indexed draws may invoke the same vertex more than once. Atomic component stores
     // avoid write/write races; all these invocations produce the same clip position.
     const Id scalar_ptr = ctx.TypePointer(spv::StorageClass::PhysicalStorageBuffer, u32_type);
     const Id scope = ctx.ConstU32(static_cast<u32>(spv::Scope::Device));
     for (u32 i = 0; i < 4; ++i) {
-        const Id ptr = ctx.OpConvertUToPtr(scalar_ptr,
-            ctx.OpIAdd(ctx.U64, store_address, ctx.Constant(ctx.U64, u64(i * 4))));
+        const Id ptr = ctx.OpConvertUToPtr(
+            scalar_ptr, address(MotionVectors::PositionsPlaceholder, store_index, 16, i * 4));
         const Id bits = ctx.OpBitcast(u32_type, ctx.OpCompositeExtract(ctx.F32[1], position, i));
         ctx.OpAtomicExchange(u32_type, ptr, scope, ctx.u32_zero_value, bits);
     }

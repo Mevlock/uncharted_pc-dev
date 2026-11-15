@@ -31,7 +31,8 @@ void SsaRewritePass(IR::Program& program);
 void SsaRepairPass(IR::Program& program);
 void PhiSimplificationPass(IR::Program& program);
 void InverseBallotEliminationPass(IR::Program& program);
-void SharedMemoryBoundsPass(IR::Program& program, const RuntimeInfo& runtime_info);
+void SharedMemoryBoundsPass(IR::Program& program, const RuntimeInfo& runtime_info,
+                            const Profile& profile);
 void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info,
                            const Profile& profile);
 void LowerHardwareIntrinsics(IR::Program& program);

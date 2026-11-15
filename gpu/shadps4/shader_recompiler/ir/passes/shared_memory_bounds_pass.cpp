@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <vector>
 
@@ -9,6 +11,7 @@
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/program.h"
+#include "shader_recompiler/profile.h"
 #include "shader_recompiler/runtime_info.h"
 
 namespace Shader::Optimization {
@@ -19,7 +22,8 @@ namespace Shader::Optimization {
 // allocated) reads the wave64 ballot scratch and whatever lies past the array instead of zeros.
 // Out-of-range accesses are sent to a sink dword after the allocation, and loads and atomics
 // from out of range yield 0. BB_LDS_BOUNDS=0 turns this off.
-void SharedMemoryBoundsPass(IR::Program& program, const RuntimeInfo& runtime_info) {
+void SharedMemoryBoundsPass(IR::Program& program, const RuntimeInfo& runtime_info,
+                            const Profile& profile) {
     static const bool enabled = [] {
         const char* env = std::getenv("BB_LDS_BOUNDS");
         return !env || std::atoi(env) != 0;
@@ -29,6 +33,19 @@ void SharedMemoryBoundsPass(IR::Program& program, const RuntimeInfo& runtime_inf
         return;
     }
     const u32 sink = Common::AlignUp(size, sizeof(u64));
+    // The sink must fit under the device's limit (BilalReloaded's 0.8.4): a shader at the limit (U2 9bd0e806 uses
+    // 32 KiB; some GPUs allow exactly 32 KiB) would otherwise declare more shared memory than the device has. Such a
+    // shader keeps its accesses unchecked, as before the pass. NVIDIA (48 KiB) is never near it.
+    if (u64(sink) + sizeof(u64) > profile.max_shared_memory_size) {
+        static std::atomic<u32> reported{0};
+        if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+            std::printf("GPU: cs %016llx: %u bytes of LDS leave no room for the bounds check's sink under the "
+                        "device's %u: not checked\n",
+                        static_cast<unsigned long long>(program.info.pgm_hash), size,
+                        profile.max_shared_memory_size);
+        }
+        return;
+    }
     bool used_sink = false;
     for (IR::Block* const block : program.blocks) {
         for (auto it = block->Instructions().begin(); it != block->Instructions().end(); ++it) {
