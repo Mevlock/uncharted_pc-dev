@@ -11,6 +11,8 @@
 
 #include "bbport_toggles.h"
 extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (prototype), or null
+extern "C" volatile uint32_t* runtime_projection_jitter_count; // the stub's record of applied jitters, or null
+extern "C" const uint8_t* runtime_projection_jitter_ring;
 #include "shader_recompiler/runtime_info.h"
 
 #include "video_core/host_shaders/camera_motion_comp.h"
@@ -439,6 +441,84 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                     projection_lag = back;
                 }
                 break;
+            }
+        }
+        // The stub's record (runtime_ultrawide.c): the jitters applied in the order the game built its
+        // cameras: several a frame (U3's street: nine, most of them objects of that frame alone), all
+        // with the frame's value. The game renders its frames in that order, so this frame's jitter is
+        // the record one frame's worth of cameras after the one last frame used; that one is found by
+        // its place (the place predicted a frame ago, checked against the read-back) or, to start and
+        // after a miss, by its value. No guess from the timing of the values asked: a change of the
+        // game's lead no longer gives the upscaler another jitter than the frame's.
+        if (runtime_projection_jitter_count && runtime_projection_jitter_ring) {
+            struct Entry {
+                float x, y;
+                u64 camera;
+            };
+            const u32 count = *runtime_projection_jitter_count;
+            const auto entry = [](u32 place) {
+                Entry e;
+                std::memcpy(&e, runtime_projection_jitter_ring + (place & 63u) * 16u, sizeof(e));
+                return e;
+            };
+            const auto same = [&](const Entry& e) {
+                return std::abs(e.x - last[0]) < 2e-6f && std::abs(e.y - last[1]) < 2e-6f;
+            };
+            // A record still in the ring (the newest 60 of its 64).
+            const auto in_ring = [&](u32 place) { return count - place - 1u < 60u; };
+            static u32 place = 0; // the record last frame's cameras were built from, once known
+            static bool known = false;
+            static u32 searched = 0, missing = 0, frames = 0, lines = 0;
+            // Cameras built per frame: the count's growth over the last 32 frames.
+            static u32 count_then = 0, frames_then = 0, period = 0;
+            if (frames == 0) {
+                count_then = count;
+            } else if (frames - frames_then >= 32) {
+                period = (count - count_then + 16) / 32;
+                count_then = count;
+                frames_then = frames;
+            }
+            // Last frame's record: the place predicted then, if it holds what the frame shows.
+            bool found = known && in_ring(place) && same(entry(place));
+            if (!found && (last[0] != 0.0f || last[1] != 0.0f)) {
+                ++searched;
+                for (u32 back = 1; back <= 60 && back <= count; ++back) {
+                    if (same(entry(count - back))) {
+                        place = count - back;
+                        found = true;
+                        break;
+                    }
+                }
+            } else if (!found && known && in_ring(place)) {
+                found = true; // no jitter in the frame (a fade, the jitter off): the place stands
+            }
+            known = false;
+            if (found && period >= 1 && period <= 30 && in_ring(place + period)) {
+                const Entry before = entry(place), now = entry(place + period);
+                previous_projection_jitter = {before.x, before.y};
+                projection_jitter = {now.x, now.y};
+                projection_matched = true;
+                place += period;
+                known = true;
+            }
+            // Diagnosis (BB_PROJECTION_JITTER_RING_LOG=1): the record's newest 48 entries, three times.
+            if (static const bool ring_log = std::getenv("BB_PROJECTION_JITTER_RING_LOG") != nullptr;
+                ring_log && (frames == 3000 || frames == 3001 || frames == 3002)) {
+                std::printf("Projection jitter ring at count %u (read back %.1f %.1f):", count,
+                            last[0] * 1e6f, last[1] * 1e6f);
+                for (u32 back = 48; back >= 1; --back) {
+                    const Entry e = entry(count - back);
+                    std::printf(" %.0f,%.0f@%05llx", e.x * 1e6f, e.y * 1e6f,
+                                static_cast<unsigned long long>(e.camera & 0xfffffu));
+                }
+                std::printf("\n");
+            }
+            missing += !known;
+            if (++frames % 600 == 0 && lines < 20) {
+                ++lines;
+                std::printf("Projection jitter record: in 600 frames %u looked up by value, %u without a "
+                            "record (inferred); %u cameras a frame\n", searched, missing, period);
+                searched = missing = 0;
             }
         }
     }

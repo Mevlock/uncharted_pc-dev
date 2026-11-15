@@ -1239,6 +1239,12 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
  * camera ahead of the frame drawn, so the jitter a frame really used is read back from the velocity pass's constants
  * (CameraMotion::OnVelocityConstants). */
 float *runtime_projection_jitter_slot;
+/* The jitters the stub applied, in the order the game built its cameras: a count of applications (uint32) and a
+ * ring of 64 entries of 16 bytes (the two floats of the slot as applied, then the camera's address), written by the
+ * stub; read by the GPU side (CameraMotion::OnVelocityConstants) to know a frame's jitter exactly instead of
+ * inferring it from the values asked. Null when the stub's page is not addressable with 32 bits (then: inferred). */
+volatile uint32_t *runtime_projection_jitter_count;
+const uint8_t *runtime_projection_jitter_ring;
 /* Set by the GPU side before the game code is patched: 1 on NVIDIA's driver, 0 on another, -1 not known yet. */
 int runtime_gpu_nvidia = -1;
 /* Which game's program was recognised when the code was patched (1, 2, 3; 0: none / not yet): read by the GPU side. */
@@ -1347,6 +1353,25 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     uint8_t *c = page, *skip1, *skip2;
     const uint8_t r = g->row;
     c = pj_emit_test(c, g, &skip1, &skip2);
+    /* The record of this application (BB_PROJECTION_JITTER_RING=0: none): count += 1 (atomic), ring[old count & 63] =
+     * {the slot's two floats, rbx}. rax and rcx are saved on the stack (the function's frame is allocated down to
+     * rsp: nothing of it lies below); the flags are dead here (the test above already changed them). */
+    uint32_t *count = (uint32_t *)(page + 0x810);
+    uint8_t *ring = page + 0x900;
+    const char *ring_env = getenv("BB_PROJECTION_JITTER_RING");
+    const int ring_on = !(ring_env && ring_env[0] == '0') && (uintptr_t)(ring + 0x400) < 0x7fffffffu;
+    if (ring_on) {
+        const uint32_t ring32 = (uint32_t)(uintptr_t)ring, ring32b = ring32 + 8;
+        *c++ = 0x50; *c++ = 0x51;                                             /* push rax; push rcx */
+        *c++ = 0xb8; *c++ = 0x01; *c++ = 0x00; *c++ = 0x00; *c++ = 0x00;      /* mov eax, 1 */
+        *c++ = 0xf0; *c++ = 0x0f; *c++ = 0xc1; *c++ = 0x05; c = pj_rel(c, count); /* lock xadd [count], eax */
+        *c++ = 0x83; *c++ = 0xe0; *c++ = 0x3f;                                /* and eax, 63 */
+        *c++ = 0xc1; *c++ = 0xe0; *c++ = 0x04;                                /* shl eax, 4 */
+        *c++ = 0x48; *c++ = 0x8b; *c++ = 0x0d; c = pj_rel(c, slot);           /* mov rcx, [slot] */
+        *c++ = 0x48; *c++ = 0x89; *c++ = 0x88; memcpy(c, &ring32, 4); c += 4; /* mov [rax + ring], rcx */
+        *c++ = 0x48; *c++ = 0x89; *c++ = 0x98; memcpy(c, &ring32b, 4); c += 4; /* mov [rax + ring + 8], rbx */
+        *c++ = 0x59; *c++ = 0x58;                                             /* pop rcx; pop rax */
+    }
     *c++ = 0xc5; *c++ = (uint8_t)(0x80 | ((~r & 15) << 3)); *c++ = 0x58; *c++ = (uint8_t)((r << 3) | 5);
     c = pj_rel(c, slot);                                                  /* vaddps xmmR, xmmR, [slot] */
     *c++ = 0xc5; *c++ = 0xf8; *c++ = 0x29; *c++ = (uint8_t)(0x83 | (r << 3));
@@ -1379,9 +1404,16 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
         pj_rel(load + 1, stub);
         load[5] = 0x0f; load[6] = 0x1f; load[7] = 0x00;                                     /* 3-byte nop */
     }
+    if (ring_on) {
+        runtime_projection_jitter_count = count;
+        runtime_projection_jitter_ring = ring;
+    }
     runtime_projection_jitter_slot = slot;
     printf("Projection jitter: the game's projection takes the upscaler jitter (%s, camera update join at %#llx, "
-           "stub at %p; BB_PROJECTION_JITTER=0 turns it off)\n", g->name, (unsigned long long)g->join, (void *)page);
+           "stub at %p; BB_PROJECTION_JITTER=0 turns it off); each frame's jitter %s\n", g->name,
+           (unsigned long long)g->join, (void *)page,
+           ring_on ? "is read from the stub's record (BB_PROJECTION_JITTER_RING=0: inferred as before)"
+                   : "is inferred from the values asked");
 #else
     (void)code;
     (void)size;
