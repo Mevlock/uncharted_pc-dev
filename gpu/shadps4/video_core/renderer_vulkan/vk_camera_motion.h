@@ -156,6 +156,16 @@ private:
     std::array<float, 3> last_forward{}, last_position{};
     bool has_last_camera = false;
     std::atomic<bool> camera_cut{false};
+    std::atomic<float> picture_speed{0.0f}; ///< last frame's picture motion, fraction of the width
+
+public:
+    /// How far the picture moved in the last frame (screen points at view z 5), in fractions
+    /// of the width (OnVelocityConstants).
+    [[nodiscard]] float PictureSpeed() const noexcept {
+        return picture_speed.load(std::memory_order_relaxed);
+    }
+
+private:
 
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pipeline_layout;

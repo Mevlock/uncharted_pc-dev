@@ -433,6 +433,8 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                         swing = std::max(swing, std::isfinite(m) ? m : 0.0f);
                     }
                 }
+                // The picture's motion this frame (fraction of the width; the jitter fade).
+                picture_speed.store(swing, std::memory_order_relaxed);
                 const bool swung = cut_motion > 0.0f && swing > cut_motion;
                 if (dot < 0.82f || moved > 2.0f || swung) {
                     if (swung && dot >= 0.82f && moved <= 2.0f) {

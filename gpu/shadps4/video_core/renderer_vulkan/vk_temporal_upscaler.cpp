@@ -611,6 +611,26 @@ bool TemporalUpscaler::OnFrameStart() {
     if (fade_was_resetting && FadeNoJitter() && BbSettings::Get().upscaler == BbSettings::UpscalerDlss) {
         jitter = {};
     }
+    // bbport (DLSS rework 5, opt-in BB_JITTER_FADE=1): the jitter shrinks while the camera moves:
+    // full up to 0.25 render pixels of picture motion a frame, none from 1 pixel, the speed
+    // decaying slowly (x0.85 a frame) so a pan's end does not snap back. Idea from LanternEngine
+    // (Awaken), measured there on a pan: frame-to-frame wobble 0.32 -> 0.035 px. Off by default:
+    // NVIDIA's guide lists jitter only when static as a risk.
+    if (static const bool fade = [] {
+            const char* env = std::getenv("BB_JITTER_FADE");
+            const bool v = env && env[0] == '1';
+            std::printf("Upscaler: jitter fade with camera speed %s (BB_JITTER_FADE)\n",
+                        v ? "on" : "off");
+            return v;
+        }();
+        fade) {
+        static float speed = 0.0f;
+        const float width = float(Scaled() || early_native ? render_width
+                                                            : scene_targets.Size().width);
+        speed = std::max(camera_motion.PictureSpeed() * width, speed * 0.85f);
+        const float keep = std::clamp((1.0f - speed) / 0.75f, 0.0f, 1.0f);
+        jitter = {jitter[0] * keep, jitter[1] * keep};
+    }
     // bbport diagnosis (BB_JITTER_OFF=1): no jitter at all (motion-vector error measurements
     // compare consecutive frames pixel for pixel).
     if (static const bool off = [] {
