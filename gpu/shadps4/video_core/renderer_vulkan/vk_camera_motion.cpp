@@ -389,7 +389,52 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 const float dx = position[0] - last_position[0], dy = position[1] - last_position[1],
                             dz = position[2] - last_position[2];
                 const float moved = std::sqrt(dx * dx + dy * dy + dz * dz);
-                if (dot < 0.82f || moved > 2.0f) {
+                // bbport: a cut also when the picture moves more than half the render width in
+                // one frame (a swing that turns less than 35 degrees or moves less than 2 units,
+                // e.g. a narrow-FOV cutscene shot change): the screen points at view z 5 near the
+                // centre and both sides, reprojected into the previous frame. Idea from
+                // LanternEngine (Awaken), re-implemented. BB_CUT_MOTION=<fraction of the width>
+                // (default 0.5; 0: off).
+                static const float cut_motion = [] {
+                    const char* env = std::getenv("BB_CUT_MOTION");
+                    const float v = env && env[0] ? static_cast<float>(std::atof(env)) : 0.5f;
+                    std::printf("Camera motion: cut when the picture moves %.2f of the width "
+                                "(BB_CUT_MOTION)\n", v);
+                    return v;
+                }();
+                float swing = 0.0f;
+                if (cut_motion > 0.0f && camera.valid) {
+                    for (const float u : {0.5f, 0.15f, 0.85f}) {
+                        constexpr float z = 5.0f;
+                        const float vp[4] = {z * (camera.uv_to_view[0] * u + camera.uv_to_view[2]),
+                                             z * (camera.uv_to_view[1] * 0.5f + camera.uv_to_view[3]),
+                                             z, 1.0f};
+                        float clip[3];
+                        for (int r = 0; r < 3; ++r) {
+                            clip[r] = 0.0f;
+                            for (int k = 0; k < 4; ++k) {
+                                clip[r] += camera.to_previous_clip[r * 4 + k] * vp[k];
+                            }
+                        }
+                        if (clip[2] <= 1e-4f) {
+                            swing = 1.0f; // behind the previous camera: a cut
+                            break;
+                        }
+                        const float du = 0.5f * clip[0] / clip[2] + 0.5f - u;
+                        const float dv = 0.5f - 0.5f * clip[1] / clip[2] - 0.5f;
+                        const float m = std::sqrt(du * du + dv * dv);
+                        swing = std::max(swing, std::isfinite(m) ? m : 0.0f);
+                    }
+                }
+                const bool swung = cut_motion > 0.0f && swing > cut_motion;
+                if (dot < 0.82f || moved > 2.0f || swung) {
+                    if (swung && dot >= 0.82f && moved <= 2.0f) {
+                        static int swings = 0;
+                        if (swings++ < 20) {
+                            std::printf("Camera motion: picture moved %.2f of the width in a frame: "
+                                        "cut\n", swing);
+                        }
+                    }
                     camera.cut = true;
                     camera_cut.store(true, std::memory_order_relaxed);
                     static int noted = 0;
