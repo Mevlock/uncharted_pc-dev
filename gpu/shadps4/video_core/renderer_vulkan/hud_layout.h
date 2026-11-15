@@ -21,9 +21,8 @@
 //   - the middle third stays in the middle,
 //   - the right third goes to the right edge.
 // The wide area is the screen, or a centred narrower area (BB_HUD_WIDE_ASPECT, e.g. 21:9 on a
-// 32:9 screen). Menus (drawn after the frame's copy into the display buffer), draws across the
-// whole width (fades, letterbox bars) and draws touching a screen edge (their edge vertices are
-// not squeezed, a sideways move would cut them) keep the 16:9 layout.
+// 32:9 screen). Menus (drawn after the frame's copy into the display buffer) and draws across the
+// whole width (fades, letterbox bars) keep the 16:9 layout.
 namespace Vulkan::HudLayout {
 
 /// An IEEE half float (binary16) as a float.
@@ -45,25 +44,19 @@ inline float HalfToFloat(uint16_t h) {
 enum class Pass : uint8_t { None, Left, Centre, Right };
 
 /// What a HUD draw's horizontal extent (its vertex positions: NDC, or beyond +-4 the 1280-wide UI
-/// space) allows: Split (drawn per third), or Keep (16:9 as before): across the whole width,
-/// touching a screen edge, or unknown.
-enum class Extent : uint8_t { Split, Full, Edge, Unknown };
+/// space) allows: Full (across the whole width: a fade or backdrop, drawn as before, since its
+/// passes would leave the gaps between the thirds out) or Split (drawn per third; also an unknown
+/// extent, as in Ferosnow95's version: the scissor puts each part of it where its third goes).
+enum class Extent : uint8_t { Split, Full };
 inline Extent ClassifyExtent(bool valid, float min_x, float max_x) {
     if (!valid || !(min_x <= max_x)) {
-        return Extent::Unknown;
+        return Extent::Split;
     }
     if (std::max(std::fabs(min_x), std::fabs(max_x)) > 4.0f) {
         min_x = min_x / 640.0f - 1.0f;
         max_x = max_x / 640.0f - 1.0f;
     }
-    if (min_x <= -0.995f && max_x >= 0.995f) {
-        return Extent::Full;
-    }
-    // The vertex shader keeps vertices at |x| >= 0.999 |w| where they are.
-    if (min_x <= -0.998f || max_x >= 0.998f) {
-        return Extent::Edge;
-    }
-    return Extent::Split;
+    return min_x <= -0.995f && max_x >= 0.995f ? Extent::Full : Extent::Split;
 }
 
 /// The wide area's half width in NDC (1: the screen), at least the 16:9 layout's (k).

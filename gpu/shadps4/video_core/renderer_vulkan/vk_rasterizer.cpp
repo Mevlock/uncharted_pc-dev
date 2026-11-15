@@ -9319,6 +9319,24 @@ bool Rasterizer::NoteHudDraw(const GraphicsPipeline* pipeline, bool is_indexed, 
     const u64 frames = hud_tracker.frames;
     const bool hud = hud_tracker.Draw(ps ? u32(ps->pgm_hash) : 0, target,
                                       FrameCapture::IsDisplayBuffer(target), is_indexed);
+    // BB_HUD_TRACE: every 600th frame, its draws from the tonemap draw on (the HUD's place in the frame).
+    if (hud_trace && hud_tracker.frames % 600 == 1) {
+        static u64 seq_frame = 0;
+        static u32 seq_lines = 0;
+        if (seq_frame != hud_tracker.frames) {
+            seq_frame = hud_tracker.frames;
+            seq_lines = 0;
+        }
+        if (seq_lines++ < 120) {
+            std::printf("HUD seq %llu: vs %08x ps %08x target %#llx%s %ux%u %s squeeze %u -> %s\n",
+                        static_cast<unsigned long long>(hud_tracker.frames),
+                        u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash),
+                        ps ? u32(ps->pgm_hash) : 0u, static_cast<unsigned long long>(target),
+                        FrameCapture::IsDisplayBuffer(target) ? " (display)" : "", cb.Pitch(), cb.Height(),
+                        is_indexed ? "indexed" : "plain", pipeline->GetGraphicsKey().ui_squeeze,
+                        hud ? "hud" : "-");
+        }
+    }
     if (hud_trace && hud_tracker.frames != frames && hud_tracker.frames % 600 == 0) {
         std::printf("HUD trace: %llu frames; over the frame %llu draws (%llu not indexed), after the "
                     "copy %llu\n",
@@ -9339,12 +9357,12 @@ bool Rasterizer::NoteHudDraw(const GraphicsPipeline* pipeline, bool is_indexed, 
                        (ps ? ps->pgm_hash : 0) + u64(extent);
         if (auto& n = traced[id]; n < 2 && traced.size() <= 64) {
             ++n;
-            static constexpr const char* kNames[] = {"split", "full (kept)", "edge (kept)",
-                                                     "unknown (kept)"};
-            std::printf("HUD draw: vs %08x ps %08x %u %s, x %.3f..%.3f -> %s\n",
+            static constexpr const char* kNames[] = {"split", "full (kept)"};
+            std::printf("HUD draw: vs %08x ps %08x %u %s, x %.3f..%.3f%s -> %s\n",
                         u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash),
                         ps ? u32(ps->pgm_hash) : 0u, Regs().num_indices,
-                        is_indexed ? "indices" : "vertices", min_x, max_x, kNames[u32(extent)]);
+                        is_indexed ? "indices" : "vertices", min_x, max_x, valid ? "" : " (unknown)",
+                        kNames[u32(extent)]);
         }
     }
     return extent == HudLayout::Extent::Split;
@@ -9355,16 +9373,40 @@ bool Rasterizer::HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u3
     using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
     const auto& regs = Regs();
     const auto& fetch = pipeline->GetFetchShader();
-    if (regs.num_indices == 0 || !fetch || fetch->attributes.empty()) {
+    if (regs.num_indices == 0) {
         return false;
     }
     const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
     // The position: the per-vertex float attribute of 2-4 components (32 or 16 bits) with the
-    // lowest semantic.
+    // lowest semantic; without a fetch shader the first vertex buffer of the shader that looks like
+    // vertices, its first float (best effort, as in Ferosnow95's version).
     const Shader::Gcn::VertexAttribute* position = nullptr;
     AmdGpu::Buffer buffer{};
     bool half = false;
-    for (const auto& attrib : fetch->attributes) {
+    bool found = false;
+    if (!fetch || fetch->attributes.empty()) {
+        for (u32 i = 0; i < vs.buffers.size() && !found; ++i) {
+            if (vs.buffers[i].IsSpecial()) {
+                continue;
+            }
+            const auto sharp = vs.buffers[i].GetSharp(vs);
+            const auto fmt = sharp.GetDataFmt();
+            const u32 vstride = sharp.GetStride();
+            const bool float_fmt = (fmt == AmdGpu::DataFormat::Format32_32 ||
+                                    fmt == AmdGpu::DataFormat::Format32_32_32 ||
+                                    fmt == AmdGpu::DataFormat::Format32_32_32_32) &&
+                                   sharp.GetNumberFmt() == AmdGpu::NumberFormat::Float;
+            const bool raw = fmt == AmdGpu::DataFormat::FormatInvalid ||
+                             fmt == AmdGpu::DataFormat::Format32 ||
+                             fmt == AmdGpu::DataFormat::Format8;
+            if (vstride >= 8 && vstride <= 256 && sharp.base_address != 0 && (float_fmt || raw)) {
+                buffer = sharp;
+                found = true;
+            }
+        }
+    }
+    static const decltype(fetch->attributes) no_attributes{};
+    for (const auto& attrib : fetch ? fetch->attributes : no_attributes) {
         if (attrib.GetStepRate() != InstanceIdType::None) {
             continue;
         }
@@ -9385,7 +9427,7 @@ bool Rasterizer::HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u3
         }
     }
     const u32 stride = buffer.GetStride();
-    if (!position || stride < (half ? 4u : 8u)) {
+    if ((!position && !found) || stride < (half ? 4u : 8u)) {
         return false;
     }
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs, fetch);
