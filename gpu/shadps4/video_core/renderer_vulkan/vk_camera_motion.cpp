@@ -429,6 +429,10 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
             const auto& a = asked_jitter[(asked_count - back) % asked_jitter.size()];
             if (std::abs(a[0] - last[0]) < 2e-6f && std::abs(a[1] - last[1]) < 2e-6f &&
                 (a[0] != 0.0f || a[1] != 0.0f)) {
+                // The value the game was given, not its read-back through the matrix product
+                // (off by up to the match tolerance, 0.003 pixels at 3440 wide): the previous
+                // jitter taken out of the motion vectors is then the one the upscaler was told.
+                previous_projection_jitter = a;
                 if (back >= 2) {
                     projection_jitter = asked_jitter[(asked_count - back + 1) % asked_jitter.size()];
                     projection_matched = true;
