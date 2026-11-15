@@ -235,7 +235,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'fast_boot': True, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
+                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
@@ -926,10 +926,10 @@ def game_environment(s, start=None):
     if not s.get('bloom', True):
         env['BB_BLOOM'] = '0'
     env['BB_DOF'] = str(s.get('depth_of_field') or '1')
-    # Fast start (0.3.6.57, on by default): no logo movie, and the boot runs the vblank fast from the shader
-    # preparation's end until the title. The setting was 'skip_intro' (off by default) before: a new key so that
-    # every player gets the new default once; Game > Skip intro logos turns it off.
-    env['BB_SKIP_INTRO'] = '1' if s.get('fast_boot', True) else '0'
+    # The logo movie (off by default). The faster boot (the vblank runs fast from the shader preparation's end until
+    # the title, paused while the logos play) is on for everyone in the port itself (BB_FAST_BOOT=0: off).
+    if s.get('skip_intro', False):
+        env['BB_SKIP_INTRO'] = '1'
     if s.get('unlock_chapters', False):
         env['BB_UNLOCK_CHAPTERS'] = '1'
     if s.get('unlock_rewards', False):
@@ -1896,7 +1896,7 @@ class Launcher:
                  _('The language the PS4 would be set to; the games use it for text and speech.'))
         name = self.ttk.Entry(f, textvariable=self.var('player_name'), width=30)
         self.row(f, _('Player name'), name, _('Shown where the game uses the PSN name.'))
-        self.check(f, 'fast_boot', _('Skip intro logos'),
+        self.check(f, 'skip_intro', _('Skip intro logos'),
                    _('Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos '
                      'and their music (they cannot be skipped with a button). All three games.'))
         self.check(f, 'unlock_chapters', _('Unlock all chapters'),

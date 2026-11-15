@@ -1423,6 +1423,7 @@ static void patch_collection_skip(uint64_t image_size) {
  * own loads as before; no movie file, decoder or logo music (the movie player starts it with the movie). Without
  * the hook (code not found): the stand-in movie of runtime_file.c. */
 volatile int runtime_movie_starts;
+volatile int runtime_logo_skipped; /* the logo movie was not asked for: vk_presenter.cpp shows black until the title */
 static int skip_intro_on(void) {
     static int on=-1;
     if (on<0) { const char *e=getenv("BB_SKIP_INTRO"); on=e && e[0]=='1'; }
@@ -1432,6 +1433,7 @@ static int __attribute__((ms_abi)) movie_start_called(const char *name, void *ma
     (void)manager;
     if (skip_intro_on() && name && !strcmp(name,"sce-ndi-logos")) {
         printf("Intro: logo movie not asked for (BB_SKIP_INTRO): the boot goes on to the title\n");
+        __atomic_store_n(&runtime_logo_skipped,1,__ATOMIC_RELEASE);
         return 1;
     }
     __atomic_add_fetch(&runtime_movie_starts,1,__ATOMIC_RELEASE);

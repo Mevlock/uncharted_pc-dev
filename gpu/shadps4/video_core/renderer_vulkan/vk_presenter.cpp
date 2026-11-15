@@ -107,6 +107,44 @@ extern "C" int runtime_ultrawide_fill;
 // bbport: the game renders at BB_RENDER_RES (runtime_ultrawide.c) with its 16:9 layout stretched over
 // it: frames that do not fill the window are shown at 16:9, not at the buffer's shape.
 extern "C" int runtime_render_resolution;
+// bbport: src/probe.c movie_start_called: the intro logo movie was not asked for (BB_SKIP_INTRO=1).
+extern "C" volatile int runtime_logo_skipped;
+// src/runtime_menumouse.c: a game menu showed (the title, after the boot).
+extern "C" volatile int runtime_title_shown;
+extern std::atomic<bool> g_last_frame_drew_scene; // vk_rasterizer.cpp TakeSceneFrame
+
+namespace {
+/// bbport: skipped intro logos (BB_SKIP_INTRO=1). The games load their title level while the logo movie
+/// plays, and the movie is drawn over their own frames until it ends. Without it those frames show: Uncharted 2
+/// clears its scene to the title's fog grey (0.63) and runs its post process over it for about a second before
+/// the temple is drawn: a grey 16:9 screen (sometimes: when the grey clear comes before the first scene draws).
+/// So from the skip until the first frame that draws the 3D scene, or a menu shows (at most 15 s), the frames are
+/// shown black, as the movie's last picture would be.
+bool CoverSkippedLogos() {
+    static int state = 0; // 0 no skip yet, 1 covering, 2 done
+    static std::chrono::steady_clock::time_point since;
+    static u32 covered = 0;
+    if (state == 2) {
+        return false;
+    }
+    if (state == 0) {
+        if (!runtime_logo_skipped) {
+            return false;
+        }
+        state = 1;
+        since = std::chrono::steady_clock::now();
+    }
+    const bool scene = g_last_frame_drew_scene.load(std::memory_order_relaxed);
+    if (scene || runtime_title_shown || std::chrono::steady_clock::now() - since > std::chrono::seconds(15)) {
+        state = 2;
+        std::printf("Intro: %u frames before the title's picture shown black (skipped logos; ended by %s)\n", covered,
+                    scene ? "the title's 3D scene" : runtime_title_shown ? "a menu" : "the 15 s limit");
+        return false;
+    }
+    ++covered;
+    return true;
+}
+} // namespace
 
 static vk::Rect2D FitImage(s32 frame_width, s32 frame_height, s32 swapchain_width,
                            s32 swapchain_height, bool fill = false) {
@@ -690,6 +728,23 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     }();
     pp_settings.downscale = downscale_filter;
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
+    if (CoverSkippedLogos()) {
+        // The frame is General after the pass (as the swapchain blit and the dumps read it).
+        const vk::MemoryBarrier2 written{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                         .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                                         .dstStageMask = vk::PipelineStageFlagBits2::eClear,
+                                         .dstAccessMask = vk::AccessFlagBits2::eTransferWrite};
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &written});
+        cmdbuf.clearColorImage(frame->image, vk::ImageLayout::eGeneral,
+                               vk::ClearColorValue{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}},
+                               vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1});
+        const vk::MemoryBarrier2 cleared{.srcStageMask = vk::PipelineStageFlagBits2::eClear,
+                                         .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+                                         .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                         .dstAccessMask = vk::AccessFlagBits2::eMemoryRead |
+                                                          vk::AccessFlagBits2::eMemoryWrite};
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &cleared});
+    }
 
     // bbport: frame generation: the frames between the previous frame and this one.
     frame->generated_count = 0;

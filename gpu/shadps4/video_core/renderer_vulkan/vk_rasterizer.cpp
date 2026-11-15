@@ -8808,6 +8808,9 @@ std::atomic<u32> g_frame_scene_draws{0};
 /// ahead of the GPU thread, before this frame's scene draws are counted: the ultrawide UI test
 /// uses this (wrong for one frame when gameplay starts or stops).
 std::atomic<bool> g_last_frame_scene{false};
+/// bbport: the frame just prepared drew the 3D scene (at least SceneExitDraws() depth-tested
+/// full-size draws; TakeSceneFrame): the cover after skipped intro logos ends there (vk_presenter.cpp).
+std::atomic<bool> g_last_frame_drew_scene{false};
 
 std::atomic<u32> g_frame_menu_draws{0};
 
@@ -8982,6 +8985,7 @@ bool Rasterizer::TakeSceneFrame() noexcept {
         return env && std::strcmp(env, "always") == 0;
     }();
     g_last_frame_scene.store(gameplay, std::memory_order_relaxed);
+    g_last_frame_drew_scene.store(scene_draws >= SceneExitDraws(), std::memory_order_relaxed);
     const bool scene = always || gameplay;
     // The game's camera: widened for gameplay (and through movies), its own for menus and title
     // screens.

@@ -49,17 +49,21 @@ extern "C" double runtime_time_scale_now(void);
 extern "C" volatile int runtime_freeze_flag; // runtime_thread.c: the game's threads are held (preparation page/hold)
 extern "C" volatile int runtime_title_shown; // runtime_menumouse.c: a game menu showed (the title, after the boot)
 
-// bbport: fast boot (BB_SKIP_INTRO=1, the launcher's "Skip intro logos"). From the end of the shader preparation (the
-// stored pipelines are in, the game's threads run again) to the title's first menu the games load the title's packages
-// one after another, a few frames each: that time follows the frame rate (U3 EU 1.02, resumed -> title: 2.6 s at 60 Hz,
-// 1.2 s at 144, 0.8 s at 240, 0.5 s at 480). The screen is black meanwhile, so the vblank runs at 480 Hz (as the
-// uncapped presets' vblank, BB_VBLANK_HZ=0) and without the frame limit until a game menu is on screen, at most 10 s;
-// then the configured rate. Not while the preparation page shows (its frames would take time from the build).
-// BB_BOOT_VBLANK_HZ=<hz>: another rate, 0: off.
+extern "C" volatile int runtime_movie_starts; // src/probe.c patch_movie_start: the game asked for a movie
+
+// bbport: faster boot (on for everyone; BB_FAST_BOOT=0: off). From the end of the shader preparation (the stored
+// pipelines are in, the game's threads run again) to the title's first menu the games load the title's packages one
+// after another, a few frames each: that time follows the frame rate (U3 EU 1.02, resumed -> title: 2.6 s at 60 Hz,
+// 1.2 s at 144, 0.8 s at 240, 0.5 s at 480). Nothing is shown meanwhile but black (and the logo movie), so the vblank
+// runs at 480 Hz (as the uncapped presets' vblank, BB_VBLANK_HZ=0) and without the frame limit until a game menu is on
+// screen, at most 10 s of it; then the configured rate. Not while the preparation page shows (its frames would take
+// time from the build), and not while a movie plays (the intro logos when they are not skipped): the games time
+// their movies by the vblank (the 60 Hz movie display below), so from the movie manager's Start until 300 ms after its
+// last picture the configured rate runs, then the boost goes on until the title. BB_BOOT_VBLANK_HZ=<hz>: another rate.
 static u32 BootVblankHz() {
     static const u32 hz = [] {
-        const char* skip = std::getenv("BB_SKIP_INTRO");
-        if (!skip || skip[0] != '1') {
+        const char* fast = std::getenv("BB_FAST_BOOT");
+        if (fast && fast[0] == '0') {
             return 0u;
         }
         const char* env = std::getenv("BB_BOOT_VBLANK_HZ");
@@ -68,13 +72,27 @@ static u32 BootVblankHz() {
     }();
     return hz;
 }
-static bool BootVblankBoost(bool port_open) {
+static bool BootVblankBoost(bool port_open, bool movie_playing) {
+    using Clock = std::chrono::steady_clock;
     static int state = 0; // 0 before the preparation's end, 1 boosted, 2 done (PresentThread only)
-    static std::chrono::steady_clock::time_point since;
+    static Clock::time_point since, paused_since;
+    static bool paused = false;
+    static int seen_starts = 0;
+    static Clock::time_point start_at{}; // the last movie Start whose first picture has not come yet
     if (state == 2 || !BootVblankHz()) {
         return false;
     }
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = Clock::now();
+    const int starts = __atomic_load_n(&runtime_movie_starts, __ATOMIC_ACQUIRE);
+    if (starts != seen_starts) {
+        seen_starts = starts;
+        start_at = now;
+    }
+    if (movie_playing) {
+        start_at = {};
+    }
+    // a movie asked for and its first picture not decoded yet (at most 3 s), or its pictures coming
+    const bool movie = movie_playing || (start_at != Clock::time_point{} && now - start_at < std::chrono::seconds(3));
     if (state == 0) {
         if (runtime_title_shown) {
             state = 2;
@@ -92,16 +110,28 @@ static bool BootVblankBoost(bool port_open) {
         }
         state = 1;
         since = now;
-        std::printf("VideoOut: boot vblank %u Hz until the title (BB_SKIP_INTRO)\n", BootVblankHz());
+        std::printf("VideoOut: boot vblank %u Hz until the title (BB_FAST_BOOT)\n", BootVblankHz());
     }
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - since).count();
+    if (movie != paused && !runtime_title_shown) {
+        paused = movie;
+        if (paused) {
+            paused_since = now;
+        } else {
+            since += now - paused_since; // the 10 s count only the boosted time
+        }
+        std::printf("VideoOut: boot vblank %s\n",
+                    paused ? "paused while a movie plays" : "on again after the movie");
+    }
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>((paused ? paused_since : now) - since).count();
     if (runtime_title_shown || ms > 10000) {
         state = 2;
-        std::printf("VideoOut: %s after %lld ms: vblank %u Hz\n", runtime_title_shown ? "title on screen" : "no title",
-                    (long long)ms, EmulatorSettings.GetVblankFrequency());
+        std::printf("VideoOut: %s after %lld ms of boot vblank: vblank %u Hz\n",
+                    runtime_title_shown ? "title on screen" : "no title", (long long)ms,
+                    EmulatorSettings.GetVblankFrequency());
         return false;
     }
-    return true;
+    return !paused;
 }
 
 namespace Vulkan {
@@ -1050,7 +1080,8 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
     while (!token.stop_requested()) {
         BbThreads::SampleCore(BbThreads::CorePresent);
-        const bool boot_boost = BootVblankBoost(main_port.is_open);
+        const bool boot_boost =
+            BootVblankBoost(main_port.is_open, MovieActive(std::chrono::steady_clock::now()));
         Common::AccurateTimer& timer = boot_boost ? boot_timer : vblank_timer;
         timer.Start();
         const auto tick_deadline = std::chrono::steady_clock::now() + (boot_boost ? boot_period : vblank_period);
