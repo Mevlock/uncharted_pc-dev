@@ -993,4 +993,136 @@ TRANSLATIONS = {
         'Ta partie est sauvegardée comme d’habitude, et une copie va ici',
         'Dein Spiel speichert wie gewohnt, und eine Kopie kommt hierher',
         'La partita si salva come sempre e una copia va qui', 'いつも通りセーブされ、ここにもコピーされます'),
+    # ---- HDR section (Settings page, HDR10 output only) --------------------------------------------------------
+    'HDR': L('HDR', 'HDR', 'HDR', 'HDR', 'HDR', 'HDR'),
+    'Paper white (nits)': L('Blanco de papel (nits)', 'Branco de papel (nits)', 'Blanc papier (nits)',
+                            'Papierweiß (Nits)', 'Bianco carta (nits)', 'ペーパーホワイト (nits)'),
+    'Peak brightness (nits)': L('Brillo máximo (nits)', 'Brilho máximo (nits)', 'Luminosité maximale (nits)',
+                                'Spitzenhelligkeit (Nits)', 'Luminosità massima (nits)', 'ピークの明るさ (nits)'),
+    "Paper white: the brightness of white in the game, the HUD and the menus. Peak: your display's peak brightness. "
+    "Both start from the launcher's values each time the game starts.": L(
+        'Blanco de papel: el brillo del blanco en el juego, el HUD y los menús. Máximo: el brillo máximo de tu '
+        'pantalla. Ambos parten de los valores del launcher cada vez que se inicia el juego.',
+        'Branco de papel: o brilho do branco no jogo, no HUD e nos menus. Máximo: o brilho máximo da sua tela. Os '
+        'dois partem dos valores do launcher toda vez que o jogo inicia.',
+        'Blanc papier : la luminosité du blanc dans le jeu, le HUD et les menus. Maximale : la luminosité maximale de '
+        'votre écran. Les deux repartent des valeurs du launcher à chaque démarrage du jeu.',
+        'Papierweiß: die Helligkeit von Weiß im Spiel, im HUD und in den Menüs. Spitze: die Spitzenhelligkeit deines '
+        'Bildschirms. Beide beginnen bei jedem Spielstart mit den Werten des Launchers.',
+        "Bianco carta: la luminosità del bianco nel gioco, nell'HUD e nei menu. Massima: la luminosità massima del "
+        "tuo schermo. Entrambi ripartono dai valori del launcher a ogni avvio del gioco.",
+        'ペーパーホワイト: ゲーム、HUD、メニューのホワイトの明るさです。ピーク: ディスプレイのピークの明るさです。'
+        'どちらもゲーム起動時に毎回ランチャーの値から始まります。'),
+    "Scene HDR (the game's own highlights)": L(
+        'HDR de escena (las luces altas del propio juego)', 'HDR da cena (os realces do próprio jogo)',
+        'HDR de la scène (les hautes lumières du jeu)', 'Szenen-HDR (die Spitzlichter des Spiels)',
+        'HDR della scena (le alte luci del gioco)', 'シーン HDR (ゲーム本来のハイライト)'),
+    'Exposure': L('Exposición', 'Exposição', 'Exposition', 'Belichtung', 'Esposizione', '露出'),
+    'Highlights start': L('Inicio de las luces altas', 'Início dos realces', 'Début des hautes lumières',
+                          'Beginn der Spitzlichter', 'Inizio delle alte luci', 'ハイライトの開始'),
+    'Where HDR brightness begins: higher keeps sunlit surfaces at paper white; only bright highlights go brighter.': L(
+        'Dónde empieza el brillo HDR: más alto mantiene las superficies al sol en el blanco de papel; solo las luces '
+        'altas intensas brillan más.',
+        'Onde começa o brilho HDR: mais alto mantém as superfícies ao sol no branco de papel; só os realces fortes '
+        'ficam mais brilhantes.',
+        'Là où commence la luminosité HDR : plus haut garde les surfaces au soleil au blanc papier ; seules les hautes '
+        'lumières vives deviennent plus lumineuses.',
+        'Wo die HDR-Helligkeit beginnt: höher hält sonnenbeschienene Flächen bei Papierweiß; nur helle Spitzlichter '
+        'werden heller.',
+        "Dove inizia la luminosità HDR: più alto mantiene le superfici al sole al bianco carta; solo le alte luci "
+        "intense diventano più luminose.",
+        'HDR の明るさが始まるところです。高くするとひなたの面はペーパーホワイトのままで、強いハイライトだけがより'
+        '明るくなります。'),
+    'Saturation': L('Saturación', 'Saturação', 'Saturation', 'Sättigung', 'Saturazione', 'サチュレーション'),
+    'Highlight saturation': L('Saturación de luces altas', 'Saturação dos realces', 'Saturation des hautes lumières',
+                              'Sättigung der Spitzlichter', 'Saturazione delle alte luci', 'ハイライトのサチュレーション'),
+    'Contrast': L('Contraste', 'Contraste', 'Contraste', 'Kontrast', 'Contrasto', 'コントラスト'),
+    'Colour restoration': L('Restauración del color', 'Restauração da cor', 'Restauration des couleurs',
+                            'Farbwiederherstellung', 'Ripristino del colore', 'カラーリストア'),
+    'Blowout restoration': L('Restauración de zonas quemadas', 'Restauração de áreas estouradas',
+                             'Restauration des zones brûlées', 'Wiederherstellung ausgebrannter Lichter',
+                             'Ripristino delle zone bruciate', 'ブローアウトリストア'),
+    'Hue correction': L('Corrección de tono', 'Correção de matiz', 'Correction de teinte', 'Farbtonkorrektur',
+                        'Correzione della tinta', 'ヒューコレクション'),
+    'Per-channel tone mapping': L('Mapeo de tonos por canal', 'Mapeamento de tons por canal',
+                                  'Mappage des tons par canal', 'Tonemapping pro Kanal', 'Tone mapping per canale',
+                                  'チャンネルごとのトーンマッピング'),
+    "The tone mapping of the game's scene into HDR (RenoDX). Colour restoration brings back the colour strength of "
+    "the game's own grading (per-channel chrominance correction); blowout restoration keeps colour in highlights "
+    "that would turn white; hue correction keeps the game's hues. Per-channel tone mapping: each colour channel on "
+    "its own, as the game's curve does (richer colours, bright ones shift towards white); off: by brightness.": L(
+        'El mapeo de tonos de la escena del juego a HDR (RenoDX). La restauración del color recupera la intensidad '
+        'del color de la gradación del propio juego (corrección de crominancia por canal); la restauración de zonas '
+        'quemadas mantiene el color en las luces altas que se volverían blancas; la corrección de tono mantiene los '
+        'tonos del juego. Mapeo por canal: cada canal de color por separado, como hace la curva del juego (colores más '
+        'ricos, los brillantes tienden al blanco); desactivado: por brillo.',
+        'O mapeamento de tons da cena do jogo para HDR (RenoDX). A restauração da cor traz de volta a intensidade da '
+        'cor da gradação do próprio jogo (correção de crominância por canal); a restauração de áreas estouradas '
+        'mantém a cor nos realces que ficariam brancos; a correção de matiz mantém os matizes do jogo. Mapeamento por '
+        'canal: cada canal de cor separadamente, como faz a curva do jogo (cores mais ricas, as claras tendem ao '
+        'branco); desligado: pelo brilho.',
+        'Le mappage des tons de la scène du jeu en HDR (RenoDX). La restauration des couleurs ramène l’intensité des '
+        'couleurs de l’étalonnage du jeu (correction de chrominance par canal) ; la restauration des zones brûlées '
+        'garde la couleur des hautes lumières qui deviendraient blanches ; la correction de teinte garde les teintes '
+        'du jeu. Mappage par canal : chaque canal de couleur à part, comme la courbe du jeu (couleurs plus riches, les '
+        'claires tirent vers le blanc) ; désactivé : selon la luminosité.',
+        'Das Tonemapping der Spielszene in HDR (RenoDX). Die Farbwiederherstellung holt die Farbstärke der eigenen '
+        'Farbgebung des Spiels zurück (Chrominanzkorrektur pro Kanal); die Wiederherstellung ausgebrannter Lichter '
+        'erhält die Farbe in Spitzlichtern, die weiß würden; die Farbtonkorrektur erhält die Farbtöne des Spiels. '
+        'Tonemapping pro Kanal: jeder Farbkanal für sich, wie die Kurve des Spiels (sattere Farben, helle gehen ins '
+        'Weiße); aus: nach Helligkeit.',
+        "Il tone mapping della scena del gioco in HDR (RenoDX). Il ripristino del colore riporta l'intensità del "
+        "colore della gradazione del gioco (correzione della crominanza per canale); il ripristino delle zone "
+        "bruciate mantiene il colore nelle alte luci che diventerebbero bianche; la correzione della tinta mantiene le "
+        "tinte del gioco. Tone mapping per canale: ogni canale di colore a sé, come fa la curva del gioco (colori più "
+        "ricchi, quelli chiari tendono al bianco); disattivato: in base alla luminosità.",
+        'ゲームのシーンを HDR にするトーンマッピング (RenoDX) です。カラーリストア: ゲーム本来のグレーディングの'
+        'カラーの強さに近づけます。ブローアウトリストア: ホワイトになるハイライトのカラーを保ちます。'
+        'ヒューコレクション: ゲームのヒューを保ちます。チャンネルごとのトーンマッピング: ゲームのカーブと同じく'
+        'カラーチャンネルごとに処理します (カラーが強くなり、明るいカラーはホワイトに近づきます)。オフ: 明るさで'
+        '処理します。'),
+    "The game's picture in HDR (menus, videos, no scene HDR)": L(
+        'La imagen del juego en HDR (menús, vídeos, sin HDR de escena)',
+        'A imagem do jogo em HDR (menus, vídeos, sem HDR da cena)',
+        'L’image du jeu en HDR (menus, vidéos, sans HDR de la scène)',
+        'Das Bild des Spiels in HDR (Menüs, Videos, ohne Szenen-HDR)',
+        "L'immagine del gioco in HDR (menu, video, senza HDR della scena)",
+        'HDR でのゲームの画像 (メニュー、ムービー、シーン HDR なし)'),
+    'Gamma': L('Gamma', 'Gama', 'Gamma', 'Gamma', 'Gamma', 'ガンマ'),
+    'Picture saturation': L('Saturación de la imagen', 'Saturação da imagem', 'Saturation de l’image',
+                            'Bildsättigung', "Saturazione dell'immagine", '画像のサチュレーション'),
+    "Gamma: 2.2 is the display the games were made for; 2.4 gives deeper shadows. Saturation: 1.00 is the game's own "
+    "colour; above it colours get stronger, using the wider colour range of HDR.": L(
+        'Gamma: 2.2 es la pantalla para la que se hicieron los juegos; 2.4 da sombras más profundas. Saturación: 1.00 '
+        'es el color del propio juego; por encima, los colores se intensifican usando la gama más amplia del HDR.',
+        'Gama: 2.2 é a tela para a qual os jogos foram feitos; 2.4 dá sombras mais profundas. Saturação: 1.00 é a cor '
+        'do próprio jogo; acima disso as cores ficam mais fortes, usando a gama mais ampla do HDR.',
+        'Gamma : 2.2 est l’écran pour lequel les jeux ont été faits ; 2.4 donne des ombres plus profondes. '
+        'Saturation : 1.00 est la couleur du jeu ; au-delà, les couleurs se renforcent avec la gamme plus large du '
+        'HDR.',
+        'Gamma: 2.2 ist der Bildschirm, für den die Spiele gemacht wurden; 2.4 ergibt tiefere Schatten. Sättigung: '
+        '1.00 ist die Farbe des Spiels; darüber werden die Farben kräftiger und nutzen den größeren Farbraum von HDR.',
+        "Gamma: 2.2 è lo schermo per cui i giochi sono stati fatti; 2.4 dà ombre più profonde. Saturazione: 1.00 è il "
+        "colore del gioco; sopra, i colori diventano più intensi usando la gamma più ampia dell'HDR.",
+        'ガンマ: 2.2 はゲームが作られた時のディスプレイです。2.4 ではシャドウのコントラストが上がります。'
+        'サチュレーション: 1.00 はゲーム本来のカラーです。これより上ではカラーが強くなり、HDR のワイドな'
+        'カラーガマットを使います。'),
+    'Gamut expansion': L('Expansión de la gama', 'Expansão da gama', 'Expansion de la gamme', 'Farbraumerweiterung',
+                         'Espansione della gamma', 'ガマット エクスパンション'),
+    'Spreads colours into the HDR colour range, like wide-gamut monitors show SDR; 0 = accurate colours, 1 = as a P3 '
+    'monitor, 2 = the full HDR range. Brightness stays the same.': L(
+        'Extiende los colores a la gama de color del HDR, como los monitores de gama amplia muestran el SDR; 0 = colores '
+        'exactos, 1 = como un monitor P3, 2 = toda la gama del HDR. El brillo no cambia.',
+        'Espalha as cores pela gama de cores do HDR, como os monitores de gama ampla mostram o SDR; 0 = cores exatas, '
+        '1 = como um monitor P3, 2 = toda a gama do HDR. O brilho não muda.',
+        'Étend les couleurs dans la gamme de couleurs du HDR, comme les écrans à gamme étendue affichent le SDR ; '
+        '0 = couleurs exactes, 1 = comme un écran P3, 2 = toute la gamme du HDR. La luminosité ne change pas.',
+        'Spreizt die Farben in den Farbraum von HDR, wie Monitore mit großem Farbraum SDR zeigen; 0 = genaue Farben, '
+        '1 = wie ein P3-Monitor, 2 = der ganze HDR-Farbraum. Die Helligkeit bleibt gleich.',
+        "Allarga i colori nella gamma di colori dell'HDR, come i monitor a gamma ampia mostrano l'SDR; 0 = colori "
+        "esatti, 1 = come un monitor P3, 2 = tutta la gamma dell'HDR. La luminosità non cambia.",
+        'ワイドガマットのモニターで SDR を表示する時のように、カラーを HDR のカラーガマットへひろげます。'
+        '0 = 正確なカラー、1 = P3 モニターと同じ、2 = HDR のカラーガマットいっぱい。明るさは変わりません。'),
+    'Reset HDR settings': L('Restablecer ajustes HDR', 'Redefinir configurações HDR', 'Réinitialiser les réglages HDR',
+                            'HDR-Einstellungen zurücksetzen', 'Ripristina le impostazioni HDR', 'HDR 設定をリセット'),
 }

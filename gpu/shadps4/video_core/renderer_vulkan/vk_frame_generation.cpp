@@ -9,10 +9,12 @@
 
 #include <vk_mem_alloc.h>
 
+#include "bbport_hdr.h"
 #include "bbport_settings.h"
 #include "ffx_vk_fsr3_3_1_5_bridge.h"
 #include "video_core/host_shaders/frame_gen_inputs_comp.h"
 #include "video_core/host_shaders/frame_gen_ui_comp.h"
+#include "video_core/host_shaders/frame_gen_ui_hdr_comp.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -122,7 +124,20 @@ FrameGenerator::~FrameGenerator() {
 }
 
 bool FrameGenerator::Wanted() const {
-    return BbSettings::Get().frame_gen != BbSettings::FrameGenOff;
+    if (BbSettings::Get().frame_gen == BbSettings::FrameGenOff) {
+        return false;
+    }
+    // bbport: HDR10 output: the frames are A2B10G10R10 holding the HDR10 signal (ColorFormat);
+    // BB_HDR_FRAME_GEN=0 keeps frame generation off while HDR is on.
+    if (BbHdr::Output() && !BbHdr::FrameGenAllowed()) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::printf("Frame generation: off while HDR is on (BB_HDR_FRAME_GEN=0)\n");
+        }
+        return false;
+    }
+    return true;
 }
 
 void FrameGenerator::CreatePipeline() {
@@ -178,7 +193,10 @@ void FrameGenerator::CreatePipeline() {
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &ui_push,
     }));
-    ui_pipeline = compute(FRAME_GEN_UI_COMP, *ui_pipeline_layout);
+    // HDR10 frames (A2B10G10R10) are written without a storage format qualifier.
+    ui_pipeline = ColorFormat == vk::Format::eR8G8B8A8Unorm
+                      ? compute(FRAME_GEN_UI_COMP, *ui_pipeline_layout)
+                      : compute(FRAME_GEN_UI_HDR_COMP, *ui_pipeline_layout);
 }
 
 void FrameGenerator::EnsureInputs(u32 w, u32 h) {
@@ -625,6 +643,8 @@ u32 FrameGenerator::GenerateFsr3(vk::CommandBuffer cmdbuf, vk::Image color,
         std::printf("Frame generation: FSR 3.1 %ux%u (depth and motion %ux%u), %.1f MB\n", width,
                     height, input_width, input_height, usage.totalUsageInBytes / 1e6);
     }
+    // bbport: HDR10 frames (BbHdr::Output): the PQ signal, up to the peak brightness.
+    const bool hdr = ColorFormat != vk::Format::eR8G8B8A8Unorm;
     const auto image = [](vk::Image handle, vk::Format format, u32 w, u32 h,
                           vk::ImageUsageFlags usage) {
         return FfxVkFsr3_3_1_6FrameGenerationImage{
@@ -651,8 +671,9 @@ u32 FrameGenerator::GenerateFsr3(vk::CommandBuffer cmdbuf, vk::Image color,
         .motionVectorScaleY = 1.0f,
         .frameTimeMilliseconds = frame_ms,
         .minLuminance = 0.0f,
-        .maxLuminance = 1.0f,
-        .transferFunction = FFX_VK_FSR3_3_1_6_FRAMEGEN_TRANSFER_SRGB,
+        .maxLuminance = hdr ? BbHdr::PeakNits() : 1.0f,
+        .transferFunction = hdr ? FFX_VK_FSR3_3_1_6_FRAMEGEN_TRANSFER_PQ
+                                : FFX_VK_FSR3_3_1_6_FRAMEGEN_TRANSFER_SRGB,
         .cameraNear = CameraNear,
         .cameraFar = CameraFar,
         .viewSpaceToMeters = 1.0f,
@@ -684,8 +705,8 @@ u32 FrameGenerator::GenerateFsr3(vk::CommandBuffer cmdbuf, vk::Image color,
         .viewSpaceToMeters = 1.0f,
         .cameraVerticalFovRadians = CameraFov,
         .minLuminance = 0.0f,
-        .maxLuminance = 1.0f,
-        .transferFunction = FFX_VK_FSR3_3_1_6_FRAMEGEN_TRANSFER_SRGB,
+        .maxLuminance = prepare.maxLuminance,
+        .transferFunction = prepare.transferFunction,
         .frameId = id,
         .reset = prepare.reset,
     };

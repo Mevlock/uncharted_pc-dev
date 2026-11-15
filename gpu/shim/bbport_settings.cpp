@@ -70,6 +70,35 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.model_lod = std::clamp(i, -2, 2);
     } else if (key == "live_resolution") {
         v.live_resolution = value == "auto" ? -1 : std::clamp(i, 0, 1);
+    } else if (key == "hdr_paper_white") {
+        v.hdr_paper_white = Clamp(f, 80.0f, 500.0f);
+    } else if (key == "hdr_peak_nits") {
+        v.hdr_peak_nits = Clamp(f, 400.0f, 10000.0f);
+    } else if (key == "hdr_exposure") {
+        v.hdr_exposure = Clamp(f, 0.25f, 4.0f);
+    } else if (key == "hdr_saturation") {
+        v.hdr_saturation = Clamp(f, 0.0f, 2.0f);
+    } else if (key == "hdr_highlight_saturation") {
+        v.hdr_highlight_saturation = Clamp(f, 0.0f, 2.0f);
+    } else if (key == "hdr_contrast") {
+        v.hdr_contrast = Clamp(f, 0.5f, 2.0f);
+    } else if (key == "hdr_chrominance") {
+        v.hdr_chrominance = Clamp(f, 0.0f, 1.0f);
+    } else if (key == "hdr_blowout") {
+        v.hdr_blowout = Clamp(f, 0.0f, 1.0f);
+    } else if (key == "hdr_hue_correction") {
+        v.hdr_hue_correction = Clamp(f, 0.0f, 1.0f);
+    } else if (key == "hdr_per_channel") {
+        v.hdr_per_channel = i != 0;
+    } else if (key == "hdr_highlight_start") {
+        // The menu's range is 0.10-0.95; 0 (anything below 0.10) asks for the earlier ramp.
+        v.hdr_highlight_start = f < 0.1f ? 0.0f : Clamp(f, 0.1f, 0.95f);
+    } else if (key == "hdr_sdr_gamma") {
+        v.hdr_sdr_gamma = Clamp(f, 1.8f, 2.8f);
+    } else if (key == "hdr_sdr_saturation") {
+        v.hdr_sdr_saturation = Clamp(f, 0.0f, 2.0f);
+    } else if (key == "hdr_gamut_expansion") {
+        v.hdr_gamut_expansion = Clamp(f, 0.0f, 2.0f);
     } else if (key == "output_res") {
         for (int r = 0; r < OutputCount; ++r) {
             if (value == std::to_string(OutputWidths[r]) + "x" + std::to_string(OutputHeights[r])) {
@@ -124,6 +153,15 @@ void Load() {
         {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
         {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
         {"BB_FRAME_GEN", "frame_gen"},              {"BB_FRAME_GEN_MULTIPLIER", "frame_gen_multiplier"},
+        {"BB_HDR_PAPER_WHITE", "hdr_paper_white"},  {"BB_HDR_PEAK_NITS", "hdr_peak_nits"},
+        {"BB_HDR_EXPOSURE", "hdr_exposure"},        {"BB_HDR_SATURATION", "hdr_saturation"},
+        {"BB_HDR_HIGHLIGHT_SATURATION", "hdr_highlight_saturation"},
+        {"BB_HDR_CONTRAST", "hdr_contrast"},        {"BB_HDR_CHROMINANCE", "hdr_chrominance"},
+        {"BB_HDR_BLOWOUT", "hdr_blowout"},          {"BB_HDR_HUE_CORRECTION", "hdr_hue_correction"},
+        {"BB_HDR_PER_CHANNEL", "hdr_per_channel"},  {"BB_HDR_SDR_GAMMA", "hdr_sdr_gamma"},
+        {"BB_HDR_SDR_SATURATION", "hdr_sdr_saturation"},
+        {"BB_HDR_HIGHLIGHT_START", "hdr_highlight_start"},
+        {"BB_HDR_GAMUT_EXPANSION", "hdr_gamut_expansion"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env)) {
@@ -139,6 +177,8 @@ void Load() {
     v.startup_model_lod = v.model_lod;
     v.startup_output_res = v.output_res;
     v.startup_live_resolution = v.live_resolution;
+    v.startup_hdr_paper_white = v.hdr_paper_white;
+    v.startup_hdr_peak_nits = v.hdr_peak_nits;
 }
 
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
@@ -230,7 +270,87 @@ void Save() {
     // Read by run.sh at start.
     std::fprintf(file, "live_resolution=%s\n", v.live_resolution < 0 ? "auto"
                                                   : v.live_resolution ? "1" : "0");
+    std::fprintf(file,
+                 "hdr_paper_white=%.0f\nhdr_peak_nits=%.0f\nhdr_exposure=%.2f\nhdr_saturation=%.2f\n"
+                 "hdr_highlight_saturation=%.2f\nhdr_contrast=%.2f\nhdr_chrominance=%.2f\n"
+                 "hdr_blowout=%.2f\nhdr_hue_correction=%.2f\nhdr_per_channel=%d\nhdr_sdr_gamma=%.2f\n"
+                 "hdr_sdr_saturation=%.2f\nhdr_highlight_start=%.2f\nhdr_gamut_expansion=%.2f\n",
+                 v.hdr_paper_white.load(), v.hdr_peak_nits.load(), v.hdr_exposure.load(),
+                 v.hdr_saturation.load(), v.hdr_highlight_saturation.load(), v.hdr_contrast.load(),
+                 v.hdr_chrominance.load(), v.hdr_blowout.load(), v.hdr_hue_correction.load(),
+                 int(v.hdr_per_channel.load()), v.hdr_sdr_gamma.load(), v.hdr_sdr_saturation.load(),
+                 v.hdr_highlight_start.load(), v.hdr_gamut_expansion.load());
     std::fclose(file);
+}
+
+void ResetHdr() {
+    auto& v = Get();
+    const Values defaults;
+    for (auto [field, value] : {std::pair{&v.hdr_paper_white, v.startup_hdr_paper_white},
+                                {&v.hdr_peak_nits, v.startup_hdr_peak_nits},
+                                {&v.hdr_exposure, defaults.hdr_exposure.load()},
+                                {&v.hdr_saturation, defaults.hdr_saturation.load()},
+                                {&v.hdr_highlight_saturation, defaults.hdr_highlight_saturation.load()},
+                                {&v.hdr_contrast, defaults.hdr_contrast.load()},
+                                {&v.hdr_chrominance, defaults.hdr_chrominance.load()},
+                                {&v.hdr_blowout, defaults.hdr_blowout.load()},
+                                {&v.hdr_hue_correction, defaults.hdr_hue_correction.load()},
+                                {&v.hdr_highlight_start, defaults.hdr_highlight_start.load()},
+                                {&v.hdr_sdr_gamma, defaults.hdr_sdr_gamma.load()},
+                                {&v.hdr_sdr_saturation, defaults.hdr_sdr_saturation.load()},
+                                {&v.hdr_gamut_expansion, defaults.hdr_gamut_expansion.load()}}) {
+        field->store(value);
+    }
+    v.hdr_per_channel = defaults.hdr_per_channel.load();
+}
+
+bool SetHdrKey(const std::string& key, const std::string& value, std::string& applied) {
+    auto& v = Get();
+    applied.clear();
+    char* end = nullptr;
+    std::strtof(value.c_str(), &end);
+    if (end == value.c_str()) {
+        return key.rfind("hdr_", 0) == 0; // not a number: left as it is
+    }
+    if (key == "hdr_per_channel") {
+        const bool before = v.hdr_per_channel.load();
+        Set(v, key, value);
+        if (v.hdr_per_channel.load() != before) {
+            applied = key + "=" + (v.hdr_per_channel.load() ? "1" : "0");
+        }
+        return true;
+    }
+    const std::pair<const char*, std::atomic<float>*> keys[] = {
+        {"hdr_paper_white", &v.hdr_paper_white},
+        {"hdr_peak_nits", &v.hdr_peak_nits},
+        {"hdr_exposure", &v.hdr_exposure},
+        {"hdr_saturation", &v.hdr_saturation},
+        {"hdr_highlight_saturation", &v.hdr_highlight_saturation},
+        {"hdr_contrast", &v.hdr_contrast},
+        {"hdr_chrominance", &v.hdr_chrominance},
+        {"hdr_blowout", &v.hdr_blowout},
+        {"hdr_hue_correction", &v.hdr_hue_correction},
+        {"hdr_sdr_gamma", &v.hdr_sdr_gamma},
+        {"hdr_sdr_saturation", &v.hdr_sdr_saturation},
+        {"hdr_highlight_start", &v.hdr_highlight_start},
+        {"hdr_gamut_expansion", &v.hdr_gamut_expansion},
+    };
+    for (const auto& [name, field] : keys) {
+        if (key != name) {
+            continue;
+        }
+        const float before = field->load();
+        Set(v, key, value);
+        const float after = field->load();
+        if (after != before) {
+            char text[96];
+            const bool nits = key == "hdr_paper_white" || key == "hdr_peak_nits";
+            std::snprintf(text, sizeof(text), nits ? "%s=%.0f" : "%s=%.2f", name, after);
+            applied = text;
+        }
+        return true;
+    }
+    return false;
 }
 
 float PresetScale(int preset) {

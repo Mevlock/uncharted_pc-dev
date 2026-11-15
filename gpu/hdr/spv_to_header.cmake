@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# bbport: a SPIR-V file as a C++ array of 32-bit words (-DIN=<file.spv> -DOUT=<header> -DNAME=<symbol>).
+file(READ "${IN}" HEX HEX)
+string(LENGTH "${HEX}" LENGTH)
+math(EXPR WORDS "${LENGTH} / 8")
+set(BODY "")
+set(I 0)
+while(I LESS LENGTH)
+    string(SUBSTRING "${HEX}" ${I} 8 W)
+    # little-endian bytes -> one word
+    string(SUBSTRING "${W}" 0 2 B0)
+    string(SUBSTRING "${W}" 2 2 B1)
+    string(SUBSTRING "${W}" 4 2 B2)
+    string(SUBSTRING "${W}" 6 2 B3)
+    string(APPEND BODY "0x${B3}${B2}${B1}${B0},")
+    math(EXPR I "${I} + 8")
+    math(EXPR COL "${I} % 128")
+    if(COL EQUAL 0)
+        string(APPEND BODY "\n")
+    endif()
+endwhile()
+file(WRITE "${OUT}" "#pragma once\n#include <cstdint>\n// Generated from ${IN}\ninline constexpr uint32_t ${NAME}[${WORDS}] = {\n${BODY}\n};\n")
