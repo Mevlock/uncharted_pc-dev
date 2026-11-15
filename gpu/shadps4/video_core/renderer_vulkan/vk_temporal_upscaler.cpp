@@ -1082,7 +1082,7 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
 }
 
 void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w,
-                                    u32 h, vk::ImageView ldr_view) {
+                                    u32 h, vk::ImageView ldr_view, bool srgb_source) {
     const auto& settings = BbSettings::Get();
     // FSR 3/4 sharpen up to 1 themselves (their RCAS): this pass adds the rest. DLSS no longer
     // sharpens (its sharpness parameter is ignored since 2.5.1, preset K included): the whole
@@ -1171,8 +1171,11 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
                         ldr ? *taa_sharpen_ldr_pipeline : *taa_sharpen_pipeline);
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *taa_sharpen_pipeline_layout, 0,
                                 writes);
+    // An sRGB-format target: the blit above linearised the copy; a negative strength tells the
+    // shader to encode it again (the result is written as encoded values through the UNORM view).
+    const float strength = srgb_source ? -extra : extra;
     cmdbuf.pushConstants(*taa_sharpen_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
-                         sizeof(extra), &extra);
+                         sizeof(strength), &strength);
     cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
     image_barrier(target, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                   vk::AccessFlagBits2::eShaderStorageWrite, all, rw);
@@ -1733,12 +1736,15 @@ void TemporalUpscaler::SharpenDisplay(VideoCore::ImageId color) {
     runtime.Transit(&image, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                     vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
     runtime.FlushBarriers();
-    ExtraSharpen(scheduler.CommandBuffer(), image.GetImage(), true, w, h, view);
+    ExtraSharpen(scheduler.CommandBuffer(), image.GetImage(), true, w, h, view,
+                 format == vk::Format::eR8G8B8A8Srgb);
     static bool noted = false;
     if (!noted) {
         noted = true;
-        std::printf("Upscaler: display frame %ux%u sharpened after the post-processing, before the "
-                    "UI (strength %.2f)\n", w, h, BbSettings::Get().sharpness.load());
+        std::printf("Upscaler: display frame %ux%u (%s) sharpened after the post-processing, before "
+                    "the UI (strength %.2f)\n", w, h,
+                    format == vk::Format::eR8G8B8A8Srgb ? "sRGB" : "UNORM",
+                    BbSettings::Get().sharpness.load());
     }
 }
 

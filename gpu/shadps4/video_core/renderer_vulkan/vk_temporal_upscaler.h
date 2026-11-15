@@ -258,7 +258,7 @@ private:
     /// Sharpness above 1 for FSR 3/4 (their RCAS stops at 1): one more RCAS pass over the target
     /// (output_image, or the 8-bit UI image with ldr) in General layout after the upscaler.
     void ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w, u32 h,
-                      vk::ImageView ldr_view = {});
+                      vk::ImageView ldr_view = {}, bool srgb_source = false);
     /// bbport (DLSS rework 3c): Native before post: the sharpening pass on the finished display
     /// frame (after the game's post-processing, before its UI), not on the HDR scene.
     void SharpenDisplay(VideoCore::ImageId color);
