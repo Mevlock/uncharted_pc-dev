@@ -87,9 +87,45 @@ void Swapchain::Create(u32 width_, u32 height_) {
                vk::to_string(swapchain_result));
     swapchain = chain;
     LowLatency::OnSwapchain(swapchain);
+    metadata_peak = 0.0f; // a new swapchain has no metadata yet
+    UpdateHdrMetadata();
 
     SetupImages();
     RefreshSemaphores();
+}
+
+void Swapchain::UpdateHdrMetadata() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("BB_HDR_METADATA");
+        return !(value && value[0] == '0');
+    }();
+    if (!enabled || !needs_hdr || !BbHdr::Output() || !instance.IsHdrMetadataSupported() || !swapchain) {
+        return;
+    }
+    const BbHdr::Tuning tuning = BbHdr::Current();
+    if (tuning.peak_nits == metadata_peak && tuning.paper_white == metadata_paper) {
+        return;
+    }
+    const bool first = metadata_peak == 0.0f;
+    metadata_peak = tuning.peak_nits;
+    metadata_paper = tuning.paper_white;
+    // Rec. 2020 primaries, D65; mastering peak and MaxCLL the peak, MaxFALL paper white.
+    const vk::HdrMetadataEXT metadata{
+        .displayPrimaryRed = {0.708f, 0.292f},
+        .displayPrimaryGreen = {0.170f, 0.797f},
+        .displayPrimaryBlue = {0.131f, 0.046f},
+        .whitePoint = {0.3127f, 0.3290f},
+        .maxLuminance = metadata_peak,
+        .minLuminance = 0.0f,
+        .maxContentLightLevel = metadata_peak,
+        .maxFrameAverageLightLevel = metadata_paper,
+    };
+    instance.GetDevice().setHdrMetadataEXT(1, &swapchain, &metadata);
+    if (first) {
+        std::printf("HDR: metadata sent (mastering peak and MaxCLL %.0f nits, MaxFALL %.0f nits)\n",
+                    metadata_peak, metadata_paper);
+        std::fflush(stdout);
+    }
 }
 
 void Swapchain::Recreate(u32 width_, u32 height_) {
@@ -136,6 +172,7 @@ bool Swapchain::AcquireNextImage() {
 }
 
 bool Swapchain::Present(u64 latency_id) {
+    UpdateHdrMetadata();
     // bbport: low latency mode (vk_low_latency.h): the game's frame carries its frame id.
     const vk::PresentIdKHR present_id{
         .swapchainCount = 1,
