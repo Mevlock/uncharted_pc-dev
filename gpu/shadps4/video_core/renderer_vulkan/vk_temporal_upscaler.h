@@ -306,6 +306,10 @@ private:
     vk::UniqueImageView ui_depth_view;
     bool depth_blit = false;
     bool scaled_session = false;
+    /// bbport (DLSS rework 3): a patched render size equal to the output (Native / DLAA): the
+    /// upscaler runs on the HDR scene colour before the post-processing, as at the game's own
+    /// 1920x1080 (Run at the trigger dispatch), not on the finished LDR frame. BB_NATIVE_BEFORE_POST=0: off.
+    bool early_native = false;
     /// BeforeDisplayPass recorded this frame's motion vectors (velocity mode, patched size).
     bool velocity_pending = false;
     /// The UI phase belongs to RunScaledVelocity: the next display pass is not redirected.

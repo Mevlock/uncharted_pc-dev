@@ -350,6 +350,19 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
             render_height = h & ~7u;
         }
     }
+    // bbport (DLSS rework 3): Native at a patched size (render = output) upscales before the
+    // post-processing: DLSS/FSR no longer accumulate the depth of field, bloom and motion blur
+    // output, and get HDR colour (highlights, the game's dithered haze before it is blurred).
+    // Idea from LanternEngine (Awaken)'s BB_UPSCALE_EARLY, re-implemented on our 1080p path.
+    if (scaled_session) {
+        const char* env = std::getenv("BB_NATIVE_BEFORE_POST");
+        const bool wanted = !(env && env[0] == '0');
+        early_native = wanted && render_width == target_width && render_height == target_height;
+        std::printf("Upscaler: native before post-processing %s (BB_NATIVE_BEFORE_POST; render "
+                    "%ux%u, output %ux%u)\n",
+                    early_native ? "on" : wanted ? "not used (scaled)" : "off", render_width,
+                    render_height, target_width, target_height);
+    }
     // Scene depth copied into the output-size UI depth by a blit (depth aspect).
     const auto features = instance.GetPhysicalDevice()
                               .getFormatProperties(vk::Format::eD32SfloatS8Uint)
@@ -532,8 +545,10 @@ bool TemporalUpscaler::OnFrameStart() {
                                   upscaler == BbSettings::UpscalerFsr3);
         }
     }
-    BbSettings::Get().active_render_width = Scaled() ? render_width : scene_targets.Size().width;
-    BbSettings::Get().active_render_height = Scaled() ? render_height : scene_targets.Size().height;
+    BbSettings::Get().active_render_width =
+        Scaled() || early_native ? render_width : scene_targets.Size().width;
+    BbSettings::Get().active_render_height =
+        Scaled() || early_native ? render_height : scene_targets.Size().height;
     // bbport: once per shown frame. Velocity mode passes here for every draw into the display
     // buffer (U3: ~6 a frame); after the upscale had set dispatched_last_frame, the next UI
     // draw cleared it and the one after found it clear: every DLSS evaluation in U3 had its
@@ -580,7 +595,7 @@ bool TemporalUpscaler::OnFrameStart() {
     }
     // CameraMotion::OnDisplayPass has already cleared Depth(). Use the context's render
     // size, which survives the frame boundary (Performance 960 -> 1920 needs 32 phases).
-    const u32 phases = Scaled() ? Motion::JitterPhases(render_width, target_width)
+    const u32 phases = Scaled() || early_native ? Motion::JitterPhases(render_width, target_width)
         : Motion::JitterPhases(scene_targets.Size().width, 1920);
     // bbport: once per shown frame. In velocity mode every draw into the display buffer comes
     // here, the UI drawn after the upscale too: U3's title screen stepped the sequence 6 times a
@@ -1679,7 +1694,7 @@ std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
 float TemporalUpscaler::SceneMipBias() const {
     if (!Active() || BbSettings::Get().upscaler == BbSettings::UpscalerTaa) return 0.0f;
     const float render = float(BbSettings::Get().active_render_width.load());
-    const float output = float(Scaled() ? target_width : 1920u);
+    const float output = float(Scaled() || early_native ? target_width : 1920u);
     const float ratio = render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
     // bbport: DLSS (DLAA too) wants one more mip level of texture detail than the render/output
     // ratio (NVIDIA's DLSS programming guide 3.5: log2(render/display) - 1). Idea from
@@ -1695,6 +1710,9 @@ float TemporalUpscaler::SceneMipBias() const {
 }
 
 bool TemporalUpscaler::Scaled() const {
+    if (early_native) {
+        return false; // render = output: the HDR path before post (Run)
+    }
     return scaled_session || target_width != 1920 || target_height != 1080;
 }
 
@@ -2257,7 +2275,7 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
         return;
     }
     velocity_pending = false;
-    if (!scaled_session || !camera_motion.VelocityMode() || failed || !Active() ||
+    if (!scaled_session || early_native || !camera_motion.VelocityMode() || failed || !Active() ||
         !camera_motion.Ready()) {
         return;
     }
