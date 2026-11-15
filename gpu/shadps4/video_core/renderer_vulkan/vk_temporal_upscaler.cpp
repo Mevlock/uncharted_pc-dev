@@ -364,6 +364,20 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
                     "%ux%u, output %ux%u)\n",
                     early_native ? "on" : wanted ? "not used (scaled)" : "off", render_width,
                     render_height, target_width, target_height);
+        // The stand-ins for scene targets follow the patched size.
+        scene_targets.SetNative({render_width, render_height});
+        // DLSS rework 12: a smaller scene inside the output-size game (probe.c, BB_SCALED_BEFORE_POST=1).
+        if (const char* scene = std::getenv("BB_SCENE_SIZE"); scene && early_native) {
+            u32 w = 0, h = 0;
+            if (std::sscanf(scene, "%ux%u", &w, &h) == 2 && w >= 64 && h >= 64 && w <= render_width &&
+                h <= render_height && (w < render_width || h < render_height)) {
+                early_scene_width = w & ~1u; // half-size passes halve it exactly
+                early_scene_height = h & ~1u;
+                std::printf("Upscaler: scaled before post-processing: scene %ux%u in a %ux%u game "
+                            "(BB_SCALED_BEFORE_POST)\n", early_scene_width, early_scene_height,
+                            render_width, render_height);
+            }
+        }
     }
     // Scene depth copied into the output-size UI depth by a blit (depth aspect).
     const auto features = instance.GetPhysicalDevice()
@@ -469,11 +483,22 @@ float Halton(u32 index, u32 base) {
 } // namespace
 
 bool TemporalUpscaler::ReducedScene(const VideoCore::Image& color) const {
-    return !scaled_session && scene_targets.Reduced() && scene_targets.EligibleScene(color);
+    return (!scaled_session || EarlyScaled()) && scene_targets.Reduced() &&
+           scene_targets.EligibleScene(color);
 }
 
 bool TemporalUpscaler::RasterScaling() const {
-    return !scaled_session && scene_targets.Reduced() && !done_this_frame;
+    return (!scaled_session || EarlyScaled()) && scene_targets.Reduced() && !done_this_frame;
+}
+
+u32 TemporalUpscaler::SceneWidth() const {
+    return EarlyScaled() ? scene_targets.Size().width
+           : Scaled() || early_native ? render_width : scene_targets.Size().width;
+}
+
+u32 TemporalUpscaler::SceneHeight() const {
+    return EarlyScaled() ? scene_targets.Size().height
+           : Scaled() || early_native ? render_height : scene_targets.Size().height;
 }
 
 bool TemporalUpscaler::OnFrameStart() {
@@ -506,7 +531,8 @@ bool TemporalUpscaler::OnFrameStart() {
     if (static bool checked = false; !checked && runtime_uncharted_game != 0) {
         checked = true;
         const char* env = std::getenv("BB_NATIVE_BEFORE_POST");
-        if (runtime_uncharted_game == 1 && early_native && !(env && env[0] == '1')) {
+        if (runtime_uncharted_game == 1 && early_native && !EarlyScaled() &&
+            !(env && env[0] == '1')) {
             early_native = false;
             reset = true;
             std::printf("Upscaler: Uncharted 1: native before post-processing not used (softer there); "
@@ -566,10 +592,13 @@ bool TemporalUpscaler::OnFrameStart() {
                                   upscaler == BbSettings::UpscalerFsr3);
         }
     }
-    BbSettings::Get().active_render_width =
-        Scaled() || early_native ? render_width : scene_targets.Size().width;
-    BbSettings::Get().active_render_height =
-        Scaled() || early_native ? render_height : scene_targets.Size().height;
+    // DLSS rework 12: the scene's stand-ins at the wanted size while the upscaler is on.
+    if (EarlyScaled()) {
+        scene_targets.SetSize(active ? SceneResolution::Size{early_scene_width, early_scene_height}
+                                     : scene_targets.Native());
+    }
+    BbSettings::Get().active_render_width = SceneWidth();
+    BbSettings::Get().active_render_height = SceneHeight();
     // bbport: once per shown frame. Velocity mode passes here for every draw into the display
     // buffer (U3: ~6 a frame); after the upscale had set dispatched_last_frame, the next UI
     // draw cleared it and the one after found it clear: every DLSS evaluation in U3 had its
@@ -616,7 +645,7 @@ bool TemporalUpscaler::OnFrameStart() {
     }
     // CameraMotion::OnDisplayPass has already cleared Depth(). Use the context's render
     // size, which survives the frame boundary (Performance 960 -> 1920 needs 32 phases).
-    const u32 phases = Scaled() || early_native ? Motion::JitterPhases(render_width, target_width)
+    const u32 phases = Scaled() || early_native ? Motion::JitterPhases(SceneWidth(), target_width)
         : Motion::JitterPhases(scene_targets.Size().width, 1920);
     // bbport: once per shown frame. In velocity mode every draw into the display buffer comes
     // here, the UI drawn after the upscale too: U3's title screen stepped the sequence 6 times a
@@ -663,8 +692,8 @@ bool TemporalUpscaler::OnFrameStart() {
     }
     // Projection jitter (prototype): the next jitter for the game's camera, in NDC (x right, y up).
     if (ProjectionJitterOn()) {
-        const float w = float(Scaled() || early_native ? render_width : scene_targets.Size().width);
-        const float h = float(Scaled() || early_native ? render_height : scene_targets.Size().height);
+        const float w = float(SceneWidth());
+        const float h = float(SceneHeight());
         const bool on = Active() && BbSettings::Get().jitter && !BbToggle::Disabled(1u << 25);
         runtime_projection_jitter_slot[0] = on && w > 0.0f ? 2.0f * jitter[0] / w : 0.0f;
         runtime_projection_jitter_slot[1] = on && h > 0.0f ? -2.0f * jitter[1] / h : 0.0f;
@@ -2089,7 +2118,7 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
     vk::Image source = color.GetImage();
     auto source_layout = vk::ImageLayout::eTransferSrcOptimal;
     u32 source_width = color.info.size.width, source_height = color.info.size.height;
-    if (!scaled_session && camera_motion.Depth() && scene_targets.Reduced() &&
+    if ((!scaled_session || EarlyScaled()) && camera_motion.Depth() && scene_targets.Reduced() &&
         scene_targets.EligibleScene(color)) {
         VideoCore::ImageViewInfo view;
         view.format = color.info.pixel_format;

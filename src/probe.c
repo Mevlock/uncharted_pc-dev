@@ -2370,6 +2370,26 @@ int main(int argc, char **argv) {
     mallopt(M_ARENA_MAX,1);
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
+#ifdef _WIN32
+    /* DLSS rework 12 (BB_SCALED_BEFORE_POST=1, off by default): Quality .. Performance upscale before the game's
+     * post-processing. The game is then patched to the OUTPUT size like Native (its post effects, HUD and display
+     * buffer at full size) and only the scene's passes are drawn at the render size, into reduced stand-ins
+     * (SceneTargets); the upscaler runs on the HDR scene before the post (TemporalUpscaler::Run). Set up here,
+     * before anything reads the sizes: BB_SCENE_SIZE takes the render size, BB_RENDER_RES the output size. */
+    {
+        const char *on = getenv("BB_SCALED_BEFORE_POST"), *render = getenv("BB_RENDER_RES"), *output = getenv("BB_OUTPUT_RES");
+        unsigned rw = 0, rh = 0, ow = 0, oh = 0;
+        if (on && on[0] == '1' && render && output && sscanf(render, "%ux%u", &rw, &rh) == 2 &&
+            sscanf(output, "%ux%u", &ow, &oh) == 2 && rw && rh && (rw < ow || rh < oh) && rw <= ow && rh <= oh) {
+            char scene[32];
+            snprintf(scene, sizeof(scene), "%ux%u", rw, rh);
+            _putenv_s("BB_SCENE_SIZE", scene);
+            _putenv_s("BB_RENDER_RES", output);
+            printf("Render resolution: scene %s upscaled to %s before the post-processing (BB_SCALED_BEFORE_POST=1): "
+                   "the game runs at the output size\n", scene, output);
+        }
+    }
+#endif
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
     if (argc == 2 && !strcmp(argv[1], "--controller-info")) return runtime_pad_tool(0,100);
     if (argc == 3 && !strcmp(argv[1], "--controller-test"))

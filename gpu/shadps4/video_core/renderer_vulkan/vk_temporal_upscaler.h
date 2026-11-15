@@ -318,6 +318,16 @@ private:
     /// upscaler runs on the HDR scene colour before the post-processing, as at the game's own
     /// 1920x1080 (Run at the trigger dispatch), not on the finished LDR frame. BB_NATIVE_BEFORE_POST=0: off.
     bool early_native = false;
+    /// bbport (DLSS rework 12, BB_SCALED_BEFORE_POST=1): with early_native, the scene's passes are
+    /// drawn at this smaller size (BB_SCENE_SIZE, set at process start from the wanted render
+    /// size) into SceneTargets' stand-ins and upscaled before the post-processing; 0: Native.
+    u32 early_scene_width = 0, early_scene_height = 0;
+    [[nodiscard]] bool EarlyScaled() const noexcept {
+        return early_native && early_scene_width != 0;
+    }
+    /// The size the scene is drawn at (jitter, mip bias): the stand-ins' with EarlyScaled.
+    [[nodiscard]] u32 SceneWidth() const;
+    [[nodiscard]] u32 SceneHeight() const;
     /// bbport PROTOTYPE (DLSS rework 7, BB_PROJECTION_JITTER=1, Uncharted 1-3, 1.02): the jitter
     /// is in the game's projection (runtime_ultrawide.c); OnFrameStart writes the next one to the
     /// game's slot, the frame's own is read back from the velocity pass (UseProjectionJitter).

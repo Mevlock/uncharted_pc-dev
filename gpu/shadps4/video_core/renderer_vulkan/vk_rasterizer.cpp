@@ -8403,7 +8403,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         }
         std::printf("Scene pass: reduced %d %s\n", reduced, why.c_str());
     }
-    push_data.scene_size = reduced ? SceneResolution::Pack(scene_targets->Size()) : 0;
+    push_data.scene_size = reduced ? scene_targets->PackedForShaders() : 0;
     if (BbStats::enabled) {
         BbStats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
         BbStats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
@@ -8642,7 +8642,9 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto proxy = pass_size.value_or(size);
         state.width = proxy.width;
         state.height = proxy.height;
-        target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+        const auto native = scene_targets->Native();
+        target_scale = {float(size.width) / float(native.width),
+                        float(size.height) / float(native.height)};
     }
     if (FrameCapture::Active()) {
         std::array<const VideoCore::ImageInfo*, AmdGpu::NUM_COLOR_BUFFERS> colors{};
