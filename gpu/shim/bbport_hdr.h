@@ -31,7 +31,15 @@ struct Tuning {
     /// Where the extended highlights begin: the SDR luminance (0-1) of the game's tone mapped
     /// picture above which the scene signal takes over (0: the earlier ramp from mid grey).
     float highlight_start;
-    float reserved[5];
+    /// Scene tone mapping: 0 RenoDX tone pass (as before), 1 the game's own curve extended past
+    /// its inflection point (RenoDX's The Last of Us Part II method), 2 the game's SDR picture
+    /// exact below a knee and the scene's own highlights above it, rolled off to the peak.
+    float scene_mode;
+    /// Mode 2: the knee, SDR luminance (0-1) of the game's picture.
+    float knee;
+    /// Compare: the left part of the screen (0-1) shows the game's SDR picture at paper white.
+    float split;
+    float reserved[2];
     // The game's SDR picture in HDR10 (post process pass): decode gamma, Oklab chroma scale.
     float sdr_gamma;
     float sdr_saturation;

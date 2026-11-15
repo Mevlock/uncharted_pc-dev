@@ -7,6 +7,10 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#ifdef _WIN32
+#include <windows.h>
+#include <dxgi1_6.h>
+#endif
 
 namespace BbSettings {
 
@@ -19,6 +23,44 @@ const char* Path() {
 
 float Clamp(float v, float lo, float hi) {
     return std::clamp(v, lo, hi);
+}
+
+// hdr_peak_nits=auto: the peak brightness Windows reports for the brightest display in HDR mode
+// (DXGI output MaxLuminance, from the display's EDID or its Windows HDR calibration); 0 when there
+// is none.
+float DisplayPeakNits() {
+#ifdef _WIN32
+    using Create = HRESULT(WINAPI*)(REFIID, void**);
+    HMODULE dxgi = LoadLibraryA("dxgi.dll");
+    auto create = dxgi ? reinterpret_cast<Create>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
+    IDXGIFactory1* factory = nullptr;
+    if (!create || FAILED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
+        return 0.0f;
+    }
+    float best = 0.0f;
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT a = 0; factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; ++a) {
+        IDXGIOutput* output = nullptr;
+        for (UINT o = 0; adapter->EnumOutputs(o, &output) != DXGI_ERROR_NOT_FOUND; ++o) {
+            IDXGIOutput6* output6 = nullptr;
+            if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput6),
+                                                 reinterpret_cast<void**>(&output6)))) {
+                DXGI_OUTPUT_DESC1 desc{};
+                if (SUCCEEDED(output6->GetDesc1(&desc)) &&
+                    desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) {
+                    best = std::max(best, desc.MaxLuminance);
+                }
+                output6->Release();
+            }
+            output->Release();
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return best;
+#else
+    return 0.0f;
+#endif
 }
 
 void Set(Values& v, const std::string& key, const std::string& value) {
@@ -73,7 +115,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "hdr_paper_white") {
         v.hdr_paper_white = Clamp(f, 80.0f, 500.0f);
     } else if (key == "hdr_peak_nits") {
-        v.hdr_peak_nits = Clamp(f, 400.0f, 10000.0f);
+        if (value == "auto") {
+            const float nits = DisplayPeakNits();
+            std::printf("HDR: peak brightness auto: the display reports %.0f nits%s\n", nits,
+                        nits > 0.0f ? "" : " (none in HDR mode: 1000)");
+            v.hdr_peak_nits = nits > 0.0f ? Clamp(nits, 400.0f, 10000.0f) : 1000.0f;
+        } else {
+            v.hdr_peak_nits = Clamp(f, 400.0f, 10000.0f);
+        }
     } else if (key == "hdr_exposure") {
         v.hdr_exposure = Clamp(f, 0.25f, 4.0f);
     } else if (key == "hdr_saturation") {
@@ -93,6 +142,12 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "hdr_highlight_start") {
         // The menu's range is 0.10-0.95; 0 (anything below 0.10) asks for the earlier ramp.
         v.hdr_highlight_start = f < 0.1f ? 0.0f : Clamp(f, 0.1f, 0.95f);
+    } else if (key == "hdr_scene_mode") {
+        v.hdr_scene_mode = i < 0 ? 0 : i > 2 ? 2 : i;
+    } else if (key == "hdr_knee") {
+        v.hdr_knee = Clamp(f, 0.2f, 0.9f);
+    } else if (key == "hdr_split") {
+        v.hdr_split = Clamp(f, 0.0f, 1.0f);
     } else if (key == "hdr_sdr_gamma") {
         v.hdr_sdr_gamma = Clamp(f, 1.8f, 2.8f);
     } else if (key == "hdr_sdr_saturation") {
@@ -162,6 +217,8 @@ void Load() {
         {"BB_HDR_SDR_SATURATION", "hdr_sdr_saturation"},
         {"BB_HDR_HIGHLIGHT_START", "hdr_highlight_start"},
         {"BB_HDR_GAMUT_EXPANSION", "hdr_gamut_expansion"},
+        {"BB_HDR_SCENE_MODE", "hdr_scene_mode"},  {"BB_HDR_KNEE", "hdr_knee"},
+        {"BB_HDR_SPLIT", "hdr_split"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env)) {
@@ -280,6 +337,8 @@ void Save() {
                  v.hdr_chrominance.load(), v.hdr_blowout.load(), v.hdr_hue_correction.load(),
                  int(v.hdr_per_channel.load()), v.hdr_sdr_gamma.load(), v.hdr_sdr_saturation.load(),
                  v.hdr_highlight_start.load(), v.hdr_gamut_expansion.load());
+    std::fprintf(file, "hdr_scene_mode=%d\nhdr_knee=%.2f\n", v.hdr_scene_mode.load(),
+                 v.hdr_knee.load());
     std::fclose(file);
 }
 
@@ -298,7 +357,9 @@ void ResetHdr() {
                                 {&v.hdr_highlight_start, defaults.hdr_highlight_start.load()},
                                 {&v.hdr_sdr_gamma, defaults.hdr_sdr_gamma.load()},
                                 {&v.hdr_sdr_saturation, defaults.hdr_sdr_saturation.load()},
-                                {&v.hdr_gamut_expansion, defaults.hdr_gamut_expansion.load()}}) {
+                                {&v.hdr_gamut_expansion, defaults.hdr_gamut_expansion.load()},
+                                {&v.hdr_knee, defaults.hdr_knee.load()},
+                                {&v.hdr_split, defaults.hdr_split.load()}}) {
         field->store(value);
     }
     v.hdr_per_channel = defaults.hdr_per_channel.load();
@@ -311,6 +372,14 @@ bool SetHdrKey(const std::string& key, const std::string& value, std::string& ap
     std::strtof(value.c_str(), &end);
     if (end == value.c_str()) {
         return key.rfind("hdr_", 0) == 0; // not a number: left as it is
+    }
+    if (key == "hdr_scene_mode") {
+        const int before = v.hdr_scene_mode.load();
+        Set(v, key, value);
+        if (v.hdr_scene_mode.load() != before) {
+            applied = key + "=" + std::to_string(v.hdr_scene_mode.load());
+        }
+        return true;
     }
     if (key == "hdr_per_channel") {
         const bool before = v.hdr_per_channel.load();
@@ -334,6 +403,8 @@ bool SetHdrKey(const std::string& key, const std::string& value, std::string& ap
         {"hdr_sdr_saturation", &v.hdr_sdr_saturation},
         {"hdr_highlight_start", &v.hdr_highlight_start},
         {"hdr_gamut_expansion", &v.hdr_gamut_expansion},
+        {"hdr_knee", &v.hdr_knee},
+        {"hdr_split", &v.hdr_split},
     };
     for (const auto& [name, field] : keys) {
         if (key != name) {

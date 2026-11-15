@@ -144,7 +144,7 @@ ANISOTROPY = [('0', "Off (the game's own)"), ('4', '4x'), ('8', '8x'), ('16', '1
 SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'), ('0', 'Maximum')]
 # HDR10 output (BB_HDR, BB_HDR_PEAK_NITS, BB_HDR_PAPER_WHITE; off by default).
 HDR_MODES = [('off', 'Off'), ('on', 'On')]
-HDR_PEAK_NITS = [('400', '400'), ('600', '600'), ('800', '800'), ('1000', '1000'), ('1500', '1500'), ('2000', '2000'), ('4000', '4000'), ('10000', '10000')]
+HDR_PEAK_NITS = [('auto', 'Auto (as Windows reports)'), ('400', '400'), ('600', '600'), ('800', '800'), ('1000', '1000'), ('1500', '1500'), ('2000', '2000'), ('4000', '4000'), ('10000', '10000')]
 HDR_PAPER_WHITE = [('80', '80'), ('100', '100'), ('150', '150'), ('203', '203'), ('250', '250'), ('300', '300'), ('400', '400'), ('500', '500')]
 # Temporal anti-aliasing at the render resolution (BB_UPSCALER): it takes the scene before the
 # games' post-processing with their own motion vectors, so it replaces their edge smoothing. At a

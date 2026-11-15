@@ -52,6 +52,9 @@ Tuning Current() {
     t.hue_correction = v.hdr_hue_correction.load(r);
     t.per_channel = v.hdr_per_channel.load(r) ? 1.0f : 0.0f;
     t.highlight_start = v.hdr_highlight_start.load(r);
+    t.scene_mode = float(v.hdr_scene_mode.load(r));
+    t.knee = v.hdr_knee.load(r);
+    t.split = v.hdr_split.load(r);
     t.sdr_gamma = v.hdr_sdr_gamma.load(r);
     t.sdr_saturation = v.hdr_sdr_saturation.load(r);
     t.gamut_expansion = v.hdr_gamut_expansion.load(r);
@@ -61,8 +64,8 @@ Tuning Current() {
 void SetOutput(bool on) {
     g_output.store(on, std::memory_order_release);
     if (on) {
-        std::printf("HDR: HDR10 output, peak %.0f nits, paper white %.0f nits\n", PeakNits(),
-                    PaperWhite());
+        std::printf("HDR: HDR10 output, peak %.0f nits, paper white %.0f nits, scene tone mapping %d (0 RenoDX, 1 game curve extended, 2 SDR + highlights)\n", PeakNits(),
+                    PaperWhite(), BbSettings::Get().hdr_scene_mode.load());
         std::fflush(stdout);
     }
 }
@@ -74,12 +77,13 @@ bool Output() {
 bool Scene() {
     static const int forced = [] {
         const char* value = std::getenv("BB_HDR_SCENE");
-        return value && *value ? (value[0] == '1' ? 1 : 0) : -1;
+        return value && *value ? (value[0] == '1' ? 1 : value[0] == '2' ? 2 : 0) : -1;
     }();
     if (!Output() || forced == 0) {
         return false;
     }
-    return forced == 1 || BbSaves::Game() == 2;
+    // All three games share the tone pass (3371ae8d); BB_HDR_SCENE=2: Uncharted 2 only (as before).
+    return forced != 2 || BbSaves::Game() == 2;
 }
 
 bool FrameGenAllowed() {

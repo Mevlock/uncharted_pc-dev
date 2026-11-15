@@ -121,6 +121,11 @@ struct Values {
     std::atomic<float> hdr_hue_correction{1.0f};
     std::atomic<bool> hdr_per_channel{false};
     std::atomic<float> hdr_highlight_start{0.6f};
+    /// Scene tone mapping (BbHdr::Tuning::scene_mode): 0 RenoDX, 1 extended game curve, 2 SDR + highlights.
+    std::atomic<int> hdr_scene_mode{0};
+    std::atomic<float> hdr_knee{0.5f};
+    /// SDR|HDR compare: share of the screen (from the left) showing the SDR picture; 0 off.
+    std::atomic<float> hdr_split{0.0f};
     std::atomic<float> hdr_sdr_gamma{2.2f};
     std::atomic<float> hdr_sdr_saturation{1.1f};
     /// Gamut expansion (both outputs): 0 accurate, 1 as Display P3, 2 as Rec. 2020.

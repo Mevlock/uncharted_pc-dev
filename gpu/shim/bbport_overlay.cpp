@@ -426,6 +426,23 @@ void HdrSection(BbSettings::Values& s) {
            "starts."));
     if (BbHdr::Scene()) {
         ImGui::TextUnformatted(T("Scene HDR (the game's own highlights)"));
+        {
+            int mode = s.hdr_scene_mode.load();
+            const char* modes[] = {"RenoDX tone mapping", "Game curve extended", "SDR + highlights"};
+            if (ImGui::Combo(TI("Tone mapping"), &mode, modes, 3)) {
+                s.hdr_scene_mode = mode;
+                dirty = true;
+            }
+            if (mode == 2) {
+                SliderIn(TI("Knee"), s.hdr_knee, 0.2f, 0.9f, "%.2f");
+            }
+            SliderIn(TI("SDR|HDR compare"), s.hdr_split, 0.0f, 1.0f, "%.2f");
+            Hint(T("RenoDX: the earlier mapping (the sliders below). Game curve extended: the game's "
+                   "own filmic curve exactly up to its turning point, then straight on into HDR (as "
+                   "RenoDX's The Last of Us Part II mod). SDR + highlights: the game's SDR picture "
+                   "exactly below the knee, the scene's own brightness above it. Compare: the left "
+                   "part of the screen shows the SDR picture (0 = off)."));
+        }
         SliderIn(TI("Exposure"), s.hdr_exposure, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
         SliderIn(TI("Highlights start"), s.hdr_highlight_start, 0.1f, 0.95f, "%.2f");
         Hint(T("Where HDR brightness begins: higher keeps sunlit surfaces at paper white; only "

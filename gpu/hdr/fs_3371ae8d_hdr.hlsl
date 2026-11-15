@@ -21,6 +21,11 @@
 #define RENODX_TONE_MAP_HUE_CORRECTION asfloat(HdrSettings.Load(32))
 #define RENODX_TONE_MAP_PER_CHANNEL asfloat(HdrSettings.Load(36))
 #define RENODX_HIGHLIGHT_START asfloat(HdrSettings.Load(40))
+// bbport 0.3.6.57 HDR: scene mode (0 RenoDX tone pass, 1 the game's curve extended, 2 the SDR
+// picture exact below a knee plus the scene's own highlights), the knee, the SDR|HDR split.
+#define BBHDR_SCENE_MODE asfloat(HdrSettings.Load(44))
+#define BBHDR_KNEE asfloat(HdrSettings.Load(48))
+#define BBHDR_SPLIT asfloat(HdrSettings.Load(52))
 #include "draw.hlsl"
 ByteAddressBuffer ssbo_1_1 : register(t0, space0);
 ByteAddressBuffer ssbo_2_1 : register(t1, space0);
@@ -160,6 +165,67 @@ float RenoDXFilmicAnchorGain(float c0, float c1, float c4, float c5, float c6)
     return target / (0.5f * (lo + hi));
 }
 
+
+// The game's own filmic slope: d/dx of RenoDXNativeFilmic.
+float BbFilmicSlope(float x, float c0, float c1, float c5, float c6)
+{
+    const float n = (x * c5) + c6;
+    const float d = (x * (x + c0)) + c1;
+    return ((c5 * d) - (n * ((2.0f * x) + c0))) / (d * d);
+}
+
+// The curve's inflection point (its steepest point: toe below, shoulder above), by a ternary
+// search of the slope on [0, 16].
+float BbFilmicInflection(float c0, float c1, float c5, float c6)
+{
+    float lo = 0.0f;
+    float hi = 16.0f;
+    [loop]
+    for (int i = 0; i < 40; i++)
+    {
+        const float a = lo + ((hi - lo) / 3.0f);
+        const float b = hi - ((hi - lo) / 3.0f);
+        if (BbFilmicSlope(a, c0, c1, c5, c6) < BbFilmicSlope(b, c0, c1, c5, c6))
+        {
+            lo = a;
+        }
+        else
+        {
+            hi = b;
+        }
+    }
+    return 0.5f * (lo + hi);
+}
+
+// Scene mode 1 (RenoDX's The Last of Us Part II method, MIT; same Naughty Dog curve): the curve
+// exactly up to its inflection point, then a straight line with the same slope, per channel.
+float3 BbFilmicExtended(float3 x, float c0, float c1, float c4, float c5, float c6)
+{
+    const float xi = BbFilmicInflection(c0, c1, c5, c6);
+    const float yi = RenoDXNativeFilmic(xi, c0, c1, c4, c5, c6);
+    const float k = BbFilmicSlope(xi, c0, c1, c5, c6);
+    float3 r;
+    r.x = x.x < xi ? RenoDXNativeFilmic(x.x, c0, c1, c4, c5, c6) : yi + (k * (x.x - xi));
+    r.y = x.y < xi ? RenoDXNativeFilmic(x.y, c0, c1, c4, c5, c6) : yi + (k * (x.y - xi));
+    r.z = x.z < xi ? RenoDXNativeFilmic(x.z, c0, c1, c4, c5, c6) : yi + (k * (x.z - xi));
+    return max(r, 0.0f);
+}
+
+float BbLuma(float3 c)
+{
+    return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+// Identity up to `knee`, then an exponential shoulder (smooth, slope 1 at the knee) towards `top`.
+float BbShoulder(float y, float knee, float top)
+{
+    if (y <= knee || top <= knee)
+    {
+        return y;
+    }
+    const float range = top - knee;
+    return knee + (range * (1.0f - exp(-(y - knee) / range)));
+}
 void frag_main()
 {
     uint buf0_dword_off = spvBitfieldUExtract(push_constants.push_data_buf_offsets0.x, 0, 8) >> 2u;
@@ -606,6 +672,7 @@ void frag_main()
     float _RESERVED_IDENTIFIER_FIXUP_547;
     float _RESERVED_IDENTIFIER_FIXUP_548;
     float renodx_filmic_gain = 1.0f;
+    float bb_c0 = 0.0f, bb_c1 = 1.0f, bb_c4 = 0.0f, bb_c5 = 1.0f, bb_c6 = 0.0f;
     if (_RESERVED_IDENTIFIER_FIXUP_425)
     {
         precise float _1017 = asfloat(ssbo_1_1.Load<uint>((36u + buf0_dword_off) * 4 + 0)) * _RESERVED_IDENTIFIER_FIXUP_456;
@@ -677,6 +744,11 @@ void frag_main()
         renodx_filmic_gain = RenoDXFilmicAnchorGain(
             _RESERVED_IDENTIFIER_FIXUP_514, _RESERVED_IDENTIFIER_FIXUP_518, _RESERVED_IDENTIFIER_FIXUP_536,
             _RESERVED_IDENTIFIER_FIXUP_527, _RESERVED_IDENTIFIER_FIXUP_525);
+        bb_c0 = _RESERVED_IDENTIFIER_FIXUP_514;
+        bb_c1 = _RESERVED_IDENTIFIER_FIXUP_518;
+        bb_c4 = _RESERVED_IDENTIFIER_FIXUP_536;
+        bb_c5 = _RESERVED_IDENTIFIER_FIXUP_527;
+        bb_c6 = _RESERVED_IDENTIFIER_FIXUP_525;
     }
     else
     {
@@ -782,7 +854,60 @@ void frag_main()
         renodx_anchor_weight *= renodx_anchor_weight;
     }
     float3 renodx_untonemapped = lerp(renodx_neutral, renodx_anchored, renodx_anchor_weight);
-    renodx_hdr = float4(renodx::draw::ToneMapPass(renodx_untonemapped, pow(max(frag_color0.rgb, 0.0f), 2.2f), renodx_neutral), 1.0f);
+    const float3 bb_sdr = pow(max(frag_color0.rgb, 0.0f), 2.2f);
+    const int bb_mode = int(BBHDR_SCENE_MODE + 0.5f);
+    const float bb_top = max(RENODX_PEAK_WHITE_NITS / max(RENODX_DIFFUSE_WHITE_NITS, 1.0f), 1.0f);
+    if (bb_mode == 1 && _RESERVED_IDENTIFIER_FIXUP_425)
+    {
+        // The game's curve extended (scene mode 1), times exposure.
+        float3 bb_h = BbFilmicExtended(renodx_scene, bb_c0, bb_c1, bb_c4, bb_c5, bb_c6) * RENODX_TONE_MAP_EXPOSURE;
+        // The grade (LUT and the overlay blend) on a copy whose brightness is compressed into
+        // SDR (identity to 0.5), then scaled back up by the same factor.
+        const float bb_y = BbLuma(bb_h);
+        const float bb_yc = BbShoulder(bb_y, 0.5f, 1.0f);
+        const float3 bb_c = saturate(bb_h * (bb_y > 1e-6f ? bb_yc / bb_y : 1.0f));
+        float3 bb_g = exp2(0.454545438289642333984375f * log2(max(bb_c, 1e-7f)));
+        if (asfloat(ssbo_1_1.Load<uint>((76u + buf0_dword_off) * 4 + 0)) > 0.5f)
+        {
+            const float bb_scale = asfloat(ssbo_1_1.Load<uint>((77u + buf0_dword_off) * 4 + 0));
+            const float bb_offset = asfloat(ssbo_1_1.Load<uint>((78u + buf0_dword_off) * 4 + 0));
+            bb_g = fs_img4.Sample(fs_samp1, (bb_scale * saturate(bb_g)) + bb_offset).xyz;
+        }
+        const float bb_blend = asfloat(ssbo_1_1.Load<uint>(_RESERVED_IDENTIFIER_FIXUP_609 * 4 + 0));
+        if (bb_blend > 0.0f)
+        {
+            const float3 bb_over = fs_img5.Sample(fs_samp0, float2(_RESERVED_IDENTIFIER_FIXUP_130, _RESERVED_IDENTIFIER_FIXUP_136)).xyz;
+            bb_g = bb_g + (bb_blend * (bb_over - bb_g));
+        }
+        float3 bb_out = pow(max(bb_g, 0.0f), 2.2f) * (bb_yc > 1e-6f ? bb_y / bb_yc : 1.0f);
+        // Display roll-off: identity below 0.4 of paper white, smooth to the peak.
+        const float bb_oy = BbLuma(bb_out);
+        bb_out *= bb_oy > 1e-6f ? BbShoulder(bb_oy, 0.4f, bb_top) / bb_oy : 1.0f;
+        renodx_hdr = float4(bb_out, 1.0f);
+    }
+    else if (bb_mode == 2)
+    {
+        // The game's SDR picture exactly, brightened above the knee by how much the game's curve
+        // compressed the scene there (the pre-tonemap luminance over the SDR curve's), the gain
+        // rolled off in stops so it approaches the peak smoothly. Colours stay the SDR ones.
+        const float bb_ys = BbLuma(bb_sdr);
+        const float bb_ratio = max(BbLuma(renodx_scene * renodx_filmic_gain) * RENODX_TONE_MAP_EXPOSURE /
+                                       max(BbLuma(renodx_neutral), 1e-4f), 1.0f);
+        const float bb_w = smoothstep(BBHDR_KNEE, 1.0f, bb_ys);
+        const float bb_stops = log2(lerp(1.0f, bb_ratio, bb_w));
+        const float bb_room = log2(max(bb_top / max(bb_ys, 1e-4f), 1.0f));
+        const float bb_gain = bb_room > 0.0f ? exp2(bb_room * (1.0f - exp(-bb_stops / bb_room))) : 1.0f;
+        renodx_hdr = float4(bb_sdr * bb_gain, 1.0f);
+    }
+    else
+    {
+        renodx_hdr = float4(renodx::draw::ToneMapPass(renodx_untonemapped, bb_sdr, renodx_neutral), 1.0f);
+    }
+    // SDR|HDR compare: the left part of the screen shows the game's SDR picture at paper white.
+    if (BBHDR_SPLIT > 0.0f && _RESERVED_IDENTIFIER_FIXUP_130 < BBHDR_SPLIT)
+    {
+        renodx_hdr = float4(bb_sdr, 1.0f);
+    }
 }
 
 SPIRV_Cross_Output main(SPIRV_Cross_Input stage_input)
