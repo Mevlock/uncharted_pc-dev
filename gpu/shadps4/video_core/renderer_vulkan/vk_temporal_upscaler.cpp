@@ -159,6 +159,67 @@ void DumpImages(const Instance& instance, Scheduler& scheduler, vk::CommandBuffe
     std::printf("Dump: frame %d -> %s\n", frame, dir.c_str());
 }
 
+/// bbport: with sub-pixel jitter the scene's last row and column can differ from the rest in some
+/// jitter phases (AMD truncates the fractional viewport edge: the column is not drawn on half the
+/// frames; full-screen passes read past the edge): a shimmering or white line at the right and
+/// bottom edges once upscaled (FSR 4 on RDNA4, DLSS edge shimmer). The row and column before them
+/// are copied over them before the upscaler reads the scene. Idea from LanternEngine (Awaken),
+/// re-implemented. BB_UPSCALE_EDGE_CLAMP=0: off.
+static bool EdgeClampOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_UPSCALE_EDGE_CLAMP");
+        const bool v = !(env && env[0] == '0');
+        std::printf("Upscaler: scene edge clamp %s (BB_UPSCALE_EDGE_CLAMP)\n", v ? "on" : "off");
+        return v;
+    }();
+    return on;
+}
+
+static void ClampSceneEdges(vk::CommandBuffer cmdbuf, vk::Image image, u32 width, u32 height) {
+    if (!EdgeClampOn() || width < 2 || height < 2) {
+        return;
+    }
+    const vk::MemoryBarrier2 before{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &before});
+    const vk::ImageSubresourceLayers layers{vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+    const vk::ImageCopy column{
+        .srcSubresource = layers,
+        .srcOffset = {s32(width - 2), 0, 0},
+        .dstSubresource = layers,
+        .dstOffset = {s32(width - 1), 0, 0},
+        .extent = {1, height, 1},
+    };
+    cmdbuf.copyImage(image, vk::ImageLayout::eGeneral, image, vk::ImageLayout::eGeneral, column);
+    // The row after the column: its corner takes the clamped column's value.
+    const vk::MemoryBarrier2 between{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &between});
+    const vk::ImageCopy row{
+        .srcSubresource = layers,
+        .srcOffset = {0, s32(height - 2), 0},
+        .dstSubresource = layers,
+        .dstOffset = {0, s32(height - 1), 0},
+        .extent = {width, 1, 1},
+    };
+    cmdbuf.copyImage(image, vk::ImageLayout::eGeneral, image, vk::ImageLayout::eGeneral, row);
+    const vk::MemoryBarrier2 after{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &after});
+}
+
 void PrintIssues(const char* what, u64 issues) {
     std::printf("Upscaler: %s invalid:", what);
     for (u32 bit = 0; bit < 64; ++bit) {
@@ -1339,6 +1400,9 @@ void TemporalUpscaler::Run() {
                 vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
                 vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eShaderRead);
 
+    if (BbSettings::Get().upscaler != BbSettings::UpscalerTaa) {
+        ClampSceneEdges(cmdbuf, input_color, w, h);
+    }
     const bool has_reactive = mask_ready || RecordReactive(input_color_view);
 
     const auto now = std::chrono::steady_clock::now();
@@ -2606,6 +2670,11 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
         reset = true; // a camera cut: the history is of the other shot
         g_frames_since_cut = 0;
         g_fade_cut_ns.store(1, std::memory_order_relaxed); // a new fade-in window (FadeReset)
+    }
+    if (BbSettings::Get().upscaler != BbSettings::UpscalerTaa &&
+        (color.usage_flags & vk::ImageUsageFlagBits::eTransferSrc) &&
+        (color.usage_flags & vk::ImageUsageFlagBits::eTransferDst)) {
+        ClampSceneEdges(cmdbuf, color.GetImage(), w, h);
     }
     const auto frame_jitter = jitter;
     jitter = velocity_jitter; // the frame's own jitter (OnFrameStart already chose the next)
