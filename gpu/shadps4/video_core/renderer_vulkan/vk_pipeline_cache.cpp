@@ -40,6 +40,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "bbport_exposure_fix.h"
 #include "bbport_focus_fix.h"
 #include "bbport_nan_guard.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -1793,7 +1794,14 @@ vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
     auto translate_timer = std::make_optional<SpanTimer>(g_bb_translate_ns);
     std::vector<u32> scaled_code;
     std::span<const u32> program_code = code;
-    if (BbMovieShaderScaled(info.pgm_hash)) {
+    if (BbExposureFix::ExposureShader(info.pgm_hash)) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::printf("Exposure metering fix: on (BB_EXPOSURE_FIX): the two metering shaders are "
+                        "translated with the whole-row column step\n");
+        }
+    } else if (BbMovieShaderScaled(info.pgm_hash)) {
         scaled_code = ScaleMovieShader(code);
         program_code = scaled_code;
     }
@@ -1858,7 +1866,10 @@ static bool MovieShaderSize(u32* width, u32* height) {
 }
 
 bool BbMovieShaderScaled(u64 pgm_hash) {
-    return u32(pgm_hash) == 0xc85d9816u && MovieShaderSize(nullptr, nullptr);
+    // (Also the exposure metering shaders of bbport_exposure_fix.h: translated with the fix, they
+    // are neither loaded from nor saved to the shader cache either.)
+    return (u32(pgm_hash) == 0xc85d9816u && MovieShaderSize(nullptr, nullptr)) ||
+           BbExposureFix::ExposureShader(pgm_hash);
 }
 
 static std::vector<u32> ScaleMovieShader(std::span<const u32> code) {

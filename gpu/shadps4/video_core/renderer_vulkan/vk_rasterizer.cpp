@@ -5512,6 +5512,90 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             });
         }
     };
+    // bbport diagnosis (BB_EXPOSURE_LOG=1): the exposure histogram compute (cs aec539f0): its
+    // workgroup counts and the first constants of its buffers, 12 times (every 120th dispatch).
+    if (u32(cs.pgm_hash) == 0xaec539f0u) {
+        static const bool exposure_log = std::getenv("BB_EXPOSURE_LOG") != nullptr;
+        static u32 calls = 0, lines = 0;
+        if (exposure_log && calls++ % 120 == 0 && lines < 400) {
+            ++lines;
+            std::printf("Exposure cs: groups %ux%ux%u", u32(cs_program.dim_x), u32(cs_program.dim_y),
+                        u32(cs_program.dim_z));
+            for (u32 b = 0; b < cs.buffers.size() && b < 3; ++b) {
+                if (cs.buffers[b].IsSpecial()) continue;
+                const auto sharp = cs.buffers[b].GetSharp(cs);
+                const u32 bytes = sharp.GetSize();
+                std::printf(" | buffer %u size %u stride %u written %d:", b, bytes, u32(sharp.GetStride()),
+                            int(cs.buffers[b].is_written));
+                if (sharp.base_address && bytes >= 48 && memory->IsValidGpuMapping(sharp.base_address, 48)) {
+                    const auto* f = reinterpret_cast<const float*>(sharp.base_address);
+                    const auto* u = reinterpret_cast<const u32*>(sharp.base_address);
+                    for (u32 i = 0; i < 12; ++i) {
+                        std::printf(" %g/%u", f[i], u[i]);
+                    }
+                }
+            }
+            std::printf("\n");
+            // The row sums the last dispatch wrote (buffer 1, one float per row), read back: how many
+            // rows hold data, their total and the average luminance the game derives (total x the
+            // third constant row's third float).
+            if (cs.buffers.size() >= 2 && !cs.buffers[0].IsSpecial() && !cs.buffers[1].IsSpecial()) {
+                const auto consts = cs.buffers[0].GetSharp(cs);
+                const auto rows = cs.buffers[1].GetSharp(cs);
+                const u32 bytes = rows.GetSize();
+                if (rows.base_address && bytes >= 4 && memory->IsValidGpuMapping(rows.base_address, bytes) &&
+                    consts.base_address && memory->IsValidGpuMapping(consts.base_address, 48)) {
+                    buffer_cache.ReadMemory(rows.base_address, bytes, false, true);
+                    const auto* f = reinterpret_cast<const float*>(rows.base_address);
+                    const float norm = reinterpret_cast<const float*>(consts.base_address)[10];
+                    const u32 n = bytes / 4;
+                    double total = 0.0;
+                    u32 filled = 0, first = n, last = 0;
+                    float low = 1e30f, high = 0.0f;
+                    for (u32 i = 0; i < n; ++i) {
+                        if (f[i] != 0.0f) {
+                            ++filled;
+                            first = std::min(first, i);
+                            last = i;
+                            low = std::min(low, f[i]);
+                            high = std::max(high, f[i]);
+                        }
+                        total += f[i];
+                    }
+                    std::printf("Exposure rows: %u rows, %u non-zero (first %u, last %u), row sum min %g max %g, "
+                                "total %g, x norm %g = average %g; rows 0, n/4, n/2, 3n/4, n-1: %g %g %g %g %g\n",
+                                n, filled, first, last, low, high, total, norm, total * norm, f[0], f[n / 4],
+                                f[n / 2], f[3 * n / 4], f[n - 1]);
+                }
+            }
+        }
+    }
+    // Diagnosis (BB_EXPOSURE_LOG=1): the small buffers the two exposure computes after the row sums write (the
+    // metered average, then its history / the value the game reads), as they stand in guest memory (read back a
+    // frame late), every 60th dispatch.
+    if (const u32 h = u32(cs.pgm_hash); h == 0x7095d6c2u || h == 0x04f81a8fu) {
+        static const bool small_log = std::getenv("BB_EXPOSURE_LOG") != nullptr;
+        static std::array<u32, 2> calls{};
+        if (small_log && calls[h == 0x04f81a8fu]++ % 60 == 0) {
+            std::printf("Exposure value cs %08x:", h);
+            for (u32 b = 0; b < cs.buffers.size(); ++b) {
+                if (cs.buffers[b].IsSpecial()) continue;
+                const auto sharp = cs.buffers[b].GetSharp(cs);
+                const u32 bytes = sharp.GetSize();
+                if (!cs.buffers[b].is_written || bytes > 64 || !sharp.base_address ||
+                    !memory->IsValidGpuMapping(sharp.base_address, bytes)) {
+                    std::printf(" | buffer %u size %u written %d", b, bytes, int(cs.buffers[b].is_written));
+                    continue;
+                }
+                std::printf(" | buffer %u size %u:", b, bytes);
+                const auto* f = reinterpret_cast<const float*>(sharp.base_address);
+                for (u32 i = 0; i < bytes / 4; ++i) {
+                    std::printf(" %g", f[i]);
+                }
+            }
+            std::printf("\n");
+        }
+    }
     if (upscaler->Enabled()) {
         upscaler->OnDispatch(cs.pgm_hash);
     }
