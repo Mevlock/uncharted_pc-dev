@@ -399,6 +399,29 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 j = 0.0f; // not a sub-pixel shift: a cut, another kind of camera
             }
         }
+        // How often the jitter given to the upscaler for a frame (the one inferred from the asked
+        // values) was not the one the frame was drawn with, as read back a frame later: a line
+        // every 600 frames (20 lines). A wrong one makes that frame shimmer with any upscaler.
+        {
+            static u32 frames = 0, wrong = 0, unmatched = 0, lines = 0, lag_changes = 0, last_lag = 0;
+            const bool moving = last[0] != 0.0f || last[1] != 0.0f || projection_jitter[0] != 0.0f ||
+                                projection_jitter[1] != 0.0f;
+            if (moving) {
+                ++frames;
+                wrong += std::abs(last[0] - projection_jitter[0]) > 2e-6f ||
+                         std::abs(last[1] - projection_jitter[1]) > 2e-6f;
+                unmatched += !projection_matched;
+                lag_changes += projection_matched && projection_lag != last_lag;
+                last_lag = projection_matched ? projection_lag : last_lag;
+                if (frames % 600 == 0 && lines < 20) {
+                    ++lines;
+                    std::printf("Projection jitter check: %u of 600 frames had another jitter than the "
+                                "upscaler was given (%u not found in the asked values, %u lag changes, "
+                                "lag now %u)\n", wrong, unmatched, lag_changes, projection_lag);
+                    wrong = unmatched = lag_changes = 0;
+                }
+            }
+        }
         previous_projection_jitter = last;
         projection_jitter = last; // unless the next asked value is found
         projection_matched = false;
