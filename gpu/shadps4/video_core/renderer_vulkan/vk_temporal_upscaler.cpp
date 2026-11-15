@@ -81,7 +81,11 @@ int DumpFrame() {
         }
         const char* frames = std::getenv("BB_DUMP_FRAMES");
         remaining = frames ? std::max(1, std::atoi(frames)) : 8;
-        index = 0;
+        // BB_DUMP_CONTINUE=1: later bursts continue the numbering (f008.. after f000..f007).
+        static const bool keep_numbering = std::getenv("BB_DUMP_CONTINUE") != nullptr;
+        if (!keep_numbering) {
+            index = 0;
+        }
     }
     --remaining;
     return index++;
