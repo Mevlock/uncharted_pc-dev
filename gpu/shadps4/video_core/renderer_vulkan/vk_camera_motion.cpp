@@ -410,7 +410,7 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                     return v;
                 }();
                 float swing = 0.0f;
-                if (cut_motion > 0.0f && camera.valid) {
+                if (camera.valid) {
                     for (const float u : {0.5f, 0.15f, 0.85f}) {
                         constexpr float z = 5.0f;
                         const float vp[4] = {z * (camera.uv_to_view[0] * u + camera.uv_to_view[2]),
@@ -520,6 +520,28 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         reported = true;
         std::printf("Camera motion: the velocity pass moves stencil-marked pixels by "
                     "(%g, %g, %g); not reproduced\n", c[56], c[57], c[58]);
+    }
+    // bbport (DLSS rework 11): with BB_STENCIL_MOTION_LOG=1, every 2 s: frames whose velocity pass
+    // moved stencil-marked pixels, and the largest such offset (vehicles, platforms? train,
+    // convoy, horse scenes).
+    if (static const bool stencil_log = std::getenv("BB_STENCIL_MOTION_LOG") != nullptr;
+        stencil_log) {
+        static u32 frames = 0, moved = 0;
+        static float largest = 0.0f;
+        static auto window = std::chrono::steady_clock::now();
+        ++frames;
+        const float m = std::sqrt(c[56] * c[56] + c[57] * c[57] + c[58] * c[58]);
+        if (m > 0.0f) {
+            ++moved;
+            largest = std::max(largest, m);
+        }
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(2)) {
+            std::printf("Stencil motion: %u of %u frames moved marked pixels, largest %g (last %g %g %g)\n",
+                        moved, frames, largest, c[56], c[57], c[58]);
+            frames = moved = 0;
+            largest = 0.0f;
+            window = now;
+        }
     }
 }
 

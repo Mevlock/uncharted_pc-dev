@@ -210,7 +210,7 @@ bool Dlss::HasFeature(const FeatureDesc& desc) const {
 
 /// bbport: BB_DLSS_PRESET: the DLSS model (NVSDK_NGX_DLSS_Hint_Render_Preset): J, K (DLSS 4,
 /// the driver's default for DLAA), L, M (DLSS 4.5), or 0 / unset for the driver's choice.
-static u32 DlssPreset() {
+static u32 DlssPreset(int quality) {
     static const u32 preset = [] {
         const char* env = std::getenv("BB_DLSS_PRESET");
         if (!env || !env[0]) {
@@ -222,7 +222,24 @@ static u32 DlssPreset() {
         std::printf("DLSS: model preset %s (%u)\n", env, value);
         return value;
     }();
-    return preset;
+    if (preset) {
+        return preset;
+    }
+    // bbport (DLSS rework 11): no model chosen (launcher "default"): NVIDIA's recommendation per
+    // mode, model M at Performance, L at Ultra Performance, the DLL's default (K) otherwise.
+    // Idea from LanternEngine (Awaken). BB_DLSS_AUTO_MODEL=0: the DLL's default for every mode.
+    static const bool automatic = [] {
+        const char* env = std::getenv("BB_DLSS_AUTO_MODEL");
+        return !(env && env[0] == '0');
+    }();
+    const u32 chosen = !automatic ? 0u : quality == 4 ? 12u : quality == 3 ? 13u : 0u;
+    static int noted = -1;
+    if (noted != int(chosen)) {
+        noted = int(chosen);
+        std::printf("DLSS: model %s for quality mode %d (BB_DLSS_AUTO_MODEL)\n",
+                    chosen == 12u ? "L" : chosen == 13u ? "M" : "default", quality);
+    }
+    return chosen;
 }
 
 bool Dlss::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
@@ -232,7 +249,7 @@ bool Dlss::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
     impl->feature.reset();
     const BbDlssFeature feature{desc.input_width,  desc.input_height, desc.output_width,
                                 desc.output_height, desc.quality,      0,
-                                DlssPreset(),       desc.hdr ? 1 : 0};
+                                DlssPreset(desc.quality), desc.hdr ? 1 : 0};
     if (!impl->api->CreateFeature(command, &feature)) {
         return false;
     }
