@@ -43,6 +43,7 @@
 
 namespace Vulkan {
 extern std::atomic<long long> g_fade_cut_ns; // below (FadeReset)
+extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (prototype), or null
 static int g_frames_since_cut = 100000; // bbport: frames since the last camera cut (dumps)
 void BbDrawLogNote(const char* text); // vk_rasterizer.cpp
 extern std::atomic<u64> g_flips;       // vk_rasterizer.cpp: flips so far
@@ -639,6 +640,15 @@ bool TemporalUpscaler::OnFrameStart() {
         }();
         off) {
         jitter = {};
+    }
+    // Projection jitter (prototype): the next jitter for the game's camera, in NDC (x right, y up).
+    if (ProjectionJitterOn()) {
+        const float w = float(Scaled() || early_native ? render_width : scene_targets.Size().width);
+        const float h = float(Scaled() || early_native ? render_height : scene_targets.Size().height);
+        const bool on = Active() && BbSettings::Get().jitter && !BbToggle::Disabled(1u << 25);
+        runtime_projection_jitter_slot[0] = on && w > 0.0f ? 2.0f * jitter[0] / w : 0.0f;
+        runtime_projection_jitter_slot[1] = on && h > 0.0f ? -2.0f * jitter[1] / h : 0.0f;
+        camera_motion.NoteAskedJitter({runtime_projection_jitter_slot[0], runtime_projection_jitter_slot[1]});
     }
     // bbport diagnosis (BB_JITTER_DIAG=1): jitter steps per shown frame, and the distinct jitter
     // positions the upscaler was given over 5 s.
@@ -1373,6 +1383,7 @@ void TemporalUpscaler::Run() {
         failed = true;
         return;
     }
+    UseProjectionJitter(w, h);
     {
         // bbport: the mode this path runs, once per change (tests can confirm FSR 4 / TAA / DLSS).
         static int last_mode = -1;
@@ -1633,6 +1644,10 @@ void TemporalUpscaler::CaptureFrameGen() {
     runtime.FlushBarriers();
     const auto cmdbuf = scheduler.CommandBuffer();
     const u32 w = depth.info.size.width, h = depth.info.size.height;
+    {
+        const auto [sw, sh] = SceneSize(w, h);
+        UseProjectionJitter(sw, sh);
+    }
     // The same motion vectors the upscaler computes: camera motion, previous minus current.
     vk::Extent2D capture{};
     if (const vk::ImageView motion =
@@ -1737,6 +1752,33 @@ float TemporalUpscaler::SceneMipBias() const {
         return std::clamp(v, -3.0f, 1.0f);
     }();
     return ratio + (UseDlss() ? dlss_extra : 0.0f);
+}
+
+bool TemporalUpscaler::ProjectionJitterOn() noexcept {
+    const bool on = runtime_projection_jitter_slot != nullptr;
+    static bool noted = false;
+    if (on && !noted) {
+        noted = true;
+        std::printf("Upscaler: PROTOTYPE projection jitter on (BB_PROJECTION_JITTER=1): jitter source = "
+                    "the game's projection, read back from the velocity pass; viewport / vertex "
+                    "shader jitter and the per-pass jitter fixes are off\n");
+    }
+    return on;
+}
+
+void TemporalUpscaler::UseProjectionJitter(u32 w, u32 h) {
+    if (!ProjectionJitterOn()) {
+        return;
+    }
+    // The jitter this frame was drawn with, as the velocity pass's projection shows it.
+    const auto ndc = camera_motion.ProjectionJitter();
+    jitter = {ndc[0] * 0.5f * float(w), -ndc[1] * 0.5f * float(h)};
+    static int noted = 0;
+    if (noted < 3 && (jitter[0] != 0.0f || jitter[1] != 0.0f)) {
+        ++noted;
+        std::printf("Upscaler: projection jitter read back: %.3f, %.3f px (%ux%u)\n", jitter[0],
+                    jitter[1], w, h);
+    }
 }
 
 bool TemporalUpscaler::Scaled() const {
@@ -2361,6 +2403,7 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
     velocity_depth = camera_motion.Depth();
     velocity_address = display;
     velocity_display = {};
+    UseProjectionJitter(w, h);
     velocity_jitter = jitter;
     velocity_width = w;
     velocity_height = h;

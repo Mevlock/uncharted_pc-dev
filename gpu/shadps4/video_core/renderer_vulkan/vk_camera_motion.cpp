@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "bbport_toggles.h"
+extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (prototype), or null
 #include "shader_recompiler/runtime_info.h"
 
 #include "video_core/host_shaders/camera_motion_comp.h"
@@ -375,6 +376,42 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         }
     }
     camera.uv_to_view = {c[0], c[1], c[2], c[3]};
+    // Projection jitter (prototype). The pass's own view-from-uv constants stay symmetric (built
+    // from the field of view), but its previous-clip rows are the previous frame's jittered
+    // projection times a rigid motion: clip x = sx (M view).x + jx (M view).z, w = (M view).z, the
+    // rows of M orthogonal, so jx = (row x . row w) / |row w|^2: last frame's jitter, exactly. The
+    // game builds its camera a fixed number of frames ahead: that jitter is looked up in the
+    // values asked of the game (NoteAskedJitter), and this frame's is the one asked next.
+    projection_mode = runtime_projection_jitter_slot != nullptr; // patched after the GPU starts
+    if (projection_mode) {
+        const auto& p = camera.to_previous_clip;
+        const float ww = p[8] * p[8] + p[9] * p[9] + p[10] * p[10];
+        std::array<float, 2> last{};
+        if (ww > 0.0f) {
+            last = {(p[0] * p[8] + p[1] * p[9] + p[2] * p[10]) / ww,
+                    (p[4] * p[8] + p[5] * p[9] + p[6] * p[10]) / ww};
+        }
+        for (auto& j : last) {
+            if (!std::isfinite(j) || std::abs(j) > 0.01f) {
+                j = 0.0f; // not a sub-pixel shift: a cut, another kind of camera
+            }
+        }
+        previous_projection_jitter = last;
+        projection_jitter = last; // unless the next asked value is found
+        projection_matched = false;
+        for (u32 back = 1; back < asked_jitter.size() && back <= asked_count; ++back) {
+            const auto& a = asked_jitter[(asked_count - back) % asked_jitter.size()];
+            if (std::abs(a[0] - last[0]) < 2e-6f && std::abs(a[1] - last[1]) < 2e-6f &&
+                (a[0] != 0.0f || a[1] != 0.0f)) {
+                if (back >= 2) {
+                    projection_jitter = asked_jitter[(asked_count - back + 1) % asked_jitter.size()];
+                    projection_matched = true;
+                    projection_lag = back;
+                }
+                break;
+            }
+        }
+    }
     std::copy(c + 12, c + 24, camera.to_world.begin());
     camera.depth_to_z = {c[8], c[9]};
     camera.valid = c[9] != 0.0f &&
@@ -499,6 +536,36 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         }
         RenderDocOnCut(camera.cut);
     }
+    // Projection jitter (prototype) diagnosis, a line every 240 frames (10 lines): the jitter read
+    // back, the one now asked of the game, last frame's, and the camera motion of the screen centre
+    // at view z 100 (all in 1/1000000 of the picture: with the camera still, a centre motion equal
+    // to half the jitter difference shows the previous clip carries the previous jitter).
+    if (projection_mode && camera.valid) {
+        static u32 frames = 0, lines = 0;
+        if (++frames % 240 == 0 && lines < 10) {
+            ++lines;
+            const float z = 100.0f, u = 0.5f, v = 0.5f;
+            const float vp[4] = {z * (camera.uv_to_view[0] * u + camera.uv_to_view[2]),
+                                 z * (camera.uv_to_view[1] * v + camera.uv_to_view[3]), z, 1.0f};
+            float clip[3];
+            for (int r = 0; r < 3; ++r) {
+                clip[r] = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    clip[r] += camera.to_previous_clip[r * 4 + k] * vp[k];
+                }
+            }
+            const float du = 0.5f * clip[0] / clip[2] + 0.5f - u, dv = 0.5f - 0.5f * clip[1] / clip[2] - v;
+            std::printf("Projection jitter: this frame %.1f %.1f (%s, lag %u), last frame (read back) %.1f "
+                        "%.1f, asked now %.1f %.1f (NDC x 1e6); centre motion %.1f %.1f, half last jitter "
+                        "%.1f %.1f (uv x 1e6)\n",
+                        projection_jitter[0] * 1e6f, projection_jitter[1] * 1e6f,
+                        projection_matched ? "found in the asked values" : "NOT matched", projection_lag,
+                        previous_projection_jitter[0] * 1e6f, previous_projection_jitter[1] * 1e6f,
+                        runtime_projection_jitter_slot[0] * 1e6f, runtime_projection_jitter_slot[1] * 1e6f,
+                        du * 1e6f, dv * 1e6f, previous_projection_jitter[0] * 0.5e6f,
+                        -previous_projection_jitter[1] * 0.5e6f);
+        }
+    }
     // The shown camera's heading for the mouse controls (bbgpu_camera_yaw: which game camera is on
     // screen), and with BB_CAMERA_LOG=1 its direction every frame, for measuring how the game turns
     // the camera from the right stick.
@@ -582,13 +649,30 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
             object_view = depth_view;
         }
     }
+    // Projection jitter (prototype): prev_proj.w = 1 tells the shader that depth and both clip
+    // positions carry the jitter (pixels here: x right, y down), to be taken out of the motion.
+    // BB_PROJECTION_JITTER_PREV=0 (diagnosis): the previous clip is taken as unjittered relative
+    // to the current one (no correction).
+    static const bool previous_jittered = [] {
+        const char* env = std::getenv("BB_PROJECTION_JITTER_PREV");
+        return !(env && env[0] == '0');
+    }();
+    const auto pixels = [&](const std::array<float, 2>& ndc) {
+        return std::array<float, 2>{ndc[0] * 0.5f * float(width), -ndc[1] * 0.5f * float(height)};
+    };
+    const auto now_jitter = projection_mode ? pixels(projection_jitter)
+        : std::array<float, 2>{jitter[0] * jitter_scale, jitter[1] * jitter_scale};
+    const auto before_jitter = projection_mode
+        ? pixels(previous_jittered ? previous_projection_jitter : projection_jitter)
+        : std::array<float, 2>{previous_jitter[0] * jitter_scale, previous_jitter[1] * jitter_scale};
     const PushConstants push{
         .reproject = camera.to_previous_clip,
         .proj = camera.uv_to_view,
-        .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], motion_deadzone(), 0.0f},
+        .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], motion_deadzone(),
+                      projection_mode ? 1.0f : 0.0f},
         .size = {float(width), float(height)},
-        .jitter = {jitter[0] * jitter_scale, jitter[1] * jitter_scale},
-        .previous_jitter = {previous_jitter[0] * jitter_scale, previous_jitter[1] * jitter_scale},
+        .jitter = now_jitter,
+        .previous_jitter = before_jitter,
         // BB_DLSS_ZERO_MOTION=1 (diagnosis): no camera motion vectors at all.
         .mode = still ? 3u : objects ? 4u : 2u,
     };

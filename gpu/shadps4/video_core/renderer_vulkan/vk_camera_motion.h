@@ -159,12 +159,26 @@ private:
     bool has_last_camera = false;
     std::atomic<bool> camera_cut{false};
     std::atomic<float> picture_speed{0.0f}; ///< last frame's picture motion, fraction of the width
+    bool projection_mode = false; ///< prototype: the jitter is in the game's projection
+    std::array<float, 2> projection_jitter{}, previous_projection_jitter{}; ///< NDC
+    std::array<std::array<float, 2>, 16> asked_jitter{}; ///< the values written to the game's slot
+    u32 asked_count = 0, projection_lag = 0;
+    bool projection_matched = false;
 
 public:
     /// How far the picture moved in the last frame (screen points at view z 5), in fractions
     /// of the width (OnVelocityConstants).
     [[nodiscard]] float PictureSpeed() const noexcept {
         return picture_speed.load(std::memory_order_relaxed);
+    }
+    /// Projection jitter (prototype, BB_PROJECTION_JITTER=1): the off-centre shift of the
+    /// velocity pass's projection this frame, in NDC (x right, y up), and last frame's.
+    [[nodiscard]] std::array<float, 2> ProjectionJitter() const noexcept {
+        return projection_jitter;
+    }
+    /// The jitter (NDC) just written to the game's slot, once per shown frame.
+    void NoteAskedJitter(std::array<float, 2> ndc) noexcept {
+        asked_jitter[asked_count++ % asked_jitter.size()] = ndc;
     }
     /// DLSS rework 9: the velocity pass's camera as NGX Frame Generation takes it (unjittered
     /// projection, current to previous clip, camera vectors); false without that camera.

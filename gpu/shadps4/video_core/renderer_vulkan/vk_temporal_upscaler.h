@@ -92,7 +92,9 @@ public:
     /// This frame's sub-pixel jitter in pixels (screen x right, y down); zero when off and after
     /// the upscale (post and UI are not jittered).
     [[nodiscard]] std::array<float, 2> Jitter() const noexcept {
-        return done_this_frame ? std::array<float, 2>{} : jitter;
+        // Projection jitter (prototype): the game's projection carries it; no viewport / vertex
+        // shader jitter and none for the per-pass fixes.
+        return done_this_frame || ProjectionJitterOn() ? std::array<float, 2>{} : jitter;
     }
 
     // Scaled presets.
@@ -310,6 +312,12 @@ private:
     /// upscaler runs on the HDR scene colour before the post-processing, as at the game's own
     /// 1920x1080 (Run at the trigger dispatch), not on the finished LDR frame. BB_NATIVE_BEFORE_POST=0: off.
     bool early_native = false;
+    /// bbport PROTOTYPE (DLSS rework 7, BB_PROJECTION_JITTER=1, Uncharted 3 EU 1.02): the jitter
+    /// is in the game's projection (runtime_ultrawide.c); OnFrameStart writes the next one to the
+    /// game's slot, the frame's own is read back from the velocity pass (UseProjectionJitter).
+    /// (The game code is patched after the GPU starts: looked up at each use.)
+    [[nodiscard]] static bool ProjectionJitterOn() noexcept;
+    void UseProjectionJitter(u32 w, u32 h);
     /// BeforeDisplayPass recorded this frame's motion vectors (velocity mode, patched size).
     bool velocity_pending = false;
     /// The UI phase belongs to RunScaledVelocity: the next display pass is not redirected.
