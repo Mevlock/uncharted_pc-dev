@@ -442,6 +442,65 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
             }
         }
     }
+    // A camera that did not move: the same view-to-world rows and the same view-from-uv constants as
+    // in the last frame, up to the rounding of the game's own camera maths (a standing camera's
+    // values flip by one unit in the last place every 50-200 frames; four are allowed: a turn of
+    // 5e-7 radians, under 0.001 pixels). Its motion vectors are zero by definition; computed, they
+    // are rounding noise (the previous clip is world to clip times view to world, the world position
+    // cancelling in single precision: up to about 0.01 pixels on near surfaces), on which the
+    // upscalers do not hold a still picture. RecordVelocity then writes exact zeros for the camera
+    // (characters keep their own vectors). BB_STILL_CAMERA=0: off (the computed vectors).
+    {
+        static const bool on = [] {
+            const char* env = std::getenv("BB_STILL_CAMERA");
+            const bool v = !(env && env[0] == '0');
+            std::printf("Camera motion: exact zero motion for a still camera %s (BB_STILL_CAMERA)\n",
+                        v ? "on" : "off");
+            return v;
+        }();
+        std::array<float, 16> now{};
+        std::copy(c + 12, c + 24, now.begin());
+        std::copy(c, c + 4, now.begin() + 12);
+        bool same = has_still_reference;
+        for (u32 i = 0; i < now.size() && same; ++i) {
+            const float scale = std::max({std::abs(now[i]), std::abs(still_reference[i]), 1.0f});
+            same = std::abs(now[i] - still_reference[i]) <= 4.0f * 1.1920929e-7f * scale;
+        }
+        camera.still = on && same;
+        // Diagnosis (BB_STILL_CAMERA_LOG=1): a frame that is not still after still ones: what changed.
+        static const bool still_log = std::getenv("BB_STILL_CAMERA_LOG") != nullptr;
+        static u32 run = 0, lines = 0;
+        if (camera.still) {
+            ++run;
+        } else {
+            if (still_log && on && has_still_reference && run >= 20 && lines < 40) {
+                ++lines;
+                float worst = 0.0f;
+                int index = -1, changed = 0;
+                for (int i = 0; i < 16; ++i) {
+                    const float d = std::abs(now[i] - still_reference[i]);
+                    changed += d != 0.0f;
+                    if (d > worst) {
+                        worst = d;
+                        index = i;
+                    }
+                }
+                std::printf("Camera motion: not still after %u still frames: %d of 16 values changed, the "
+                            "largest by %g (value %d: %g -> %g)\n", run, changed, worst, index,
+                            index >= 0 ? still_reference[index] : 0.0f, index >= 0 ? now[index] : 0.0f);
+            }
+            run = 0;
+        }
+        still_reference = now;
+        has_still_reference = true;
+        static u32 frames = 0, still_frames = 0, still_lines = 0;
+        still_frames += camera.still;
+        if (++frames % 600 == 0 && still_lines < 20) {
+            ++still_lines;
+            std::printf("Camera motion: still camera in %u of 600 frames\n", still_frames);
+            still_frames = 0;
+        }
+    }
     std::copy(c + 12, c + 24, camera.to_world.begin());
     camera.depth_to_z = {c[8], c[9]};
     camera.valid = c[9] != 0.0f &&
@@ -645,17 +704,17 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
 
 /// bbport: BB_MOTION_DEADZONE=<pixels> (default 0.01; 0: off): velocity-pass motion below it is
 /// none (float rounding left +-0.0002 px alternating per column: DLSS drew stripes from it).
-/// It stays on with the jitter in the game's projection: without it a still view was less steady with
-/// every upscaler (U3 street, 3440x1440 native, 60-frame temporal std p50: DLSS 0.35 against 0.22 with
-/// it, FSR 3.1 0.30-0.40 against 0.22; the viewport-jitter path without it: DLSS 0.25 against 0.15,
-/// FSR 3.1 0.40 against 0.23; even with no jitter at all DLSS gave 0.17 against 0.00): the motion of a
-/// still camera is rounding noise, not zero, and the upscalers hold a still picture only on exact zeros.
+/// With the jitter in the game's projection it is off unless set (the user's tests, 2026-11-15): a
+/// still camera gets exact zeros there without a threshold (OnVelocityConstants, camera.still).
+/// Without either a still view was less steady with every upscaler (U3 street, 3440x1440 native,
+/// 60-frame temporal std p50: DLSS 0.35 against 0.22 with the dead zone, FSR 3.1 0.30-0.40 against
+/// 0.22; the viewport-jitter path without it: DLSS 0.25 against 0.15, FSR 3.1 0.40 against 0.23).
 float CameraMotion::MotionDeadzone() {
     static const float set = [] {
         const char* env = std::getenv("BB_MOTION_DEADZONE");
         return env && env[0] ? static_cast<float>(std::atof(env)) : -1.0f;
     }();
-    return set >= 0.0f ? set : 0.01f;
+    return set >= 0.0f ? set : runtime_projection_jitter_slot ? 0.0f : 0.01f;
 }
 static float motion_deadzone() {
     return CameraMotion::MotionDeadzone();
@@ -706,8 +765,9 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
     const PushConstants push{
         .reproject = camera.to_previous_clip,
         .proj = camera.uv_to_view,
+        // w: 1 = projection jitter, + 2 = a still camera (exact zero camera motion).
         .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], motion_deadzone(),
-                      projection_mode ? 1.0f : 0.0f},
+                      (projection_mode ? 1.0f : 0.0f) + (camera.still ? 2.0f : 0.0f)},
         .size = {float(width), float(height)},
         .jitter = now_jitter,
         .previous_jitter = before_jitter,

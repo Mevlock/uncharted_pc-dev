@@ -153,6 +153,7 @@ private:
         std::array<float, 12> to_world{};  ///< view to world, 3x4 rows (c12..c23)
         bool valid = false;
         bool cut = false; ///< a camera cut this frame: no motion, history reset
+        bool still = false; ///< the camera is where it was last frame (to rounding): zero motion
     } velocity_camera;
     /// The last frame's camera (world forward and position), for detecting cuts.
     std::array<float, 3> last_forward{}, last_position{};
@@ -162,6 +163,8 @@ private:
     bool projection_mode = false; ///< prototype: the jitter is in the game's projection
     std::array<float, 2> projection_jitter{}, previous_projection_jitter{}; ///< NDC
     std::array<std::array<float, 2>, 16> asked_jitter{}; ///< the values written to the game's slot
+    std::array<float, 16> still_reference{}; ///< last frame's view-to-world rows and view-from-uv
+    bool has_still_reference = false;
     u32 asked_count = 0, projection_lag = 0;
     bool projection_matched = false;
 
