@@ -11,6 +11,7 @@
 
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/texture_cache/image.h"
 
@@ -149,6 +150,7 @@ private:
         std::array<float, 12> to_previous_clip{};
         std::array<float, 4> uv_to_view{}; ///< view x = z (a u + c), view y = z (b v + d)
         std::array<float, 2> depth_to_z{}; ///< z = y / (depth - x)
+        std::array<float, 12> to_world{};  ///< view to world, 3x4 rows (c12..c23)
         bool valid = false;
         bool cut = false; ///< a camera cut this frame: no motion, history reset
     } velocity_camera;
@@ -164,6 +166,9 @@ public:
     [[nodiscard]] float PictureSpeed() const noexcept {
         return picture_speed.load(std::memory_order_relaxed);
     }
+    /// DLSS rework 9: the velocity pass's camera as NGX Frame Generation takes it (unjittered
+    /// projection, current to previous clip, camera vectors); false without that camera.
+    bool RealCamera(Dlss::FrameGenCamera& out) const;
 
 private:
 

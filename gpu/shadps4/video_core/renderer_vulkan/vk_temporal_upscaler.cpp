@@ -1646,6 +1646,9 @@ void TemporalUpscaler::CaptureFrameGen() {
                                     Active() ? std::array<float, 2>{jitter[0] * s, jitter[1] * s}
                                              : std::array<float, 2>{},
                                     camera_motion.Ready());
+        Dlss::FrameGenCamera camera{};
+        camera_motion.RealCamera(camera); // DLSS rework 9 (valid false without the camera)
+        frame_generator->SetCaptureCamera(camera);
     }
 }
 

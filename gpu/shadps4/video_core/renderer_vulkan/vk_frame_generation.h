@@ -18,6 +18,7 @@
 
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/texture_cache/image.h"
 
 struct FfxVkFsr3_3_1_6FrameGenerationContext;
@@ -58,6 +59,10 @@ public:
     }
     /// After the motion vectors are written. `motion_valid` false: they are zero this frame.
     void EndCapture(vk::CommandBuffer cmdbuf, std::array<float, 2> jitter, bool motion_valid);
+    /// DLSS rework 9: the captured frame's real camera (unjittered), for DLSS Frame Generation.
+    void SetCaptureCamera(const Dlss::FrameGenCamera& camera) {
+        capture_camera = camera;
+    }
 
     /// The game's picture before its UI (`source`, TransferSrcOptimal layout): copied.
     void CaptureHudless(vk::CommandBuffer cmdbuf, vk::Image source, vk::Format format, u32 w,
@@ -125,6 +130,12 @@ private:
 
     bool captured = false; ///< BeginCapture ran since the last Generate
     std::array<float, 2> capture_jitter{};
+    Dlss::FrameGenCamera capture_camera{}; ///< DLSS rework 9: the captured frame's real camera
+    // DLSS rework 9: the UI's coverage (R8) for DLSS Frame Generation.
+    VideoCore::UniqueImage ui_alpha_image;
+    vk::UniqueImageView ui_alpha_view;
+    u32 ui_alpha_width = 0, ui_alpha_height = 0;
+    vk::UniquePipeline ui_alpha_pipeline;
     bool reset = true;
     int last_provider = 0;
     bool last_hudless = false;

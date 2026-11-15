@@ -77,6 +77,25 @@ typedef struct BbDlssgEvaluate {
     uint32_t multi_frame_index; // 1 .. multi_frame_count, in order
 } BbDlssgEvaluate;
 
+// Optional extension of ABI 2 (DLSS rework 9), exported as "BbDlssgEvaluateCamera": bridges
+// without it keep working with FrameGenEvaluate, and the ABI number stays 2, so an older port
+// still accepts a newer bridge. The real camera (unjittered) and the UI's coverage.
+typedef struct BbDlssgCamera {
+    uint32_t struct_size;            // sizeof(BbDlssgCamera): later fields only when larger
+    int32_t valid;                   // the matrices and vectors below are set
+    float view_to_clip[4][4];        // row vectors (D3D style: clip = view * m), no jitter
+    float clip_to_view[4][4];
+    float clip_to_prev_clip[4][4];
+    float prev_clip_to_clip[4][4];
+    float position[3], up[3], right[3], forward[3]; // world space
+    float aspect;                    // view width / height
+    BbDlssImage ui_alpha;            // sampled, R8: the UI's coverage; image null when none
+} BbDlssgCamera;
+
+typedef int32_t (*BbDlssgEvaluateCameraFn)(VkCommandBuffer command,
+                                           const BbDlssgEvaluate* evaluate,
+                                           const BbDlssgCamera* camera);
+
 typedef struct BbDlssApi {
     uint32_t abi;
     // UTF-16 paths: the directory with nvngx_dlss.dll, and a writable data directory.

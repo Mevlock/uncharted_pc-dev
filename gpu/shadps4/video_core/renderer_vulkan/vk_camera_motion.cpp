@@ -375,6 +375,7 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         }
     }
     camera.uv_to_view = {c[0], c[1], c[2], c[3]};
+    std::copy(c + 12, c + 24, camera.to_world.begin());
     camera.depth_to_z = {c[8], c[9]};
     camera.valid = c[9] != 0.0f &&
                    std::all_of(camera.to_previous_clip.begin(), camera.to_previous_clip.end(),
@@ -828,6 +829,107 @@ void CameraMotion::Overlay(VideoCore::ImageId frame) {
         device.destroyImageView(depth_view);
         device.destroyImageView(color_view);
     });
+}
+
+} // namespace Vulkan
+
+namespace Vulkan {
+
+namespace {
+using Mat4 = std::array<std::array<double, 4>, 4>;
+Mat4 Multiply(const Mat4& a, const Mat4& b) {
+    Mat4 r{};
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            for (int k = 0; k < 4; ++k)
+                r[i][j] += a[i][k] * b[k][j];
+    return r;
+}
+/// Gauss-Jordan with partial pivoting; false when singular.
+bool Invert(const Mat4& m, Mat4& out) {
+    double a[4][8];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 8; ++j)
+            a[i][j] = j < 4 ? m[i][j] : (j - 4 == i ? 1.0 : 0.0);
+    for (int col = 0; col < 4; ++col) {
+        int pivot = col;
+        for (int r = col + 1; r < 4; ++r)
+            if (std::abs(a[r][col]) > std::abs(a[pivot][col])) pivot = r;
+        if (std::abs(a[pivot][col]) < 1e-12) return false;
+        if (pivot != col)
+            for (int j = 0; j < 8; ++j) std::swap(a[col][j], a[pivot][j]);
+        const double d = a[col][col];
+        for (int j = 0; j < 8; ++j) a[col][j] /= d;
+        for (int r = 0; r < 4; ++r) {
+            if (r == col) continue;
+            const double f = a[r][col];
+            for (int j = 0; j < 8; ++j) a[r][j] -= f * a[col][j];
+        }
+    }
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) out[i][j] = a[i][j + 4];
+    return true;
+}
+/// Column-vector matrix -> NGX's row-vector layout (the transpose).
+void Store(float (&dst)[4][4], const Mat4& m) {
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) dst[i][j] = float(m[j][i]);
+}
+} // namespace
+
+bool CameraMotion::RealCamera(Dlss::FrameGenCamera& out) const {
+    const auto& camera = velocity_camera;
+    out.valid = false;
+    if (!velocity_mode || !camera.valid || camera.cut) {
+        return false;
+    }
+    // The velocity pass: view x = z (a u + c), view y = z (b v + d), z = y0 / (depth - x0), u, v
+    // the D3D-style screen uv (v down). As a projection with w = view z:
+    //   ndc x = 2u - 1, ndc y = 1 - 2v, depth = x0 + y0 / z.
+    const double a = camera.uv_to_view[0], b = camera.uv_to_view[1], c = camera.uv_to_view[2],
+                 d = camera.uv_to_view[3], x0 = camera.depth_to_z[0], y0 = camera.depth_to_z[1];
+    if (a == 0.0 || b == 0.0) {
+        return false;
+    }
+    const Mat4 proj{{{2.0 / a, 0.0, -2.0 * c / a - 1.0, 0.0},
+                     {0.0, -2.0 / b, 1.0 + 2.0 * d / b, 0.0},
+                     {0.0, 0.0, x0, y0},
+                     {0.0, 0.0, 1.0, 0.0}}};
+    // Previous clip: the pass's rows x, y, w of (view, 1); z with the same depth mapping.
+    const auto& p = camera.to_previous_clip;
+    const Mat4 previous{{{p[0], p[1], p[2], p[3]},
+                         {p[4], p[5], p[6], p[7]},
+                         {x0 * p[8], x0 * p[9], x0 * p[10], x0 * p[11] + y0},
+                         {p[8], p[9], p[10], p[11]}}};
+    Mat4 inverse_proj{}, to_previous{}, from_previous{};
+    if (!Invert(proj, inverse_proj)) {
+        return false;
+    }
+    to_previous = Multiply(previous, inverse_proj);
+    if (!Invert(to_previous, from_previous)) {
+        return false;
+    }
+    Store(out.view_to_clip, proj);
+    Store(out.clip_to_view, inverse_proj);
+    Store(out.clip_to_prev_clip, to_previous);
+    Store(out.prev_clip_to_clip, from_previous);
+    const auto& m = camera.to_world;
+    const auto unit = [](float (&v)[3], float x, float y, float z) {
+        const float l = std::sqrt(x * x + y * y + z * z);
+        const float s = l > 0.0f ? 1.0f / l : 0.0f;
+        v[0] = x * s;
+        v[1] = y * s;
+        v[2] = z * s;
+    };
+    unit(out.right, m[0], m[4], m[8]);
+    unit(out.up, m[1], m[5], m[9]);
+    unit(out.forward, m[2], m[6], m[10]);
+    out.position[0] = m[3];
+    out.position[1] = m[7];
+    out.position[2] = m[11];
+    out.aspect = float(std::abs(a / b));
+    out.valid = true;
+    return true;
 }
 
 } // namespace Vulkan

@@ -13,6 +13,7 @@
 #include "ffx_vk_fsr3_3_1_5_bridge.h"
 #include "video_core/host_shaders/frame_gen_inputs_comp.h"
 #include "video_core/host_shaders/frame_gen_ui_comp.h"
+#include "video_core/host_shaders/frame_gen_ui_alpha_comp.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -179,6 +180,8 @@ void FrameGenerator::CreatePipeline() {
         .pPushConstantRanges = &ui_push,
     }));
     ui_pipeline = compute(FRAME_GEN_UI_COMP, *ui_pipeline_layout);
+    // DLSS rework 9: the same inputs, the UI's coverage as an R8 storage image.
+    ui_alpha_pipeline = compute(FRAME_GEN_UI_ALPHA_COMP, *ui_pipeline_layout);
 }
 
 void FrameGenerator::EnsureInputs(u32 w, u32 h) {
@@ -724,6 +727,84 @@ u32 FrameGenerator::GenerateDlss(vk::CommandBuffer cmdbuf, vk::Image color,
                              u32 h) {
         return Dlss::Resource{image, view, format, vk::ImageAspectFlagBits::eColor, w, h};
     };
+    // DLSS rework 9: the UI's coverage (where the frame differs from the one without UI), and
+    // below the captured frame's real camera. BB_DLSSG_UI_ALPHA=0 / BB_DLSSG_CAMERA=0: without.
+    static const bool ui_alpha_on = [] {
+        const char* env = std::getenv("BB_DLSSG_UI_ALPHA");
+        return !(env && env[0] == '0');
+    }();
+    static const bool camera_on = [] {
+        const char* env = std::getenv("BB_DLSSG_CAMERA");
+        return !(env && env[0] == '0');
+    }();
+    Dlss::Resource ui_alpha{};
+    if (ui_alpha_on && hudless && hudless_view) {
+        if (!ui_alpha_image || ui_alpha_width != width || ui_alpha_height != height) {
+            scheduler.WaitSubmitted();
+            ui_alpha_view.reset();
+            ui_alpha_image = VideoCore::UniqueImage(instance.GetDevice(), instance.GetAllocator());
+            ui_alpha_image.Create(vk::ImageCreateInfo{
+                .imageType = vk::ImageType::e2D,
+                .format = vk::Format::eR8Unorm,
+                .extent = {width, height, 1},
+                .mipLevels = 1,
+                .arrayLayers = 1,
+                .samples = vk::SampleCountFlagBits::e1,
+                .tiling = vk::ImageTiling::eOptimal,
+                .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled,
+                .initialLayout = vk::ImageLayout::eUndefined,
+            });
+            ui_alpha_view = Check(instance.GetDevice().createImageViewUnique({
+                .image = vk::Image(ui_alpha_image),
+                .viewType = vk::ImageViewType::e2D,
+                .format = vk::Format::eR8Unorm,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            }));
+            ui_alpha_width = width;
+            ui_alpha_height = height;
+        }
+        vk::ImageMemoryBarrier2 b{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eNone,
+            .dstStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .dstAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = vk::Image(ui_alpha_image),
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        const vk::DescriptorImageInfo alpha_info{.imageView = *ui_alpha_view,
+                                                 .imageLayout = vk::ImageLayout::eGeneral};
+        const vk::DescriptorImageInfo color_info{.imageView = color_view,
+                                                 .imageLayout = vk::ImageLayout::eGeneral};
+        const vk::DescriptorImageInfo hudless_info{.imageView = hudless_view,
+                                                   .imageLayout = vk::ImageLayout::eGeneral};
+        const std::array<vk::WriteDescriptorSet, 3> writes{{
+            {.dstBinding = 0, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eStorageImage,
+             .pImageInfo = &alpha_info},
+            {.dstBinding = 1, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eSampledImage,
+             .pImageInfo = &color_info},
+            {.dstBinding = 2, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eSampledImage,
+             .pImageInfo = &hudless_info},
+        }};
+        const std::array<s32, 2> size{s32(width), s32(height)};
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *ui_alpha_pipeline);
+        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *ui_pipeline_layout, 0, writes);
+        cmdbuf.pushConstants(*ui_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                             sizeof(size), size.data());
+        cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
+        b.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
+        b.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
+        b.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
+        b.dstAccessMask = vk::AccessFlagBits2::eShaderRead;
+        b.oldLayout = vk::ImageLayout::eGeneral;
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        ui_alpha = resource(vk::Image(ui_alpha_image), *ui_alpha_view, vk::Format::eR8Unorm,
+                            width, height);
+    }
+    const Dlss::FrameGenCamera* real_camera =
+        camera_on && capture_camera.valid ? &capture_camera : nullptr;
     for (u32 index = 1; index <= count; ++index) {
         BbGpuCheckpoint(cmdbuf, "dlss-fg evaluate", width, height);
         const bool ok = dlss->EvaluateFrameGen(
@@ -738,6 +819,8 @@ u32 FrameGenerator::GenerateDlss(vk::CommandBuffer cmdbuf, vk::Image color,
                         .hudless = hudless ? resource(hudless, hudless_view, ColorFormat, width,
                                                       height)
                                            : Dlss::Resource{},
+                        .camera = real_camera,
+                        .ui_alpha = ui_alpha,
                         .jitter_x = capture_jitter[0],
                         .jitter_y = capture_jitter[1],
                         .camera_near = CameraNear,

@@ -373,7 +373,8 @@ void Identity(float (&m)[4][4]) {
         m[i][i] = 1.0f;
 }
 
-int32_t FrameGenEvaluate(VkCommandBuffer command, const BbDlssgEvaluate* evaluate) {
+int32_t FrameGenEvaluateWith(VkCommandBuffer command, const BbDlssgEvaluate* evaluate,
+                              const BbDlssgCamera* camera) {
     if (!state.fg_feature || !state.fg_parameters || !evaluate)
         return 0;
     auto backbuffer = Wrap(evaluate->backbuffer, false);
@@ -389,6 +390,14 @@ int32_t FrameGenEvaluate(VkCommandBuffer command, const BbDlssgEvaluate* evaluat
     if (evaluate->hudless.image != VK_NULL_HANDLE) {
         hudless = Wrap(evaluate->hudless, false);
         resources.pHudless = &hudless;
+    }
+    // DLSS rework 9: the port's real camera and the UI's coverage, when given.
+    const bool real_camera = camera && camera->struct_size >= sizeof(BbDlssgCamera) && camera->valid;
+    NVSDK_NGX_Resource_VK ui_alpha{};
+    if (camera && camera->struct_size >= sizeof(BbDlssgCamera) &&
+        camera->ui_alpha.image != VK_NULL_HANDLE) {
+        ui_alpha = Wrap(camera->ui_alpha, false);
+        resources.pUIAlpha = &ui_alpha;
     }
     NVSDK_NGX_DLSSG_Opt_Eval_Params options{};
     options.multiFrameCount = evaluate->multi_frame_count;
@@ -413,6 +422,17 @@ int32_t FrameGenEvaluate(VkCommandBuffer command, const BbDlssgEvaluate* evaluat
     options.cameraFOV = evaluate->camera_fov;
     options.cameraAspectRatio = aspect;
     options.depthInverted = evaluate->depth_inverted != 0;
+    if (real_camera) {
+        std::memcpy(options.cameraViewToClip, camera->view_to_clip, sizeof(options.cameraViewToClip));
+        std::memcpy(options.clipToCameraView, camera->clip_to_view, sizeof(options.clipToCameraView));
+        std::memcpy(options.clipToPrevClip, camera->clip_to_prev_clip, sizeof(options.clipToPrevClip));
+        std::memcpy(options.prevClipToClip, camera->prev_clip_to_clip, sizeof(options.prevClipToClip));
+        std::memcpy(options.cameraPos, camera->position, sizeof(options.cameraPos));
+        std::memcpy(options.cameraUp, camera->up, sizeof(options.cameraUp));
+        std::memcpy(options.cameraRight, camera->right, sizeof(options.cameraRight));
+        std::memcpy(options.cameraFwd, camera->forward, sizeof(options.cameraFwd));
+        options.cameraAspectRatio = camera->aspect;
+    }
     options.cameraMotionIncluded = true;
     // No vector is invalid (0, the zero-initialised value, would mark every still pixel).
     options.motionVectorsInvalidValue = std::numeric_limits<float>::max();
@@ -422,6 +442,10 @@ int32_t FrameGenEvaluate(VkCommandBuffer command, const BbDlssgEvaluate* evaluat
                                        &resources, &options))
                ? 1
                : 0;
+}
+
+int32_t FrameGenEvaluate(VkCommandBuffer command, const BbDlssgEvaluate* evaluate) {
+    return FrameGenEvaluateWith(command, evaluate, nullptr);
 }
 
 void Shutdown() {
@@ -447,4 +471,10 @@ const BbDlssApi api{BBPORT_DLSS_BRIDGE_ABI, Configure,        InstanceExtensions
 
 extern "C" __declspec(dllexport) const BbDlssApi* BbDlssGetApi() {
     return &api;
+}
+
+extern "C" __declspec(dllexport) int32_t BbDlssgEvaluateCamera(VkCommandBuffer command,
+                                                               const BbDlssgEvaluate* evaluate,
+                                                               const BbDlssgCamera* camera) {
+    return FrameGenEvaluateWith(command, evaluate, camera);
 }

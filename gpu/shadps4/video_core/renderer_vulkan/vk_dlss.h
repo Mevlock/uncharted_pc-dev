@@ -75,9 +75,20 @@ public:
         u32 render_width, render_height; ///< depth and motion vectors
         bool operator==(const FrameGenDesc&) const = default;
     };
+    /// DLSS rework 9: the frame's real camera (no jitter) for Frame Generation, row vectors
+    /// (clip = view * m) as NGX takes them.
+    struct FrameGenCamera {
+        bool valid = false;
+        float view_to_clip[4][4]{}, clip_to_view[4][4]{}, clip_to_prev_clip[4][4]{},
+            prev_clip_to_clip[4][4]{};
+        float position[3]{}, up[3]{}, right[3]{}, forward[3]{};
+        float aspect = 1.0f;
+    };
     struct FrameGenFrame {
         Resource backbuffer, depth, motion, output; ///< General layout
         Resource hudless; ///< the backbuffer before the UI, General; image null when none
+        const FrameGenCamera* camera = nullptr; ///< null: the plausible camera of before
+        Resource ui_alpha; ///< R8, the UI's coverage, General; image null when none
         float jitter_x, jitter_y;
         float camera_near, camera_far, camera_fov;
         bool depth_inverted;
