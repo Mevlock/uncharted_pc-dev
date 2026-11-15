@@ -1,4 +1,4 @@
-/* One Hit Kills for Uncharted 2 (Uncharted 3 has its own debug switch): a hook at the start of the NPCs'
+/* One Hit Kills for Uncharted 2 (Uncharted 3: its own debug switch, plus the armour step further down): a hook at the start of the NPCs'
  * Npc::ComputeArmorDamage (npc code), which applies an attack's damage to the NPC's health (Npc::RespondToAttack, " -
  * received attack for %d damage", runs after it and only reacts: damage changed there killed nothing): rdi = the NPC hit, rsi = the attack record
  * {+4 kind, +8 attacker handle (slot pointer, +0x10 its id), +0x24 damage}. The attacker comes from the handle as the
@@ -131,4 +131,50 @@ void __attribute__((ms_abi)) runtime_u1_jetski_skill(uint64_t rdi, uint64_t rsi,
     const uint64_t seen = __atomic_load_n(&jetski_seen_ns, __ATOMIC_RELAXED);
     if (onehit_log() && (!seen || now - seen >= 500000000u)) printf("OneHit1: Elena rides the jet ski: her shots count as the player's\n");
     __atomic_store_n(&jetski_seen_ns, now, __ATOMIC_RELAXED);
+}
+
+/* Uncharted 3: Naughty Dog's own "One Hit Kills" switch (cheats.py KEEP) only sets the player's bullets to 10000
+ * damage where the shot is built (1.02 0xd61828, 1.00 0x472e25); Npc::ComputeArmorDamage then sums the damage over
+ * the attack's hit points with each point's armour factor, so an armoured enemy (the heavies in body armour, e.g. in
+ * the cruise ship's container fight, #341) took next to nothing until its armour came off. The hook sits where the
+ * damage after armour is final, before the difficulty's "Damage by Player to NPCs" scale: 1.02 inside the function at
+ * mov [rbp-0x4040], ebx (0x35784e), 1.00 in its caller right after both helpers return it in eax (0x2a6ff, mov r15d,
+ * eax); r14 = the attack in both. The attack record: +8 the attacker handle (slot pointer, +0x10 its id; valid while
+ * object+0x7c == the id), +0x1c kind, +0x20 damage before armour, +0x24 hit points. An attack of the player's (type
+ * id 0xa5a63e9b, or 0xf2c86c22, which the 1.00 code treats as the player too) with damage before armour does 100000:
+ * the NPC dies at once. Allies' and enemies' attacks stay as they are.
+ * BB_ONEHIT_LOG=1: each attack is printed (kind, damage before and after armour, hit points, attacker type). */
+#define U3_PLAYER_TYPE 0xa5a63e9bu
+#define U3_PLAYER_TYPE_2 0xf2c86c22u
+static const unsigned char *u3_attacker_of(const unsigned char *attack) {
+    uint64_t slot; uint32_t id;
+    memcpy(&slot,attack+8,8); memcpy(&id,attack+0x10,4);
+    if (!slot || !id) return NULL;
+    const unsigned char *object; memcpy(&object,(const void *)(uintptr_t)slot,8);
+    if (!object) return NULL;
+    uint32_t object_id; memcpy(&object_id,object+0x7c,4);
+    return object_id==id ? object : NULL;
+}
+static void u3_armor_damage(const unsigned char *attack, uint64_t *damage_reg) {
+    if ((!onehit_on() && !onehit_log()) || !attack) return;
+    const unsigned char *attacker=u3_attacker_of(attack);
+    uint32_t type=0, kind, points; int32_t raw;
+    if (attacker) memcpy(&type,attacker+0x30,4);
+    memcpy(&kind,attack+0x1c,4); memcpy(&raw,attack+0x20,4); memcpy(&points,attack+0x24,4);
+    const int32_t after=(int32_t)(uint32_t)*damage_reg;
+    if (onehit_on() && (type==U3_PLAYER_TYPE || type==U3_PLAYER_TYPE_2) && raw>0 && after<ONE_HIT_DAMAGE)
+        *damage_reg=(*damage_reg&~(uint64_t)0xffffffffu)|(uint32_t)ONE_HIT_DAMAGE;
+    if (onehit_log())
+        printf("OneHit3: attack kind %u, damage %d before armour, %d after (%u hit points), attacker %p type %08x -> %d\n",
+               kind,raw,after,points,(const void *)attacker,type,(int32_t)(uint32_t)*damage_reg);
+}
+void __attribute__((ms_abi)) runtime_u3_armor_damage_102(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                         const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)image;
+    u3_armor_damage((const unsigned char *)(uintptr_t)r14,&((uint64_t *)(uintptr_t)regs)[0]); /* rbx */
+}
+void __attribute__((ms_abi)) runtime_u3_armor_damage_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                         const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)image;
+    u3_armor_damage((const unsigned char *)(uintptr_t)r14,&((uint64_t *)(uintptr_t)regs)[7]); /* rax */
 }
