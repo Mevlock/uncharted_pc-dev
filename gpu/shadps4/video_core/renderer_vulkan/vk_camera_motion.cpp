@@ -205,6 +205,22 @@ float CameraMotion::Near() const noexcept {
 }
 
 std::array<std::array<float, 4>, 3> CameraMotion::TaaDepthParameters() const noexcept {
+    // Velocity mode (Uncharted): the camera of the game's velocity pass, in the form taa.comp reads
+    // (view x, y = ndc z / proj.xy; z = proj.w / (depth - proj.z); the previous view z = previous_z .
+    // (view, 1); the previous depth = prev_proj.z + prev_proj.w / z). The pass gives view = z (c0 u +
+    // c2, c1 v + c3, 1) and z = c9 / (depth - c8), its previous clip w row the previous view z.
+    // Before, TAA got the other mode's camera here (never filled in velocity mode): its test of the
+    // history's depth failed everywhere, no history was kept, and the picture was each jittered
+    // frame alone (U3 street still view: 60-frame std p50 1.19 with either jitter path).
+    if (velocity_mode && velocity_camera.valid) {
+        const auto& c = velocity_camera;
+        const float sx = c.uv_to_view[0] != 0.0f ? 2.0f / c.uv_to_view[0] : 1.0f;
+        const float sy = c.uv_to_view[1] != 0.0f ? -2.0f / c.uv_to_view[1] : 1.0f;
+        const std::array<float, 4> proj{sx, sy, c.depth_to_z[0], c.depth_to_z[1]};
+        return {proj, proj,
+                {c.to_previous_clip[8], c.to_previous_clip[9], c.to_previous_clip[10],
+                 c.to_previous_clip[11]}};
+    }
     const auto transform = Multiply(previous.view, current.inv_view);
     return {current.proj, previous.proj,
             {transform[8], transform[9], transform[10], transform[11]}};
