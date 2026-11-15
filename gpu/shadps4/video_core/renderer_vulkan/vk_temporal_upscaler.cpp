@@ -403,7 +403,8 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     if (BbHdr::Scene()) {
         hdr_scene = enabled && hudless_hash != 0 && scaled_session;
         std::printf("HDR: scene HDR %s\n",
-                    hdr_scene ? "on (upscaled frames with DLSS, FSR 4, XeSS or TAA)"
+                    hdr_scene ? "on (frames upscaled after the post-processing with DLSS, FSR 4, "
+                                "XeSS or TAA; any frame upscaled before it)"
                               : "off: it needs a render resolution (Display page) and an upscaler");
         std::fflush(stdout);
     }
@@ -1143,7 +1144,7 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
 }
 
 void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w,
-                                    u32 h, vk::ImageView ldr_view, bool srgb_source) {
+                                    u32 h, vk::ImageView view, bool srgb_source) {
     const auto& settings = BbSettings::Get();
     // FSR 3/4 sharpen up to 1 themselves (their RCAS): this pass adds the rest. DLSS no longer
     // sharpens (its sharpness parameter is ignored since 2.5.1, preset K included): the whole
@@ -1178,8 +1179,9 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
         extra_sharpen_height = h;
     }
     vk::ImageView target_view = *output_view;
-    if (ldr && ldr_view) {
-        target_view = ldr_view; // another 8-bit target than the UI image (SharpenDisplay)
+    if (view) {
+        // Another target than the UI image (SharpenDisplay) or output_image (HdrEarlyFrame).
+        target_view = view;
     } else if (ldr) {
         if (!ui_storage_view) {
             // The UI image's own format may be sRGB; FSR 3 writes it through a UNORM view too.
@@ -1758,6 +1760,11 @@ void TemporalUpscaler::OnDrawRecorded(u64 ps_hash, VideoCore::ImageId color) {
     }
     // The finished frame before its UI: the sharpening the upscale left for it (Native before
     // post); frame generation's picture without UI then is the sharpened one, as the frame shown.
+    // Scene HDR: the HDR copy of this pass (the Scene shadow) is the frame shown: the sharpening
+    // goes to it, and the display frame is written again from it (HdrEarlyFrame).
+    if (HdrEarlyFrame(color)) {
+        sharpen_pending = false;
+    }
     if (sharpen_pending) {
         sharpen_pending = false;
         SharpenDisplay(color);
@@ -1777,6 +1784,76 @@ void TemporalUpscaler::OnDrawRecorded(u64 ps_hash, VideoCore::ImageId color) {
     frame_generator->CaptureHudless(scheduler.CommandBuffer(), image.GetImage(),
                                     image.info.pixel_format, image.info.size.width,
                                     image.info.size.height);
+}
+
+// bbport (scene HDR where the upscaler runs before the post-processing: Native / DLAA in Uncharted
+// 2 and 3, BB_SCALED_BEFORE_POST): the game's post-processing then works at the display's size, so
+// the Scene shadow its last pass drew (RecordHdrShadow) already is the finished HDR frame; no
+// upscale comes after it (RunScaledVelocity, where the scene HDR is taken otherwise, does not run).
+// Here, right after that pass and before the UI: the sharpening left for the finished frame on the
+// HDR scene (linear, as the upscaled HDR scene is sharpened in DispatchToUi), then the split: the
+// display buffer gets the 8-bit frame the HUD draws over, made from the HDR scene (the composite at
+// the flip finds the HUD by comparing with exactly that), the shadow the presenter's domain.
+bool TemporalUpscaler::HdrEarlyFrame(VideoCore::ImageId color) {
+    if (!hdr_scene || !early_native) {
+        return false;
+    }
+    const bool drawn = scene_shadow.drawn;
+    tone_shadow.drawn = scene_shadow.drawn = blur1_shadow.drawn = blur2_shadow.drawn = false;
+    auto& image = texture_cache.GetImage(color);
+    const auto format = image.info.pixel_format;
+    const u32 w = image.info.size.width, h = image.info.size.height;
+    const VAddr address = image.info.guest_address;
+    const char* why = !drawn ? "no HDR copy of the pass was drawn"
+                      : scene_shadow.width != w || scene_shadow.height != h
+                            ? "the HDR copy has another size"
+                      : format != vk::Format::eR8G8B8A8Unorm && format != vk::Format::eR8G8B8A8Srgb
+                            ? "the frame is not an 8-bit one"
+                      : !(image.usage_flags & vk::ImageUsageFlagBits::eStorage)
+                            ? "the frame cannot be written by a compute pass"
+                      : !FrameCapture::IsDisplayBuffer(address) ? "the pass does not draw a display buffer"
+                                                                : nullptr;
+    if (why) {
+        static int noted = 0;
+        if (noted < 4) {
+            ++noted;
+            std::printf("HDR: no scene HDR for a frame drawn before the UI at %ux%u: %s\n", w, h, why);
+        }
+        if (hdr_early && hdr_address == address) {
+            hdr_frame = false; // the buffer holds an SDR frame now
+        }
+        return false;
+    }
+    const auto view = CachedView(image, vk::Format::eR8G8B8A8Unorm, vk::ImageAspectFlagBits::eColor);
+    scheduler.EndRendering();
+    runtime.Transit(&image, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+    runtime.FlushBarriers();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    const bool sharpen = sharpen_pending && BbSettings::Get().upscaler != BbSettings::UpscalerTaa;
+    if (sharpen) {
+        ExtraSharpen(cmdbuf, vk::Image(scene_shadow.image), false, w, h, *scene_shadow.view);
+        static bool told = false;
+        if (!told) {
+            told = true;
+            std::printf("HDR: the HDR scene is sharpened after the post-processing, before the UI "
+                        "(strength %.2f)\n", BbSettings::Get().sharpness.load());
+        }
+    }
+    RecordHdrSplit(cmdbuf, vk::Image(scene_shadow.image), *scene_shadow.view, image.GetImage(), view,
+                   w, h);
+    hdr_frame = true;
+    hdr_early = true;
+    hdr_early_color = color;
+    hdr_early_flip = g_flips.load(std::memory_order_relaxed);
+    hdr_address = address;
+    static bool noted = false;
+    if (!noted) {
+        noted = true;
+        std::printf("HDR: the HDR scene %ux%u after the post-processing is the frame shown (the "
+                    "upscaler ran before it)\n", w, h);
+    }
+    return true;
 }
 
 void TemporalUpscaler::SharpenDisplay(VideoCore::ImageId color) {
@@ -2347,7 +2424,9 @@ bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::I
             }
             if (hdr_input) {
                 // bbport (scene HDR): the 8-bit frame for the HUD from the HDR scene.
-                RecordHdrSplit(cmdbuf, ow, oh);
+                RecordHdrSplit(cmdbuf, vk::Image(output_image), *output_view, vk::Image(ui_image),
+                               UiStorageView(), ow, oh);
+                hdr_early = false;
             } else {
                 barrier(vk::Image(output_image), vk::ImageAspectFlagBits::eColor,
                         vk::ImageLayout::eGeneral, all, rw, vk::ImageLayout::eGeneral,
@@ -2486,6 +2565,13 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
     // Every draw into a display buffer passes here; the frame's first one still has the depth
     // and camera (OnDisplayPass clears them). Later ones (Uncharted's full-screen copies before
     // the UI) keep the pending upscale.
+    // Scene HDR, upscaler before post (HdrEarlyFrame): a draw into that frame's buffer once it was
+    // shown starts another picture there (a menu, the next scene frame: its own HDR copy follows).
+    // The frame's own UI comes before its flip.
+    if (hdr_frame && hdr_early && display == hdr_address &&
+        g_flips.load(std::memory_order_relaxed) != hdr_early_flip) {
+        hdr_frame = false;
+    }
     if (!camera_motion.Depth()) {
         return;
     }
@@ -3048,8 +3134,10 @@ TemporalUpscaler::ShadowTarget TemporalUpscaler::HdrShadowTarget(HdrShadow which
             .arrayLayers = 1,
             .samples = vk::SampleCountFlagBits::e1,
             .tiling = vk::ImageTiling::eOptimal,
+            // Transfer destination: the upscaler's edge clamp copies inside the Scene shadow.
             .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled |
-                     vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc,
+                     vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc |
+                     vk::ImageUsageFlagBits::eTransferDst,
             .initialLayout = vk::ImageLayout::eUndefined,
         });
         shadow.view = Check(device.createImageViewUnique({
@@ -3104,17 +3192,22 @@ void TemporalUpscaler::CreateHdrPipelines() {
     hdr_composite_pipeline = compute(HDR_COMPOSITE_COMP);
 }
 
-void TemporalUpscaler::RecordHdrSplit(vk::CommandBuffer cmdbuf, u32 w, u32 h) {
-    CreateHdrPipelines();
-    const auto device = instance.GetDevice();
+vk::ImageView TemporalUpscaler::UiStorageView() {
     if (!ui_storage_view) {
         // The UI image's own format may be sRGB: written through a UNORM view (as FSR 3 does).
-        ui_storage_view = Check(device.createImageViewUnique({
+        ui_storage_view = Check(instance.GetDevice().createImageViewUnique({
             .image = vk::Image(ui_image), .viewType = vk::ImageViewType::e2D,
             .format = vk::Format::eR8G8B8A8Unorm,
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         }));
     }
+    return *ui_storage_view;
+}
+
+void TemporalUpscaler::RecordHdrSplit(vk::CommandBuffer cmdbuf, vk::Image scene,
+                                      vk::ImageView scene_view, vk::Image sdr,
+                                      vk::ImageView sdr_view, u32 w, u32 h) {
+    CreateHdrPipelines();
     const auto barrier = [&](vk::Image image, vk::PipelineStageFlags2 src,
                              vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst,
                              vk::AccessFlags2 dst_access) {
@@ -3130,11 +3223,11 @@ void TemporalUpscaler::RecordHdrSplit(vk::CommandBuffer cmdbuf, u32 w, u32 h) {
     constexpr auto rw = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
     constexpr auto storage = vk::AccessFlagBits2::eShaderStorageRead |
                              vk::AccessFlagBits2::eShaderStorageWrite;
-    barrier(vk::Image(output_image), all, rw, cs, storage);
-    barrier(vk::Image(ui_image), all, rw, cs, vk::AccessFlagBits2::eShaderStorageWrite);
+    barrier(scene, all, rw, cs, storage);
+    barrier(sdr, all, rw, cs, vk::AccessFlagBits2::eShaderStorageWrite);
     const std::array<vk::DescriptorImageInfo, 2> infos{{
-        {.imageView = *output_view, .imageLayout = vk::ImageLayout::eGeneral},
-        {.imageView = *ui_storage_view, .imageLayout = vk::ImageLayout::eGeneral}}};
+        {.imageView = scene_view, .imageLayout = vk::ImageLayout::eGeneral},
+        {.imageView = sdr_view, .imageLayout = vk::ImageLayout::eGeneral}}};
     std::array<vk::WriteDescriptorSet, 2> writes{};
     for (u32 i = 0; i < writes.size(); ++i) {
         writes[i] = {.dstBinding = i, .descriptorCount = 1,
@@ -3143,16 +3236,17 @@ void TemporalUpscaler::RecordHdrSplit(vk::CommandBuffer cmdbuf, u32 w, u32 h) {
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *hdr_split_pipeline);
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *hdr_pipeline_layout, 0, writes);
     cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
-    barrier(vk::Image(output_image), cs, vk::AccessFlagBits2::eShaderStorageWrite, all, rw);
-    barrier(vk::Image(ui_image), cs, vk::AccessFlagBits2::eShaderStorageWrite,
+    barrier(scene, cs, vk::AccessFlagBits2::eShaderStorageWrite, all, rw);
+    barrier(sdr, cs, vk::AccessFlagBits2::eShaderStorageWrite,
             vk::PipelineStageFlagBits2::eColorAttachmentOutput | all, rw);
+    hdr_shown = {scene, scene_view, sdr, sdr_view, w, h};
     hdr_output_layout = vk::ImageLayout::eGeneral;
 }
 
 void TemporalUpscaler::RecordHdrComposite(vk::CommandBuffer cmdbuf) {
     CreateHdrPipelines();
     const auto device = instance.GetDevice();
-    const u32 w = ui_width, h = ui_height;
+    const u32 w = hdr_shown.width, h = hdr_shown.height;
     if (!hdr_composite_image || hdr_composite_width != w || hdr_composite_height != h) {
         if (hdr_composite_image) {
             scheduler.DeferOperation([image = std::move(hdr_composite_image),
@@ -3183,13 +3277,6 @@ void TemporalUpscaler::RecordHdrComposite(vk::CommandBuffer cmdbuf) {
         hdr_composite_height = h;
         std::printf("HDR: composite %ux%u\n", w, h);
     }
-    if (!ui_storage_view) {
-        ui_storage_view = Check(device.createImageViewUnique({
-            .image = vk::Image(ui_image), .viewType = vk::ImageViewType::e2D,
-            .format = vk::Format::eR8G8B8A8Unorm,
-            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-        }));
-    }
     constexpr auto all = vk::PipelineStageFlagBits2::eAllCommands;
     constexpr auto cs = vk::PipelineStageFlagBits2::eComputeShader;
     constexpr auto rw = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
@@ -3203,9 +3290,9 @@ void TemporalUpscaler::RecordHdrComposite(vk::CommandBuffer cmdbuf) {
             .image = image, .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}};
     };
     const std::array before{
-        image_barrier(vk::Image(ui_image), vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
+        image_barrier(hdr_shown.sdr, vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
                       all, rw, cs, vk::AccessFlagBits2::eShaderStorageRead),
-        image_barrier(vk::Image(output_image), hdr_output_layout, vk::ImageLayout::eGeneral, all,
+        image_barrier(hdr_shown.scene, hdr_output_layout, vk::ImageLayout::eGeneral, all,
                       rw, cs, vk::AccessFlagBits2::eShaderStorageRead),
         image_barrier(vk::Image(hdr_composite_image), vk::ImageLayout::eUndefined,
                       vk::ImageLayout::eGeneral, all, rw, cs,
@@ -3214,8 +3301,8 @@ void TemporalUpscaler::RecordHdrComposite(vk::CommandBuffer cmdbuf) {
     cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(before.size()),
                              .pImageMemoryBarriers = before.data()});
     const std::array<vk::DescriptorImageInfo, 3> infos{{
-        {.imageView = *output_view, .imageLayout = vk::ImageLayout::eGeneral},
-        {.imageView = *ui_storage_view, .imageLayout = vk::ImageLayout::eGeneral},
+        {.imageView = hdr_shown.scene_view, .imageLayout = vk::ImageLayout::eGeneral},
+        {.imageView = hdr_shown.sdr_view, .imageLayout = vk::ImageLayout::eGeneral},
         {.imageView = *hdr_composite_view, .imageLayout = vk::ImageLayout::eGeneral}}};
     std::array<vk::WriteDescriptorSet, 3> writes{};
     for (u32 i = 0; i < writes.size(); ++i) {
@@ -3231,11 +3318,11 @@ void TemporalUpscaler::RecordHdrComposite(vk::CommandBuffer cmdbuf) {
         image_barrier(vk::Image(hdr_composite_image), vk::ImageLayout::eGeneral,
                       vk::ImageLayout::eGeneral, cs, vk::AccessFlagBits2::eShaderStorageWrite,
                       all, vk::AccessFlagBits2::eShaderRead),
-        image_barrier(vk::Image(output_image), vk::ImageLayout::eGeneral,
+        image_barrier(hdr_shown.scene, vk::ImageLayout::eGeneral,
                       vk::ImageLayout::eShaderReadOnlyOptimal, cs,
                       vk::AccessFlagBits2::eShaderStorageRead, all,
                       vk::AccessFlagBits2::eShaderRead),
-        image_barrier(vk::Image(ui_image), vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
+        image_barrier(hdr_shown.sdr, vk::ImageLayout::eGeneral, vk::ImageLayout::eGeneral,
                       cs, vk::AccessFlagBits2::eShaderStorageRead, all, rw),
     };
     cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(after.size()),
@@ -3430,6 +3517,27 @@ bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
         BbDrawLogNote(" [UPSCALE-AT-FLIP]");
         RunScaledVelocity(velocity_display, velocity_display);
     }
+    // bbport (scene HDR, the upscaler before the post-processing: HdrEarlyFrame): the game's own
+    // display buffer holds the 8-bit frame with its HUD; shown is the composite of the HDR scene
+    // (the Scene shadow) and that HUD.
+    if (hdr_frame && hdr_early && address == hdr_address && hdr_early_color) {
+        auto& image = texture_cache.GetImage(hdr_early_color);
+        if (image.info.guest_address == address && image.GetImage() == hdr_shown.sdr &&
+            image.info.size.width == hdr_shown.width && image.info.size.height == hdr_shown.height) {
+            hdr_shown.sdr_view = CachedView(image, vk::Format::eR8G8B8A8Unorm,
+                                            vk::ImageAspectFlagBits::eColor);
+            scheduler.EndRendering();
+            runtime.Transit(&image, vk::ImageLayout::eGeneral,
+                            vk::PipelineStageFlagBits2::eComputeShader,
+                            vk::AccessFlagBits2::eShaderRead);
+            runtime.FlushBarriers();
+            RecordHdrComposite(scheduler.CommandBuffer());
+            display = {vk::Image(hdr_composite_image), vk::Format::eR16G16B16A16Sfloat,
+                       hdr_composite_width, hdr_composite_height, hdr_shown.scene_view};
+            return true;
+        }
+        hdr_frame = false; // the buffer was made again
+    }
     std::scoped_lock lock{display_mutex};
     const auto it = displays.find(address);
     if (it == displays.end() || !it->second.valid) {
@@ -3439,11 +3547,13 @@ bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
                it->second.format, it->second.width, it->second.height};
     // bbport (scene HDR): the frame of the HDR scene upscaled into the UI image: its composite
     // with the frame's HUD.
-    if (hdr_frame && address == hdr_address && it->second.alias == vk::Image(ui_image)) {
+    if (hdr_frame && !hdr_early && address == hdr_address &&
+        it->second.alias == vk::Image(ui_image) && hdr_shown.sdr == vk::Image(ui_image)) {
+        hdr_shown.sdr_view = UiStorageView();
         scheduler.EndRendering();
         RecordHdrComposite(scheduler.CommandBuffer());
         display = {vk::Image(hdr_composite_image), vk::Format::eR16G16B16A16Sfloat,
-                   hdr_composite_width, hdr_composite_height, *output_view};
+                   hdr_composite_width, hdr_composite_height, hdr_shown.scene_view};
         return true;
     }
     // Diagnostic capture of the actual completed display buffer, including native UI.

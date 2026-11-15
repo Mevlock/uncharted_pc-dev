@@ -3,7 +3,8 @@
 // MODE 0 (after the upscale of the HDR scene, `scene` linear, 1.0 = the game's white): the 8-bit
 //   frame the HUD draws into (`sdr`, stored values: the scene clipped at white) and, in place, the
 //   scene in the presenter's domain (above 1.0 the value whose sRGB encoding, shown at gamma 2.2,
-//   gives the scene's own; equal below).
+//   gives the scene's own; equal below), alpha 0 (no HUD in it: the frame without UI that frame
+//   generation gets is encoded like the scene pixels of the composite, also with the vivid HUD).
 // MODE 1 (at the flip): the frame shown. `shown` is the 8-bit frame with the HUD; where it equals
 //   the frame before the HUD (recomputed from `scene`) the HDR scene shows; HUD pixels keep it
 //   under their coverage, estimated from the brightness change (a dark overlay: shown / before,
@@ -45,7 +46,7 @@ void main() {
     h = mix(max(h, 0.0), vec3(0.0), isnan(h)); // NaN from the upscaler: black
     imageStore(sdr, pixel, vec4(Encode(min(h, vec3(1.0))), 1.0));
     const vec3 presented = mix(h, Decode(pow(h, vec3(1.0 / 2.2))), greaterThan(h, vec3(1.0)));
-    imageStore(scene, pixel, vec4(presented, 1.0));
+    imageStore(scene, pixel, vec4(presented, 0.0));
 #else
     const vec3 h = imageLoad(scene, pixel).rgb;
     const vec3 d = Decode(imageLoad(shown, pixel).rgb);

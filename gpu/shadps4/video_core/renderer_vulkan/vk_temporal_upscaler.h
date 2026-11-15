@@ -237,7 +237,16 @@ private:
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
     /// bbport (scene HDR): after the upscale of the HDR scene into output_image (General): the
     /// 8-bit frame the HUD draws into (ui_image) and the scene in the presenter's domain, in place.
-    void RecordHdrSplit(vk::CommandBuffer cmdbuf, u32 w, u32 h);
+    void RecordHdrSplit(vk::CommandBuffer cmdbuf, vk::Image scene, vk::ImageView scene_view,
+                        vk::Image sdr, vk::ImageView sdr_view, u32 w, u32 h);
+    /// The UI image through a UNORM view (its own format may be sRGB), for compute passes.
+    vk::ImageView UiStorageView();
+    /// bbport (scene HDR with the upscaler before the post-processing, early_native): the pass
+    /// after the tone pass has just drawn the display frame `color` and its HDR copy (the Scene
+    /// shadow, at the display's size: no upscale follows): sharpens the HDR scene if that was
+    /// left for the finished frame and splits it (the display buffer gets the 8-bit frame made
+    /// from it, for the HUD and the composite at the flip). False: this frame stays SDR.
+    bool HdrEarlyFrame(VideoCore::ImageId color);
     /// At the flip: the HDR composite of the scene and the frame's HUD (hdr_composite_image).
     void RecordHdrComposite(vk::CommandBuffer cmdbuf);
     void CreateHdrPipelines();
@@ -323,7 +332,7 @@ private:
     /// Sharpness above 1 for FSR 3/4 (their RCAS stops at 1): one more RCAS pass over the target
     /// (output_image, or the 8-bit UI image with ldr) in General layout after the upscaler.
     void ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w, u32 h,
-                      vk::ImageView ldr_view = {}, bool srgb_source = false);
+                      vk::ImageView view = {}, bool srgb_source = false);
     /// bbport (DLSS rework 3c): Native before post: the sharpening pass on the finished display
     /// frame (after the game's post-processing, before its UI), not on the HDR scene.
     void SharpenDisplay(VideoCore::ImageId color);
@@ -501,7 +510,19 @@ private:
     bool last_hdr_input = false; ///< the upscaler's input domain last frame (its history)
     bool hdr_frame = false;      ///< output_image holds the shown frame's HDR scene (split done)
     VAddr hdr_address = 0;       ///< the display buffer of that frame
-    vk::ImageLayout hdr_output_layout = vk::ImageLayout::eGeneral; ///< output_image's, after it
+    /// The shown frame's HDR scene (output_image, or the Scene shadow with hdr_early) and the 8-bit
+    /// frame the HUD is drawn over (ui_image, or the game's display buffer), as the split left them.
+    struct HdrShown {
+        vk::Image scene;
+        vk::ImageView scene_view;
+        vk::Image sdr;
+        vk::ImageView sdr_view;
+        u32 width = 0, height = 0;
+    } hdr_shown;
+    bool hdr_early = false;               ///< hdr_frame was made by HdrEarlyFrame
+    VideoCore::ImageId hdr_early_color{}; ///< its display buffer
+    u64 hdr_early_flip = 0;               ///< the flip count when it was made
+    vk::ImageLayout hdr_output_layout = vk::ImageLayout::eGeneral; ///< hdr_shown.scene's, after the split
     VideoCore::UniqueImage hdr_composite_image;
     vk::UniqueImageView hdr_composite_view;
     u32 hdr_composite_width = 0, hdr_composite_height = 0;

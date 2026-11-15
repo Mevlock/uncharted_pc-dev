@@ -761,8 +761,12 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             .image = display.image,
             .viewType = vk::ImageViewType::e2D,
             .format = float_display ? display.format : view_info.format,
+            // The HDR composite's alpha is the HUD's share of the pixel (the vivid HUD): read as
+            // it is; forced to one it made the whole picture count as HUD.
             .components = {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
-                           vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eOne},
+                           vk::ComponentSwizzle::eIdentity,
+                           float_display ? vk::ComponentSwizzle::eIdentity
+                                         : vk::ComponentSwizzle::eOne},
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         }));
         draw_scheduler.DeferOperation([device, image_view] { device.destroyImageView(image_view); });
