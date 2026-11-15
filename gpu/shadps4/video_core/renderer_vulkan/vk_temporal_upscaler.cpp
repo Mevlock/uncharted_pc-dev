@@ -1082,7 +1082,7 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
 }
 
 void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w,
-                                    u32 h) {
+                                    u32 h, vk::ImageView ldr_view) {
     const auto& settings = BbSettings::Get();
     // FSR 3/4 sharpen up to 1 themselves (their RCAS): this pass adds the rest. DLSS no longer
     // sharpens (its sharpness parameter is ignored since 2.5.1, preset K included): the whole
@@ -1117,7 +1117,9 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
         extra_sharpen_height = h;
     }
     vk::ImageView target_view = *output_view;
-    if (ldr) {
+    if (ldr && ldr_view) {
+        target_view = ldr_view; // another 8-bit target than the UI image (SharpenDisplay)
+    } else if (ldr) {
         if (!ui_storage_view) {
             // The UI image's own format may be sRGB; FSR 3 writes it through a UNORM view too.
             ui_storage_view = Check(device.createImageViewUnique({
@@ -1569,8 +1571,25 @@ void TemporalUpscaler::Run() {
     if (dispatched) {
         reset = false;
         dispatched_last_frame = true;
+        // bbport (DLSS rework 3c): Native before post: sharpening the HDR scene here left the final
+        // picture softer than before (the tonemap, bloom, depth of field and motion blur come after
+        // it): the pass now runs on the finished display frame, before the UI (OnDrawRecorded ->
+        // SharpenDisplay), where it ran when the upscaler worked on that frame.
+        // BB_SHARPEN_AFTER_POST=0: here, on the HDR scene.
+        static const bool after_post = [] {
+            const char* env = std::getenv("BB_SHARPEN_AFTER_POST");
+            const bool v = !(env && env[0] == '0');
+            std::printf("Upscaler: sharpening after the post-processing at Native %s "
+                        "(BB_SHARPEN_AFTER_POST)\n", v ? "on" : "off");
+            return v;
+        }();
+        sharpen_pending = false;
         if (BbSettings::Get().upscaler != BbSettings::UpscalerTaa) {
-            ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
+            if (early_native && after_post && hudless_hash && !sharpen_display_failed) {
+                sharpen_pending = true;
+            } else {
+                ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
+            }
         }
         // The result replaces the scene color's RGB (its alpha carries data for the post).
         own_barrier(vk::Image(output_image), vk::ImageLayout::eGeneral, all, rw,
@@ -1670,8 +1689,16 @@ void TemporalUpscaler::CaptureFrameGen() {
 void TemporalUpscaler::OnDrawRecorded(u64 ps_hash, VideoCore::ImageId color) {
     // This draw starts the upscaler's next frame (OnFrameStart: it writes the display buffer);
     // the frame generator knows whether this frame's inputs were taken.
-    if (!hudless_hash || u32(ps_hash) != hudless_hash || !color || !frame_generator ||
-        !frame_generator->Wanted()) {
+    if (!hudless_hash || u32(ps_hash) != hudless_hash || !color) {
+        return;
+    }
+    // The finished frame before its UI: the sharpening the upscale left for it (Native before
+    // post); frame generation's picture without UI then is the sharpened one, as the frame shown.
+    if (sharpen_pending) {
+        sharpen_pending = false;
+        SharpenDisplay(color);
+    }
+    if (!frame_generator || !frame_generator->Wanted()) {
         return;
     }
     // Upscaled at a patched size: the frame without UI is the upscaled one (RunScaledVelocity).
@@ -1686,6 +1713,33 @@ void TemporalUpscaler::OnDrawRecorded(u64 ps_hash, VideoCore::ImageId color) {
     frame_generator->CaptureHudless(scheduler.CommandBuffer(), image.GetImage(),
                                     image.info.pixel_format, image.info.size.width,
                                     image.info.size.height);
+}
+
+void TemporalUpscaler::SharpenDisplay(VideoCore::ImageId color) {
+    auto& image = texture_cache.GetImage(color);
+    const auto format = image.info.pixel_format;
+    if ((format != vk::Format::eR8G8B8A8Unorm && format != vk::Format::eR8G8B8A8Srgb) ||
+        !(image.usage_flags & vk::ImageUsageFlagBits::eStorage)) {
+        // Another kind of display buffer (HDR output): the pass goes back before the post.
+        sharpen_display_failed = true;
+        std::printf("Upscaler: the display frame (format %d) cannot be sharpened after the "
+                    "post-processing: sharpening the scene before it\n", int(format));
+        return;
+    }
+    const u32 w = image.info.size.width, h = image.info.size.height;
+    // Encoded values through a UNORM view, as the upscaled UI image was sharpened.
+    const auto view = CachedView(image, vk::Format::eR8G8B8A8Unorm, vk::ImageAspectFlagBits::eColor);
+    scheduler.EndRendering();
+    runtime.Transit(&image, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+    runtime.FlushBarriers();
+    ExtraSharpen(scheduler.CommandBuffer(), image.GetImage(), true, w, h, view);
+    static bool noted = false;
+    if (!noted) {
+        noted = true;
+        std::printf("Upscaler: display frame %ux%u sharpened after the post-processing, before the "
+                    "UI (strength %.2f)\n", w, h, BbSettings::Get().sharpness.load());
+    }
 }
 
 vk::ImageView TemporalUpscaler::CachedView(const VideoCore::Image& image, vk::Format format,
