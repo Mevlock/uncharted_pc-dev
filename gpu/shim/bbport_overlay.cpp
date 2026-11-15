@@ -239,11 +239,23 @@ void UpdateGameStats() {
     game_worst_ms = sorted[0];
 }
 
+/// The size the scene is drawn at. With BB_SCALED_BEFORE_POST=1 (probe.c) the game itself runs at
+/// the output size (BB_RENDER_RES = BB_OUTPUT_RES) and BB_SCENE_SIZE holds the render size.
+static const char* SceneRenderRes() {
+    const char* scene = std::getenv("BB_SCENE_SIZE");
+    return scene && scene[0] ? scene : std::getenv("BB_RENDER_RES");
+}
+static bool ScaledBeforePost() {
+    const char* scene = std::getenv("BB_SCENE_SIZE");
+    return scene && scene[0];
+}
+
 /// What the game renders and shows, from the launcher's start settings: "2288x960 -> 3440x1440
-/// (Quality)", "3440x1440 (native)" or the game's own 1920x1080.
+/// (Quality)", "3440x1440 (native)" or the game's own 1920x1080; "... (Performance) before post"
+/// when the scaled mode upscales before the game's post effects.
 const char* RenderSizeText() {
     static const std::string text = [] {
-        const char* render = std::getenv("BB_RENDER_RES");
+        const char* render = SceneRenderRes();
         const char* output = std::getenv("BB_OUTPUT_RES");
         if (!render || !render[0]) {
             return std::string("1920x1080 ") + T("(the game's own)");
@@ -259,15 +271,19 @@ const char* RenderSizeText() {
             text += std::string(" ") +
                     (scale < 1.6f ? T("(Quality)") : scale < 1.85f ? T("(Balanced)") : T("(Performance)"));
         }
+        if (ScaledBeforePost()) {
+            text += " before post";
+        }
         return text;
     }();
     return text.c_str();
 }
 
-/// The counter's render size: "2288x960 Q" (Balanced B, Performance P), "3440x1440".
+/// The counter's render size: "2288x960 Q" (Balanced B, Performance P), "3440x1440"; "1712x704 P
+/// pre" when the scaled mode upscales before the game's post effects.
 const char* ShortRenderText() {
     static const std::string text = [] {
-        const char* render = std::getenv("BB_RENDER_RES");
+        const char* render = SceneRenderRes();
         const char* output = std::getenv("BB_OUTPUT_RES");
         if (!render || !render[0]) {
             return std::string("1920x1080");
@@ -277,7 +293,8 @@ const char* ShortRenderText() {
         }
         const float render_w = float(std::atoi(render)), output_w = float(std::atoi(output));
         const float scale = render_w > 0.0f ? output_w / render_w : 1.0f;
-        return std::string(render) + (scale < 1.6f ? " Q" : scale < 1.85f ? " B" : " P");
+        return std::string(render) + (scale < 1.6f ? " Q" : scale < 1.85f ? " B" : " P") +
+               (ScaledBeforePost() ? " pre" : "");
     }();
     return text.c_str();
 }
@@ -305,7 +322,7 @@ static const char* CounterUpscalerName(int upscaler) {
                                          : std::string("auto"));
     }();
     static const std::string dlss = "DLSS" + dlaa.substr(4);
-    const char* render = std::getenv("BB_RENDER_RES");
+    const char* render = SceneRenderRes();
     const char* output = std::getenv("BB_OUTPUT_RES");
     const bool native = !render || !render[0] || !output || !output[0] || std::strcmp(render, output) == 0;
     return native ? dlaa.c_str() : dlss.c_str();
