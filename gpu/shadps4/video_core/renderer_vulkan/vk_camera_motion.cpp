@@ -641,13 +641,17 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
 
 /// bbport: BB_MOTION_DEADZONE=<pixels> (default 0.01; 0: off): velocity-pass motion below it is
 /// none (float rounding left +-0.0002 px alternating per column: DLSS drew stripes from it).
-/// With the jitter in the game's projection it is off unless set (the user's tests, 2026-11-15).
+/// It stays on with the jitter in the game's projection: without it a still view was less steady with
+/// every upscaler (U3 street, 3440x1440 native, 60-frame temporal std p50: DLSS 0.35 against 0.22 with
+/// it, FSR 3.1 0.30-0.40 against 0.22; the viewport-jitter path without it: DLSS 0.25 against 0.15,
+/// FSR 3.1 0.40 against 0.23; even with no jitter at all DLSS gave 0.17 against 0.00): the motion of a
+/// still camera is rounding noise, not zero, and the upscalers hold a still picture only on exact zeros.
 float CameraMotion::MotionDeadzone() {
     static const float set = [] {
         const char* env = std::getenv("BB_MOTION_DEADZONE");
         return env && env[0] ? static_cast<float>(std::atof(env)) : -1.0f;
     }();
-    return set >= 0.0f ? set : runtime_projection_jitter_slot ? 0.0f : 0.01f;
+    return set >= 0.0f ? set : 0.01f;
 }
 static float motion_deadzone() {
     return CameraMotion::MotionDeadzone();
