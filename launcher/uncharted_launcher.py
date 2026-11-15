@@ -134,6 +134,11 @@ RENDER_PIXELS_MAX_BIG = 3840 * 2160  # the 4K choices
 ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'),
              ('always', 'Always fill (menus stretched)'),
              ('0', "16:9 with black bars (the games' own)")]
+# The in-game HUD on a screen wider than 16:9 (BB_HUD_LAYOUT, BB_HUD_WIDE_ASPECT; hud_layout.h): in the
+# middle 16:9, or the elements of its left and right thirds at the screen's edges (or a 21:9 area's).
+HUD_LAYOUTS = [('16:9', 'In the middle (16:9)'),
+               ('wide', 'Wide: sides at the screen edges'),
+               ('wide-21:9', 'Wide: sides at the edges of 21:9')]
 # The games' field of view in percent (BB_FOV), on every screen.
 FIELDS_OF_VIEW = [('100', "100% (the games' own)"), ('110', '110%'), ('120', '120%'), ('130', '130%')]
 SCALERS = [('fsr1', 'FSR 1 (AMD FidelityFX, sharp)'), ('bilinear', 'Smooth (bilinear)')]
@@ -236,7 +241,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
                 'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
-                'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
+                'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'hud_layout': '16:9', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
                 'shader_preparation': 'before', 'preparation_speed': 'all',
@@ -922,6 +927,11 @@ def game_environment(s, start=None):
         # at Native had no anti-aliasing at all, only the sub-pixel jitter).
         env['BB_RENDER_RES'], env['BB_OUTPUT_RES'] = sizes
     env['BB_ULTRAWIDE'] = str(s.get('ultrawide') or 'auto')
+    hud = str(s.get('hud_layout') or '16:9')
+    if hud.startswith('wide'):
+        env['BB_HUD_LAYOUT'] = 'wide'
+        if hud == 'wide-21:9':
+            env['BB_HUD_WIDE_ASPECT'] = '21:9'
     env['BB_FOV'] = str(s.get('fov') or '100')
     if not s.get('bloom', True):
         env['BB_BLOOM'] = '0'
@@ -1959,6 +1969,11 @@ class Launcher:
                    'and fills it. Menus, loading screens and cutscene videos stay 16:9; the in-game HUD '
                    'is stretched for now. Always fill never switches to 16:9 (if the switching '
                    'misfires for you): menus, loading screens and videos are then stretched.'))
+        self.row(f, _('HUD at wide screens'), self.choice(f, 'hud_layout', HUD_LAYOUTS, 34),
+                 _('On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in its '
+                   'left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the edges of '
+                   'a 21:9 area (for 32:9 screens). Menus and videos stay 16:9. The wide HUD comes from '
+                   "Ferosnow95's Uncharted 2 HUD in BilalReloaded's port."))
         self.row(f, _('Field of view'), self.choice(f, 'fov', FIELDS_OF_VIEW, 34),
                  _('Shows more of the scene in every direction, also when aiming and in cutscenes.'))
         self.row(f, _('Texture filtering'), self.choice(f, 'anisotropy', ANISOTROPY, 34),
