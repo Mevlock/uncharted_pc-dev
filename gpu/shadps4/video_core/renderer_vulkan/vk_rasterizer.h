@@ -7,6 +7,7 @@
 #include <mutex>
 #include <vector>
 
+#include "bbport_hdr.h"
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "shader_recompiler/ir/passes/srt.h"
@@ -288,6 +289,19 @@ private:
     void UpdateViewportScissorState() const;
     void UpdateDepthStencilState() const;
     void UpdatePrimitiveState(bool is_indexed) const;
+    /// bbport (scene HDR): a draw of the tone pass or the pass after it again into its HDR shadow.
+    void RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderState& state,
+                         bool is_indexed, u32 num_indices, u32 num_instances, u32 first_vertex,
+                         u32 first_instance);
+    /// bbport (scene HDR): a motion blur dispatch after the tone pass again on the HDR values.
+    void RecordHdrBlurShadow(const ComputePipeline& pipeline, u64 cs_hash, u32 groups_x,
+                             u32 groups_y, u32 groups_z);
+    vk::Buffer hdr_settings_buffer{}; ///< the tone pass replacement's settings (BbHdr::Tuning), a ring
+    VmaAllocation hdr_settings_allocation{};
+    void* hdr_settings_mapped = nullptr;
+    u32 hdr_settings_stride = 0, hdr_settings_slot = 0;
+    bool hdr_settings_written = false;
+    BbHdr::Tuning hdr_settings_last{};
     void UpdateRasterizationState() const;
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
 

@@ -97,6 +97,11 @@ public:
         return needs_hdr;
     }
 
+    /// bbport: the HDR10 swapchain format (BbHdr::Output, or the guest's own HDR).
+    vk::Format GetHdrFormat() const {
+        return hdr_format.format;
+    }
+
 private:
     /// Selects the best available swapchain image format
     void FindPresentFormat();
@@ -137,7 +142,13 @@ private:
     u32 image_index = 0;
     u32 frame_index = 0;
     bool needs_recreation = true;
+    /// bbport: HDR10 metadata (VK_EXT_hdr_metadata) from the HDR settings; sent again when they change.
+    void UpdateHdrMetadata();
+    float metadata_peak = 0.0f;
+    float metadata_paper = 0.0f;
     bool needs_hdr = false;    // The game requested HDR swapchain
+    vk::SurfaceFormatKHR hdr_format{vk::Format::eA2B10G10R10UnormPack32,
+                                    vk::ColorSpaceKHR::eHdr10St2084EXT};
     bool supports_hdr = false; // SC supports HDR output
 };
 

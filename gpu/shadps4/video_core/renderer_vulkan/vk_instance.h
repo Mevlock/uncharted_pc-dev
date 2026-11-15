@@ -223,6 +223,11 @@ public:
         return vertex_input_dynamic_state;
     }
 
+    /// bbport: VK_EXT_hdr_metadata is enabled.
+    bool IsHdrMetadataSupported() const {
+        return hdr_metadata;
+    }
+
     /// Returns true when VK_KHR_fragment_shader_barycentric is supported.
     bool IsFragmentShaderBarycentricSupported() const {
         return fragment_shader_barycentric;
@@ -640,6 +645,7 @@ private:
     u32 queue_family_index{0};
     bool custom_border_color{};
     bool fragment_shader_barycentric{};
+    bool hdr_metadata{};
     bool amd_shader_explicit_vertex_parameter{};
     bool depth_clip_control{};
     bool depth_clip_enable{};

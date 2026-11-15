@@ -32,8 +32,9 @@ class FrameGenerator {
 public:
     /// Frames generated per game frame at most (DLSS 4x).
     static constexpr u32 MaxGenerated = 3;
-    /// The format of the frames read and written (the Presenter's frame images).
-    static constexpr vk::Format ColorFormat = vk::Format::eR8G8B8A8Unorm;
+    /// The format of the frames read and written (the Presenter's frame images): RGBA8, or
+    /// A2B10G10R10 (HDR10 signal) with the port's HDR10 output, set by the Presenter at start.
+    static inline vk::Format ColorFormat = vk::Format::eR8G8B8A8Unorm;
     struct Output {
         vk::Image image;
         vk::ImageView view;
