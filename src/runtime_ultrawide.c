@@ -204,6 +204,129 @@ static int output_size(unsigned *w, unsigned *h) {
 static int render_resolution(const uint8_t *code, uint64_t size, uint64_t image_end, unsigned *width,
                              unsigned *height);
 
+/* U1's ordinary camera constructor (US 1.02: 0x2cb3e0) creates a right-handed
+ * basis; its reflection constructor (0x2cb590) reflects all three vectors and
+ * therefore reverses that handedness. Preserve square, positive-handed cameras
+ * (including the non-90-degree flashlight), but still widen mirrored views.
+ * Finite negative determinants identify reflected views. Zero/non-finite bases
+ * retain the old zoom~=1 cube-face guard rather than changing unknown cameras.
+ * The three basis vectors precede inverse aspect F by 0x40, 0x30 and 0x20.
+ *
+ * Preserve the complete guest red zone, flags, XMM/YMM registers and MXCSR.
+ * Legacy SSE touches only the saved low 128 bits of XMM0-2. Scratch is below
+ * the red zone; a temporary masked MXCSR prevents malformed camera data from
+ * raising a new floating-point exception while classifying the basis. */
+static uint8_t *emit_u1_camera_guard(uint8_t *c, uint8_t *back, uint8_t base,
+                                     uint32_t field, uint32_t lo_bits, uint32_t hi_bits) {
+#define EMIT(...) do { const uint8_t bytes[] = {__VA_ARGS__}; memcpy(c, bytes, sizeof(bytes)); c += sizeof(bytes); } while (0)
+    uint8_t *aspect_jump[2], *unknown_jump[3], *zoom_jump[2], *negative_jump;
+    EMIT(0x48, 0x8d, 0xa4, 0x24, 0x80, 0xff, 0xff, 0xff, 0x9c); /* lea rsp,[rsp-128]; pushfq */
+    for (int b = 0; b < 2; ++b) {
+        if (base >= 8) *c++ = 0x41;
+        EMIT(0x81, (uint8_t)(0xb8 | (base & 7)));
+        if ((base & 7) == 4) *c++ = 0x24;
+        memcpy(c, &field, 4);
+        memcpy(c + 4, b ? &hi_bits : &lo_bits, 4);
+        c += 8;
+        EMIT(0x0f, b ? 0x87 : 0x82); /* ja/jb apply, rel32 */
+        aspect_jump[b] = c; c += 4;
+    }
+    EMIT(0x48, 0x8d, 0x64, 0x24, 0xc0,       /* lea rsp,[rsp-64] */
+         0x0f, 0x11, 0x04, 0x24,             /* movups [rsp],xmm0 */
+         0x0f, 0x11, 0x4c, 0x24, 0x10,       /* movups [rsp+16],xmm1 */
+         0x0f, 0x11, 0x54, 0x24, 0x20,       /* movups [rsp+32],xmm2 */
+         0x0f, 0xae, 0x5c, 0x24, 0x30,       /* stmxcsr [rsp+48] */
+         0xc7, 0x44, 0x24, 0x34, 0x80, 0x1f, 0, 0, /* masked, round-to-nearest MXCSR */
+         0x0f, 0xae, 0x54, 0x24, 0x34);      /* ldmxcsr [rsp+52] */
+    /* movups xmm(reg),[base+disp32], including r12's SIB byte. */
+#define LOAD_BASIS(reg, offset) do { \
+        const uint32_t disp = field - (offset); \
+        if (base >= 8) *c++ = 0x41; \
+        EMIT(0x0f, 0x10, (uint8_t)(0x80 | ((reg) << 3) | (base & 7))); \
+        if ((base & 7) == 4) *c++ = 0x24; \
+        memcpy(c, &disp, 4); c += 4; \
+    } while (0)
+    LOAD_BASIS(0, 0x40);
+    LOAD_BASIS(1, 0x30);
+    EMIT(0x0f, 0x28, 0xd0,                   /* movaps xmm2,xmm0 */
+         0x0f, 0xc6, 0xc0, 0xc9,             /* shufps xmm0,xmm0,yzx */
+         0x0f, 0xc6, 0xc9, 0xd2,             /* shufps xmm1,xmm1,zxy */
+         0x0f, 0x59, 0xc1);                  /* mulps xmm0,xmm1 */
+    LOAD_BASIS(1, 0x30);
+    EMIT(0x0f, 0xc6, 0xd2, 0xd2,             /* shufps xmm2,xmm2,zxy */
+         0x0f, 0xc6, 0xc9, 0xc9,             /* shufps xmm1,xmm1,yzx */
+         0x0f, 0x59, 0xd1,                   /* mulps xmm2,xmm1 */
+         0x0f, 0x5c, 0xc2);                  /* subps xmm0,xmm2: cross(right,up) */
+    LOAD_BASIS(1, 0x20);
+    EMIT(0x0f, 0x59, 0xc1,                   /* mulps xmm0,xmm1 */
+         0x0f, 0x28, 0xc8,                   /* movaps xmm1,xmm0 */
+         0x0f, 0x12, 0xd0,                   /* movhlps xmm2,xmm0: z to low lane */
+         0x0f, 0xc6, 0xc9, 0x55,             /* y to low lane */
+         0xf3, 0x0f, 0x58, 0xc1,             /* addss xmm0,xmm1 */
+         0xf3, 0x0f, 0x58, 0xc2);            /* addss xmm0,xmm2: determinant */
+    EMIT(0x66, 0x0f, 0x76, 0xd2,             /* pcmpeqd xmm2,xmm2 */
+         0x66, 0x0f, 0x72, 0xd2, 0x01,       /* psrld xmm2,1: clear sign bit */
+         0x0f, 0x28, 0xc8, 0x0f, 0x54, 0xca, /* xmm1 = abs(determinant) */
+         0x66, 0x0f, 0x72, 0xd2, 0x17,
+         0x66, 0x0f, 0x72, 0xf2, 0x17,       /* xmm2 = positive infinity */
+         0x0f, 0x2e, 0xca, 0x0f, 0x8a);      /* ucomiss abs(det),+inf; jp unknown */
+    unknown_jump[0] = c; c += 4;
+    EMIT(0x0f, 0x83);                         /* jae unknown: +/-infinity */
+    unknown_jump[1] = c; c += 4;
+    EMIT(0x0f, 0x57, 0xd2, 0x0f, 0x2e, 0xc2, 0x0f, 0x82); /* det<0: reflected view */
+    negative_jump = c; c += 4;
+    EMIT(0x0f, 0x84);                         /* det==0: unknown basis */
+    unknown_jump[2] = c; c += 4;
+#define RESTORE_SCRATCH() EMIT( \
+         0x0f, 0x10, 0x04, 0x24, \
+         0x0f, 0x10, 0x4c, 0x24, 0x10, \
+         0x0f, 0x10, 0x54, 0x24, 0x20, \
+         0x0f, 0xae, 0x54, 0x24, 0x30, \
+         0x48, 0x8d, 0x64, 0x24, 0x40)
+#define RESTORE_FLAGS() EMIT(0x9d, 0x48, 0x8d, 0xa4, 0x24, 0x80, 0, 0, 0)
+    RESTORE_SCRATCH();
+    RESTORE_FLAGS();
+    *c++ = 0xe9; /* positive square camera: return without scaling */
+    int32_t rel = (int32_t)(back - (c + 4));
+    memcpy(c, &rel, 4); c += 4;
+    for (int b = 0; b < 3; ++b) {
+        rel = (int32_t)(c - (unknown_jump[b] + 4));
+        memcpy(unknown_jump[b], &rel, 4);
+    }
+    RESTORE_SCRATCH();
+    /* Unknown handedness: preserve precisely the upstream 90-degree cube test. */
+    for (int b = 0; b < 2; ++b) {
+        const uint32_t zoom = field + 4;
+        if (base >= 8) *c++ = 0x41;
+        EMIT(0x81, (uint8_t)(0xb8 | (base & 7)));
+        if ((base & 7) == 4) *c++ = 0x24;
+        memcpy(c, &zoom, 4);
+        memcpy(c + 4, b ? &hi_bits : &lo_bits, 4);
+        c += 8;
+        EMIT(0x0f, b ? 0x87 : 0x82);
+        zoom_jump[b] = c; c += 4;
+    }
+    RESTORE_FLAGS();
+    *c++ = 0xe9;
+    rel = (int32_t)(back - (c + 4));
+    memcpy(c, &rel, 4); c += 4;
+    rel = (int32_t)(c - (negative_jump + 4));
+    memcpy(negative_jump, &rel, 4);
+    RESTORE_SCRATCH();
+    for (int b = 0; b < 2; ++b) {
+        rel = (int32_t)(c - (aspect_jump[b] + 4));
+        memcpy(aspect_jump[b], &rel, 4);
+        rel = (int32_t)(c - (zoom_jump[b] + 4));
+        memcpy(zoom_jump[b], &rel, 4);
+    }
+    RESTORE_FLAGS();
+#undef RESTORE_FLAGS
+#undef RESTORE_SCRATCH
+#undef LOAD_BASIS
+#undef EMIT
+    return c; /* mirrored, non-cube unknown, or non-square camera: apply the usual multiplier */
+}
+
 void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     const char *mode = getenv("BB_ULTRAWIDE");
     const int off = mode && mode[0] == '0' && mode[1] == 0;
@@ -314,10 +437,27 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
     while (pad > 0 && code[pad - 1] == 0) --pad;
     const uint64_t cave = (pad + 0x100 + 0xff) & ~(uint64_t)0xff;
     const int screen_only = !getenv("BB_ULTRAWIDE_ALL_CAMERAS");
-    const uint64_t stride = screen_only ? 0x58 : 0x40; /* the cube face check: 4 compares */
+    /* run.py sets the current executable again after each collection game switch. U1's
+     * flashlight uses a square camera whose zoom is not 1: widening it clips the beam's
+     * falloff into a hard circle. Preserve square positive-handed U1 cameras, while its
+     * reflected cameras still widen. U2/U3 retain their original cube-face check. */
+    const char *exe = getenv("BB_EXE");
+    const int u1_guard = exe && strcmp(exe, "eboot.bin") == 0;
+    const uint64_t stride = screen_only ? (u1_guard ? 0x1c0 : 0x58) : 0x40;
     if (cave + 0x20 + (uint64_t)ns * stride + 0x80 > size) {
         printf("Ultrawide: no room at the end of the game code, not applied\n");
         return;
+    }
+    if (screen_only && u1_guard) {
+        /* The guard's length does not depend on the camera or the bounds; its longest form (an r12 base: SIB bytes)
+         * plus the original read (up to 10 bytes), the vmulss and the jump back (13) must fit in one stub. */
+        uint8_t trial[0x200];
+        const uint64_t used = (uint64_t)(emit_u1_camera_guard(trial, trial, 12, field, 0, 0) - trial);
+        if (used + 10 + 13 > stride) {
+            printf("Ultrawide: the U1 camera check (%llu bytes) does not fit its stub, not applied\n",
+                   (unsigned long long)used);
+            return;
+        }
     }
     /* Constants: k, 1/k (after a division), k/fov, fov/k. They live in a writable block near the
      * code so the presenter can switch them per frame (runtime_ultrawide_select): menus, title
@@ -358,7 +498,9 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
      * are both 1 within 0.5% (a 90 degree cube face) is left alone; every other camera is widened,
      * the screen's views and the reflections too: square reflection cameras (U3's pub mirror,
      * water) kept a 16:9 view while the widened screen sampled them, so the screen's ultrawide
-     * sides showed the reflection's clamped edge (bands, 2026-10-24). The check keeps the flags
+     * sides showed the reflection's clamped edge (bands, 2026-10-24). U1's handedness guard
+     * additionally preserves its non-90-degree flashlight without excluding reflected views.
+     * The check keeps the flags
      * (pushfq/popfq): some reads sit between a compare and its jump. */
     const float square_lo = 0.995f, square_hi = 1.005f;
     uint32_t lo_bits, hi_bits;
@@ -372,7 +514,9 @@ void runtime_patch_ultrawide(uint8_t *code, uint64_t size, uint64_t image_end) {
         memcpy(c, code + at, len);
         c += len;
         uint8_t *apply_jump[4] = {NULL, NULL, NULL, NULL};
-        if (screen_only) {
+        if (screen_only && u1_guard) {
+            c = emit_u1_camera_guard(c, code + at + len, base, field, lo_bits, hi_bits);
+        } else if (screen_only) {
             *c++ = 0x9c; /* pushfq */
             for (int b = 0; b < 4; ++b) {
                 /* cmp dword [base + F (+4 for the zoom)], imm32: below 0.995 (jb) or above 1.005
