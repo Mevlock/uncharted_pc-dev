@@ -216,8 +216,8 @@ static bool RealPlanes() {
 }
 
 float CameraMotion::Far(float fixed) const noexcept {
-    if (velocity_mode && velocity_camera.valid && RealPlanes()) {
-        const float x = velocity_camera.depth_to_z[0], y = velocity_camera.depth_to_z[1];
+    if (velocity_mode && planes_known && RealPlanes()) {
+        const float x = planes[0], y = planes[1];
         const float z = std::abs(y / (1.0f - x));
         if (std::isfinite(z) && z > 1.0f) {
             return std::min(z, 1.0e6f);
@@ -227,8 +227,8 @@ float CameraMotion::Far(float fixed) const noexcept {
 }
 
 float CameraMotion::Near() const noexcept {
-    if (velocity_mode && velocity_camera.valid && RealPlanes()) {
-        const float x = velocity_camera.depth_to_z[0], y = velocity_camera.depth_to_z[1];
+    if (velocity_mode && planes_known && RealPlanes()) {
+        const float x = planes[0], y = planes[1];
         const float z = x != 0.0f ? std::abs(y / x) : 0.0f;
         if (std::isfinite(z) && z > 1.0e-4f && z < 100.0f) {
             static bool noted = false;
@@ -238,6 +238,12 @@ float CameraMotion::Near() const noexcept {
                             "(BB_UPSCALER_REAL_PLANES=0: 0.1 and 10000 / 3000)\n", z, Far(10000.0f));
             }
             return z;
+        }
+        static bool told = false;
+        if (!told) {
+            told = true;
+            std::printf("Camera motion: no near plane from the velocity pass's depth constants (%g, %g): "
+                        "the fixed planes for the upscalers\n", x, y);
         }
     }
     if (current.proj[2] == 0.0f) {
@@ -781,6 +787,12 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     }
     std::copy(c + 12, c + 24, camera.to_world.begin());
     camera.depth_to_z = {c[8], c[9]};
+    // Kept for the upscaler's near / far planes (Near, Far): the frame's camera is cleared at the display
+    // pass, before the upscaler runs on the path after the post-processing.
+    if (c[9] != 0.0f && std::isfinite(c[8]) && std::isfinite(c[9])) {
+        planes = {c[8], c[9]};
+        planes_known = true;
+    }
     camera.valid = c[9] != 0.0f &&
                    std::all_of(camera.to_previous_clip.begin(), camera.to_previous_clip.end(),
                                [](float v) { return std::isfinite(v); });
