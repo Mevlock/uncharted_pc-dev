@@ -49,6 +49,7 @@
 #include <immintrin.h>
 extern "C" unsigned runtime_render_width, runtime_render_height;
 extern "C" int runtime_ultrawide_fill;
+extern "C" float runtime_ultrawide_scale; // runtime_ultrawide.c: the UI squeeze
 // src/runtime_file.c: movie streams (.bsf) opened so far.
 extern "C" volatile int runtime_movie_opens;
 // src/probe.c patch_movie_start: calls of the movie manager's Start so far.
@@ -4841,9 +4842,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
     // bbport (draw batching): a draw the pipeline's batched variant can take records nothing of
     // its own until it is known to join a run (then the run records it at its flush).
+    // bbport: the wide HUD (hud_layout.h): an in-game HUD draw is recorded once per third of
+    // its layout, never batched.
+    const bool hud_split = HudWideOn() && NoteHudDraw(pipeline, is_indexed, index_offset, true);
     const GraphicsPipeline* batch_variant =
-        is_indexed && DrawBatchEnabled() ? pipeline->batch_variant.load(std::memory_order_acquire)
-                                         : nullptr;
+        !hud_split && is_indexed && DrawBatchEnabled()
+            ? pipeline->batch_variant.load(std::memory_order_acquire)
+            : nullptr;
     if (!batch_variant) {
         EmitVertexBuffers();
         if (is_indexed) {
@@ -5167,6 +5172,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             window = now;
         }
     }
+    hud_pass = hud_split ? HudLayout::Pass::Left : HudLayout::Pass::None;
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     FullBarrierBeforeDraw(scheduler);
@@ -5205,7 +5211,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                                     num_instances, 0, 0);
     }
     ++g_pass_draws;
-    if (!batched) scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+    const auto record_draw = [=](vk::CommandBuffer cmdbuf) {
         if (checkpoint) {
             cmdbuf.setCheckpointNV(checkpoint);
         }
@@ -5215,7 +5221,20 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         } else {
             cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
         }
-    });
+    };
+    if (!batched) {
+        scheduler.Record(record_draw);
+    }
+    if (hud_split) {
+        // The middle and right thirds: the same draw with their viewport and scissor (the dynamic
+        // state tracker sends only what changed).
+        for (const auto pass : {HudLayout::Pass::Centre, HudLayout::Pass::Right}) {
+            hud_pass = pass;
+            UpdateDynamicState(pipeline, is_indexed);
+            scheduler.Record(record_draw);
+        }
+    }
+    hud_pass = HudLayout::Pass::None;
     // bbport (scene HDR): the tone pass and the pass after it, drawn again into the HDR shadows.
     if (pipeline->GetHdrRole() != GraphicsPipeline::HdrRole::None && !batched) [[unlikely]] {
         RecordHdrShadow(*pipeline, state, is_indexed, num_indices, num_instances, first_vertex,
@@ -5439,6 +5458,9 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     }
     ClipJitterPush(pipeline);
     pipeline->BindResources(set_writes, push_data, set1_first_write);
+    if (hud_wide) {
+        NoteHudDraw(pipeline, is_indexed, 0, false); // GPU-written arguments: never split
+    }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
     FullBarrierBeforeDraw(scheduler);
@@ -9659,6 +9681,217 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
                              [&](auto&& command) { scheduler.Record(std::move(command)); });
 }
 
+// bbport: the wide HUD (hud_layout.h): BB_HUD_LAYOUT=wide at a screen wider than 16:9 (the UI squeeze
+// runtime_ultrawide_scale below 1), BB_HUD_WIDE_ASPECT the area its sides fill. Decided at the first draw:
+// the ultrawide patch (runtime_ultrawide.c) runs when the game is loaded, after the rasterizer exists.
+bool Rasterizer::HudWideOn() {
+    if (hud_state >= 0) {
+        return hud_state != 0;
+    }
+    hud_k = runtime_ultrawide_scale;
+    hud_wide = runtime_ultrawide_fill && hud_k > 0.0f && hud_k < 0.995f && HudLayout::WideFromEnv();
+    hud_trace = [] {
+        const char* env = std::getenv("BB_HUD_TRACE");
+        return env && env[0] == '1';
+    }();
+    if (const char* env = std::getenv("BB_HUDLESS_PS"); env && *env) {
+        hud_tracker.tonemap_ps = std::strtoull(env, nullptr, 16);
+    }
+    if (hud_wide) {
+        hud_area = HudLayout::AreaHalf((16.0f / 9.0f) / hud_k, HudLayout::AspectFromEnv(), hud_k);
+        std::printf("HUD: wide (side thirds at the edges of %.0f%% of the screen width, UI squeeze %.4f, "
+                    "after pixel shader %08llx)\n",
+                    hud_area * 100.0f, hud_k, static_cast<unsigned long long>(hud_tracker.tonemap_ps));
+    }
+    hud_state = hud_wide ? 1 : 0;
+    std::printf("HUD layout: %s (BB_HUD_LAYOUT %s, UI squeeze %.4f)\n", hud_wide ? "wide" : "16:9",
+                std::getenv("BB_HUD_LAYOUT") ? std::getenv("BB_HUD_LAYOUT") : "unset", hud_k);
+    return hud_wide;
+}
+
+// bbport: the wide HUD (hud_layout.h, from Ferosnow95's Uncharted 2 HUD in BilalReloaded's port):
+// every draw passes here in order on the recording thread; true for an in-game HUD draw over a
+// widened frame (its vertex shader squeezes the UI) that may be drawn per third of its layout.
+bool Rasterizer::NoteHudDraw(const GraphicsPipeline* pipeline, bool is_indexed, u32 index_offset,
+                             bool direct) {
+    const auto& cb = Regs().color_buffers[0];
+    if (!cb) {
+        return false;
+    }
+    const VAddr target = cb.Address();
+    const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const u64 frames = hud_tracker.frames;
+    const bool hud = hud_tracker.Draw(ps ? u32(ps->pgm_hash) : 0, target,
+                                      FrameCapture::IsDisplayBuffer(target), is_indexed);
+    // BB_HUD_TRACE: every 600th frame, its draws from the tonemap draw on (the HUD's place in the frame).
+    if (hud_trace && hud_tracker.frames % 600 == 1) {
+        static u64 seq_frame = 0;
+        static u32 seq_lines = 0;
+        if (seq_frame != hud_tracker.frames) {
+            seq_frame = hud_tracker.frames;
+            seq_lines = 0;
+        }
+        if (seq_lines++ < 120) {
+            std::printf("HUD seq %llu: vs %08x ps %08x target %#llx%s %ux%u %s squeeze %u -> %s\n",
+                        static_cast<unsigned long long>(hud_tracker.frames),
+                        u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash),
+                        ps ? u32(ps->pgm_hash) : 0u, static_cast<unsigned long long>(target),
+                        FrameCapture::IsDisplayBuffer(target) ? " (display)" : "", cb.Pitch(), cb.Height(),
+                        is_indexed ? "indexed" : "plain", pipeline->GetGraphicsKey().ui_squeeze,
+                        hud ? "hud" : "-");
+        }
+    }
+    if (hud_trace && hud_tracker.frames != frames && hud_tracker.frames % 600 == 0) {
+        std::printf("HUD trace: %llu frames; over the frame %llu draws (%llu not indexed), after the "
+                    "copy %llu\n",
+                    static_cast<unsigned long long>(hud_tracker.frames),
+                    static_cast<unsigned long long>(hud_tracker.over_frame_draws),
+                    static_cast<unsigned long long>(hud_tracker.over_frame_skipped),
+                    static_cast<unsigned long long>(hud_tracker.after_copy_draws));
+    }
+    if (!hud || !direct || !pipeline->GetGraphicsKey().ui_squeeze) {
+        return false;
+    }
+    float min_x = 0.0f, max_x = 0.0f;
+    const bool valid = HudExtent(pipeline, is_indexed, index_offset, min_x, max_x);
+    const auto extent = HudLayout::ClassifyExtent(valid, min_x, max_x);
+    if (hud_trace) {
+        static std::unordered_map<u64, u32> traced;
+        const u64 id = pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash * 31 +
+                       (ps ? ps->pgm_hash : 0) + u64(extent);
+        if (auto& n = traced[id]; n < 2 && traced.size() <= 64) {
+            ++n;
+            static constexpr const char* kNames[] = {"split", "full (kept)"};
+            std::printf("HUD draw: vs %08x ps %08x %u %s, x %.3f..%.3f%s -> %s\n",
+                        u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash),
+                        ps ? u32(ps->pgm_hash) : 0u, Regs().num_indices,
+                        is_indexed ? "indices" : "vertices", min_x, max_x, valid ? "" : " (unknown)",
+                        kNames[u32(extent)]);
+        }
+    }
+    return extent == HudLayout::Extent::Split;
+}
+
+bool Rasterizer::HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u32 index_offset,
+                           float& min_x, float& max_x) const {
+    using InstanceIdType = Shader::Gcn::VertexAttribute::InstanceIdType;
+    const auto& regs = Regs();
+    const auto& fetch = pipeline->GetFetchShader();
+    if (regs.num_indices == 0) {
+        return false;
+    }
+    const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
+    // The position: the per-vertex float attribute of 2-4 components (32 or 16 bits) with the
+    // lowest semantic; without a fetch shader the first vertex buffer of the shader that looks like
+    // vertices, its first float (best effort, as in Ferosnow95's version).
+    const Shader::Gcn::VertexAttribute* position = nullptr;
+    AmdGpu::Buffer buffer{};
+    bool half = false;
+    bool found = false;
+    if (!fetch || fetch->attributes.empty()) {
+        for (u32 i = 0; i < vs.buffers.size() && !found; ++i) {
+            if (vs.buffers[i].IsSpecial()) {
+                continue;
+            }
+            const auto sharp = vs.buffers[i].GetSharp(vs);
+            const auto fmt = sharp.GetDataFmt();
+            const u32 vstride = sharp.GetStride();
+            const bool float_fmt = (fmt == AmdGpu::DataFormat::Format32_32 ||
+                                    fmt == AmdGpu::DataFormat::Format32_32_32 ||
+                                    fmt == AmdGpu::DataFormat::Format32_32_32_32) &&
+                                   sharp.GetNumberFmt() == AmdGpu::NumberFormat::Float;
+            const bool raw = fmt == AmdGpu::DataFormat::FormatInvalid ||
+                             fmt == AmdGpu::DataFormat::Format32 ||
+                             fmt == AmdGpu::DataFormat::Format8;
+            if (vstride >= 8 && vstride <= 256 && sharp.base_address != 0 && (float_fmt || raw)) {
+                buffer = sharp;
+                found = true;
+            }
+        }
+    }
+    static const decltype(fetch->attributes) no_attributes{};
+    for (const auto& attrib : fetch ? fetch->attributes : no_attributes) {
+        if (attrib.GetStepRate() != InstanceIdType::None) {
+            continue;
+        }
+        const auto sharp = attrib.GetSharp(vs);
+        const auto fmt = sharp.GetDataFmt();
+        const bool is_half = fmt == AmdGpu::DataFormat::Format16_16 ||
+                             fmt == AmdGpu::DataFormat::Format16_16_16_16;
+        if (sharp.GetNumberFmt() != AmdGpu::NumberFormat::Float ||
+            (!is_half && fmt != AmdGpu::DataFormat::Format32_32 &&
+             fmt != AmdGpu::DataFormat::Format32_32_32 &&
+             fmt != AmdGpu::DataFormat::Format32_32_32_32)) {
+            continue;
+        }
+        if (!position || attrib.semantic < position->semantic) {
+            position = &attrib;
+            buffer = sharp;
+            half = is_half;
+        }
+    }
+    const u32 stride = buffer.GetStride();
+    if ((!position && !found) || stride < (half ? 4u : 8u)) {
+        return false;
+    }
+    const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs, fetch);
+    const u32 count = std::min<u32>(regs.num_indices, 4096);
+    const auto readable = [&](VAddr address, u64 size) {
+        return memory->IsValidGpuMapping(address, 0) &&
+               memory->ClampRangeSize(address, size) == size;
+    };
+    min_x = std::numeric_limits<float>::max();
+    max_x = std::numeric_limits<float>::lowest();
+    bool any = false;
+    const auto take = [&](u64 vertex) {
+        const VAddr address = buffer.base_address + vertex * stride;
+        if (!readable(address, half ? sizeof(u16) : sizeof(float))) {
+            return;
+        }
+        float x;
+        if (half) {
+            u16 h;
+            std::memcpy(&h, reinterpret_cast<const void*>(address), sizeof(h));
+            x = HudLayout::HalfToFloat(h);
+        } else {
+            std::memcpy(&x, reinterpret_cast<const void*>(address), sizeof(x));
+        }
+        if (std::isfinite(x)) {
+            min_x = std::min(min_x, x);
+            max_x = std::max(max_x, x);
+            any = true;
+        }
+    };
+    if (is_indexed) {
+        const bool index16 = regs.index_buffer_type.index_type == AmdGpu::IndexType::Index16;
+        const u32 index_size = index16 ? 2 : 4;
+        const VAddr indices =
+            regs.index_base_address.Address<VAddr>() + u64(index_offset) * index_size;
+        if (!readable(indices, u64(count) * index_size)) {
+            return false;
+        }
+        const u32 restart = index16 ? 0xffffu : 0xffffffffu;
+        for (u32 i = 0; i < count; ++i) {
+            u32 index;
+            if (index16) {
+                u16 v;
+                std::memcpy(&v, reinterpret_cast<const void*>(indices + u64(i) * 2), 2);
+                index = v;
+            } else {
+                std::memcpy(&index, reinterpret_cast<const void*>(indices + u64(i) * 4), 4);
+            }
+            if (index != restart) {
+                take(u64(index) + vertex_offset);
+            }
+        }
+    } else {
+        for (u32 i = 0; i < count; ++i) {
+            take(u64(vertex_offset) + i);
+        }
+    }
+    return any;
+}
+
 void Rasterizer::UpdateViewportScissorState() const {
     const auto& regs = Regs();
 
@@ -9877,6 +10110,25 @@ void Rasterizer::UpdateViewportScissorState() const {
                 std::printf("KeyIcons: prompt zoom skipped (viewport %.0fx%.0f, limit %.0fx%.0f)\n", z.width, z.height,
                             max_w, max_h);
             }
+        }
+    }
+
+    // bbport: the wide HUD (hud_layout.h): this pass's third of the squeezed layout moved to its
+    // place (viewport x) and cut to its columns (scissor).
+    if (hud_pass != HudLayout::Pass::None && !regs.IsClipDisabled()) {
+        for (size_t i = 0; i < viewports.size() && i < scissors.size(); ++i) {
+            auto& vp = viewports[i];
+            auto& r = scissors[i];
+            const float vx = vp.x, vw = vp.width;
+            if (!(vw > 0.0f)) {
+                continue;
+            }
+            const auto cut = HudLayout::PassScissor(hud_pass, r.offset.x,
+                                                    r.offset.x + s32(r.extent.width), vx, vw, hud_k,
+                                                    hud_area);
+            vp.x = vx + HudLayout::Shift(hud_pass, hud_k, hud_area) * 0.5f * vw;
+            r.offset.x = cut.x0;
+            r.extent.width = u32(cut.x1 - cut.x0);
         }
     }
 
