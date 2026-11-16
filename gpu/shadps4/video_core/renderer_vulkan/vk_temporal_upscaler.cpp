@@ -2029,13 +2029,14 @@ float TemporalUpscaler::SceneMipBias() const {
     const float render = float(BbSettings::Get().active_render_width.load());
     const float output = float(Scaled() || early_native ? target_width : 1920u);
     const float ratio = render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
-    // bbport: DLSS (DLAA too) wants one more mip level of texture detail than the render/output
-    // ratio (NVIDIA's DLSS programming guide 3.5: log2(render/display) - 1). Idea from
-    // LanternEngine (Awaken) / AwesomeObserver. BB_DLSS_MIP_BIAS=<levels> (default -1; 0: the
-    // ratio only, as before).
+    // bbport: an extra DLSS mip bias (NVIDIA's DLSS programming guide 3.5 suggests
+    // log2(render/display) - 1) is off by default: on every scene draw it made fine, high-contrast
+    // textures (sand ripples, stone, foliage cut-outs) shimmer in fast motion (Uncharted 3's horse
+    // rides), which the same guide warns about ("flickering and/or moire"). Off = the render/output
+    // ratio only, as in 0.3.6.56. BB_DLSS_MIP_BIAS=<levels> (e.g. -1) for comparison.
     static const float dlss_extra = [] {
         const char* env = std::getenv("BB_DLSS_MIP_BIAS");
-        const float v = env && env[0] ? static_cast<float>(std::atof(env)) : -1.0f;
+        const float v = env && env[0] ? static_cast<float>(std::atof(env)) : 0.0f;
         std::printf("Upscaler: DLSS extra mip bias %.2f (BB_DLSS_MIP_BIAS)\n", v);
         return std::clamp(v, -3.0f, 1.0f);
     }();
