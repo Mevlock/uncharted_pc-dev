@@ -541,8 +541,9 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     }
     // A camera that did not move: the same view-to-world rows and the same view-from-uv constants as
     // in the last frame, up to the rounding of the game's own camera maths (a standing camera's
-    // values flip by one unit in the last place every 50-200 frames; four are allowed: a turn of
-    // 5e-7 radians, under 0.001 pixels). Its motion vectors are zero by definition; computed, they
+    // values flip by one unit in the last place every 50-200 frames; four are allowed for the rotation:
+    // a turn of 5e-7 radians, under 0.001 pixels; the translation is held to 1e-5 world units). Its motion
+    // vectors are zero by definition; computed, they
     // are rounding noise (the previous clip is world to clip times view to world, the world position
     // cancelling in single precision: up to about 0.01 pixels on near surfaces), on which the
     // upscalers do not hold a still picture. RecordVelocity then writes exact zeros for the camera
@@ -560,6 +561,16 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         std::copy(c, c + 4, now.begin() + 12);
         bool same = has_still_reference;
         for (u32 i = 0; i < now.size() && same; ++i) {
+            // The camera's world translation (entries 3, 7, 11) is compared in world units, not relative to its
+            // size: a camera far from the origin has coarse floats, and a relative limit there allowed a
+            // millimetre a frame (about a pixel on a near surface) to count as still. 1e-5 world units is
+            // about 0.01 pixels at a surface a metre away at 1440p; the rotation and the view-from-uv
+            // constants keep the relative limit (their rounding does not grow with the position).
+            const bool translation = i < 12 && i % 4 == 3;
+            if (translation) {
+                same = std::abs(now[i] - still_reference[i]) <= 1e-5f;
+                continue;
+            }
             const float scale = std::max({std::abs(now[i]), std::abs(still_reference[i]), 1.0f});
             same = std::abs(now[i] - still_reference[i]) <= 4.0f * 1.1920929e-7f * scale;
         }
