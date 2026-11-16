@@ -41,6 +41,13 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/button_prompts.h"
 #include "video_core/renderer_vulkan/vk_low_latency.h"
+#include "video_core/cache_storage.h"
+#include "bbport_i18n.h"
+
+// bbport: the window title while the exit saves the shader files still queued (FlushPipelineCacheForExit).
+static std::string ExitSavingTitle(unsigned left) {
+    return fmt::format(fmt::runtime(BbI18n::T("Uncharted: saving the prepared shaders, {} left")), left);
+}
 
 extern "C" {
 // runtime_memory.c
@@ -322,11 +329,26 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         }
         std::printf("Window closed (close button, Alt+F4 or system quit request)\n");
         std::fflush(stdout);
-        // bbport: gone from the screen at once; the shader cache's last writes (FlushPipelineCacheForExit, up to 10 s)
-        // happen behind it, so a slow disk never shows a window that does not respond.
-        SDL_HideWindow(window->GetSDLWindow());
+        // bbport: gone from the screen at once; the shader cache's last writes (FlushPipelineCacheForExit, for as long
+        // as saving goes on) happen behind it, so a slow disk never shows a window that does not respond. With files
+        // still to save the window is minimized, not hidden: its title (taskbar) says how many are left, and closing
+        // it again ends the game at once (what is left is prepared at the next start).
+        SDL_Window* sdl_window = window->GetSDLWindow();
+        if (Storage::DataBase::Instance().PendingWrites() == 0) {
+            SDL_HideWindow(sdl_window);
+        } else {
+            SDL_MinimizeWindow(sdl_window);
+        }
         SDL_PumpEvents();
-        Vulkan::FlushPipelineCacheForExit();
+        Vulkan::FlushPipelineCacheForExit([sdl_window](u32 left) {
+            SDL_SetWindowTitle(sdl_window, ExitSavingTitle(left).c_str());
+            bool closed_again = false;
+            for (SDL_Event event; SDL_PollEvent(&event);) {
+                closed_again = closed_again || event.type == SDL_EVENT_QUIT ||
+                               event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED;
+            }
+            return !closed_again;
+        });
 #ifdef _WIN32
         // bbport: _Exit is ExitProcess on Windows, which still runs every DLL's detach code with
         // the other threads already gone: libsrt's (through FFmpeg) joined a thread through a
@@ -562,7 +584,15 @@ extern "C" void bbgpu_input_sample(void) {
 }
 
 extern "C" void bbgpu_prepare_exit(void) {
-    Vulkan::FlushPipelineCacheForExit();
+    // The menu's Quit (or a switch to another game of the collection): the window still shows the game; its title
+    // says how many shader files are left (the window thread keeps pumping: closing it then minimizes it, and a
+    // second close ends the game at once).
+    Vulkan::FlushPipelineCacheForExit([](u32 left) {
+        if (g_window) {
+            SDL_SetWindowTitle(g_window->GetSDLWindow(), ExitSavingTitle(left).c_str());
+        }
+        return true;
+    });
 }
 
 extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {

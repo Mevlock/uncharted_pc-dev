@@ -151,7 +151,8 @@ public:
     void Sync();
     /// bbport: writes the driver's pipeline cache and flushes the queued blobs; called as the
     /// process ends (the window thread ends it with _Exit).
-    void SaveForExit();
+    /// `note(left)` while shader files are still being saved (false: stop waiting, end now).
+    void SaveForExit(const std::function<bool(u32 left)>& note = {});
 
     /// bbport: a pipeline or shader was compiled within the last second (draw-preparation
     /// helpers then assist; see vk_draw_prep.cpp).
@@ -355,6 +356,6 @@ private:
 };
 
 /// bbport: the process is about to end: saves the driver's pipeline cache, flushes the queued blobs.
-void FlushPipelineCacheForExit();
+void FlushPipelineCacheForExit(const std::function<bool(u32 left)>& note = {});
 
 } // namespace Vulkan

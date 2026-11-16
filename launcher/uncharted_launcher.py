@@ -2872,6 +2872,8 @@ class Launcher:
         self.job = GameJob(self.process)
         self.entered, self.last_problem, self.stopping = False, '', False
         self.prep_shown = False
+        # The preparation page closed with shader files still being saved behind the game, and what the exit left.
+        self.prep_behind, self.exit_left = False, 0
         if not closing:
             self.reader = threading.Thread(target=self.read_output, args=(self.process,), daemon=True)
             self.reader.start()
@@ -2949,7 +2951,10 @@ class Launcher:
                         except OSError:
                             pass
                     self.detect_controller()
-                    if prepared and code == 0 and not self.stopping:
+                    if self.exit_left:
+                        self.status.configure(text=_('{} prepared shader files were not saved: the next start '
+                                                     'prepares them again.').format(self.exit_left), fg=MUTED)
+                    elif prepared and code == 0 and not self.stopping:
                         self.status.configure(text=_('Shaders prepared.'), fg=GOLD)
                     elif prepared and self.stopping:
                         self.status.configure(text=_('Preparation stopped; it continues next time.'), fg=MUTED)
@@ -2979,7 +2984,29 @@ class Launcher:
                         if getattr(self, 'prep_shown', False) and not self.preparing:
                             self.prep_shown = False
                             title = next(t for k, t, _s, _e in GAMES if k == self.app['start'])
+                            # The page closed with files still to save (a slow disk): prepared once they are saved.
+                            text = _('{}: prepared; the shaders are still being saved while you play.') \
+                                if self.prep_behind else _('{}: shaders prepared.')
+                            self.prep_status.configure(text=text.format(title), fg=GOLD)
+                    elif item.startswith('Preparation: ') and 'behind the game' in item and 'saved under' in item:
+                        self.prep_behind = True
+                    elif item.startswith('Preparation: every shader file saved'):
+                        if self.prep_behind:
+                            self.prep_behind = False
+                            title = next(t for k, t, _s, _e in GAMES if k == self.app['start'])
                             self.prep_status.configure(text=_('{}: shaders prepared.').format(title), fg=GOLD)
+                    elif item.startswith('Shader cache at exit: '):
+                        # The game is saving the shader files still queued before it ends (as long as saving goes on).
+                        words = item.split()
+                        if 'saving' in words or words[-1] == 'left':
+                            left = next((w for w in words if w.isdigit()), '')
+                            self.status.configure(text=_('Saving the prepared shaders before the game ends: {} '
+                                                         'left').format(left), fg=GOLD)
+                        elif 'left after' in item:
+                            try:
+                                self.exit_left = int(item.split('writes pending, ')[1].split()[0])
+                            except (IndexError, ValueError):
+                                self.exit_left = 0
                     elif item.startswith('Switching to '):
                         self.status.configure(text=_('Starting the next game of the collection…'), fg=GOLD)
                     self.append(item)

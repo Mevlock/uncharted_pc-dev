@@ -149,9 +149,22 @@ static std::mutex deferred_marker_mutex;
 static std::filesystem::path deferred_marker;
 static std::string deferred_stamp;
 
+bool HasDeferredPreparedMarker() {
+    std::scoped_lock lk{deferred_marker_mutex};
+    return !deferred_marker.empty();
+}
+
 bool WriteDeferredPreparedMarker() {
     std::scoped_lock lk{deferred_marker_mutex};
     if (deferred_marker.empty() || Storage::DataBase::Instance().PendingWrites() != 0) {
+        return false;
+    }
+    // A shader file that could not be saved: the cache is not complete, so no marker (the next start prepares what
+    // is missing instead of trusting it).
+    if (const u64 failed = Storage::DataBase::Instance().FailedWrites()) {
+        std::printf("Preparation: %llu shader files could not be saved: no prepared marker (the next start prepares "
+                    "what is missing)\n", static_cast<unsigned long long>(failed));
+        deferred_marker.clear();
         return false;
     }
     std::FILE* f = std::fopen(deferred_marker.string().c_str(), "w");
@@ -2962,32 +2975,71 @@ void PipelineCache::WarmUpThread() {
     // shader files of a first U3 launch were written behind the game, which ran slowly for a minute or two on an
     // Intel laptop until they were on disk (and every time after clearing the shaders; a restart was smooth).
     // BB_PREP_PAGE_SAVE=0: they are written behind the game, as before.
-    // A very slow disk (a player's: ~1.1 s per write with 4 writers, 1584 queued = minutes) would keep the page up
-    // for that long: once 2 s of saving say the rest would take more than 20 s, the page closes and the rest is
-    // written behind the game, as before.
+    // A slow disk (a player's: ~1.1 s per write with 4 writers, 1584 queued = minutes) would keep the page up for
+    // that long: the page hands the rest to the background (written behind the game, then at the exit for as long as
+    // saving goes on, and what is still missing then is prepared at the next start) only when saving it would take
+    // over 5 more minutes at the drive's rate: the rate since the last slow stretch ended (2 s or more of it), or,
+    // while the writes are slow (over a second each, or one running that long) and have been for 10 s in all, the
+    // rate over the whole saving. A fast drive saves the largest list (U3, ~26,000 files) in 18-25 s. A one-off stall
+    // is waited through: 0.3.6.57 judged the first 2 s against a fixed 20 s, and a player's NVMe SSD, whose first
+    // four writes were held 3.6 s at once (then 1.4 ms per file), lost the page after 88 of 17,675 files; the fixed
+    // 20 s also closed it on any fast drive for a list of over ~14,000 files. The page shows the time left. Without
+    // the game running no throttle applies (SetUnthrottled).
     if (prep_screen && ship_list && PageSavesShaders()) {
         const double t_save = elapsed_ms();
         const u32 total = db.PendingWrites();
-        const auto start = std::chrono::steady_clock::now();
-        const auto end = start + std::chrono::seconds(60);
-        bool too_slow = false;
-        while (db.PendingWrites() != 0 && std::chrono::steady_clock::now() < end) {
+        const char* handed = nullptr;
+        double slow_total = 0.0;
+        db.SetUnthrottled(true);
+        using Clock = std::chrono::steady_clock;
+        const auto save_start = Clock::now();
+        auto window = save_start, last = save_start;
+        u32 window_saved = 0;
+        bool was_slow = false;
+        constexpr double limit_s = 300.0;
+        while (db.PendingWrites() != 0) {
             const u32 left = db.PendingWrites();
-            BbOverlay::SetShaderPreparation(4, total > left ? total - left : 0, total);
-            const double spent = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
             const u32 saved = total > left ? total - left : 0;
-            if (spent >= 2.0 && (saved == 0 || spent / saved * left > 20.0)) {
-                too_slow = true;
+            BbOverlay::SetShaderPreparation(4, saved, total);
+            const auto now = Clock::now();
+            const double slow = db.SlowForSeconds();
+            if (slow > 0.0) {
+                slow_total += std::chrono::duration<double>(now - last).count();
+            } else if (was_slow) {
+                window = now; // the rate is measured from the end of a slow stretch on
+                window_saved = saved;
+            }
+            was_slow = slow > 0.0;
+            last = now;
+            const auto too_long = [&](double from_s, u32 from_saved) {
+                const double rate = double(saved - from_saved) / from_s;
+                return rate <= 0.0 || double(left) / rate > limit_s;
+            };
+            if (slow > 0.0) {
+                if (const double all = std::chrono::duration<double>(now - save_start).count();
+                    slow_total >= 10.0 && too_long(all, 0)) {
+                    handed = "the writes are slow: saving the rest would take over 5 minutes";
+                    break;
+                }
+            } else if (const double span = std::chrono::duration<double>(now - window).count();
+                       span >= 2.0 && too_long(span, window_saved)) {
+                handed = "saving the rest would take over 5 minutes";
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
+        db.SetUnthrottled(false);
         BbOverlay::SetShaderPreparation(0, 0, 0);
         const u32 left = db.PendingWrites();
-        std::printf("Preparation: %u of %u shader files saved under the page in %.0f ms%s\n", total - std::min(left, total),
-                    total, elapsed_ms() - t_save,
-                    left ? (too_slow ? " (the disk is slow: the rest behind the game)" : " (the rest behind the game)")
-                         : "");
+        std::printf("Preparation: %u of %u shader files saved under the page in %.0f ms", total - std::min(left, total),
+                    total, elapsed_ms() - t_save);
+        if (left) {
+            std::printf(" (%s: the rest behind the game)", handed ? handed : "stopped");
+        }
+        if (slow_total > 0.0) {
+            std::printf(" (slow writes for %.1f s of it)", slow_total);
+        }
+        std::printf("\n");
     }
     if (prep_screen) {
         BbOverlay::SetPreparationScreen(false);
@@ -3003,12 +3055,30 @@ void PipelineCache::WarmUpThread() {
             deferred_marker = prepared_marker;
             deferred_stamp = prepared_stamp;
         } else {
-            db.Flush(120000);
-            if (db.PendingWrites() == 0) {
-                if (std::FILE* f = std::fopen(prepared_marker.string().c_str(), "w")) {
-                    std::fprintf(f, "%s\n", prepared_stamp.c_str());
-                    std::fclose(f);
-                }
+            // In play: the marker follows once every write queued so far is done, however long that takes (the
+            // writes go on behind the game; 0.3.6.57 gave up after 2 minutes and left no marker although the files
+            // were all saved later). The exit writes it too, after its own wait (SaveForExit).
+            {
+                std::scoped_lock lk{deferred_marker_mutex};
+                deferred_marker = prepared_marker;
+                deferred_stamp = prepared_stamp;
+            }
+            if (WriteDeferredPreparedMarker()) {
+                std::printf("Preparation: every shader file saved: prepared\n");
+            } else {
+                std::thread{[] {
+                    Common::SetCurrentThreadName("bb:PreparedMarker");
+                    auto& storage = Storage::DataBase::Instance();
+                    while (!WriteDeferredPreparedMarker()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        if (!HasDeferredPreparedMarker()) {
+                            return;
+                        }
+                    }
+                    std::printf("Preparation: every shader file saved behind the game: prepared (%u writes "
+                                "queued now)\n", storage.PendingWrites());
+                    std::fflush(stdout);
+                }}.detach();
             }
         }
     }

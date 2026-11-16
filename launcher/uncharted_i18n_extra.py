@@ -441,6 +441,9 @@ EXTRA_TRANSLATIONS = {
         'Game curve extended': 'Spielkurve verlängert',
         'RenoDX tone mapping': 'RenoDX-Tone-Mapping',
         "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": 'Wie die helleren Lichter der eigenen Szenen der Spiele (siehe HDR oben) entstehen. SDR + Spitzlichter: das SDR-Bild des Spiels unverändert; nur was heller als ein Kniepunkt ist, erhält die eigene Helligkeit der Szene. Spielkurve verlängert: die eigene Filmkurve des Spiels bis zu ihrem Wendepunkt, danach geradlinig weiter ins HDR. RenoDX-Tone-Mapping: der RenoDX-Tone-Mapper mit eigenen Bildeinstellungen. Lässt sich auch beim Spielen ändern (Menü im Spiel, Taste Einfg, Abschnitt HDR); das Spiel startet mit der hier getroffenen Wahl.',
+        '{} prepared shader files were not saved: the next start prepares them again.': '{} vorbereitete Shader-Dateien wurden nicht gespeichert: der nächste Start bereitet sie erneut vor.',
+        '{}: prepared; the shaders are still being saved while you play.': '{}: vorbereitet; die Shader werden noch während des Spielens gespeichert.',
+        'Saving the prepared shaders before the game ends: {} left': 'Die vorbereiteten Shader werden vor dem Spielende gespeichert: noch {}',
     },
     'it': {
         'Auto (as Windows reports)':
@@ -881,6 +884,9 @@ EXTRA_TRANSLATIONS = {
         'Game curve extended': 'Curva del gioco estesa',
         'RenoDX tone mapping': 'Mappatura dei toni RenoDX',
         "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": "Come nascono le luci più brillanti delle scene dei giochi (vedi HDR sopra). SDR + alte luci: l'immagine SDR del gioco così com'è; solo ciò che è più luminoso di un ginocchio riceve la luminosità propria della scena. Curva del gioco estesa: la curva filmica del gioco fino al suo punto di flesso, poi dritta verso l'HDR. Mappatura dei toni RenoDX: il tone mapper RenoDX con le proprie impostazioni d'immagine. Si può cambiare anche mentre si gioca (menu di gioco, tasto Ins, sezione HDR); il gioco parte con la scelta fatta qui.",
+        '{} prepared shader files were not saved: the next start prepares them again.': '{} file di shader preparati non sono stati salvati: il prossimo avvio li prepara di nuovo.',
+        '{}: prepared; the shaders are still being saved while you play.': '{}: preparato; gli shader vengono ancora salvati mentre giochi.',
+        'Saving the prepared shaders before the game ends: {} left': 'Salvataggio degli shader preparati prima della chiusura del gioco: ne mancano {}',
     },
     'ja': {
         'Auto (as Windows reports)':
@@ -1315,6 +1321,9 @@ EXTRA_TRANSLATIONS = {
         'Game curve extended': 'ゲームのカーブを延長',
         'RenoDX tone mapping': 'RenoDX トーンマッピング',
         "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": 'ゲームのシーン自体のより明るいハイライト（上の HDR を参照）の作り方です。SDR + ハイライト：ゲームの SDR 映像をそのまま使い、ニーより明るい部分だけがシーン本来の明るさになります。ゲームのカーブを延長：ゲーム自体のフィルミックカーブを変曲点まで使い、その先はまっすぐ HDR へ延ばします。RenoDX トーンマッピング：独自の画質設定を持つ RenoDX のトーンマッパーです。プレイ中にも変更できます（ゲーム内メニュー、Insert キー、HDR の項目）。ゲームはここで選んだ設定で起動します。',
+        '{} prepared shader files were not saved: the next start prepares them again.': '準備したシェーダーファイル {} 個が保存されませんでした。次回の起動時に再度準備します。',
+        '{}: prepared; the shaders are still being saved while you play.': '{}: 準備完了。シェーダーはプレイ中も保存されています。',
+        'Saving the prepared shaders before the game ends: {} left': 'ゲーム終了前に準備したシェーダーを保存しています: 残り {}',
     },
     'es': {
         'Auto (as Windows reports)':
@@ -1654,6 +1663,9 @@ EXTRA_TRANSLATIONS = {
         'Game curve extended': 'Curva del juego extendida',
         'RenoDX tone mapping': 'Mapeo de tonos RenoDX',
         "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": 'Cómo se crean las luces más brillantes de las propias escenas de los juegos (véase HDR arriba). SDR + luces altas: la imagen SDR del juego tal cual; solo lo que es más brillante que un codo recibe el brillo propio de la escena. Curva del juego extendida: la curva fílmica del juego hasta su punto de inflexión y, desde ahí, recta hacia el HDR. Mapeo de tonos RenoDX: el mapeador de tonos RenoDX con sus propios ajustes de imagen. También se puede cambiar mientras juegas (menú del juego, tecla Insert, sección HDR); el juego empieza con lo elegido aquí.',
+        '{} prepared shader files were not saved: the next start prepares them again.': '{} archivos de shaders preparados no se guardaron: el próximo inicio los vuelve a preparar.',
+        '{}: prepared; the shaders are still being saved while you play.': '{}: preparado; los shaders se siguen guardando mientras juegas.',
+        'Saving the prepared shaders before the game ends: {} left': 'Guardando los shaders preparados antes de que termine el juego: quedan {}',
     },
     'pt': {
         'Auto (as Windows reports)':
@@ -1994,6 +2006,9 @@ EXTRA_TRANSLATIONS = {
         'Game curve extended': 'Curva do jogo estendida',
         'RenoDX tone mapping': 'Mapeamento de tons RenoDX',
         "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": 'Como são criados os realces mais brilhantes das próprias cenas dos jogos (veja HDR acima). SDR + realces: a imagem SDR do jogo como ela é; só o que é mais brilhante que um joelho recebe o brilho próprio da cena. Curva do jogo estendida: a curva fílmica do próprio jogo até o seu ponto de inflexão e, a partir daí, reta até o HDR. Mapeamento de tons RenoDX: o mapeador de tons RenoDX com seus próprios ajustes de imagem. Também pode ser alterado durante o jogo (menu do jogo, tecla Insert, seção HDR); o jogo começa com a escolha feita aqui.',
+        '{} prepared shader files were not saved: the next start prepares them again.': '{} arquivos de shaders preparados não foram salvos: o próximo início os prepara de novo.',
+        '{}: prepared; the shaders are still being saved while you play.': '{}: preparado; os shaders ainda estão sendo salvos enquanto você joga.',
+        'Saving the prepared shaders before the game ends: {} left': 'Salvando os shaders preparados antes de o jogo fechar: faltam {}',
     },
     'fr': {
         'Auto (as Windows reports)':
@@ -2335,6 +2350,9 @@ EXTRA_TRANSLATIONS = {
         'Game curve extended': 'Courbe du jeu prolongée',
         'RenoDX tone mapping': 'Mappage tonal RenoDX',
         "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": "Comment sont créées les hautes lumières plus vives des scènes des jeux (voir HDR ci-dessus). SDR + hautes lumières : l'image SDR du jeu telle quelle ; seul ce qui est plus lumineux qu'un coude reçoit la luminosité propre de la scène. Courbe du jeu prolongée : la courbe filmique du jeu jusqu'à son point d'inflexion, puis tout droit vers le HDR. Mappage tonal RenoDX : le mappeur tonal RenoDX avec ses propres réglages d'image. Modifiable aussi en jouant (menu en jeu, touche Inser, section HDR) ; le jeu démarre avec le choix fait ici.",
+        '{} prepared shader files were not saved: the next start prepares them again.': "{} fichiers de shaders préparés n'ont pas été enregistrés : le prochain lancement les prépare à nouveau.",
+        '{}: prepared; the shaders are still being saved while you play.': '{} : préparé ; les shaders sont encore enregistrés pendant que vous jouez.',
+        'Saving the prepared shaders before the game ends: {} left': 'Enregistrement des shaders préparés avant la fermeture du jeu : encore {}',
     },
     # Russian (EU-Russian CUSA02344 players): poncho-ajmv's translation from the upstream port (PR #713)
     # where the English text is the same as ours, the rest translated for this port; the shared
@@ -2749,5 +2767,8 @@ EXTRA_TRANSLATIONS = {
         'Game curve extended': 'Продлённая кривая игры',
         'RenoDX tone mapping': 'Тональное отображение RenoDX',
         "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": 'Как создаются более яркие блики собственных сцен игр (см. HDR выше). SDR + блики: SDR-картинка игры как есть; только то, что ярче точки перегиба, получает собственную яркость сцены. Продлённая кривая игры: собственная кинокривая игры до точки поворота, дальше по прямой в HDR. Тональное отображение RenoDX: тональный преобразователь RenoDX со своими настройками изображения. Можно менять и во время игры (игровое меню, клавиша Insert, раздел HDR); игра запускается с выбранным здесь вариантом.',
+        '{} prepared shader files were not saved: the next start prepares them again.': '{} подготовленных файлов шейдеров не сохранено: при следующем запуске они будут подготовлены снова.',
+        '{}: prepared; the shaders are still being saved while you play.': '{}: подготовлено; шейдеры ещё сохраняются во время игры.',
+        'Saving the prepared shaders before the game ends: {} left': 'Сохранение подготовленных шейдеров перед закрытием игры: осталось {}',
     },
 }

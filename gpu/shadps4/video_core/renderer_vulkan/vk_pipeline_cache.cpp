@@ -721,17 +721,43 @@ void PipelineCache::DriverCacheSaver(std::stop_token stop) {
     }
 }
 
-void PipelineCache::SaveForExit() {
-    // bbport: up to 10 s (was 3): right after a preparation thousands of shader files are still being written, and a
-    // game closed then lost them. Usually nothing is pending and this returns at once. Not longer: the writes can stall
-    // in Windows' file calls (seen once, all writers blocked in create/rename), and whatever is left is prepared again
-    // at the next start (files are renamed into place whole; the prepared marker only follows complete writes).
+void PipelineCache::SaveForExit(const std::function<bool(u32 left)>& note) {
+    // bbport: the shader files still queued are saved before the process ends, for as long as saving goes on: the
+    // wait ends when all are done, or when none has been done for 10 s (writes held by Windows' file calls: seen once,
+    // all writers blocked in create/rename). 0.3.6.57 waited at most 10 s, and a player's first start (its writes
+    // slowed by a stall at the start) lost 15,590 shader files at the exit. Usually nothing is pending and this
+    // returns at once. The window's title says how many are left (`note`: the window is minimized after a close, a
+    // second close ends the game at once); the launcher shows the count from these lines. Whatever is left is
+    // prepared at the next start (only what is missing, under the page: files are renamed into place whole, and the
+    // prepared marker only follows complete writes).
     auto& db = Storage::DataBase::Instance();
     if (const u32 pending = db.PendingWrites(); pending > 0) {
         const auto start = std::chrono::steady_clock::now();
-        db.Flush(10000);
-        std::printf("Shader cache at exit: %u writes pending, %u left after %.1f s\n", pending, db.PendingWrites(),
-                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+        std::printf("Shader cache at exit: saving %u shader files before the game ends\n", pending);
+        std::fflush(stdout);
+        db.SetUnthrottled(true);
+        auto last_line = start;
+        bool stopped = false;
+        const bool done = db.WaitForWrites(10.0, [&](u32 left) {
+            if (const auto now = std::chrono::steady_clock::now(); now - last_line >= std::chrono::seconds(1)) {
+                last_line = now;
+                std::printf("Shader cache at exit: %u left\n", left);
+                std::fflush(stdout);
+            }
+            stopped = note && !note(left);
+            return !stopped;
+        });
+        db.SetUnthrottled(false);
+        std::printf("Shader cache at exit: %u writes pending, %u left after %.1f s%s\n", pending, db.PendingWrites(),
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                    done      ? ""
+                    : stopped ? " (closed again: the rest is prepared at the next start)"
+                              : " (none saved for 10 s: the rest is prepared at the next start)");
+        std::fflush(stdout);
+    }
+    // A preparation whose files were still being saved behind the game: its marker, now that they are on disk.
+    if (WriteDeferredPreparedMarker()) {
+        std::printf("Preparation: every shader file saved at the exit: prepared\n");
         std::fflush(stdout);
     }
     if (driver_cache_dirty.load() != 0 && IsWarm()) {
@@ -739,9 +765,9 @@ void PipelineCache::SaveForExit() {
     }
 }
 
-void FlushPipelineCacheForExit() {
+void FlushPipelineCacheForExit(const std::function<bool(u32 left)>& note) {
     if (auto* cache = g_exit_pipeline_cache) {
-        cache->SaveForExit();
+        cache->SaveForExit(note);
     }
 }
 

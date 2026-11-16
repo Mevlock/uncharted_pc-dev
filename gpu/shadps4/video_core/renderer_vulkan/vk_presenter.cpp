@@ -1577,19 +1577,24 @@ void PrepareShadersWithoutWindow(AmdGpu::Liverpool* liverpool) {
     }
     BbOverlay::PrintPreparationProgress();
     // Every prepared shader and pipeline must reach the disk before the process ends (the exit flush waits at most
-    // 3 s: a first preparation's ~20,000 writes were mostly lost and the next start built them again).
+    // 3 s: a first preparation's ~20,000 writes were mostly lost and the next start built them again): for as long
+    // as saving goes on (0.3.6.57: at most 2 minutes), until none has been saved for 10 s.
     const auto t_flush = std::chrono::steady_clock::now();
     auto& db = Storage::DataBase::Instance();
     const u32 to_write = std::max<u32>(1, db.PendingWrites());
-    while (db.PendingWrites() != 0 && std::chrono::steady_clock::now() - t_flush < std::chrono::minutes(2)) {
-        BbOverlay::SetShaderPreparation(4, to_write - std::min(to_write, db.PendingWrites()), to_write);
+    db.SetUnthrottled(true);
+    db.WaitForWrites(10.0, [&](u32 left) {
+        BbOverlay::SetShaderPreparation(4, to_write - std::min(to_write, left), to_write);
         BbOverlay::PrintPreparationProgress();
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    }
+        return true;
+    });
+    db.SetUnthrottled(false);
     BbOverlay::SetShaderPreparation(0, 0, 0);
+    // Only a complete cache gets the "prepared" marker (else the next start prepares again); the exit flush writes
+    // it once nothing is pending.
+    const bool had_marker = HasDeferredPreparedMarker();
     FlushPipelineCacheForExit();
-    // Only a complete cache gets the "prepared" marker (else the next start prepares again).
-    const bool marked = WriteDeferredPreparedMarker();
+    const bool marked = had_marker && !HasDeferredPreparedMarker();
     std::printf("Preparation only: cache written in %.1f s (%u writes left; prepared marker %s)\n",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t_flush).count(),
                 db.PendingWrites(), marked ? "written" : "not written");

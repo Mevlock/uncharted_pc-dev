@@ -59,6 +59,21 @@ public:
     void Flush(u32 max_ms);
     /// bbport: writes and removals still queued (the preparation's "saving" progress).
     u32 PendingWrites() const;
+    /// bbport: writes and removals done since the start (progress, while new ones are also queued).
+    u64 CompletedWrites() const;
+    /// bbport: shader files that could not be saved since the start (disk full, refused): the prepared marker is
+    /// not written after one, so the next start prepares what is missing.
+    u64 FailedWrites() const;
+    /// bbport: how long the writes have been slow on end, in seconds (0 when they are not): since the first of a run
+    /// of writes over a second, or for how long a write still running has taken, once over a second. Slowness ends
+    /// once a second of writes has gone by without a slow one (a one-off stall costs only the stall).
+    double SlowForSeconds() const;
+    /// bbport: while the preparation page or the exit waits for the writes (no game running whose reads need the
+    /// disk), the slow-disk throttle (one write at a time, a pause after each) is off. Counted: on/off in pairs.
+    void SetUnthrottled(bool on);
+    /// bbport: waits until every queued write is done, or until none has completed for `stall_s` seconds (stuck);
+    /// `tick(left)` about 4 times a second (false: stop waiting). True when all were done.
+    bool WaitForWrites(double stall_s, const std::function<bool(u32 left)>& tick);
 
 public:
     static constexpr u32 IoWorkers = 4; ///< file writer threads (one for an archive)

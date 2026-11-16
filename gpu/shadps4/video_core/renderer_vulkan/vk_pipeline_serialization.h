@@ -24,5 +24,7 @@ void RegisterShaderInputs(const Shader::Info& info, const std::vector<Shader::Ud
 /// bbport (BB_PREPARE_ONLY): writes the variant list's "prepared" marker the preparation left for after the cache
 /// writes, when none is pending any more. False when there was none to write or writes are still pending.
 bool WriteDeferredPreparedMarker();
+/// bbport: a prepared marker is still waiting for its cache writes (in play: written behind the game, or at the exit).
+bool HasDeferredPreparedMarker();
 
 } // namespace Vulkan

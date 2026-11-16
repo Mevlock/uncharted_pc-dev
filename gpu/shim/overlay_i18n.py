@@ -778,6 +778,10 @@ TRANSLATIONS = {
                                 '残り約 {} 分 {} 秒'),
     'about {} s left': L('quedan unos {} s', 'faltam cerca de {} s', 'environ {} s restantes', 'noch etwa {} s',
                          'circa {} s rimanenti', '残り約 {} 秒'),
+    'Uncharted: saving the prepared shaders, {} left': L(
+        'Uncharted: guardando los shaders preparados, quedan {}', 'Uncharted: salvando os shaders preparados, faltam {}',
+        'Uncharted : enregistrement des shaders préparés, encore {}', 'Uncharted: vorbereitete Shader werden gespeichert, noch {}',
+        'Uncharted: salvataggio degli shader preparati, ne mancano {}', 'Uncharted: 準備したシェーダーを保存中、残り {}'),
     'a few seconds left': L('quedan unos segundos', 'faltam alguns segundos', 'encore quelques secondes',
                             'noch wenige Sekunden', 'mancano pochi secondi', '残り数秒'),
     # ---- The game's save list (sceSaveDataDialog, the overlay's list) ------------------------------------------

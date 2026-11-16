@@ -2598,7 +2598,8 @@ void FullScreenPreparation() {
     const std::string count =
         scan_of ? fmt::format("{:.1f} / {:.1f} GB{}", scan_at / 1024.0, scan_of / 1024.0, ScanEta(scan_at, scan_of))
         : !finishing && total
-            ? fmt::format("{} / {}{}", done, total, phase == 2 ? PreparationEta(done, total) : std::string{})
+            ? fmt::format("{} / {}{}", done, total,
+                          phase == 2 || phase == 4 ? PreparationEta(done, total) : std::string{})
             : std::string{};
     centered(count.c_str(), 1.1f, grey);
     // Where it is switched off (the launcher's Advanced page). For now also the way out if a large shader cache
@@ -2631,7 +2632,7 @@ void PrintPreparationProgress() {
     const bool finishing = PreparationFinished() || (phase == 0 && seen_step2);
     const bool between = phase == 0 && had_step && !seen_step2;
     const int step = phase == 4 ? 4 : finishing ? 3 : phase == 2 || between ? 2 : had_step ? 1 : 0;
-    const std::string eta = phase == 2 && total ? PreparationEta(done, total) : std::string{};
+    const std::string eta = (phase == 2 || phase == 4) && total ? PreparationEta(done, total) : std::string{};
     std::printf("PREP %d %u %u %d %d|%s\n",
                 int(100.0f * PreparationFraction(phase, done, total, finishing, between)), done, total, step,
                 PreparationSavesStep() ? 3 : 2, eta.c_str());
