@@ -203,7 +203,49 @@ float CameraMotion::VerticalFov() const noexcept {
     return 2.0f * std::atan(1.0f / current.proj[1]);
 }
 
+// The game's planes in velocity mode (Uncharted): the velocity pass turns depth into view z as z = y / (depth - x)
+// (depth_to_z): the near plane is at depth 0, the far plane at depth 1. FSR 3.1 and FSR 4 turn depth into metres
+// with them (small-motion cut-off, the tighter history clamp near the camera, disocclusion); they were handed
+// fixed 0.1 and 10000 (3000). BB_UPSCALER_REAL_PLANES=0: the fixed values. `fixed` when they are not known.
+static bool RealPlanes() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_UPSCALER_REAL_PLANES");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
+float CameraMotion::Far(float fixed) const noexcept {
+    if (velocity_mode && planes_known && RealPlanes()) {
+        const float x = planes[0], y = planes[1];
+        const float z = std::abs(y / (1.0f - x));
+        if (std::isfinite(z) && z > 1.0f) {
+            return std::min(z, 1.0e6f);
+        }
+    }
+    return fixed;
+}
+
 float CameraMotion::Near() const noexcept {
+    if (velocity_mode && planes_known && RealPlanes()) {
+        const float x = planes[0], y = planes[1];
+        const float z = x != 0.0f ? std::abs(y / x) : 0.0f;
+        if (std::isfinite(z) && z > 1.0e-4f && z < 100.0f) {
+            static bool noted = false;
+            if (!noted) {
+                noted = true;
+                std::printf("Camera motion: the game's planes for the upscalers: near %.4f, far %.1f "
+                            "(BB_UPSCALER_REAL_PLANES=0: 0.1 and 10000 / 3000)\n", z, Far(10000.0f));
+            }
+            return z;
+        }
+        static bool told = false;
+        if (!told) {
+            told = true;
+            std::printf("Camera motion: no near plane from the velocity pass's depth constants (%g, %g): "
+                        "the fixed planes for the upscalers\n", x, y);
+        }
+    }
     if (current.proj[2] == 0.0f) {
         return 0.1f;
     }
@@ -745,6 +787,12 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     }
     std::copy(c + 12, c + 24, camera.to_world.begin());
     camera.depth_to_z = {c[8], c[9]};
+    // Kept for the upscaler's near / far planes (Near, Far): the frame's camera is cleared at the display
+    // pass, before the upscaler runs on the path after the post-processing.
+    if (c[9] != 0.0f && std::isfinite(c[8]) && std::isfinite(c[9])) {
+        planes = {c[8], c[9]};
+        planes_known = true;
+    }
     camera.valid = c[9] != 0.0f &&
                    std::all_of(camera.to_previous_clip.begin(), camera.to_previous_clip.end(),
                                [](float v) { return std::isfinite(v); });

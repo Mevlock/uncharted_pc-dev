@@ -98,6 +98,8 @@ public:
     /// Vertical field of view and near/far planes of the current camera.
     [[nodiscard]] float VerticalFov() const noexcept;
     [[nodiscard]] float Near() const noexcept;
+    /// The far plane in velocity mode (the game's), else `fixed`.
+    [[nodiscard]] float Far(float fixed) const noexcept;
     // Current projection, previous projection, and row Z of previous-view * inverse-view.
     [[nodiscard]] std::array<std::array<float, 4>, 3> TaaDepthParameters() const noexcept;
 
@@ -163,6 +165,8 @@ private:
     bool projection_mode = false; ///< prototype: the jitter is in the game's projection
     std::array<float, 2> projection_jitter{}, previous_projection_jitter{}; ///< NDC
     std::array<std::array<float, 2>, 16> asked_jitter{}; ///< the values written to the game's slot
+    std::array<float, 2> planes{}; ///< the last velocity pass's depth constants (z = y / (depth - x))
+    bool planes_known = false;
     std::array<float, 16> still_reference{}; ///< last frame's view-to-world rows and view-from-uv
     bool has_still_reference = false;
     u32 asked_count = 0, projection_lag = 0;
