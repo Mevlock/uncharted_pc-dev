@@ -794,6 +794,7 @@ void TemporalUpscaler::OnDispatch(u64 cs_hash) {
     if (frame_generator && frame_generator->Wanted() && camera_motion.VelocityMode() &&
         !frame_gen_captured) {
         frame_gen_captured = true;
+        hudless_pending = false; // a frame not shown (its picture without UI is not this one's)
         CaptureFrameGen();
     }
     if (failed || Scaled()) {
@@ -1848,7 +1849,28 @@ void TemporalUpscaler::OnDrawRecorded(u64 ps_hash, VideoCore::ImageId color) {
     if (velocity_pending) {
         return;
     }
+    // Not here: the game's FXAA still draws into this buffer (full-screen passes, vertex shader
+    // f585649d). Taken before the first UI draw (OnDraw) or when the frame is shown
+    // (DisplayOverride), as the upscaled frames are (RunScaledVelocity).
+    hudless_pending = true;
+    hudless_color = color;
+    hudless_address = texture_cache.GetImage(color).info.guest_address;
+}
+
+void TemporalUpscaler::CaptureHudlessNow(VideoCore::ImageId color, const char* where) {
+    hudless_pending = false;
+    if (!frame_generator || !frame_generator->Wanted() || !color) {
+        return;
+    }
     auto& image = texture_cache.GetImage(color);
+    if (image.info.guest_address != hudless_address) {
+        return;
+    }
+    if (static bool noted = false; !noted) {
+        noted = true;
+        std::printf("Frame generation: the picture without UI taken after the game's full-screen "
+                    "passes (%s)\n", where);
+    }
     scheduler.EndRendering();
     runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
                     vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
@@ -2113,6 +2135,11 @@ void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
     // The next frame's scene (a draw with the scene depth) ends the UI phase of the last one.
     // UI drawn into the display buffer with the scene depth (prompts in the world) keeps it.
     draw_vs = u32(vs_hash);
+    // Frame generation's picture without UI: the finished frame, before this first UI draw.
+    if (hudless_pending && color && u32(vs_hash) != 0xf585649du &&
+        texture_cache.GetImage(color).info.guest_address == hudless_address) {
+        CaptureHudlessNow(color, "at the first UI draw");
+    }
     if (velocity_ui && ui_phase && depth && depth == velocity_depth && color != ui_color) {
         ui_phase = false;
     }
@@ -3609,6 +3636,10 @@ bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
         }
         BbDrawLogNote(" [UPSCALE-AT-FLIP]");
         RunScaledVelocity(velocity_display, velocity_display);
+    }
+    // Frame generation's picture without UI of a frame without UI draws: the frame shown.
+    if (hudless_pending && address == hudless_address) {
+        CaptureHudlessNow(hudless_color, "when shown, no UI draw");
     }
     // bbport (scene HDR, the upscaler before the post-processing: HdrEarlyFrame): the game's own
     // display buffer holds the 8-bit frame with its HUD; shown is the composite of the HDR scene

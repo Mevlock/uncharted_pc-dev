@@ -350,6 +350,15 @@ private:
     FrameGenerator* frame_generator = nullptr;
     bool frame_gen_captured = false; ///< this frame's inputs are taken
     u64 hudless_hash = 0;
+    /// Frame generation's picture without UI (not upscaled at a patched size): taken once the
+    /// game's full-screen passes into the display buffer are done, i.e. at the frame's first UI
+    /// draw there or, without one, when the frame is shown. The game's FXAA (6bd1e015 luma,
+    /// 749bbec9 into the display buffer) runs after BB_HUDLESS_PS: a copy taken at that pass
+    /// differed from the shown frame at every contrasted edge, which DLSS-G took for UI.
+    void CaptureHudlessNow(VideoCore::ImageId color, const char* where);
+    bool hudless_pending = false;
+    VideoCore::ImageId hudless_color{};
+    VAddr hudless_address = 0;
     int applied_preset = -1;
     int applied_upscaler = -1;
     bool dispatched_last_frame = false;
