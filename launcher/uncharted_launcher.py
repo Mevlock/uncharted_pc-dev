@@ -2986,6 +2986,13 @@ class Launcher:
                             self.prep_behind = False
                             title = next(t for k, t, _s, _e in GAMES if k == self.app['start'])
                             self.prep_status.configure(text=_('{}: shaders prepared.').format(title), fg=GOLD)
+                    elif item.startswith('Preparation: ') and 'shader files could not be saved: no prepared marker' in item:
+                        # The game could not write the prepared marker (files it could not save): not prepared, so the
+                        # run ends with the "files were not saved" message instead of "Shaders prepared.".
+                        try:
+                            self.exit_left = max(1, int(item.split()[1]))
+                        except (IndexError, ValueError):
+                            self.exit_left = 1
                     elif item.startswith('Shader cache at exit: '):
                         # The game is saving the shader files still queued before it ends (as long as saving goes on).
                         words = item.split()
