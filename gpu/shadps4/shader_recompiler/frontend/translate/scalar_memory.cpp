@@ -105,9 +105,14 @@ void Translator::S_BUFFER_LOAD_DWORD(int num_dwords, const GcnInst& inst) {
                 value = ir.BitCast<IR::U32>(IR::F32{ir.FPMax(ir.BitCast<IR::F32>(value), widest)});
             } else if (!rows && at == 10) {
                 // The divisor: the samples really summed (1024 a row instead of the half width).
-                const IR::F32 step = ir.BitCast<IR::F32>(
-                    ir.ReadConstBuffer(vsharp, ir.Imm32(8), buffer_info));
-                const IR::F32 more = IR::F32{ir.FPMax(ir.Imm32(1.0f), IR::F32{ir.FPDiv(widest, step)})};
+                // Guarded: a step of 0 (the original shader never reads it) would give infinity, and an infinity
+                // or NaN in the exposure history would stay there. The factor is 1 for the shader's own sizes
+                // and about 2 at 8K wide, so it is capped far above that.
+                const IR::F32 step = IR::F32{ir.FPMax(
+                    ir.BitCast<IR::F32>(ir.ReadConstBuffer(vsharp, ir.Imm32(8), buffer_info)),
+                    ir.Imm32(1.0e-20f))};
+                const IR::F32 more = IR::F32{ir.FPMin(
+                    IR::F32{ir.FPMax(ir.Imm32(1.0f), IR::F32{ir.FPDiv(widest, step)})}, ir.Imm32(64.0f))};
                 value = ir.BitCast<IR::U32>(IR::F32{ir.FPMul(ir.BitCast<IR::F32>(value), more)});
             }
         }
