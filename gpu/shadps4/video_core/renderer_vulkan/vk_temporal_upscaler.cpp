@@ -1146,8 +1146,58 @@ void TemporalUpscaler::RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color,
     taa_next = 1 - taa_next;
 }
 
+// The commands of ExtraSharpen, from handles only: recorded at once or later by the recording thread.
+static void RecordExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, vk::Image copy,
+                               vk::ImageView copy_view, vk::ImageView target_view,
+                               vk::Pipeline pipeline, vk::PipelineLayout layout, u32 w, u32 h,
+                               float strength) {
+    const auto image_barrier = [&](vk::Image image, vk::ImageLayout old_layout,
+                                   vk::PipelineStageFlags2 src, vk::AccessFlags2 src_access,
+                                   vk::PipelineStageFlags2 dst, vk::AccessFlags2 dst_access) {
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = src, .srcAccessMask = src_access,
+            .dstStageMask = dst, .dstAccessMask = dst_access,
+            .oldLayout = old_layout, .newLayout = vk::ImageLayout::eGeneral,
+            .image = image, .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}};
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    };
+    constexpr auto all = vk::PipelineStageFlagBits2::eAllCommands;
+    constexpr auto rw = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+    image_barrier(target, vk::ImageLayout::eGeneral, all, rw, vk::PipelineStageFlagBits2::eBlit,
+                  vk::AccessFlagBits2::eTransferRead);
+    image_barrier(copy, vk::ImageLayout::eUndefined, all, rw,
+                  vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferWrite);
+    const vk::ImageBlit region{
+        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .srcOffsets = std::array{vk::Offset3D{}, vk::Offset3D{s32(w), s32(h), 1}},
+        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .dstOffsets = std::array{vk::Offset3D{}, vk::Offset3D{s32(w), s32(h), 1}},
+    };
+    cmdbuf.blitImage(target, vk::ImageLayout::eGeneral, copy, vk::ImageLayout::eGeneral, region,
+                     vk::Filter::eNearest);
+    image_barrier(copy, vk::ImageLayout::eGeneral,
+                  vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferWrite,
+                  vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderStorageRead);
+    image_barrier(target, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eBlit,
+                  vk::AccessFlagBits2::eTransferRead, vk::PipelineStageFlagBits2::eComputeShader,
+                  vk::AccessFlagBits2::eShaderStorageWrite);
+    const std::array<vk::DescriptorImageInfo, 2> infos{{
+        {.imageView = copy_view, .imageLayout = vk::ImageLayout::eGeneral},
+        {.imageView = target_view, .imageLayout = vk::ImageLayout::eGeneral}}};
+    std::array<vk::WriteDescriptorSet, 2> writes{};
+    for (u32 i = 0; i < writes.size(); ++i)
+        writes[i] = {.dstBinding = i, .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &infos[i]};
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
+    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);
+    cmdbuf.pushConstants(layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(strength), &strength);
+    cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    image_barrier(target, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                  vk::AccessFlagBits2::eShaderStorageWrite, all, rw);
+}
+
 void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w,
-                                    u32 h, vk::ImageView view, bool srgb_source) {
+                                    u32 h, vk::ImageView view, bool srgb_source, bool deferred) {
     const auto& settings = BbSettings::Get();
     // FSR 3/4 sharpen up to 1 themselves (their RCAS): this pass adds the rest. DLSS no longer
     // sharpens (its sharpness parameter is ignored since 2.5.1, preset K included): the whole
@@ -1196,55 +1246,21 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
         }
         target_view = *ui_storage_view;
     }
-    const auto image_barrier = [&](vk::Image image, vk::ImageLayout old_layout,
-                                   vk::PipelineStageFlags2 src, vk::AccessFlags2 src_access,
-                                   vk::PipelineStageFlags2 dst, vk::AccessFlags2 dst_access) {
-        const vk::ImageMemoryBarrier2 b{
-            .srcStageMask = src, .srcAccessMask = src_access,
-            .dstStageMask = dst, .dstAccessMask = dst_access,
-            .oldLayout = old_layout, .newLayout = vk::ImageLayout::eGeneral,
-            .image = image, .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1}};
-        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
-    };
-    constexpr auto all = vk::PipelineStageFlagBits2::eAllCommands;
-    constexpr auto rw = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
-    image_barrier(target, vk::ImageLayout::eGeneral, all, rw, vk::PipelineStageFlagBits2::eBlit,
-                  vk::AccessFlagBits2::eTransferRead);
-    image_barrier(vk::Image(extra_sharpen_image), vk::ImageLayout::eUndefined, all, rw,
-                  vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferWrite);
-    const vk::ImageBlit region{
-        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .srcOffsets = std::array{vk::Offset3D{}, vk::Offset3D{s32(w), s32(h), 1}},
-        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .dstOffsets = std::array{vk::Offset3D{}, vk::Offset3D{s32(w), s32(h), 1}},
-    };
-    cmdbuf.blitImage(target, vk::ImageLayout::eGeneral, vk::Image(extra_sharpen_image),
-                     vk::ImageLayout::eGeneral, region, vk::Filter::eNearest);
-    image_barrier(vk::Image(extra_sharpen_image), vk::ImageLayout::eGeneral,
-                  vk::PipelineStageFlagBits2::eBlit, vk::AccessFlagBits2::eTransferWrite,
-                  vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderStorageRead);
-    image_barrier(target, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eBlit,
-                  vk::AccessFlagBits2::eTransferRead, vk::PipelineStageFlagBits2::eComputeShader,
-                  vk::AccessFlagBits2::eShaderStorageWrite);
-    const std::array<vk::DescriptorImageInfo, 2> infos{{
-        {.imageView = *extra_sharpen_view, .imageLayout = vk::ImageLayout::eGeneral},
-        {.imageView = target_view, .imageLayout = vk::ImageLayout::eGeneral}}};
-    std::array<vk::WriteDescriptorSet, 2> writes{};
-    for (u32 i = 0; i < writes.size(); ++i)
-        writes[i] = {.dstBinding = i, .descriptorCount = 1,
-            .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &infos[i]};
-    cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute,
-                        ldr ? *taa_sharpen_ldr_pipeline : *taa_sharpen_pipeline);
-    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *taa_sharpen_pipeline_layout, 0,
-                                writes);
-    // An sRGB-format target: the blit above linearised the copy; a negative strength tells the
-    // shader to encode it again (the result is written as encoded values through the UNORM view).
+    // An sRGB-format target: the blit linearises the copy; a negative strength tells the shader
+    // to encode it again (the result is written as encoded values through the UNORM view).
     const float strength = srgb_source ? -extra : extra;
-    cmdbuf.pushConstants(*taa_sharpen_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
-                         sizeof(strength), &strength);
-    cmdbuf.dispatch((w + 7) / 8, (h + 7) / 8, 1);
-    image_barrier(target, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
-                  vk::AccessFlagBits2::eShaderStorageWrite, all, rw);
+    const vk::Image copy = vk::Image(extra_sharpen_image);
+    const vk::ImageView copy_view = *extra_sharpen_view;
+    const vk::Pipeline pipeline = ldr ? *taa_sharpen_ldr_pipeline : *taa_sharpen_pipeline;
+    const vk::PipelineLayout layout = *taa_sharpen_pipeline_layout;
+    if (deferred) {
+        scheduler.Record([=](vk::CommandBuffer recorded) {
+            RecordExtraSharpen(recorded, target, copy, copy_view, target_view, pipeline, layout, w, h,
+                               strength);
+        });
+        return;
+    }
+    RecordExtraSharpen(cmdbuf, target, copy, copy_view, target_view, pipeline, layout, w, h, strength);
 }
 
 void TemporalUpscaler::OnBlendedSceneDraw() {
@@ -1877,8 +1893,23 @@ void TemporalUpscaler::SharpenDisplay(VideoCore::ImageId color) {
     runtime.Transit(&image, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                     vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
     runtime.FlushBarriers();
-    ExtraSharpen(scheduler.CommandBuffer(), image.GetImage(), true, w, h, view,
-                 format == vk::Format::eR8G8B8A8Srgb);
+    // Recorded in order by the recording thread: taking the command buffer here made the GPU
+    // thread wait for that thread once more every frame (U3 market route at Native: 10 waits a
+    // frame instead of 7.5, the dip about 4% lower). Not while the copy image must be (re)created
+    // (ExtraSharpen then waits for the submitted work with its command buffer open), and not
+    // with BB_SHARPEN_DISPLAY_DEFERRED=0.
+    static const bool deferred_on = [] {
+        const char* env = std::getenv("BB_SHARPEN_DISPLAY_DEFERRED");
+        return !(env && env[0] == '0');
+    }();
+    const auto& settings = BbSettings::Get();
+    const bool pass_runs = settings.sharpen && std::clamp(settings.sharpness.load(), 0.0f, 2.0f) -
+                                                       ((UseDlss() || UseXess()) ? 0.0f : 1.0f) > 0.0f;
+    const bool deferred = deferred_on && extra_sharpen_width == w && extra_sharpen_height == h;
+    if (pass_runs) {
+        ExtraSharpen(deferred ? vk::CommandBuffer{} : scheduler.CommandBuffer(), image.GetImage(), true,
+                     w, h, view, format == vk::Format::eR8G8B8A8Srgb, deferred);
+    }
     static bool noted = false;
     if (!noted) {
         noted = true;

@@ -331,8 +331,10 @@ private:
     void RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color, vk::ImageView depth);
     /// Sharpness above 1 for FSR 3/4 (their RCAS stops at 1): one more RCAS pass over the target
     /// (output_image, or the 8-bit UI image with ldr) in General layout after the upscaler.
+    /// With `deferred` the pass is recorded in order by the recording thread (Scheduler::Record) and
+    /// `cmdbuf` is not used: no wait for that thread (SharpenDisplay, every frame).
     void ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w, u32 h,
-                      vk::ImageView view = {}, bool srgb_source = false);
+                      vk::ImageView view = {}, bool srgb_source = false, bool deferred = false);
     /// bbport (DLSS rework 3c): Native before post: the sharpening pass on the finished display
     /// frame (after the game's post-processing, before its UI), not on the HDR scene.
     void SharpenDisplay(VideoCore::ImageId color);
