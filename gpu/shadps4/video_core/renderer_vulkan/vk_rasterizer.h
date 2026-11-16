@@ -21,7 +21,6 @@
 #include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
-#include "video_core/renderer_vulkan/hud_layout.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -510,22 +509,6 @@ private:
     /// halved for a depth buffer of exactly half its size, none otherwise.
     std::array<float, 2> SceneJitterFor(VideoCore::ImageId depth);
     std::array<float, 2> target_scale{1.0f, 1.0f}; ///< pass drawn into the upscaler's output-size images
-    // bbport: the wide HUD (hud_layout.h; BB_HUD_LAYOUT=wide): the in-game HUD draws over a
-    // widened frame are drawn once per third of their 16:9 layout.
-    bool hud_wide = false;               ///< BB_HUD_LAYOUT=wide at a screen wider than 16:9
-    int hud_state = -1;                  ///< HudWideOn decided: -1 not yet, 0 off, 1 on
-    bool HudWideOn();
-    bool hud_trace = false;              ///< BB_HUD_TRACE=1: HUD draws and their extents in the log
-    float hud_k = 1.0f;                  ///< the UI squeeze (runtime_ultrawide_scale)
-    float hud_area = 1.0f;               ///< half width of the wide area in NDC (1: the screen)
-    HudLayout::Tracker hud_tracker;      ///< which draws are the in-game HUD's
-    HudLayout::Pass hud_pass = HudLayout::Pass::None; ///< the pass being recorded
-    /// Stage B, every draw in order: whether it is an in-game HUD draw to split (DrawRecord).
-    bool NoteHudDraw(const GraphicsPipeline* pipeline, bool is_indexed, u32 index_offset,
-                     bool direct);
-    /// A HUD draw's horizontal extent from its position attribute (min/max x); false: unknown.
-    bool HudExtent(const GraphicsPipeline* pipeline, bool is_indexed, u32 index_offset,
-                   float& min_x, float& max_x) const;
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
 
