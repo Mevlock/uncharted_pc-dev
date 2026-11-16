@@ -148,10 +148,17 @@ static thread_local SavedInputs t_saved_inputs{};
 static std::mutex deferred_marker_mutex;
 static std::filesystem::path deferred_marker;
 static std::string deferred_stamp;
+static bool deferred_marker_announce = false; // the preparation (page or prepare-only) armed it: say if it fails
+static bool deferred_marker_written = false; // the marker file was really written (not just no longer pending)
 
 bool HasDeferredPreparedMarker() {
     std::scoped_lock lk{deferred_marker_mutex};
     return !deferred_marker.empty();
+}
+
+bool DeferredPreparedMarkerWritten() {
+    std::scoped_lock lk{deferred_marker_mutex};
+    return deferred_marker_written;
 }
 
 bool WriteDeferredPreparedMarker() {
@@ -162,8 +169,11 @@ bool WriteDeferredPreparedMarker() {
     // A shader file that could not be saved: the cache is not complete, so no marker (the next start prepares what
     // is missing instead of trusting it).
     if (const u64 failed = Storage::DataBase::Instance().FailedWrites()) {
-        std::printf("Preparation: %llu shader files could not be saved: no prepared marker (the next start prepares "
-                    "what is missing)\n", static_cast<unsigned long long>(failed));
+        // On a start that was already prepared the marker file stays, so the next start prepares nothing: no line.
+        if (deferred_marker_announce) {
+            std::printf("Preparation: %llu shader files could not be saved: no prepared marker (the next start "
+                        "prepares what is missing)\n", static_cast<unsigned long long>(failed));
+        }
         deferred_marker.clear();
         return false;
     }
@@ -172,9 +182,10 @@ bool WriteDeferredPreparedMarker() {
         return false;
     }
     std::fprintf(f, "%s\n", deferred_stamp.c_str());
-    std::fclose(f);
+    const bool closed = std::fclose(f) == 0;
     deferred_marker.clear();
-    return true;
+    deferred_marker_written = closed;
+    return closed;
 }
 
 void RegisterShaderInputs(const Shader::Info& info, const std::vector<Shader::UdRead>& reads,
@@ -3009,11 +3020,23 @@ void PipelineCache::WarmUpThread() {
         u32 window_saved = 0;
         bool was_slow = false;
         constexpr double limit_s = 300.0;
+        // No shader file finished for this long (one write hung in create or rename): the page hands over, whatever
+        // the rate says (the rate needs the writes to go on to fall at all).
+        constexpr double no_progress_s = 15.0;
+        u64 last_completed = db.CompletedWrites();
+        auto last_progress = save_start;
         while (db.PendingWrites() != 0) {
             const u32 left = db.PendingWrites();
             const u32 saved = total > left ? total - left : 0;
             BbOverlay::SetShaderPreparation(4, saved, total);
             const auto now = Clock::now();
+            if (const u64 completed = db.CompletedWrites(); completed != last_completed) {
+                last_completed = completed;
+                last_progress = now;
+            } else if (std::chrono::duration<double>(now - last_progress).count() >= no_progress_s) {
+                handed = "no shader file saved for 15 s";
+                break;
+            }
             const double slow = db.SlowForSeconds();
             if (slow > 0.0) {
                 slow_total += std::chrono::duration<double>(now - last).count();
@@ -3066,6 +3089,7 @@ void PipelineCache::WarmUpThread() {
             std::scoped_lock lk{deferred_marker_mutex};
             deferred_marker = prepared_marker;
             deferred_stamp = prepared_stamp;
+            deferred_marker_announce = true;
         } else {
             // In play: the marker follows once every write queued so far is done, however long that takes (the
             // writes go on behind the game; 0.3.6.57 gave up after 2 minutes and left no marker although the files
@@ -3074,6 +3098,7 @@ void PipelineCache::WarmUpThread() {
                 std::scoped_lock lk{deferred_marker_mutex};
                 deferred_marker = prepared_marker;
                 deferred_stamp = prepared_stamp;
+                deferred_marker_announce = prep_screen;
             }
             if (WriteDeferredPreparedMarker()) {
                 std::printf("Preparation: every shader file saved: prepared\n");

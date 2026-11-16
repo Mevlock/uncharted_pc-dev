@@ -1592,9 +1592,8 @@ void PrepareShadersWithoutWindow(AmdGpu::Liverpool* liverpool) {
     BbOverlay::SetShaderPreparation(0, 0, 0);
     // Only a complete cache gets the "prepared" marker (else the next start prepares again); the exit flush writes
     // it once nothing is pending.
-    const bool had_marker = HasDeferredPreparedMarker();
     FlushPipelineCacheForExit();
-    const bool marked = had_marker && !HasDeferredPreparedMarker();
+    const bool marked = DeferredPreparedMarkerWritten();
     std::printf("Preparation only: cache written in %.1f s (%u writes left; prepared marker %s)\n",
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t_flush).count(),
                 db.PendingWrites(), marked ? "written" : "not written");

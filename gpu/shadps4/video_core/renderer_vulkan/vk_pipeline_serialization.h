@@ -26,5 +26,7 @@ void RegisterShaderInputs(const Shader::Info& info, const std::vector<Shader::Ud
 bool WriteDeferredPreparedMarker();
 /// bbport: a prepared marker is still waiting for its cache writes (in play: written behind the game, or at the exit).
 bool HasDeferredPreparedMarker();
+// True once the prepared marker file was really written (a failed save clears the pending marker without one).
+bool DeferredPreparedMarkerWritten();
 
 } // namespace Vulkan
