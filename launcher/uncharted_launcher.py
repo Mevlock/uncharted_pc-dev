@@ -44,7 +44,7 @@ CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.6.57'  # fork: upstream 0.3.6 + this fork's changes
+VERSION = '0.3.6.57.1'  # fork: upstream 0.3.6 + this fork's changes
 # Fork: updates come from this fork's own releases (the latest one; -pre tags are published as normal releases).
 RELEASES_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases/latest'
 RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
@@ -142,6 +142,10 @@ DEPTH_OF_FIELD = [('1', "On (the games' own)"), ('aim', 'Off only while aiming')
 # Anisotropic filtering of scene textures (BB_ANISO; 0 = the game's own).
 ANISOTROPY = [('0', "Off (the game's own)"), ('4', '4x'), ('8', '8x'), ('16', '16x')]
 SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'), ('0', 'Maximum')]
+# HDR10 output (BB_HDR, BB_HDR_PEAK_NITS, BB_HDR_PAPER_WHITE; off by default).
+HDR_MODES = [('off', 'Off'), ('on', 'On')]
+HDR_PEAK_NITS = [('auto', 'Auto (as Windows reports)'), ('400', '400'), ('600', '600'), ('800', '800'), ('1000', '1000'), ('1500', '1500'), ('2000', '2000'), ('4000', '4000'), ('10000', '10000')]
+HDR_PAPER_WHITE = [('80', '80'), ('100', '100'), ('150', '150'), ('203', '203'), ('250', '250'), ('300', '300'), ('400', '400'), ('500', '500')]
 # Temporal anti-aliasing at the render resolution (BB_UPSCALER): it takes the scene before the
 # games' post-processing with their own motion vectors, so it replaces their edge smoothing. At a
 # reduced render resolution (Uncharted 3: Quality, Balanced, Performance) it also upscales.
@@ -235,7 +239,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
+                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'hdr': 'off', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
@@ -925,6 +929,11 @@ def game_environment(s, start=None):
     env['BB_FOV'] = str(s.get('fov') or '100')
     if not s.get('bloom', True):
         env['BB_BLOOM'] = '0'
+    # HDR10 output (the renderer falls back to SDR, and logs why, without an HDR10 display).
+    if str(s.get('hdr') or 'off') == 'on':
+        env['BB_HDR'] = '1'
+        env['BB_HDR_PEAK_NITS'] = str(s.get('hdr_peak_nits') or '1000')
+        env['BB_HDR_PAPER_WHITE'] = str(s.get('hdr_paper_white') or '203')
     env['BB_DOF'] = str(s.get('depth_of_field') or '1')
     # The logo movie (off by default). The faster boot (the vblank runs fast from the shader preparation's end until
     # the title, paused while the logos play) is on for everyone in the port itself (BB_FAST_BOOT=0: off).
@@ -1983,6 +1992,13 @@ class Launcher:
                  _('FSR 1 keeps edges sharp when the image is enlarged; bilinear is softer.'))
         self.row(f, _('Sharpening'), self.choice(f, 'sharpening', SHARPENING, 34),
                  _('AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).'))
+        self.section(f, _('HDR'))
+        self.row(f, _('HDR'), self.choice(f, 'hdr', HDR_MODES, 34),
+                 _("HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below."))
+        self.row(f, _('Peak brightness (nits)'), self.choice(f, 'hdr_peak_nits', HDR_PEAK_NITS, 34),
+                 _("The brightest highlights: set it to your display's peak brightness."))
+        self.row(f, _('Paper white (nits)'), self.choice(f, 'hdr_paper_white', HDR_PAPER_WHITE, 34),
+                 _('The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.'))
         self.section(f, _('Anti-aliasing'))
         self.aa_box = self.row(f, _('Anti-aliasing'), self.choice(f, 'anti_aliasing', self.aa_modes(), 34),
                  _('Temporal anti-aliasing with the games\' own motion vectors: smoother edges and less '

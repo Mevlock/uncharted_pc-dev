@@ -148,6 +148,9 @@ add_host_shader(fs_tri.vert fs_tri_vert)
 add_host_shader(fsr.comp fsr_easu_comp SAMPLE_EASU=1)
 add_host_shader(fsr.comp fsr_rcas_comp SAMPLE_RCAS=1)
 add_host_shader(post_process.frag post_process_frag)
+add_host_shader(overlay_hdr.frag overlay_hdr_frag)
+add_host_shader(hdr_scene.comp hdr_split_comp MODE=0)
+add_host_shader(hdr_scene.comp hdr_composite_comp MODE=1)
 add_host_shader(camera_motion.comp camera_motion_comp)
 add_host_shader(upscale_merge.comp upscale_merge_comp)
 add_host_shader(upscale_reactive.comp upscale_reactive_comp)
@@ -161,10 +164,22 @@ add_host_shader(depth_resample.frag depth_stencil_bits_frag STENCIL_BITS=1)
 add_host_shader(camera_motion.comp camera_motion_debug_comp DEBUG_OVERLAY=1)
 add_host_shader(frame_gen_inputs.comp frame_gen_inputs_comp)
 add_host_shader(frame_gen_ui.comp frame_gen_ui_comp)
+add_host_shader(frame_gen_ui_alpha.comp frame_gen_ui_alpha_comp)
+add_host_shader(frame_gen_ui.comp frame_gen_ui_hdr_comp HDR_TARGET=1)
 foreach(BPP IN ITEMS 8 16 32 64 96 128)
     add_host_shader(tiling.comp tiling_micro_${BPP}_comp BITS_PER_PIXEL=${BPP} IS_MACRO_TILED=0)
     add_host_shader(tiling.comp tiling_macro_${BPP}_comp BITS_PER_PIXEL=${BPP} IS_MACRO_TILED=1)
 endforeach()
+# bbport: Uncharted 2's tone pass replacement for scene HDR (hdr/README.md), embedded.
+set(HDR_TONE_HEADER ${SHADER_DIR}/hdr_tone_3371ae8d.h)
+add_custom_command(OUTPUT ${HDR_TONE_HEADER}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_DIR}
+    COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_CURRENT_SOURCE_DIR}/hdr/fs_3371ae8d_hdr.spv
+            -DOUT=${HDR_TONE_HEADER} -DNAME=HDR_TONE_3371AE8D
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/hdr/spv_to_header.cmake
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/hdr/fs_3371ae8d_hdr.spv
+            ${CMAKE_CURRENT_SOURCE_DIR}/hdr/spv_to_header.cmake VERBATIM)
+list(APPEND SHADER_HEADERS ${HDR_TONE_HEADER})
 add_custom_target(host_shaders DEPENDS ${SHADER_HEADERS})
 
 file(GLOB_RECURSE VIDEO_CORE CONFIGURE_DEPENDS shadps4/video_core/*.cpp)

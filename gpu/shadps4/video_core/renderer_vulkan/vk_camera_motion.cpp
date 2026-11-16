@@ -10,6 +10,8 @@
 #include <cstring>
 
 #include "bbport_toggles.h"
+extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (prototype), or null
+#include "shader_recompiler/runtime_info.h"
 
 #include "video_core/host_shaders/camera_motion_comp.h"
 #include "video_core/host_shaders/camera_motion_debug_comp.h"
@@ -80,6 +82,15 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
     if (velocity_mode) {
         std::printf("Camera motion: from the game's velocity pass (%zu shaders)\n",
                     velocity_shaders.size());
+        // bbport (from BilalReloaded's Uncharted port, #84): characters' own motion (skinning,
+        // animation) from their vertices. Off by default (BB_CHARACTER_MOTION=1 turns it on): the
+        // vectors never reached the upscaler (the object motion frame, see the rasterizer), the
+        // picture was approved without them, and every G-buffer draw took a motion twin of its
+        // pipeline, compiled in play. Off: characters get the camera's motion, no twins.
+        const char* characters = std::getenv("BB_CHARACTER_MOTION");
+        Shader::MotionVectors::characters = characters && characters[0] == '1';
+        std::printf("Camera motion: character motion vectors %s\n",
+                    Shader::MotionVectors::characters ? "on (BB_CHARACTER_MOTION=1)" : "off");
     }
     const auto device = instance.GetDevice();
     if (for_upscaler) {
@@ -368,6 +379,43 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         }
     }
     camera.uv_to_view = {c[0], c[1], c[2], c[3]};
+    // Projection jitter (prototype). The pass's own view-from-uv constants stay symmetric (built
+    // from the field of view), but its previous-clip rows are the previous frame's jittered
+    // projection times a rigid motion: clip x = sx (M view).x + jx (M view).z, w = (M view).z, the
+    // rows of M orthogonal, so jx = (row x . row w) / |row w|^2: last frame's jitter, exactly. The
+    // game builds its camera a fixed number of frames ahead: that jitter is looked up in the
+    // values asked of the game (NoteAskedJitter), and this frame's is the one asked next.
+    projection_mode = runtime_projection_jitter_slot != nullptr; // patched after the GPU starts
+    if (projection_mode) {
+        const auto& p = camera.to_previous_clip;
+        const float ww = p[8] * p[8] + p[9] * p[9] + p[10] * p[10];
+        std::array<float, 2> last{};
+        if (ww > 0.0f) {
+            last = {(p[0] * p[8] + p[1] * p[9] + p[2] * p[10]) / ww,
+                    (p[4] * p[8] + p[5] * p[9] + p[6] * p[10]) / ww};
+        }
+        for (auto& j : last) {
+            if (!std::isfinite(j) || std::abs(j) > 0.01f) {
+                j = 0.0f; // not a sub-pixel shift: a cut, another kind of camera
+            }
+        }
+        previous_projection_jitter = last;
+        projection_jitter = last; // unless the next asked value is found
+        projection_matched = false;
+        for (u32 back = 1; back < asked_jitter.size() && back <= asked_count; ++back) {
+            const auto& a = asked_jitter[(asked_count - back) % asked_jitter.size()];
+            if (std::abs(a[0] - last[0]) < 2e-6f && std::abs(a[1] - last[1]) < 2e-6f &&
+                (a[0] != 0.0f || a[1] != 0.0f)) {
+                if (back >= 2) {
+                    projection_jitter = asked_jitter[(asked_count - back + 1) % asked_jitter.size()];
+                    projection_matched = true;
+                    projection_lag = back;
+                }
+                break;
+            }
+        }
+    }
+    std::copy(c + 12, c + 24, camera.to_world.begin());
     camera.depth_to_z = {c[8], c[9]};
     camera.valid = c[9] != 0.0f &&
                    std::all_of(camera.to_previous_clip.begin(), camera.to_previous_clip.end(),
@@ -389,7 +437,54 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 const float dx = position[0] - last_position[0], dy = position[1] - last_position[1],
                             dz = position[2] - last_position[2];
                 const float moved = std::sqrt(dx * dx + dy * dy + dz * dz);
-                if (dot < 0.82f || moved > 2.0f) {
+                // bbport: a cut also when the picture moves more than half the render width in
+                // one frame (a swing that turns less than 35 degrees or moves less than 2 units,
+                // e.g. a narrow-FOV cutscene shot change): the screen points at view z 5 near the
+                // centre and both sides, reprojected into the previous frame. Idea from
+                // LanternEngine (Awaken), re-implemented. BB_CUT_MOTION=<fraction of the width>
+                // (default 0.5; 0: off).
+                static const float cut_motion = [] {
+                    const char* env = std::getenv("BB_CUT_MOTION");
+                    const float v = env && env[0] ? static_cast<float>(std::atof(env)) : 0.5f;
+                    std::printf("Camera motion: cut when the picture moves %.2f of the width "
+                                "(BB_CUT_MOTION)\n", v);
+                    return v;
+                }();
+                float swing = 0.0f;
+                if (camera.valid) {
+                    for (const float u : {0.5f, 0.15f, 0.85f}) {
+                        constexpr float z = 5.0f;
+                        const float vp[4] = {z * (camera.uv_to_view[0] * u + camera.uv_to_view[2]),
+                                             z * (camera.uv_to_view[1] * 0.5f + camera.uv_to_view[3]),
+                                             z, 1.0f};
+                        float clip[3];
+                        for (int r = 0; r < 3; ++r) {
+                            clip[r] = 0.0f;
+                            for (int k = 0; k < 4; ++k) {
+                                clip[r] += camera.to_previous_clip[r * 4 + k] * vp[k];
+                            }
+                        }
+                        if (clip[2] <= 1e-4f) {
+                            swing = 1.0f; // behind the previous camera: a cut
+                            break;
+                        }
+                        const float du = 0.5f * clip[0] / clip[2] + 0.5f - u;
+                        const float dv = 0.5f - 0.5f * clip[1] / clip[2] - 0.5f;
+                        const float m = std::sqrt(du * du + dv * dv);
+                        swing = std::max(swing, std::isfinite(m) ? m : 0.0f);
+                    }
+                }
+                // The picture's motion this frame (fraction of the width; the jitter fade).
+                picture_speed.store(swing, std::memory_order_relaxed);
+                const bool swung = cut_motion > 0.0f && swing > cut_motion;
+                if (dot < 0.82f || moved > 2.0f || swung) {
+                    if (swung && dot >= 0.82f && moved <= 2.0f) {
+                        static int swings = 0;
+                        if (swings++ < 20) {
+                            std::printf("Camera motion: picture moved %.2f of the width in a frame: "
+                                        "cut\n", swing);
+                        }
+                    }
                     camera.cut = true;
                     camera_cut.store(true, std::memory_order_relaxed);
                     static int noted = 0;
@@ -444,6 +539,36 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         }
         RenderDocOnCut(camera.cut);
     }
+    // Projection jitter (prototype) diagnosis, a line every 240 frames (10 lines): the jitter read
+    // back, the one now asked of the game, last frame's, and the camera motion of the screen centre
+    // at view z 100 (all in 1/1000000 of the picture: with the camera still, a centre motion equal
+    // to half the jitter difference shows the previous clip carries the previous jitter).
+    if (projection_mode && camera.valid) {
+        static u32 frames = 0, lines = 0;
+        if (++frames % 240 == 0 && lines < 10) {
+            ++lines;
+            const float z = 100.0f, u = 0.5f, v = 0.5f;
+            const float vp[4] = {z * (camera.uv_to_view[0] * u + camera.uv_to_view[2]),
+                                 z * (camera.uv_to_view[1] * v + camera.uv_to_view[3]), z, 1.0f};
+            float clip[3];
+            for (int r = 0; r < 3; ++r) {
+                clip[r] = 0.0f;
+                for (int k = 0; k < 4; ++k) {
+                    clip[r] += camera.to_previous_clip[r * 4 + k] * vp[k];
+                }
+            }
+            const float du = 0.5f * clip[0] / clip[2] + 0.5f - u, dv = 0.5f - 0.5f * clip[1] / clip[2] - v;
+            std::printf("Projection jitter: this frame %.1f %.1f (%s, lag %u), last frame (read back) %.1f "
+                        "%.1f, asked now %.1f %.1f (NDC x 1e6); centre motion %.1f %.1f, half last jitter "
+                        "%.1f %.1f (uv x 1e6)\n",
+                        projection_jitter[0] * 1e6f, projection_jitter[1] * 1e6f,
+                        projection_matched ? "found in the asked values" : "NOT matched", projection_lag,
+                        previous_projection_jitter[0] * 1e6f, previous_projection_jitter[1] * 1e6f,
+                        runtime_projection_jitter_slot[0] * 1e6f, runtime_projection_jitter_slot[1] * 1e6f,
+                        du * 1e6f, dv * 1e6f, previous_projection_jitter[0] * 0.5e6f,
+                        -previous_projection_jitter[1] * 0.5e6f);
+        }
+    }
     // The shown camera's heading for the mouse controls (bbgpu_camera_yaw: which game camera is on
     // screen), and with BB_CAMERA_LOG=1 its direction every frame, for measuring how the game turns
     // the camera from the right stick.
@@ -467,16 +592,42 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         std::printf("Camera motion: the velocity pass moves stencil-marked pixels by "
                     "(%g, %g, %g); not reproduced\n", c[56], c[57], c[58]);
     }
+    // bbport (DLSS rework 11): with BB_STENCIL_MOTION_LOG=1, every 2 s: frames whose velocity pass
+    // moved stencil-marked pixels, and the largest such offset (vehicles, platforms? train,
+    // convoy, horse scenes).
+    if (static const bool stencil_log = std::getenv("BB_STENCIL_MOTION_LOG") != nullptr;
+        stencil_log) {
+        static u32 frames = 0, moved = 0;
+        static float largest = 0.0f;
+        static auto window = std::chrono::steady_clock::now();
+        ++frames;
+        const float m = std::sqrt(c[56] * c[56] + c[57] * c[57] + c[58] * c[58]);
+        if (m > 0.0f) {
+            ++moved;
+            largest = std::max(largest, m);
+        }
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(2)) {
+            std::printf("Stencil motion: %u of %u frames moved marked pixels, largest %g (last %g %g %g)\n",
+                        moved, frames, largest, c[56], c[57], c[58]);
+            frames = moved = 0;
+            largest = 0.0f;
+            window = now;
+        }
+    }
 }
 
 /// bbport: BB_MOTION_DEADZONE=<pixels> (default 0.01; 0: off): velocity-pass motion below it is
 /// none (float rounding left +-0.0002 px alternating per column: DLSS drew stripes from it).
-static float motion_deadzone() {
-    static const float value = [] {
+/// With the jitter in the game's projection it is off unless set (the user's tests, 2026-11-15).
+float CameraMotion::MotionDeadzone() {
+    static const float set = [] {
         const char* env = std::getenv("BB_MOTION_DEADZONE");
-        return env && env[0] ? static_cast<float>(std::atof(env)) : 0.01f;
+        return env && env[0] ? static_cast<float>(std::atof(env)) : -1.0f;
     }();
-    return value;
+    return set >= 0.0f ? set : runtime_projection_jitter_slot ? 0.0f : 0.01f;
+}
+static float motion_deadzone() {
+    return CameraMotion::MotionDeadzone();
 }
 
 
@@ -492,22 +643,52 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
                                   vk::ImageView motion_view, u32 width, u32 height,
                                   float jitter_scale) {
     const auto& camera = velocity_camera;
+    // Mode 4 (BilalReloaded's #84): the characters' own motion (ObjectMotion,
+    // Shader::MotionVectors::characters) where it was written this frame; the camera's elsewhere.
+    // Not for motion written at another size than the render (frame generation's larger capture).
+    const bool still = zero_motion_test() || !camera.valid || camera.cut;
+    bool objects = false;
+    vk::ImageView object_view = depth_view;
+    if (!still && jitter_scale == 1.0f && Shader::MotionVectors::characters && object_motion &&
+        object_motion->Enabled()) {
+        object_view = object_motion->PrepareRead(cmdbuf, width, height, objects);
+        if (!objects) {
+            object_view = depth_view;
+        }
+    }
+    // Projection jitter (prototype): prev_proj.w = 1 tells the shader that depth and both clip
+    // positions carry the jitter (pixels here: x right, y down), to be taken out of the motion.
+    // BB_PROJECTION_JITTER_PREV=0 (diagnosis): the previous clip is taken as unjittered relative
+    // to the current one (no correction).
+    static const bool previous_jittered = [] {
+        const char* env = std::getenv("BB_PROJECTION_JITTER_PREV");
+        return !(env && env[0] == '0');
+    }();
+    const auto pixels = [&](const std::array<float, 2>& ndc) {
+        return std::array<float, 2>{ndc[0] * 0.5f * float(width), -ndc[1] * 0.5f * float(height)};
+    };
+    const auto now_jitter = projection_mode ? pixels(projection_jitter)
+        : std::array<float, 2>{jitter[0] * jitter_scale, jitter[1] * jitter_scale};
+    const auto before_jitter = projection_mode
+        ? pixels(previous_jittered ? previous_projection_jitter : projection_jitter)
+        : std::array<float, 2>{previous_jitter[0] * jitter_scale, previous_jitter[1] * jitter_scale};
     const PushConstants push{
         .reproject = camera.to_previous_clip,
         .proj = camera.uv_to_view,
-        .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], motion_deadzone(), 0.0f},
+        .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], motion_deadzone(),
+                      projection_mode ? 1.0f : 0.0f},
         .size = {float(width), float(height)},
-        .jitter = {jitter[0] * jitter_scale, jitter[1] * jitter_scale},
-        .previous_jitter = {previous_jitter[0] * jitter_scale, previous_jitter[1] * jitter_scale},
+        .jitter = now_jitter,
+        .previous_jitter = before_jitter,
         // BB_DLSS_ZERO_MOTION=1 (diagnosis): no camera motion vectors at all.
-        .mode = (zero_motion_test() || !camera.valid || camera.cut) ? 3u : 2u,
+        .mode = still ? 3u : objects ? 4u : 2u,
     };
     const vk::DescriptorImageInfo depth_info{.imageView = depth_view,
                                              .imageLayout = vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo motion_info{.imageView = motion_view,
                                               .imageLayout = vk::ImageLayout::eGeneral};
-    // Binding 2 (object motion) is not read in these modes.
-    const vk::DescriptorImageInfo velocity_info{.imageView = depth_view,
+    // Binding 2: the object motion in mode 4 (not read in the others).
+    const vk::DescriptorImageInfo velocity_info{.imageView = object_view,
                                                 .imageLayout = vk::ImageLayout::eGeneral};
     const std::array<vk::WriteDescriptorSet, 3> writes = {{
         {.dstBinding = 0,
@@ -739,6 +920,107 @@ void CameraMotion::Overlay(VideoCore::ImageId frame) {
         device.destroyImageView(depth_view);
         device.destroyImageView(color_view);
     });
+}
+
+} // namespace Vulkan
+
+namespace Vulkan {
+
+namespace {
+using Mat4 = std::array<std::array<double, 4>, 4>;
+Mat4 Multiply(const Mat4& a, const Mat4& b) {
+    Mat4 r{};
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            for (int k = 0; k < 4; ++k)
+                r[i][j] += a[i][k] * b[k][j];
+    return r;
+}
+/// Gauss-Jordan with partial pivoting; false when singular.
+bool Invert(const Mat4& m, Mat4& out) {
+    double a[4][8];
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 8; ++j)
+            a[i][j] = j < 4 ? m[i][j] : (j - 4 == i ? 1.0 : 0.0);
+    for (int col = 0; col < 4; ++col) {
+        int pivot = col;
+        for (int r = col + 1; r < 4; ++r)
+            if (std::abs(a[r][col]) > std::abs(a[pivot][col])) pivot = r;
+        if (std::abs(a[pivot][col]) < 1e-12) return false;
+        if (pivot != col)
+            for (int j = 0; j < 8; ++j) std::swap(a[col][j], a[pivot][j]);
+        const double d = a[col][col];
+        for (int j = 0; j < 8; ++j) a[col][j] /= d;
+        for (int r = 0; r < 4; ++r) {
+            if (r == col) continue;
+            const double f = a[r][col];
+            for (int j = 0; j < 8; ++j) a[r][j] -= f * a[col][j];
+        }
+    }
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) out[i][j] = a[i][j + 4];
+    return true;
+}
+/// Column-vector matrix -> NGX's row-vector layout (the transpose).
+void Store(float (&dst)[4][4], const Mat4& m) {
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) dst[i][j] = float(m[j][i]);
+}
+} // namespace
+
+bool CameraMotion::RealCamera(Dlss::FrameGenCamera& out) const {
+    const auto& camera = velocity_camera;
+    out.valid = false;
+    if (!velocity_mode || !camera.valid || camera.cut) {
+        return false;
+    }
+    // The velocity pass: view x = z (a u + c), view y = z (b v + d), z = y0 / (depth - x0), u, v
+    // the D3D-style screen uv (v down). As a projection with w = view z:
+    //   ndc x = 2u - 1, ndc y = 1 - 2v, depth = x0 + y0 / z.
+    const double a = camera.uv_to_view[0], b = camera.uv_to_view[1], c = camera.uv_to_view[2],
+                 d = camera.uv_to_view[3], x0 = camera.depth_to_z[0], y0 = camera.depth_to_z[1];
+    if (a == 0.0 || b == 0.0) {
+        return false;
+    }
+    const Mat4 proj{{{2.0 / a, 0.0, -2.0 * c / a - 1.0, 0.0},
+                     {0.0, -2.0 / b, 1.0 + 2.0 * d / b, 0.0},
+                     {0.0, 0.0, x0, y0},
+                     {0.0, 0.0, 1.0, 0.0}}};
+    // Previous clip: the pass's rows x, y, w of (view, 1); z with the same depth mapping.
+    const auto& p = camera.to_previous_clip;
+    const Mat4 previous{{{p[0], p[1], p[2], p[3]},
+                         {p[4], p[5], p[6], p[7]},
+                         {x0 * p[8], x0 * p[9], x0 * p[10], x0 * p[11] + y0},
+                         {p[8], p[9], p[10], p[11]}}};
+    Mat4 inverse_proj{}, to_previous{}, from_previous{};
+    if (!Invert(proj, inverse_proj)) {
+        return false;
+    }
+    to_previous = Multiply(previous, inverse_proj);
+    if (!Invert(to_previous, from_previous)) {
+        return false;
+    }
+    Store(out.view_to_clip, proj);
+    Store(out.clip_to_view, inverse_proj);
+    Store(out.clip_to_prev_clip, to_previous);
+    Store(out.prev_clip_to_clip, from_previous);
+    const auto& m = camera.to_world;
+    const auto unit = [](float (&v)[3], float x, float y, float z) {
+        const float l = std::sqrt(x * x + y * y + z * z);
+        const float s = l > 0.0f ? 1.0f / l : 0.0f;
+        v[0] = x * s;
+        v[1] = y * s;
+        v[2] = z * s;
+    };
+    unit(out.right, m[0], m[4], m[8]);
+    unit(out.up, m[1], m[5], m[9]);
+    unit(out.forward, m[2], m[6], m[10]);
+    out.position[0] = m[3];
+    out.position[1] = m[7];
+    out.position[2] = m[11];
+    out.aspect = float(std::abs(a / b));
+    out.valid = true;
+    return true;
 }
 
 } // namespace Vulkan

@@ -232,7 +232,10 @@ void ObjectMotion::Attach(RenderState& state, u32 width, u32 height) {
 vk::ImageView ObjectMotion::PrepareRead(vk::CommandBuffer cmdbuf, u32 width, u32 height,
                                         bool& valid) {
     EnsureImage(std::max(image_width, 1u), std::max(image_height, 1u));
-    valid = written && width == image_width && height == image_height;
+    // The scene fills the top left of targets that can be larger (Uncharted's aligned ones).
+    valid = written && width <= image_width && height <= image_height &&
+            (width == image_width || Shader::MotionVectors::characters) &&
+            (height == image_height || Shader::MotionVectors::characters);
     const vk::ImageMemoryBarrier2 barrier{
         .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
         .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,

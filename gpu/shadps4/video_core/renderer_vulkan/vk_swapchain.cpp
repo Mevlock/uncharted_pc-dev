@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <string>
+#include <array>
+#include <cstdio>
+#include "bbport_hdr.h"
 #include "bbport_settings.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -12,6 +16,7 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_low_latency.h"
+#include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
 namespace Vulkan {
@@ -56,7 +61,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
     const u32 queue_family_indices_count = exclusive ? 1u : 2u;
     const vk::SharingMode sharing_mode =
         exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
-    const auto format = needs_hdr ? SURFACE_FORMAT_HDR : surface_format;
+    const auto format = needs_hdr ? hdr_format : surface_format;
     const vk::SwapchainCreateInfoKHR swapchain_info = {
         .pNext = LowLatency::SwapchainNext(),
         .surface = surface,
@@ -82,9 +87,45 @@ void Swapchain::Create(u32 width_, u32 height_) {
                vk::to_string(swapchain_result));
     swapchain = chain;
     LowLatency::OnSwapchain(swapchain);
+    metadata_peak = 0.0f; // a new swapchain has no metadata yet
+    UpdateHdrMetadata();
 
     SetupImages();
     RefreshSemaphores();
+}
+
+void Swapchain::UpdateHdrMetadata() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("BB_HDR_METADATA");
+        return !(value && value[0] == '0');
+    }();
+    if (!enabled || !needs_hdr || !BbHdr::Output() || !instance.IsHdrMetadataSupported() || !swapchain) {
+        return;
+    }
+    const BbHdr::Tuning tuning = BbHdr::Current();
+    if (tuning.peak_nits == metadata_peak && tuning.paper_white == metadata_paper) {
+        return;
+    }
+    const bool first = metadata_peak == 0.0f;
+    metadata_peak = tuning.peak_nits;
+    metadata_paper = tuning.paper_white;
+    // Rec. 2020 primaries, D65; mastering peak and MaxCLL the peak, MaxFALL paper white.
+    const vk::HdrMetadataEXT metadata{
+        .displayPrimaryRed = {0.708f, 0.292f},
+        .displayPrimaryGreen = {0.170f, 0.797f},
+        .displayPrimaryBlue = {0.131f, 0.046f},
+        .whitePoint = {0.3127f, 0.3290f},
+        .maxLuminance = metadata_peak,
+        .minLuminance = 0.0f,
+        .maxContentLightLevel = metadata_peak,
+        .maxFrameAverageLightLevel = metadata_paper,
+    };
+    instance.GetDevice().setHdrMetadataEXT(1, &swapchain, &metadata);
+    if (first) {
+        std::printf("HDR: metadata sent (mastering peak and MaxCLL %.0f nits, MaxFALL %.0f nits)\n",
+                    metadata_peak, metadata_paper);
+        std::fflush(stdout);
+    }
 }
 
 void Swapchain::Recreate(u32 width_, u32 height_) {
@@ -98,15 +139,10 @@ void Swapchain::SetHDR(bool hdr) {
         return;
     }
 
-    auto result = instance.GetDevice().waitIdle();
-    if (result != vk::Result::eSuccess) {
-        LOG_WARNING(ImGui, "Failed to wait for Vulkan device idle on mode change: {}",
-                    vk::to_string(result));
-    }
-
     needs_hdr = hdr;
+    // Recreate's Destroy waits for the device under the submit lock.
     Recreate(width, height);
-    ImGui::Core::OnSurfaceFormatChange(needs_hdr ? SURFACE_FORMAT_HDR.format
+    ImGui::Core::OnSurfaceFormatChange(needs_hdr ? hdr_format.format
                                                  : surface_format.format);
 }
 
@@ -136,6 +172,7 @@ bool Swapchain::AcquireNextImage() {
 }
 
 bool Swapchain::Present(u64 latency_id) {
+    UpdateHdrMetadata();
     // bbport: low latency mode (vk_low_latency.h): the game's frame carries its frame id.
     const vk::PresentIdKHR present_id{
         .swapchainCount = 1,
@@ -196,6 +233,40 @@ void Swapchain::FindPresentFormat() {
         }) != formats.end();
     // Also make sure that user allowed us to use HDR
     supports_hdr &= EmulatorSettings.IsHdrAllowed();
+    // bbport: the port's own HDR10 output (BB_HDR=1, the launcher's Display > HDR): an HDR10
+    // (Rec. 2020 PQ) format, 10-bit first, chosen at start; without one the output stays SDR.
+    if (BbHdr::Requested()) {
+        constexpr std::array candidates{vk::Format::eA2B10G10R10UnormPack32,
+                                        vk::Format::eA2R10G10B10UnormPack32,
+                                        vk::Format::eR16G16B16A16Sfloat};
+        const vk::SurfaceFormatKHR* found = nullptr;
+        for (const vk::Format candidate : candidates) {
+            for (const vk::SurfaceFormatKHR& sformat : formats) {
+                if (!found && sformat.format == candidate &&
+                    sformat.colorSpace == vk::ColorSpaceKHR::eHdr10St2084EXT) {
+                    found = &sformat;
+                }
+            }
+        }
+        if (found) {
+            hdr_format = *found;
+            supports_hdr = true;
+            needs_hdr = true; // the swapchain is HDR10 from its creation on
+            std::printf("HDR: swapchain %s, %s\n", vk::to_string(hdr_format.format).c_str(),
+                        vk::to_string(hdr_format.colorSpace).c_str());
+            BbHdr::SetOutput(true);
+        } else {
+            std::string offered;
+            for (const vk::SurfaceFormatKHR& sformat : formats) {
+                offered += " " + vk::to_string(sformat.format) + "/" +
+                           vk::to_string(sformat.colorSpace);
+            }
+            std::printf("HDR: the display offers no HDR10 format (turn on 'Use HDR' in Windows "
+                        "display settings, or the display has no HDR): SDR output. Offered:%s\n",
+                        offered.c_str());
+        }
+        std::fflush(stdout);
+    }
 
     // If there is a single undefined surface format, the device doesn't care, so we'll just use
     // RGBA sRGB.
@@ -294,6 +365,11 @@ void Swapchain::SetSurfaceProperties() {
 void Swapchain::Destroy() {
     LowLatency::OnSwapchainDestroy();
     vk::Device device = instance.GetDevice();
+    // bbport: vkDeviceWaitIdle needs the queues externally synchronized: the GPU command thread
+    // submits under submit_mutex while the presenter recreates the swapchain (a window resize, a
+    // display mode change). From moistman7's PR #156 to BilalReloaded's port (display changes
+    // with DLSS lost the device). Callers must not hold submit_mutex.
+    std::scoped_lock submit_lock{Scheduler::submit_mutex};
     const auto wait_result = device.waitIdle();
     if (wait_result != vk::Result::eSuccess) {
         LOG_WARNING(Render_Vulkan, "Failed to wait for device to become idle: {}",
@@ -360,7 +436,7 @@ void Swapchain::SetupImages() {
         auto [im_view_result, im_view] = device.createImageView(vk::ImageViewCreateInfo{
             .image = images[i],
             .viewType = vk::ImageViewType::e2D,
-            .format = needs_hdr ? SURFACE_FORMAT_HDR.format : surface_format.format,
+            .format = needs_hdr ? hdr_format.format : surface_format.format,
             .subresourceRange =
                 {
                     .aspectMask = vk::ImageAspectFlagBits::eColor,

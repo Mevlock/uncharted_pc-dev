@@ -72,6 +72,7 @@ bool CollectExtensions(const VkExtensionProperties* required, u32 count,
 struct Dlss::Impl {
     HMODULE module{};
     const BbDlssApi* api{};
+    BbDlssgEvaluateCameraFn evaluate_camera{}; ///< optional bridge export (DLSS rework 9)
     std::vector<std::string> instance_extensions, device_extensions;
     std::optional<FeatureDesc> feature;
     std::optional<FrameGenDesc> frame_gen;
@@ -116,6 +117,10 @@ Dlss::Dlss() : impl{std::make_unique<Impl>()} {
         impl->module ? reinterpret_cast<BbDlssGetApiFn>(GetProcAddress(impl->module, "BbDlssGetApi"))
                      : nullptr;
     impl->api = get_api ? get_api() : nullptr;
+    impl->evaluate_camera =
+        impl->module ? reinterpret_cast<BbDlssgEvaluateCameraFn>(
+                           GetProcAddress(impl->module, "BbDlssgEvaluateCamera"))
+                     : nullptr;
     // ABI 1 bridges (DLSS only) still work; Frame Generation needs ABI 2.
     if (!impl->api || impl->api->abi < 1 || impl->api->abi > BBPORT_DLSS_BRIDGE_ABI) {
         impl->Disable("bbport_dlss.dll is missing or from another version");
@@ -210,7 +215,7 @@ bool Dlss::HasFeature(const FeatureDesc& desc) const {
 
 /// bbport: BB_DLSS_PRESET: the DLSS model (NVSDK_NGX_DLSS_Hint_Render_Preset): J, K (DLSS 4,
 /// the driver's default for DLAA), L, M (DLSS 4.5), or 0 / unset for the driver's choice.
-static u32 DlssPreset() {
+static u32 DlssPreset(int quality) {
     static const u32 preset = [] {
         const char* env = std::getenv("BB_DLSS_PRESET");
         if (!env || !env[0]) {
@@ -222,7 +227,24 @@ static u32 DlssPreset() {
         std::printf("DLSS: model preset %s (%u)\n", env, value);
         return value;
     }();
-    return preset;
+    if (preset) {
+        return preset;
+    }
+    // bbport (DLSS rework 11): no model chosen (launcher "default"): NVIDIA's recommendation per
+    // mode, model M at Performance, L at Ultra Performance, the DLL's default (K) otherwise.
+    // Idea from LanternEngine (Awaken). BB_DLSS_AUTO_MODEL=0: the DLL's default for every mode.
+    static const bool automatic = [] {
+        const char* env = std::getenv("BB_DLSS_AUTO_MODEL");
+        return !(env && env[0] == '0');
+    }();
+    const u32 chosen = !automatic ? 0u : quality == 4 ? 12u : quality == 3 ? 13u : 0u;
+    static int noted = -1;
+    if (noted != int(chosen)) {
+        noted = int(chosen);
+        std::printf("DLSS: model %s for quality mode %d (BB_DLSS_AUTO_MODEL)\n",
+                    chosen == 12u ? "L" : chosen == 13u ? "M" : "default", quality);
+    }
+    return chosen;
 }
 
 bool Dlss::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
@@ -232,7 +254,7 @@ bool Dlss::CreateFeature(vk::CommandBuffer command, const FeatureDesc& desc) {
     impl->feature.reset();
     const BbDlssFeature feature{desc.input_width,  desc.input_height, desc.output_width,
                                 desc.output_height, desc.quality,      0,
-                                DlssPreset(),       desc.hdr ? 1 : 0};
+                                DlssPreset(desc.quality), desc.hdr ? 1 : 0};
     if (!impl->api->CreateFeature(command, &feature)) {
         return false;
     }
@@ -307,6 +329,42 @@ bool Dlss::EvaluateFrameGen(vk::CommandBuffer command, const FrameGenFrame& fram
         frame.jitter_x,          frame.jitter_y,      frame.camera_near,   frame.camera_far,
         frame.camera_fov,        frame.depth_inverted ? 1 : 0,             frame.reset ? 1 : 0,
         frame.count,             frame.index};
+    // DLSS rework 9: the real camera and the UI's coverage through the bridge's optional export
+    // (an older bridge: the plausible camera). BB_DLSSG_CAMERA=0: the old path.
+    static const bool camera_on = [] {
+        const char* env = std::getenv("BB_DLSSG_CAMERA");
+        return !(env && env[0] == '0');
+    }();
+    if (camera_on && impl->evaluate_camera && (frame.camera || frame.ui_alpha.image)) {
+        BbDlssgCamera camera{};
+        camera.struct_size = sizeof(camera);
+        if (frame.camera && frame.camera->valid) {
+            camera.valid = 1;
+            std::memcpy(camera.view_to_clip, frame.camera->view_to_clip, sizeof(camera.view_to_clip));
+            std::memcpy(camera.clip_to_view, frame.camera->clip_to_view, sizeof(camera.clip_to_view));
+            std::memcpy(camera.clip_to_prev_clip, frame.camera->clip_to_prev_clip,
+                        sizeof(camera.clip_to_prev_clip));
+            std::memcpy(camera.prev_clip_to_clip, frame.camera->prev_clip_to_clip,
+                        sizeof(camera.prev_clip_to_clip));
+            std::memcpy(camera.position, frame.camera->position, sizeof(camera.position));
+            std::memcpy(camera.up, frame.camera->up, sizeof(camera.up));
+            std::memcpy(camera.right, frame.camera->right, sizeof(camera.right));
+            std::memcpy(camera.forward, frame.camera->forward, sizeof(camera.forward));
+            camera.aspect = frame.camera->aspect;
+        }
+        if (frame.ui_alpha.image) {
+            camera.ui_alpha = image(frame.ui_alpha);
+        }
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::printf("DLSS: Frame Generation with the real camera (%s) and the UI coverage (%s) "
+                        "(BB_DLSSG_CAMERA)\n",
+                        camera.valid ? "yes" : "not this frame",
+                        frame.ui_alpha.image ? "yes" : "no");
+        }
+        return impl->evaluate_camera(command, &parameters, &camera) != 0;
+    }
     return impl->api->FrameGenEvaluate(command, &parameters) != 0;
 }
 

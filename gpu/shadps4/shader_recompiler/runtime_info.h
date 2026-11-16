@@ -96,6 +96,11 @@ struct MotionVectors {
     static constexpr u64 PositionsPlaceholder = 0x5EC0DF0000000000ull;
     static constexpr u32 FlagStore = 1;
     static constexpr u32 FlagLoad = 2;
+    /// bbport (from BilalReloaded's Uncharted port, #84): Uncharted's G-buffer passes (one or
+    /// more targets, the scene depth, stencil writes) may carry object motion; the rasterizer
+    /// stores it for the draws whose vertices the GPU wrote this session (skinned characters),
+    /// instead of the 5-target G-buffer and bone palettes of Bloodborne. BB_CHARACTER_MOTION=1: on (off by default).
+    static inline bool characters = false;
 };
 
 /// bbport diagnosis (BB_VS_CHECK=1): vertex shaders record their program hash at this buffer

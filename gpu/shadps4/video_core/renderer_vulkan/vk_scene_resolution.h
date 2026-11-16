@@ -25,7 +25,19 @@ public:
     ~SceneTargets();
     bool SetSize(SceneResolution::Size);
     SceneResolution::Size Size() const { return size; }
-    bool Reduced() const { return size != SceneResolution::Size{}; }
+    bool Reduced() const { return size != native; }
+    /// The game's own target size (1920x1080, or the size BB_RENDER_RES patched in): proxies stand
+    /// in for targets of this size and of half of it. Also makes the scene size that size.
+    void SetNative(SceneResolution::Size value);
+    SceneResolution::Size Native() const { return native; }
+    /// The scene size as the shaders' FragCoord conversion takes it: that code multiplies by
+    /// 1920 / width and 1080 / height (constants in every translated shader, cached ones too),
+    /// so for another native size the width and height are given in 1920x1080 terms.
+    u32 PackedForShaders() const {
+        const u32 w = u32(std::lround(1920.0 * size.width / native.width));
+        const u32 h = u32(std::lround(1080.0 * size.height / native.height));
+        return SceneResolution::Pack({std::max(1u, w), std::max(1u, h)});
+    }
     /// A reduced proxy can stand in for the image: a 1920x1080 scene target or, scaled by
     /// the same factor, a half-resolution (960x540) one (toggle SceneHalfRes).
     bool Eligible(const VideoCore::Image&) const;
@@ -97,6 +109,7 @@ private:
     Runtime& runtime;
     Lookup lookup;
     SceneResolution::Size size;
+    SceneResolution::Size native;
     std::unordered_map<u64, std::unique_ptr<Entry>> entries; ///< by Key(uid, level)
     std::unordered_set<u64> tracked; ///< uids with proxies
     bool copying = false;

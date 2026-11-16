@@ -57,7 +57,7 @@ public:
         return view ? *view : vk::ImageView{};
     }
     [[nodiscard]] vk::Image Image(u32 width, u32 height) const noexcept {
-        return written && width == image_width && height == image_height
+        return written && width <= image_width && height <= image_height
             ? vk::Image(image) : vk::Image{};
     }
 

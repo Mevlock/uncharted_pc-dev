@@ -166,6 +166,20 @@ public:
         clip_jitter = on;
     }
 
+    /// bbport: scene HDR (BbHdr::Scene): the tone pass (its HDR replacement shader, the settings
+    /// buffer at HdrSettingsBinding) or the pass after it, with an HDR variant into an RGBA16F
+    /// target (HdrHandle, null when it could not be built).
+    enum class HdrRole : u8 { None, Tone, Post };
+    [[nodiscard]] HdrRole GetHdrRole() const noexcept {
+        return hdr_role;
+    }
+    [[nodiscard]] vk::Pipeline HdrHandle() const noexcept {
+        return *hdr_pipeline;
+    }
+    [[nodiscard]] u32 HdrSettingsBinding() const noexcept {
+        return hdr_settings_binding;
+    }
+
     /// bbport (draw batching, BB_DRAW_BATCH=1): the batched variant (Profile::batched_graphics),
     /// built on the GPU command thread the first time this pipeline draws; null when it has none.
     mutable std::atomic<const GraphicsPipeline*> batch_variant{nullptr};
@@ -207,6 +221,9 @@ private:
     GraphicsPipelineKey key;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
     std::array<std::shared_ptr<LibraryPart>, 4> library_parts; ///< bbport (BB_GPL): the parts it was linked from
+    HdrRole hdr_role = HdrRole::None;
+    u32 hdr_settings_binding = 0;
+    vk::UniquePipeline hdr_pipeline;
 };
 
 struct ClipDistanceShaderKey {

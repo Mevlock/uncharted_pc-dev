@@ -32,6 +32,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "bbport_hdr.h"
 #include "video_core/renderer_vulkan/vk_guest_sync_stats.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "bbport_threads.h"
@@ -54,7 +55,10 @@ extern "C" volatile int runtime_movie_opens;
 extern "C" volatile int runtime_movie_starts;
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 
+extern "C" int runtime_gpu_nvidia; // runtime_ultrawide.c: projection jitter is on by default on NVIDIA only
+
 namespace Vulkan {
+bool BbMovieShaderSize(u64 pgm_hash, u32& width, u32& height); // vk_pipeline_cache.cpp
 
 // bbport diagnosis: BB_CONST_CHECK=<shader hash>: the constants of that shader's draws as they
 // were packed for recording (user data, the flattened resource table read through it, constant
@@ -709,6 +713,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         Shader::ClipJitter::enabled = env && *env ? env[0] != '0'
                                                   : instance.GetDriverID() != vk::DriverId::eNvidiaProprietary;
         std::printf("Upscaler jitter: %s\n", Shader::ClipJitter::enabled ? "in the vertex shaders" : "viewport offset");
+        // Projection jitter (runtime_ultrawide.c) is on by default on NVIDIA's driver only.
+        runtime_gpu_nvidia = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ? 1 : 0;
     }
     // bbport: from here the stored pipelines load on background threads (the motion shaders
     // among them need the buffer addresses fixed just above).
@@ -948,7 +954,246 @@ bool Rasterizer::SyncSrtReads(const Shader::SrtReadLog& log) {
     return true;
 }
 
-Rasterizer::~Rasterizer() = default;
+Rasterizer::~Rasterizer() {
+    if (hdr_settings_buffer) {
+        vmaDestroyBuffer(instance.GetAllocator(), hdr_settings_buffer, hdr_settings_allocation);
+    }
+}
+
+// bbport: scene HDR (TemporalUpscaler::HdrScene, gpu/hdr/README.md). The tone pass is drawn again
+// with its HDR replacement into the Tone shadow (the peak and paper-white nits in a buffer at the
+// replacement's settings binding); the pass after it again with the Tone shadow in place of its
+// input (binding 2) into the Scene shadow, through its RGBA16F variant: the game's own math
+// (distortion, overlays, the 2.2 power) on the HDR values. Same constants, buffers and render
+// area; the game's own draws are untouched. From moistman7's PR #156 to BilalReloaded's port.
+void Rasterizer::RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderState& state,
+                                 bool is_indexed, u32 num_indices, u32 num_instances,
+                                 u32 first_vertex, u32 first_instance) {
+    using Shadow = TemporalUpscaler::HdrShadow;
+    const vk::Pipeline handle = pipeline.HdrHandle();
+    const auto* ps = pipeline.GetStages()[u32(Shader::SwStage::Fragment)];
+    if (!handle || !ps || !upscaler->HdrScene() || state.num_color_attachments != 1 ||
+        pipeline.SplitSets()) {
+        return;
+    }
+    Pipeline::DescriptorWrites writes = set_writes;
+    vk::DescriptorBufferInfo settings_info{};
+    vk::DescriptorImageInfo tone_info{};
+    vk::DescriptorImageInfo blur_info{};
+    Shadow which{};
+    if (pipeline.GetHdrRole() == GraphicsPipeline::HdrRole::Tone) {
+        // The menu's HDR settings (BbHdr::Tuning) change live: each change takes the next slot
+        // of a ring, so frames still in flight keep reading the values they were recorded with.
+        constexpr u32 slots = 64;
+        if (!hdr_settings_buffer) {
+            const u32 align = u32(std::max<vk::DeviceSize>(instance.StorageMinAlignment(), 256));
+            hdr_settings_stride = u32((sizeof(BbHdr::Tuning) + align - 1) / align * align);
+            const VkBufferCreateInfo buffer_info = static_cast<VkBufferCreateInfo>(
+                vk::BufferCreateInfo{.size = vk::DeviceSize(hdr_settings_stride) * slots,
+                                     .usage = vk::BufferUsageFlagBits::eStorageBuffer});
+            const VmaAllocationCreateInfo alloc_info{
+                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                         VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                .usage = VMA_MEMORY_USAGE_AUTO,
+            };
+            VkBuffer buffer{};
+            VmaAllocationInfo mapped{};
+            if (vmaCreateBuffer(instance.GetAllocator(), &buffer_info, &alloc_info, &buffer,
+                                &hdr_settings_allocation, &mapped) != VK_SUCCESS ||
+                !mapped.pMappedData) {
+                return;
+            }
+            hdr_settings_buffer = vk::Buffer{buffer};
+            hdr_settings_mapped = mapped.pMappedData;
+            hdr_settings_slot = slots - 1;
+        }
+        const BbHdr::Tuning tuning = BbHdr::Current();
+        if (!hdr_settings_written ||
+            std::memcmp(&tuning, &hdr_settings_last, sizeof(tuning)) != 0) {
+            hdr_settings_slot = (hdr_settings_slot + 1) % slots;
+            const vk::DeviceSize offset = vk::DeviceSize(hdr_settings_slot) * hdr_settings_stride;
+            std::memcpy(static_cast<u8*>(hdr_settings_mapped) + offset, &tuning, sizeof(tuning));
+            vmaFlushAllocation(instance.GetAllocator(), hdr_settings_allocation, offset,
+                               sizeof(tuning));
+            hdr_settings_last = tuning;
+            hdr_settings_written = true;
+        }
+        settings_info = {hdr_settings_buffer,
+                         vk::DeviceSize(hdr_settings_slot) * hdr_settings_stride,
+                         sizeof(BbHdr::Tuning)};
+        writes.push_back({.dstBinding = pipeline.HdrSettingsBinding(),
+                          .descriptorCount = 1,
+                          .descriptorType = vk::DescriptorType::eStorageBuffer,
+                          .pBufferInfo = &settings_info});
+        which = Shadow::Tone;
+    } else if (upscaler->HdrPostPass(ps->pgm_hash)) {
+        tone_info = {.imageView = upscaler->ToneShadowView(),
+                     .imageLayout = vk::ImageLayout::eGeneral};
+        // The game's motion blur of this frame run again on the HDR values (RecordHdrBlurShadow):
+        // its result in place of the 8-bit one at binding 3, which the pass adds where things
+        // move (else that part of the picture was the SDR frame, clipped at paper white).
+        const bool blur = upscaler->HdrShadowWasDrawn(Shadow::Blur2);
+        blur_info = {.imageView = blur ? upscaler->HdrShadowView(Shadow::Blur2) : vk::ImageView{},
+                     .imageLayout = vk::ImageLayout::eGeneral};
+        bool swapped = false;
+        for (auto& write : writes) {
+            if (write.dstBinding == 2 && write.descriptorCount == 1 &&
+                write.descriptorType == vk::DescriptorType::eSampledImage) {
+                write.pImageInfo = &tone_info;
+                swapped = true;
+            }
+            if (blur && write.dstBinding == 3 && write.descriptorCount == 1 &&
+                write.descriptorType == vk::DescriptorType::eSampledImage) {
+                write.pImageInfo = &blur_info;
+            }
+        }
+        if (!swapped) {
+            static bool noted = false;
+            if (!noted) {
+                noted = true;
+                std::printf("HDR: the pass after the tone pass reads no image at binding 2: no "
+                            "scene HDR\n");
+            }
+            return;
+        }
+        which = Shadow::Scene;
+    } else {
+        return;
+    }
+    const auto target = upscaler->HdrShadowTarget(which, state.width, state.height);
+    scheduler.EndRendering();
+    const auto shadow_barrier = [&](vk::ImageLayout old_layout, vk::PipelineStageFlags2 src,
+                                    vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst,
+                                    vk::AccessFlags2 dst_access) {
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = src,
+            .srcAccessMask = src_access,
+            .dstStageMask = dst,
+            .dstAccessMask = dst_access,
+            .oldLayout = old_layout,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = target.image,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        scheduler.Record([b](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        });
+    };
+    shadow_barrier(vk::ImageLayout::eUndefined, vk::PipelineStageFlagBits2::eAllCommands,
+                   vk::AccessFlagBits2::eMemoryRead,
+                   vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                   vk::AccessFlagBits2::eColorAttachmentWrite);
+    RenderState shadow = state;
+    shadow.color_attachments[0].image_view = target.view;
+    shadow.color_attachments[0].image_layout = vk::ImageLayout::eGeneral;
+    shadow.color_attachments[0].is_clear = 0;
+    shadow.depth_stencil_attachment.depth_clear = false;
+    shadow.depth_stencil_attachment.stencil_clear = false;
+    scheduler.BeginRendering(shadow);
+    pipeline.BindResources(writes, push_data);
+    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
+        if (is_indexed) {
+            cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex), first_instance);
+        } else {
+            cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
+        }
+    });
+    scheduler.EndRendering();
+    shadow_barrier(vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                   vk::AccessFlagBits2::eColorAttachmentWrite,
+                   vk::PipelineStageFlagBits2::eAllCommands,
+                   vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderStorageRead |
+                       vk::AccessFlagBits2::eTransferRead);
+    upscaler->HdrShadowDrawn(which);
+}
+
+// bbport (scene HDR): the game's motion blur between the tone pass and the pass after it, in all
+// three games: compute 006d71bb (8x8 groups) reads the tone pass output (binding 3) and writes the
+// half-size colour with a blur weight from the motion vectors (binding 4); 19367542 blurs that
+// (reads binding 2, writes binding 3); the pass after the tone pass adds the result. Each is
+// recorded again right after the game's own, with the HDR shadows in place of its 8-bit images:
+// Tone -> Blur1 -> Blur2, which that pass's HDR copy reads (RecordHdrShadow). Same constants,
+// buffers and groups; the game's dispatches are untouched.
+void Rasterizer::RecordHdrBlurShadow(const ComputePipeline& pipeline, u64 cs_hash, u32 groups_x,
+                                     u32 groups_y, u32 groups_z) {
+    using Shadow = TemporalUpscaler::HdrShadow;
+    Shadow out{}, in{};
+    if (!upscaler->HdrBlurPass(cs_hash, out, in)) {
+        return;
+    }
+    const bool first = out == Shadow::Blur1;
+    const u32 in_binding = first ? 3 : 2, out_binding = first ? 4 : 3;
+    const auto [tone_w, tone_h] = upscaler->HdrShadowSize(Shadow::Tone);
+    const u32 w = (tone_w + 1) / 2, h = (tone_h + 1) / 2;
+    Pipeline::DescriptorWrites writes = set_writes;
+    const vk::DescriptorImageInfo in_info{.imageView = upscaler->HdrShadowView(in),
+                                          .imageLayout = vk::ImageLayout::eGeneral};
+    const auto target = upscaler->HdrShadowTarget(out, w, h);
+    const vk::DescriptorImageInfo out_info{.imageView = target.view,
+                                           .imageLayout = vk::ImageLayout::eGeneral};
+    u32 found = 0;
+    for (auto& write : writes) {
+        if (write.descriptorCount != 1) {
+            continue;
+        }
+        if (write.dstBinding == in_binding &&
+            write.descriptorType == vk::DescriptorType::eSampledImage) {
+            write.pImageInfo = &in_info;
+            found |= 1;
+        } else if (write.dstBinding == out_binding &&
+                   write.descriptorType == vk::DescriptorType::eStorageImage) {
+            write.pImageInfo = &out_info;
+            found |= 2;
+        }
+    }
+    if (found != 3) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::printf("HDR: motion blur pass %08x has other bindings: the blur stays 8-bit\n",
+                        u32(cs_hash));
+        }
+        return;
+    }
+    const vk::Image image = target.image;
+    const auto barrier = [&](vk::ImageLayout old_layout, vk::PipelineStageFlags2 src,
+                             vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst,
+                             vk::AccessFlags2 dst_access) {
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = src,
+            .srcAccessMask = src_access,
+            .dstStageMask = dst,
+            .dstAccessMask = dst_access,
+            .oldLayout = old_layout,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = image,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        scheduler.Record([b](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        });
+    };
+    barrier(vk::ImageLayout::eUndefined, vk::PipelineStageFlagBits2::eAllCommands,
+            vk::AccessFlagBits2::eMemoryRead, vk::PipelineStageFlagBits2::eComputeShader,
+            vk::AccessFlagBits2::eShaderStorageWrite);
+    pipeline.BindResources(writes, push_data);
+    const vk::Pipeline handle = pipeline.Handle();
+    scheduler.Record([=](vk::CommandBuffer cmdbuf) {
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
+        cmdbuf.dispatch(groups_x, groups_y, groups_z);
+    });
+    barrier(vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+            vk::AccessFlagBits2::eShaderStorageWrite, vk::PipelineStageFlagBits2::eAllCommands,
+            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderSampledRead);
+    upscaler->HdrShadowDrawn(out);
+    static bool told = false;
+    if (!told && out == Shadow::Blur2) {
+        told = true;
+        std::printf("HDR: the motion blur runs on the HDR scene too (%ux%u)\n", w, h);
+        std::fflush(stdout);
+    }
+}
 
 inline const AmdGpu::Regs& Rasterizer::Regs() const {
     return stage_regs ? *stage_regs : liverpool->regs;
@@ -4290,7 +4535,25 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             camera_motion->InvalidateHistory();
         }
         camera_motion->SetJitter(upscaler->Jitter());
-        object_motion->OnFrameStart();
+        // bbport: once per shown frame. Uncharted draws into the display buffer several times a frame
+        // (the composite, its copies, the HUD): every one of them passed here and started a new object
+        // motion frame, so the positions stored during the scene were two or more "frames" old by the
+        // next scene and never matched: 0 draws with history, no character motion vectors at all
+        // (BB_FRAME_STATS: "Object motion: N draws, N stored, 0 with history"). Off until it has been
+        // looked at (it turns the character vectors on for the first time): BB_OBJECT_MOTION_FRAME=1
+        // turns it on, otherwise as before (every display draw).
+        {
+            static const bool per_flip = [] {
+                const char* env = std::getenv("BB_OBJECT_MOTION_FRAME");
+                return env && env[0] == '1';
+            }();
+            static u64 motion_flip = ~0ull;
+            const u64 flip = g_flips.load(std::memory_order_relaxed);
+            if (!per_flip || flip != motion_flip) {
+                motion_flip = flip;
+                object_motion->OnFrameStart();
+            }
+        }
         NoteFrameStart();
         static const char* scene_debug = std::getenv("BB_SCENE_DEBUG");
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
@@ -4723,7 +4986,33 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             }
         }
     }
-    if (motion_draw && motion_geometry) {
+    // bbport (from BilalReloaded's Uncharted port, #84): the animated draws of Uncharted's
+    // G-buffer passes are the skinned ones, whose vertex buffers the GPU wrote this session (the
+    // skinning compute; the level's vertices stay as loaded). Its shaders read vertices from
+    // buffers (no vertex inputs): the draw's identity across frames comes from those buffers'
+    // sizes and strides, not their addresses (skinned vertices can move between frames). (The
+    // stencil's character bit differs between the games: Uncharted 2 sets it on the whole level.)
+    bool character_draw = false;
+    if (motion_draw && Shader::MotionVectors::characters) {
+        const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
+        u64 hash = 0x6a09e667f3bcc909ULL;
+        for (const auto& resource : vs.buffers) {
+            if (resource.IsSpecial()) continue;
+            const auto buffer = resource.GetSharp(vs);
+            if (!buffer.Valid()) continue;
+            hash = XXH3_64bits_withSeed(&buffer.num_records, sizeof(buffer.num_records),
+                                        hash ^ buffer.GetStride());
+            // Constant buffers (stride 16) are not vertices.
+            character_draw |= buffer.GetStride() != 16 &&
+                              buffer_cache.IsRangeGpuWritten(buffer.base_address,
+                                                             buffer.GetSize());
+        }
+        if (character_draw && !motion_geometry) {
+            motion_geometry = hash;
+        }
+    }
+    if (motion_draw && motion_geometry &&
+        (!Shader::MotionVectors::characters || character_draw)) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         const auto [base_vertex, first_instance] =
             GetDrawOffsets(regs, vs, pipeline->GetFetchShader());
@@ -4738,7 +5027,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             const char* value = std::getenv("BB_OBJECT_MOTION_ALL");
             return value && value[0] == '1';
         }();
-        bool gated = !all_motion;
+        bool gated = !all_motion && !character_draw;
         u64 palette = 0;
         for (const auto& resource : vs.buffers) {
             if (resource.IsSpecial()) continue;
@@ -4927,6 +5216,11 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
         }
     });
+    // bbport (scene HDR): the tone pass and the pass after it, drawn again into the HDR shadows.
+    if (pipeline->GetHdrRole() != GraphicsPipeline::HdrRole::None && !batched) [[unlikely]] {
+        RecordHdrShadow(*pipeline, state, is_indexed, num_indices, num_instances, first_vertex,
+                        first_instance);
+    }
     if (upscaler->Enabled() && cb_descs[0].first) {
         const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
         upscaler->OnDrawRecorded(ps ? ps->pgm_hash : 0, cb_descs[0].first);
@@ -5482,6 +5776,90 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             });
         }
     };
+    // bbport diagnosis (BB_EXPOSURE_LOG=1): the exposure histogram compute (cs aec539f0): its
+    // workgroup counts and the first constants of its buffers, 12 times (every 120th dispatch).
+    if (u32(cs.pgm_hash) == 0xaec539f0u) {
+        static const bool exposure_log = std::getenv("BB_EXPOSURE_LOG") != nullptr;
+        static u32 calls = 0, lines = 0;
+        if (exposure_log && calls++ % 120 == 0 && lines < 400) {
+            ++lines;
+            std::printf("Exposure cs: groups %ux%ux%u", u32(cs_program.dim_x), u32(cs_program.dim_y),
+                        u32(cs_program.dim_z));
+            for (u32 b = 0; b < cs.buffers.size() && b < 3; ++b) {
+                if (cs.buffers[b].IsSpecial()) continue;
+                const auto sharp = cs.buffers[b].GetSharp(cs);
+                const u32 bytes = sharp.GetSize();
+                std::printf(" | buffer %u size %u stride %u written %d:", b, bytes, u32(sharp.GetStride()),
+                            int(cs.buffers[b].is_written));
+                if (sharp.base_address && bytes >= 48 && memory->IsValidGpuMapping(sharp.base_address, 48)) {
+                    const auto* f = reinterpret_cast<const float*>(sharp.base_address);
+                    const auto* u = reinterpret_cast<const u32*>(sharp.base_address);
+                    for (u32 i = 0; i < 12; ++i) {
+                        std::printf(" %g/%u", f[i], u[i]);
+                    }
+                }
+            }
+            std::printf("\n");
+            // The row sums the last dispatch wrote (buffer 1, one float per row), read back: how many
+            // rows hold data, their total and the average luminance the game derives (total x the
+            // third constant row's third float).
+            if (cs.buffers.size() >= 2 && !cs.buffers[0].IsSpecial() && !cs.buffers[1].IsSpecial()) {
+                const auto consts = cs.buffers[0].GetSharp(cs);
+                const auto rows = cs.buffers[1].GetSharp(cs);
+                const u32 bytes = rows.GetSize();
+                if (rows.base_address && bytes >= 4 && memory->IsValidGpuMapping(rows.base_address, bytes) &&
+                    consts.base_address && memory->IsValidGpuMapping(consts.base_address, 48)) {
+                    buffer_cache.ReadMemory(rows.base_address, bytes, false, true);
+                    const auto* f = reinterpret_cast<const float*>(rows.base_address);
+                    const float norm = reinterpret_cast<const float*>(consts.base_address)[10];
+                    const u32 n = bytes / 4;
+                    double total = 0.0;
+                    u32 filled = 0, first = n, last = 0;
+                    float low = 1e30f, high = 0.0f;
+                    for (u32 i = 0; i < n; ++i) {
+                        if (f[i] != 0.0f) {
+                            ++filled;
+                            first = std::min(first, i);
+                            last = i;
+                            low = std::min(low, f[i]);
+                            high = std::max(high, f[i]);
+                        }
+                        total += f[i];
+                    }
+                    std::printf("Exposure rows: %u rows, %u non-zero (first %u, last %u), row sum min %g max %g, "
+                                "total %g, x norm %g = average %g; rows 0, n/4, n/2, 3n/4, n-1: %g %g %g %g %g\n",
+                                n, filled, first, last, low, high, total, norm, total * norm, f[0], f[n / 4],
+                                f[n / 2], f[3 * n / 4], f[n - 1]);
+                }
+            }
+        }
+    }
+    // Diagnosis (BB_EXPOSURE_LOG=1): the small buffers the two exposure computes after the row sums write (the
+    // metered average, then its history / the value the game reads), as they stand in guest memory (read back a
+    // frame late), every 60th dispatch.
+    if (const u32 h = u32(cs.pgm_hash); h == 0x7095d6c2u || h == 0x04f81a8fu) {
+        static const bool small_log = std::getenv("BB_EXPOSURE_LOG") != nullptr;
+        static std::array<u32, 2> calls{};
+        if (small_log && calls[h == 0x04f81a8fu]++ % 60 == 0) {
+            std::printf("Exposure value cs %08x:", h);
+            for (u32 b = 0; b < cs.buffers.size(); ++b) {
+                if (cs.buffers[b].IsSpecial()) continue;
+                const auto sharp = cs.buffers[b].GetSharp(cs);
+                const u32 bytes = sharp.GetSize();
+                if (!cs.buffers[b].is_written || bytes > 64 || !sharp.base_address ||
+                    !memory->IsValidGpuMapping(sharp.base_address, bytes)) {
+                    std::printf(" | buffer %u size %u written %d", b, bytes, int(cs.buffers[b].is_written));
+                    continue;
+                }
+                std::printf(" | buffer %u size %u:", b, bytes);
+                const auto* f = reinterpret_cast<const float*>(sharp.base_address);
+                for (u32 i = 0; i < bytes / 4; ++i) {
+                    std::printf(" %g", f[i]);
+                }
+            }
+            std::printf("\n");
+        }
+    }
     if (upscaler->Enabled()) {
         upscaler->OnDispatch(cs.pgm_hash);
     }
@@ -5686,7 +6064,28 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         .indirect = false,
     };
     const u32 workgroup_split = Shader::WorkgroupSplit(cs.cs_split_eligible, hw_cs);
-    const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
+    u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y;
+    const u32 dim_z = cs_program.dim_z;
+    // bbport: the movie shader (YUV to RGB, one pixel per thread of a 32x2 group) is dispatched
+    // with the render width / 32 groups, rounded down: exact at 1920, 16 columns short at 3440 (the
+    // right edge kept what was there before, a white bar). The groups are raised to cover the
+    // movie's size; the threads past the image's edge write nothing (robustImageAccess2).
+    // From moistman7's PR #156 to BilalReloaded's port.
+    if (u32 movie_w = 0, movie_h = 0; BbMovieShaderSize(cs.pgm_hash, movie_w, movie_h)) {
+        const u32 tx = cs_program.num_thread_x.full, ty = cs_program.num_thread_y.full;
+        const u32 need_x = tx ? (movie_w + tx - 1) / tx : dim_x;
+        const u32 need_y = ty ? (movie_h + ty - 1) / ty : dim_y;
+        if (dim_x < need_x || dim_y < need_y) {
+            static std::atomic<int> noted{0};
+            if (noted++ == 0) {
+                std::printf("Movie: dispatch %ux%u groups raised to %ux%u (%ux%u pixels)\n", dim_x,
+                            dim_y, std::max(dim_x, need_x), std::max(dim_y, need_y), movie_w,
+                            movie_h);
+            }
+            dim_x = std::max(dim_x, need_x);
+            dim_y = std::max(dim_y, need_y);
+        }
+    }
     const u32 groups_x = dim_x * (workgroup_split > 1 ? workgroup_split : Shader::CtaSplitFactor(cs.pgm_hash));
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, groups_x, dim_y, dim_z);
@@ -5730,6 +6129,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
         crumb_scheduler->WriteBreadcrumb(cmdbuf, crumb, vk::PipelineStageFlagBits2::eComputeShader);
     });
     DebugState.IncDispatch();
+    if (upscaler->HdrScene()) [[unlikely]] {
+        RecordHdrBlurShadow(*pipeline, cs.pgm_hash, groups_x, dim_y, dim_z);
+    }
 
     ResetBindings(true);
     scheduler.KickRecording();
@@ -8373,7 +8775,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         }
         std::printf("Scene pass: reduced %d %s\n", reduced, why.c_str());
     }
-    push_data.scene_size = reduced ? SceneResolution::Pack(scene_targets->Size()) : 0;
+    push_data.scene_size = reduced ? scene_targets->PackedForShaders() : 0;
     if (BbStats::enabled) {
         BbStats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
         BbStats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
@@ -8612,7 +9014,9 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto proxy = pass_size.value_or(size);
         state.width = proxy.width;
         state.height = proxy.height;
-        target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+        const auto native = scene_targets->Native();
+        target_scale = {float(size.width) / float(native.width),
+                        float(size.height) / float(native.height)};
     }
     if (FrameCapture::Active()) {
         std::array<const VideoCore::ImageInfo*, AmdGpu::NUM_COLOR_BUFFERS> colors{};

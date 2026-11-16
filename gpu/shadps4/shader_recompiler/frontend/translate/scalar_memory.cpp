@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bbport_exposure_fix.h"
 #include "bbport_focus_fix.h"
 #include "shader_recompiler/frontend/translate/translate.h"
 
@@ -93,6 +94,22 @@ void Translator::S_BUFFER_LOAD_DWORD(int num_dwords, const GcnInst& inst) {
                 ir.BitCast<IR::F32>(value),
                 ir.FPMul(inverse_size, ir.Imm32(axis == 0 ? 1920.0f : 1080.0f)));
             value = ir.BitCast<IR::U32>(centre);
+        }
+        // bbport: the exposure metering at render sizes above 2048 wide (bbport_exposure_fix.h).
+        if (smrd.imm && BbExposureFix::ExposureShader(info.pgm_hash)) {
+            const u32 at = smrd.offset + i;
+            const bool rows = static_cast<u32>(info.pgm_hash) == 0xaec539f0u;
+            const IR::F32 widest = ir.Imm32(1.0f / 1024.0f);
+            if (rows && at == 8) {
+                // The column step: the 1024 taps span the whole row.
+                value = ir.BitCast<IR::U32>(IR::F32{ir.FPMax(ir.BitCast<IR::F32>(value), widest)});
+            } else if (!rows && at == 10) {
+                // The divisor: the samples really summed (1024 a row instead of the half width).
+                const IR::F32 step = ir.BitCast<IR::F32>(
+                    ir.ReadConstBuffer(vsharp, ir.Imm32(8), buffer_info));
+                const IR::F32 more = IR::F32{ir.FPMax(ir.Imm32(1.0f), IR::F32{ir.FPDiv(widest, step)})};
+                value = ir.BitCast<IR::U32>(IR::F32{ir.FPMul(ir.BitCast<IR::F32>(value), more)});
+            }
         }
         ir.SetScalarReg(dst_reg + i, value);
     }

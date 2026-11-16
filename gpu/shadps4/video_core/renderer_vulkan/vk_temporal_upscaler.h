@@ -92,7 +92,9 @@ public:
     /// This frame's sub-pixel jitter in pixels (screen x right, y down); zero when off and after
     /// the upscale (post and UI are not jittered).
     [[nodiscard]] std::array<float, 2> Jitter() const noexcept {
-        return done_this_frame ? std::array<float, 2>{} : jitter;
+        // Projection jitter (prototype): the game's projection carries it; no viewport / vertex
+        // shader jitter and none for the per-pass fixes.
+        return done_this_frame || ProjectionJitterOn() ? std::array<float, 2>{} : jitter;
     }
 
     // Scaled presets.
@@ -138,8 +140,67 @@ public:
         vk::Image image;
         vk::Format format;
         u32 width, height;
+        /// bbport (scene HDR): the HDR scene before the UI (RGBA16F, ShaderReadOnlyOptimal, the
+        /// display's size) when `image` is the HDR composite; null otherwise.
+        vk::ImageView hdr_hudless{};
     };
     bool DisplayOverride(VAddr address, Display& display);
+
+    /// bbport: Uncharted 2's scene HDR (BbHdr::Scene, gpu/hdr/README.md). The tone pass is drawn
+    /// again with its HDR replacement into the Tone shadow; the pass after it (BB_HUDLESS_PS) again
+    /// with that shadow as its input into the Scene shadow (linear HDR, the game's distortion and
+    /// overlays included), which the upscale reads instead of the game's 8-bit frame
+    /// (RunScaledVelocity); the presenter shows the HDR composite of it and the frame's HUD.
+    /// Blur1/Blur2: the game's motion blur after the tone pass (compute 006d71bb: the half-size
+    /// colour and weight from the tone pass output, then 19367542: the blur), run again on the
+    /// Tone shadow; the pass after the tone pass adds Blur2 (its binding 3) where things move.
+    enum class HdrShadow { Tone, Scene, Blur1, Blur2 };
+    struct ShadowTarget {
+        vk::Image image;
+        vk::ImageView view;
+    };
+    [[nodiscard]] bool HdrScene() const noexcept {
+        return hdr_scene;
+    }
+    /// The shadow's RGBA16F image at w x h (made or resized here), for this frame's draw.
+    ShadowTarget HdrShadowTarget(HdrShadow which, u32 w, u32 h);
+    void HdrShadowDrawn(HdrShadow which) {
+        Shadow(which).drawn = true;
+    }
+    [[nodiscard]] bool HdrShadowWasDrawn(HdrShadow which) const noexcept {
+        return Shadow(which).drawn;
+    }
+    [[nodiscard]] vk::ImageView HdrShadowView(HdrShadow which) const noexcept {
+        return *Shadow(which).view;
+    }
+    [[nodiscard]] std::pair<u32, u32> HdrShadowSize(HdrShadow which) const noexcept {
+        return {Shadow(which).width, Shadow(which).height};
+    }
+    /// A motion blur dispatch to run again on the HDR values: its output shadow, and the shadow
+    /// it reads in place of the game's image (Tone for the first, Blur1 for the second).
+    [[nodiscard]] bool HdrBlurPass(u64 cs_hash, HdrShadow& out, HdrShadow& in) const noexcept {
+        if (!hdr_scene || !tone_shadow.drawn) {
+            return false;
+        }
+        if (u32(cs_hash) == 0x006d71bbu) {
+            out = HdrShadow::Blur1;
+            in = HdrShadow::Tone;
+            return true;
+        }
+        if (u32(cs_hash) == 0x19367542u && blur1_shadow.drawn) {
+            out = HdrShadow::Blur2;
+            in = HdrShadow::Blur1;
+            return true;
+        }
+        return false;
+    }
+    /// The pass after the tone pass, with a Tone shadow drawn this frame to read.
+    [[nodiscard]] bool HdrPostPass(u64 ps_hash) const noexcept {
+        return hdr_scene && hudless_hash && u32(ps_hash) == hudless_hash && tone_shadow.drawn;
+    }
+    [[nodiscard]] vk::ImageView ToneShadowView() const noexcept {
+        return *tone_shadow.view;
+    }
 
 private:
     /// bbport: views of guest images the upscaler reads, kept across frames: FSR 4 registers
@@ -172,8 +233,23 @@ private:
                       const VideoCore::Image& depth, vk::Image color_image,
                       vk::ImageView color_view, vk::Format color_format, vk::Image depth_image,
                       vk::ImageView depth_view, u32 source_width, u32 source_height, u32 w, u32 h,
-                      u32 ow, u32 oh);
+                      u32 ow, u32 oh, bool hdr_input = false);
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
+    /// bbport (scene HDR): after the upscale of the HDR scene into output_image (General): the
+    /// 8-bit frame the HUD draws into (ui_image) and the scene in the presenter's domain, in place.
+    void RecordHdrSplit(vk::CommandBuffer cmdbuf, vk::Image scene, vk::ImageView scene_view,
+                        vk::Image sdr, vk::ImageView sdr_view, u32 w, u32 h);
+    /// The UI image through a UNORM view (its own format may be sRGB), for compute passes.
+    vk::ImageView UiStorageView();
+    /// bbport (scene HDR with the upscaler before the post-processing, early_native): the pass
+    /// after the tone pass has just drawn the display frame `color` and its HDR copy (the Scene
+    /// shadow, at the display's size: no upscale follows): sharpens the HDR scene if that was
+    /// left for the finished frame and splits it (the display buffer gets the 8-bit frame made
+    /// from it, for the HUD and the composite at the flip). False: this frame stays SDR.
+    bool HdrEarlyFrame(VideoCore::ImageId color);
+    /// At the flip: the HDR composite of the scene and the frame's HUD (hdr_composite_image).
+    void RecordHdrComposite(vk::CommandBuffer cmdbuf);
+    void CreateHdrPipelines();
     void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
     void PrepareUiDepth(VideoCore::ImageId depth);
     /// Render size below the scaled-preset output size (the resolution patch is on).
@@ -255,7 +331,13 @@ private:
     void RecordTaa(vk::CommandBuffer cmdbuf, vk::ImageView color, vk::ImageView depth);
     /// Sharpness above 1 for FSR 3/4 (their RCAS stops at 1): one more RCAS pass over the target
     /// (output_image, or the 8-bit UI image with ldr) in General layout after the upscaler.
-    void ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w, u32 h);
+    void ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, bool ldr, u32 w, u32 h,
+                      vk::ImageView view = {}, bool srgb_source = false);
+    /// bbport (DLSS rework 3c): Native before post: the sharpening pass on the finished display
+    /// frame (after the game's post-processing, before its UI), not on the HDR scene.
+    void SharpenDisplay(VideoCore::ImageId color);
+    bool sharpen_pending = false;      ///< this frame's upscale left its sharpening for the display frame
+    bool sharpen_display_failed = false; ///< the display buffer cannot take it: sharpen before post
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -306,6 +388,26 @@ private:
     vk::UniqueImageView ui_depth_view;
     bool depth_blit = false;
     bool scaled_session = false;
+    /// bbport (DLSS rework 3): a patched render size equal to the output (Native / DLAA): the
+    /// upscaler runs on the HDR scene colour before the post-processing, as at the game's own
+    /// 1920x1080 (Run at the trigger dispatch), not on the finished LDR frame. BB_NATIVE_BEFORE_POST=0: off.
+    bool early_native = false;
+    /// bbport (DLSS rework 12, BB_SCALED_BEFORE_POST=1): with early_native, the scene's passes are
+    /// drawn at this smaller size (BB_SCENE_SIZE, set at process start from the wanted render
+    /// size) into SceneTargets' stand-ins and upscaled before the post-processing; 0: Native.
+    u32 early_scene_width = 0, early_scene_height = 0;
+    [[nodiscard]] bool EarlyScaled() const noexcept {
+        return early_native && early_scene_width != 0;
+    }
+    /// The size the scene is drawn at (jitter, mip bias): the stand-ins' with EarlyScaled.
+    [[nodiscard]] u32 SceneWidth() const;
+    [[nodiscard]] u32 SceneHeight() const;
+    /// bbport PROTOTYPE (DLSS rework 7, BB_PROJECTION_JITTER=1, Uncharted 1-3, 1.02): the jitter
+    /// is in the game's projection (runtime_ultrawide.c); OnFrameStart writes the next one to the
+    /// game's slot, the frame's own is read back from the velocity pass (UseProjectionJitter).
+    /// (The game code is patched after the GPU starts: looked up at each use.)
+    [[nodiscard]] static bool ProjectionJitterOn() noexcept;
+    void UseProjectionJitter(u32 w, u32 h);
     /// BeforeDisplayPass recorded this frame's motion vectors (velocity mode, patched size).
     bool velocity_pending = false;
     /// The UI phase belongs to RunScaledVelocity: the next display pass is not redirected.
@@ -386,6 +488,47 @@ private:
     vk::UniqueImageView extra_sharpen_view;
     u32 extra_sharpen_width = 0, extra_sharpen_height = 0;
     vk::UniqueImageView ui_storage_view;
+
+    // bbport: scene HDR (HdrScene).
+    bool hdr_scene = false; ///< BbHdr::Scene at start
+    struct ShadowImage {
+        VideoCore::UniqueImage image;
+        vk::UniqueImageView view;
+        u32 width = 0, height = 0;
+        bool drawn = false; ///< this frame
+    };
+    ShadowImage tone_shadow, scene_shadow, blur1_shadow, blur2_shadow;
+    ShadowImage& Shadow(HdrShadow which) noexcept {
+        return which == HdrShadow::Tone    ? tone_shadow
+               : which == HdrShadow::Scene ? scene_shadow
+               : which == HdrShadow::Blur1 ? blur1_shadow
+                                           : blur2_shadow;
+    }
+    const ShadowImage& Shadow(HdrShadow which) const noexcept {
+        return const_cast<TemporalUpscaler*>(this)->Shadow(which);
+    }
+    bool last_hdr_input = false; ///< the upscaler's input domain last frame (its history)
+    bool hdr_frame = false;      ///< output_image holds the shown frame's HDR scene (split done)
+    VAddr hdr_address = 0;       ///< the display buffer of that frame
+    /// The shown frame's HDR scene (output_image, or the Scene shadow with hdr_early) and the 8-bit
+    /// frame the HUD is drawn over (ui_image, or the game's display buffer), as the split left them.
+    struct HdrShown {
+        vk::Image scene;
+        vk::ImageView scene_view;
+        vk::Image sdr;
+        vk::ImageView sdr_view;
+        u32 width = 0, height = 0;
+    } hdr_shown;
+    bool hdr_early = false;               ///< hdr_frame was made by HdrEarlyFrame
+    VideoCore::ImageId hdr_early_color{}; ///< its display buffer
+    u64 hdr_early_flip = 0;               ///< the flip count when it was made
+    vk::ImageLayout hdr_output_layout = vk::ImageLayout::eGeneral; ///< hdr_shown.scene's, after the split
+    VideoCore::UniqueImage hdr_composite_image;
+    vk::UniqueImageView hdr_composite_view;
+    u32 hdr_composite_width = 0, hdr_composite_height = 0;
+    vk::UniqueDescriptorSetLayout hdr_desc_layout;
+    vk::UniquePipelineLayout hdr_pipeline_layout;
+    vk::UniquePipeline hdr_split_pipeline, hdr_composite_pipeline;
 };
 
 } // namespace Vulkan

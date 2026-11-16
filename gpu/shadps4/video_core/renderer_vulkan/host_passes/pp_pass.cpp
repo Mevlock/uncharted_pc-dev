@@ -6,6 +6,7 @@
 #include "common/assert.h"
 #include "core/emulator_settings.h"
 #include "video_core/host_shaders/fs_tri_vert.h"
+#include "video_core/host_shaders/overlay_hdr_frag.h"
 #include "video_core/host_shaders/post_process_frag.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -15,7 +16,8 @@
 
 namespace Vulkan::HostPasses {
 
-void PostProcessingPass::Create(vk::Device device, const vk::Format surface_format) {
+void PostProcessingPass::Create(vk::Device device, const vk::Format surface_format,
+                                const vk::Format hdr_overlay_format) {
     boost::container::static_vector<vk::DescriptorSetLayoutBinding, 2> bindings{
         {
             .binding = 0,
@@ -166,6 +168,41 @@ void PostProcessingPass::Create(vk::Device device, const vk::Format surface_form
     pipeline = Check<"create post process pipeline">(device.createGraphicsPipelineUnique(
         /*pipeline_cache*/ {}, pipeline_info));
 
+    // bbport: HDR10 output only (BbHdr): the overlay's 8-bit image blended onto the HDR10
+    // swapchain image (RenderOverlay).
+    if (hdr_overlay_format != vk::Format::eUndefined) {
+        const auto& overlay_module = CompileSPV(OVERLAY_HDR_FRAG, device);
+        ASSERT(overlay_module);
+        SetObjectName(device, overlay_module, "overlay_hdr.frag");
+        auto overlay_stages = shaders_ci;
+        overlay_stages[1].module = overlay_module;
+        const vk::PipelineRenderingCreateInfo overlay_rendering_ci{
+            .colorAttachmentCount = 1,
+            .pColorAttachmentFormats = &hdr_overlay_format,
+        };
+        const vk::PipelineColorBlendAttachmentState overlay_blend{
+            .blendEnable = true,
+            .srcColorBlendFactor = vk::BlendFactor::eSrcAlpha,
+            .dstColorBlendFactor = vk::BlendFactor::eOneMinusSrcAlpha,
+            .colorBlendOp = vk::BlendOp::eAdd,
+            .srcAlphaBlendFactor = vk::BlendFactor::eZero,
+            .dstAlphaBlendFactor = vk::BlendFactor::eOne,
+            .alphaBlendOp = vk::BlendOp::eAdd,
+            .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+                              vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA,
+        };
+        auto overlay_blending = color_blending;
+        overlay_blending.attachmentCount = 1;
+        overlay_blending.pAttachments = &overlay_blend;
+        auto overlay_info = pipeline_info;
+        overlay_info.pNext = &overlay_rendering_ci;
+        overlay_info.pStages = overlay_stages.data();
+        overlay_info.pColorBlendState = &overlay_blending;
+        overlay_pipeline = Check<"create HDR overlay pipeline">(
+            device.createGraphicsPipelineUnique(/*pipeline_cache*/ {}, overlay_info));
+        device.destroyShaderModule(overlay_module);
+    }
+
     // Once pipeline is compiled, we don't need the shader module anymore
     device.destroyShaderModule(vs_module);
     device.destroyShaderModule(fs_module);
@@ -277,6 +314,45 @@ void PostProcessingPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
     }
+}
+
+void PostProcessingPass::RenderOverlay(vk::CommandBuffer cmdbuf, vk::ImageView overlay,
+                                       vk::ImageView target, vk::Extent2D extent,
+                                       const Settings& settings) {
+    const vk::RenderingAttachmentInfo attachment{
+        .imageView = target,
+        .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+        .loadOp = vk::AttachmentLoadOp::eLoad,
+        .storeOp = vk::AttachmentStoreOp::eStore,
+    };
+    const vk::DescriptorImageInfo image_info{
+        .sampler = *sampler,
+        .imageView = overlay,
+        .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
+    };
+    const vk::WriteDescriptorSet write{
+        .dstBinding = 0,
+        .descriptorCount = 1,
+        .descriptorType = vk::DescriptorType::eCombinedImageSampler,
+        .pImageInfo = &image_info,
+    };
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *overlay_pipeline);
+    cmdbuf.setViewport(0, vk::Viewport{.width = float(extent.width),
+                                       .height = float(extent.height),
+                                       .minDepth = 0.0f,
+                                       .maxDepth = 1.0f});
+    cmdbuf.setScissor(0, vk::Rect2D{.extent = extent});
+    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, *pipeline_layout, 0, write);
+    cmdbuf.pushConstants(*pipeline_layout, vk::ShaderStageFlagBits::eFragment, 0, sizeof(Settings),
+                         &settings);
+    cmdbuf.beginRendering(vk::RenderingInfo{
+        .renderArea = {.extent = extent},
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &attachment,
+    });
+    cmdbuf.draw(3, 1, 0, 0);
+    cmdbuf.endRendering();
 }
 
 } // namespace Vulkan::HostPasses

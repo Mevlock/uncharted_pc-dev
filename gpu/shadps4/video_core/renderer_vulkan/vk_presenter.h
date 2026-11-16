@@ -90,7 +90,8 @@ public:
     }
 
     void SetHDR(bool enable) {
-        if (!IsHDRSupported()) {
+        // bbport: the port's own HDR10 output (BbHdr::Output) stays on for the session.
+        if (!IsHDRSupported() || own_hdr) {
             return;
         }
         swapchain.SetHDR(enable);
@@ -131,7 +132,17 @@ private:
 
     void SetExpectedGameSize(s32 width, s32 height);
 
+    /// bbport (HDR10 output): the overlay drawn into `overlay_image` (the swapchain's SDR format,
+    /// cleared) and blended onto the swapchain image (ColorAttachmentOptimal) at paper white.
+    void RenderOverlayHdr(vk::CommandBuffer cmdbuf, vk::Extent2D extent);
+
 private:
+    bool own_hdr = false; ///< bbport: BbHdr::Output at start
+    vk::Image overlay_image{};
+    VmaAllocation overlay_allocation{};
+    vk::ImageView overlay_view{};
+    vk::Extent2D overlay_extent{};
+
     float expected_ratio{1920.0 / 1080.0f};
     /// bbport: the window's size, for frames that fill it (widened gameplay frames).
     u32 window_frame_width{1920}, window_frame_height{1080};

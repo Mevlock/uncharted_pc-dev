@@ -28,6 +28,7 @@
 #endif
 #include <windows.h>
 #endif
+#include "bbport_hdr.h"
 #include "bbport_i18n.h"
 #include "bbport_saves.h"
 #include "bbport_settings.h"
@@ -239,11 +240,23 @@ void UpdateGameStats() {
     game_worst_ms = sorted[0];
 }
 
+/// The size the scene is drawn at. With BB_SCALED_BEFORE_POST=1 (probe.c) the game itself runs at
+/// the output size (BB_RENDER_RES = BB_OUTPUT_RES) and BB_SCENE_SIZE holds the render size.
+static const char* SceneRenderRes() {
+    const char* scene = std::getenv("BB_SCENE_SIZE");
+    return scene && scene[0] ? scene : std::getenv("BB_RENDER_RES");
+}
+static bool ScaledBeforePost() {
+    const char* scene = std::getenv("BB_SCENE_SIZE");
+    return scene && scene[0];
+}
+
 /// What the game renders and shows, from the launcher's start settings: "2288x960 -> 3440x1440
-/// (Quality)", "3440x1440 (native)" or the game's own 1920x1080.
+/// (Quality)", "3440x1440 (native)" or the game's own 1920x1080; "... (Performance) before post"
+/// when the scaled mode upscales before the game's post effects.
 const char* RenderSizeText() {
     static const std::string text = [] {
-        const char* render = std::getenv("BB_RENDER_RES");
+        const char* render = SceneRenderRes();
         const char* output = std::getenv("BB_OUTPUT_RES");
         if (!render || !render[0]) {
             return std::string("1920x1080 ") + T("(the game's own)");
@@ -259,15 +272,19 @@ const char* RenderSizeText() {
             text += std::string(" ") +
                     (scale < 1.6f ? T("(Quality)") : scale < 1.85f ? T("(Balanced)") : T("(Performance)"));
         }
+        if (ScaledBeforePost()) {
+            text += " before post";
+        }
         return text;
     }();
     return text.c_str();
 }
 
-/// The counter's render size: "2288x960 Q" (Balanced B, Performance P), "3440x1440".
+/// The counter's render size: "2288x960 Q" (Balanced B, Performance P), "3440x1440"; "1712x704 P
+/// pre" when the scaled mode upscales before the game's post effects.
 const char* ShortRenderText() {
     static const std::string text = [] {
-        const char* render = std::getenv("BB_RENDER_RES");
+        const char* render = SceneRenderRes();
         const char* output = std::getenv("BB_OUTPUT_RES");
         if (!render || !render[0]) {
             return std::string("1920x1080");
@@ -277,7 +294,8 @@ const char* ShortRenderText() {
         }
         const float render_w = float(std::atoi(render)), output_w = float(std::atoi(output));
         const float scale = render_w > 0.0f ? output_w / render_w : 1.0f;
-        return std::string(render) + (scale < 1.6f ? " Q" : scale < 1.85f ? " B" : " P");
+        return std::string(render) + (scale < 1.6f ? " Q" : scale < 1.85f ? " B" : " P") +
+               (ScaledBeforePost() ? " pre" : "");
     }();
     return text.c_str();
 }
@@ -305,7 +323,7 @@ static const char* CounterUpscalerName(int upscaler) {
                                          : std::string("auto"));
     }();
     static const std::string dlss = "DLSS" + dlaa.substr(4);
-    const char* render = std::getenv("BB_RENDER_RES");
+    const char* render = SceneRenderRes();
     const char* output = std::getenv("BB_OUTPUT_RES");
     const bool native = !render || !render[0] || !output || !output[0] || std::strcmp(render, output) == 0;
     return native ? dlaa.c_str() : dlss.c_str();
@@ -396,6 +414,97 @@ void Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
     float v = value;
     const bool changed = ImGui::SliderFloat(label, &v, lo, hi, "%.2f");
     Store(value, v, changed);
+}
+
+// A slider kept in its range when a value is typed (Ctrl+click).
+void SliderIn(const char* label, std::atomic<float>& value, float lo, float hi, const char* format,
+              ImGuiSliderFlags flags = 0) {
+    float v = value;
+    const bool changed =
+        ImGui::SliderFloat(label, &v, lo, hi, format, flags | ImGuiSliderFlags_AlwaysClamp);
+    Store(value, v, changed);
+}
+
+void Hint(const char* text);
+void TextGrey(const char* text);
+
+// HDR10 output (BbHdr): the picture settings, live (BbHdr::Current, read each frame by the
+// presenter and the tone pass replacement), kept in bbport.ini.
+void HdrSection(BbSettings::Values& s) {
+    if (!BbHdr::Output()) {
+        return;
+    }
+    ImGui::SeparatorText(T("HDR"));
+    SliderIn(TI("Paper white (nits)"), s.hdr_paper_white, 80.0f, 500.0f, "%.0f");
+    SliderIn(TI("Peak brightness (nits)"), s.hdr_peak_nits, 400.0f, 10000.0f, "%.0f",
+             ImGuiSliderFlags_Logarithmic);
+    Hint(T("Paper white: the brightness of white in the game, the HUD and the menus. Peak: your "
+           "display's peak brightness. Both start from the launcher's values each time the game "
+           "starts."));
+    if (BbHdr::Scene()) {
+        ImGui::TextUnformatted(T("Scene HDR (the game's own highlights)"));
+        {
+            int mode = s.hdr_scene_mode.load();
+            const char* modes[] = {T("RenoDX tone mapping"), T("Game curve extended"), T("SDR + highlights")};
+            if (ImGui::Combo(TI("Tone mapping"), &mode, modes, 3)) {
+                s.hdr_scene_mode = mode;
+                dirty = true;
+            }
+            if (mode == 2) {
+                SliderIn(TI("Knee"), s.hdr_knee, 0.2f, 0.9f, "%.2f");
+                SliderIn(TI("Highlight strength"), s.hdr_strength, 0.0f, 1.0f, "%.2f");
+            }
+            SliderIn(TI("SDR|HDR compare"), s.hdr_split, 0.0f, 1.0f, "%.2f");
+            Hint(T("RenoDX: the earlier mapping (the sliders below). Game curve extended: the game's "
+                   "own filmic curve exactly up to its turning point, then straight on into HDR (as "
+                   "RenoDX's The Last of Us Part II mod). SDR + highlights: the game's SDR picture "
+                   "exactly below the knee, the scene's own brightness above it. Compare: the left "
+                   "part of the screen shows the SDR picture (0 = off)."));
+            Checkbox(TI("Vivid HUD"), s.hdr_hud_vivid);
+            Hint(T("The HUD in wider colours, as a wide-gamut monitor shows SDR. Off: the HUD's exact colours."));
+        }
+        SliderIn(TI("Exposure"), s.hdr_exposure, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        SliderIn(TI("Highlights start"), s.hdr_highlight_start, 0.1f, 0.95f, "%.2f");
+        Hint(T("Where HDR brightness begins: higher keeps sunlit surfaces at paper white; only "
+               "bright highlights go brighter."));
+        SliderIn(TI("Saturation"), s.hdr_saturation, 0.0f, 2.0f, "%.2f");
+        SliderIn(TI("Highlight saturation"), s.hdr_highlight_saturation, 0.0f, 2.0f, "%.2f");
+        SliderIn(TI("Contrast"), s.hdr_contrast, 0.5f, 2.0f, "%.2f");
+        SliderIn(TI("Colour restoration"), s.hdr_chrominance, 0.0f, 1.0f, "%.2f");
+        SliderIn(TI("Blowout restoration"), s.hdr_blowout, 0.0f, 1.0f, "%.2f");
+        SliderIn(TI("Hue correction"), s.hdr_hue_correction, 0.0f, 1.0f, "%.2f");
+        Checkbox(TI("Per-channel tone mapping"), s.hdr_per_channel);
+        Hint(T("The tone mapping of the game's scene into HDR (RenoDX). Colour restoration brings "
+               "back the colour strength of the game's own grading (per-channel chrominance "
+               "correction); blowout restoration keeps colour in highlights that would turn white; "
+               "hue correction keeps the game's hues. Per-channel tone mapping: each colour channel "
+               "on its own, as the game's curve does (richer colours, bright ones shift towards "
+               "white); off: by brightness."));
+    }
+    ImGui::TextUnformatted(T("The game's picture in HDR (menus, videos, no scene HDR)"));
+    SliderIn(TI("Gamma"), s.hdr_sdr_gamma, 1.8f, 2.8f, "%.2f");
+    SliderIn(TI("Picture saturation"), s.hdr_sdr_saturation, 0.0f, 2.0f, "%.2f");
+    Hint(T("Gamma: 2.2 is the display the games were made for; 2.4 gives deeper shadows. "
+           "Saturation: 1.00 is the game's own colour; above it colours get stronger, using the "
+           "wider colour range of HDR."));
+    // Both outputs (the last step before the HDR10 signal), so outside the two groups.
+    SliderIn(TI("Gamut expansion"), s.hdr_gamut_expansion, 0.0f, 2.0f, "%.2f");
+    Hint(T("Spreads colours into the HDR colour range, like wide-gamut monitors show SDR; 0 = "
+           "accurate colours, 1 = as a P3 monitor, 2 = the full HDR range. Brightness stays the "
+           "same."));
+    if (ImGui::Button(TI("Reset HDR settings"))) {
+        BbSettings::ResetHdr();
+        dirty = true;
+    }
+    const BbHdr::Tuning t = BbHdr::Current();
+    const std::string values = fmt::format(
+        "paper {:.0f}, peak {:.0f} | exposure {:.2f}, start {:.2f}, saturation {:.2f}, highlights "
+        "{:.2f}, contrast {:.2f}, colour {:.2f}, blowout {:.2f}, hue {:.2f}, per-channel {} | "
+        "gamma {:.2f}, picture saturation {:.2f} | gamut expansion {:.2f}",
+        t.paper_white, t.peak_nits, t.exposure, t.highlight_start, t.saturation,
+        t.highlight_saturation, t.contrast, t.chrominance, t.blowout, t.hue_correction,
+        t.per_channel != 0.0f ? "on" : "off", t.sdr_gamma, t.sdr_saturation, t.gamut_expansion);
+    TextGrey(values.c_str());
 }
 
 // A grey note that wraps at the window's edge (TextDisabled does not wrap: translated notes ran off the window).
@@ -1207,7 +1316,9 @@ void Menu() {
            "input latency; menus and cutscene videos are not generated. The launcher's Frame rate "
            "limit counts generated frames."));
 
+    HdrSection(s);
     // The mouse's settings are on the Controls tab (saved in input.ini there).
+
     ImGui::SeparatorText(T("Other"));
     Checkbox(TI("FPS counter in the corner"), s.show_fps);
     ImGui::BeginDisabled(!s.show_fps);

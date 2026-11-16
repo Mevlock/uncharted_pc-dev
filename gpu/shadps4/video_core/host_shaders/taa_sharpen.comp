@@ -18,8 +18,16 @@ layout(push_constant) uniform Params { float strength; };
 #define FSR_RCAS_F 1
 #define FSR_RCAS_DENOISE 1
 float color_scale;
+// strength < 0: the copy was blitted from an sRGB-format image, which linearises it; the target is
+// written through a UNORM view (encoded values), so the colours are encoded again here and the
+// pass works on encoded values like it does for a UNORM source. (Without this the picture came out
+// with the sRGB curve applied twice: very dark.)
 vec3 loadColor(ivec2 p) {
-    return max(imageLoad(resolved_img, clamp(p, ivec2(0), imageSize(resolved_img)-1)).rgb, vec3(0));
+    vec3 c = max(imageLoad(resolved_img, clamp(p, ivec2(0), imageSize(resolved_img)-1)).rgb, vec3(0));
+    if (strength < 0.0) {
+        c = mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+    }
+    return c;
 }
 AF4 FsrRcasLoadF(ASU2 p) { return vec4(loadColor(p) / color_scale, 1); }
 void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
@@ -27,7 +35,7 @@ void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(p, imageSize(result_img)))) return;
-    float amount = clamp(strength, 0.0, 2.0);
+    float amount = clamp(abs(strength), 0.0, 2.0);
     vec3 center = loadColor(p);
     if (amount == 0.0) {
         imageStore(result_img, p, vec4(center, 1));

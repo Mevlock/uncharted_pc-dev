@@ -12,6 +12,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#include "bbport_hdr.h"
 #include "bbport_overlay.h"
 #include "bbport_thumbnail.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
@@ -210,7 +211,19 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
     // bbport: frames are composed in RGBA8 (what frame generation reads and writes) and
     // blitted into the swapchain's format.
-    pp_pass.Create(device, FrameGenerator::ColorFormat);
+    // HDR10 output (BbHdr, the swapchain chose an HDR10 format at start): the frames hold the
+    // HDR10 signal in A2B10G10R10 (an 8-bit frame would band), the post process pass encodes it
+    // and the overlay is blended on at paper white. Nothing of it is made with HDR off.
+    own_hdr = BbHdr::Output() && swapchain.GetHDR();
+    if (own_hdr) {
+        FrameGenerator::ColorFormat = vk::Format::eA2B10G10R10UnormPack32;
+        pp_settings.hdr = HostPasses::PostProcessingPass::HdrEncode;
+        pp_settings.paper_nits = BbHdr::PaperWhite(); // then each frame (PrepareFrame)
+        pp_settings.peak_nits = BbHdr::PeakNits();
+        pp_pass.Create(device, FrameGenerator::ColorFormat, swapchain.GetHdrFormat());
+    } else {
+        pp_pass.Create(device, FrameGenerator::ColorFormat);
+    }
     BbOverlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
 
     frame_generator = std::make_unique<FrameGenerator>(instance, draw_scheduler);
@@ -228,6 +241,10 @@ Presenter::~Presenter() {
     Check(flip_scheduler.CommandBuffer().reset());
 
     const vk::Device device = instance.GetDevice();
+    if (overlay_image) {
+        device.destroyImageView(overlay_view);
+        vmaDestroyImage(instance.GetAllocator(), overlay_image, overlay_allocation);
+    }
     for (auto& frame : present_frames) {
         DestroyGenerated(&frame);
         vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
@@ -296,6 +313,75 @@ void Presenter::EnsureGenerated(Frame* frame) {
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         }));
     }
+}
+
+void Presenter::RenderOverlayHdr(vk::CommandBuffer cmdbuf, vk::Extent2D extent) {
+    const vk::Device device = instance.GetDevice();
+    const vk::Format format = swapchain.GetSurfaceFormat().format; // the overlay's own (SDR)
+    if (!overlay_image || overlay_extent != extent) {
+        if (overlay_image) {
+            // The previous image may still be read by a frame in flight. vkDeviceWaitIdle needs the
+            // queues externally synchronized: under the submit lock (not held here).
+            std::scoped_lock submit_lock{Scheduler::submit_mutex};
+            Check(device.waitIdle());
+            device.destroyImageView(overlay_view);
+            vmaDestroyImage(instance.GetAllocator(), overlay_image, overlay_allocation);
+            overlay_image = vk::Image{};
+        }
+        const VkImageCreateInfo image_info = static_cast<VkImageCreateInfo>(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = format,
+            .extent = {extent.width, extent.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .usage = vk::ImageUsageFlagBits::eColorAttachment |
+                     vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+        });
+        const VmaAllocationCreateInfo alloc_info = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkImage image{};
+        if (vmaCreateImage(instance.GetAllocator(), &image_info, &alloc_info, &image,
+                           &overlay_allocation, nullptr) != VK_SUCCESS) {
+            return;
+        }
+        overlay_image = vk::Image{image};
+        SetObjectName(device, overlay_image, "HDR overlay image");
+        overlay_view = Check<"create HDR overlay view">(device.createImageView({
+            .image = overlay_image,
+            .viewType = vk::ImageViewType::e2D,
+            .format = format,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        }));
+        overlay_extent = extent;
+    }
+    const vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    const auto barrier = [&](vk::ImageLayout from, vk::ImageLayout to, vk::AccessFlags src,
+                             vk::AccessFlags dst) {
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                               vk::PipelineStageFlagBits::eAllCommands, {}, {}, {},
+                               vk::ImageMemoryBarrier{
+                                   .srcAccessMask = src,
+                                   .dstAccessMask = dst,
+                                   .oldLayout = from,
+                                   .newLayout = to,
+                                   .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                   .image = overlay_image,
+                                   .subresourceRange = range,
+                               });
+    };
+    barrier(vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal, {},
+            vk::AccessFlagBits::eTransferWrite);
+    cmdbuf.clearColorImage(overlay_image, vk::ImageLayout::eTransferDstOptimal,
+                           vk::ClearColorValue{std::array<float, 4>{0.0f, 0.0f, 0.0f, 0.0f}},
+                           range);
+    barrier(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eColorAttachmentOptimal,
+            vk::AccessFlagBits::eTransferWrite,
+            vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eColorAttachmentWrite);
+    BbOverlay::Render(cmdbuf, overlay_view, extent);
+    barrier(vk::ImageLayout::eColorAttachmentOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+            vk::AccessFlagBits::eColorAttachmentWrite, vk::AccessFlagBits::eShaderRead);
+    pp_pass.RenderOverlay(cmdbuf, overlay_view, swapchain.ImageView(), extent, pp_settings);
 }
 
 bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const {
@@ -667,14 +753,20 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     vk::ImageView image_view{};
     vk::Extent2D image_size{};
+    // bbport (scene HDR): the upscaler's HDR composite (RGBA16F, linear, read as it is).
+    const bool float_display = upscaled && display.format == vk::Format::eR16G16B16A16Sfloat;
     if (upscaled) {
         const auto device = instance.GetDevice();
         image_view = Check(device.createImageView({
             .image = display.image,
             .viewType = vk::ImageViewType::e2D,
-            .format = view_info.format,
+            .format = float_display ? display.format : view_info.format,
+            // The HDR composite's alpha is the HUD's share of the pixel (the vivid HUD): read as
+            // it is; forced to one it made the whole picture count as HUD.
             .components = {vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eIdentity,
-                           vk::ComponentSwizzle::eIdentity, vk::ComponentSwizzle::eOne},
+                           vk::ComponentSwizzle::eIdentity,
+                           float_display ? vk::ComponentSwizzle::eIdentity
+                                         : vk::ComponentSwizzle::eOne},
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         }));
         draw_scheduler.DeferOperation([device, image_view] { device.destroyImageView(image_view); });
@@ -715,8 +807,23 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                          ? 16.0f / 9.0f
                          : static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
+    // FSR's HDR sampling is for a guest PQ picture; the HDR10 encode reads the game's own one.
+    const bool encode_hdr = pp_settings.hdr == HostPasses::PostProcessingPass::HdrEncode;
+    // HDR10 output: the menu's HDR settings, live. The scene HDR composite keeps gamma 2.2 and its
+    // own colours (its domain: hdr_scene.comp; the tone pass replacement has its own saturation).
+    if (encode_hdr) {
+        const BbHdr::Tuning tuning = BbHdr::Current();
+        pp_settings.paper_nits = tuning.paper_white;
+        pp_settings.peak_nits = tuning.peak_nits;
+        pp_settings.sdr_gamma = float_display ? 2.2f : tuning.sdr_gamma;
+        pp_settings.sdr_saturation = float_display ? 1.0f : tuning.sdr_saturation;
+        // Gamut expansion: the last step of both (the overlay keeps accurate colours).
+        pp_settings.gamut_expansion = tuning.gamut_expansion;
+        // Vivid HUD: only the scene HDR composite carries the HUD's share in its alpha.
+        pp_settings.hud_expansion = float_display ? tuning.hud_vivid : 0.0f;
+    }
     image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
-                                 fsr_settings, frame->is_hdr);
+                                 fsr_settings, frame->is_hdr && !encode_hdr);
 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
@@ -774,14 +881,21 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     }
     // bbport: an upscaled frame (the upscaler's output-size image) is generated from too: its
     // picture before the UI is captured at its own size (TemporalUpscaler::RunScaledVelocity).
-    if (frame_generator->Wanted() && !frame->is_hdr && !fast_game) {
+    // bbport: with the port's HDR10 output the frames are A2B10G10R10 (FrameGenerator::ColorFormat).
+    if (frame_generator->Wanted() && (!frame->is_hdr || own_hdr) && !fast_game) {
         EnsureGenerated(frame);
         // The picture before the UI, composed like the frame (equal outside the UI).
         vk::Image hudless{};
         vk::ImageView hudless_view{};
         vk::Extent2D hudless_size{};
-        if (const auto source = frame_generator->Hudless(view_info.format, hudless_size);
-            source && hudless_size == image_size) {
+        // Scene HDR: the HDR scene before the UI (the upscaler's, the frame equals it there).
+        vk::ImageView source = display.hdr_hudless;
+        if (float_display && source) {
+            hudless_size = image_size;
+        } else {
+            source = frame_generator->Hudless(view_info.format, hudless_size);
+        }
+        if (source && hudless_size == image_size) {
             if (hudless_frame.width != frame->width || hudless_frame.height != frame->height ||
                 !hudless_frame.image) {
                 // The previous frame's generation may still read it on the GPU (the switch from
@@ -804,7 +918,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_target});
             const auto scaled = fsr_pass.Render(cmdbuf, source, hudless_size,
                                                 {frame->width, frame->height}, fsr_settings,
-                                                frame->is_hdr);
+                                                frame->is_hdr && !encode_hdr);
             pp_pass.Render(cmdbuf, scaled, hudless_size, hudless_frame, pp_settings);
             hudless = hudless_frame.image;
             hudless_view = hudless_frame.image_view;
@@ -1273,6 +1387,9 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
         }
         // bbport: the settings menu / FPS counter over the frame, at display resolution.
         BbOverlay::NotePresent();
+        if (own_hdr) {
+            BbHdr::PollTuneFile(); // the HDR tune file, at most a stat every 250 ms
+        }
         const bool overlay = BbOverlay::Visible();
         const std::array post_barriers{
             vk::ImageMemoryBarrier{
@@ -1303,7 +1420,11 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
                                vk::PipelineStageFlagBits::eAllCommands,
                                vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
         if (overlay) {
-            BbOverlay::Render(cmdbuf, swapchain.ImageView(), extent);
+            if (own_hdr) {
+                RenderOverlayHdr(cmdbuf, extent);
+            } else {
+                BbOverlay::Render(cmdbuf, swapchain.ImageView(), extent);
+            }
             const vk::ImageMemoryBarrier to_present{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
                 .dstAccessMask = vk::AccessFlagBits::eNone,
@@ -1358,12 +1479,11 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     const auto t1 = Clock::now();
 
     // Present to swapchain.
+    bool presented = true;
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
         const auto t2 = Clock::now();
-        if (!swapchain.Present(latency_id) && window.GetWidth() != 0 && window.GetHeight() != 0) {
-            swapchain.Recreate(window.GetWidth(), window.GetHeight());
-        }
+        presented = swapchain.Present(latency_id);
         const auto t3 = Clock::now();
         if (slow_ms > 0 && ms(t0, t3) > slow_ms) {
             char gpu_done[32] = "(not waited)";
@@ -1376,6 +1496,10 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
                         ms(t1, t2), swapchain.last_async_ms, swapchain.last_queue_lock_ms,
                         swapchain.last_present_call_ms);
         }
+    }
+    // Recreate (its Destroy) waits for the device under the submit lock: after releasing it.
+    if (!presented && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
     return true;
 }

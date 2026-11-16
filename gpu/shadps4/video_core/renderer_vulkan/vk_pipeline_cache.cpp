@@ -40,6 +40,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "bbport_exposure_fix.h"
 #include "bbport_focus_fix.h"
 #include "bbport_nan_guard.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
@@ -1296,7 +1297,13 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         for (s32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS && !skip_cb_binding; ++cb) {
             bound += (regs.color_buffers[cb] && regs.color_target_mask.GetMask(cb)) ? 1 : 0;
         }
-        motion_possible = Shader::MotionVectors::positions_address != 0 && bound >= 5 &&
+        // Uncharted (BilalReloaded's #84): its G-buffer passes draw one target with the scene
+        // depth and write the stencil; the rasterizer picks the character draws.
+        const bool uncharted_gbuffer = Shader::MotionVectors::characters && bound >= 1 &&
+                                       regs.depth_control.stencil_enable &&
+                                       regs.depth_control.depth_write_enable;
+        motion_possible = Shader::MotionVectors::positions_address != 0 &&
+                          (bound >= 5 || uncharted_gbuffer) &&
                           !regs.color_buffers[Shader::MotionVectors::Output] &&
                           regs.depth_buffer.DepthValid() &&
                           regs.depth_buffer.NumSamples() == 1 && !regs.IsClipDisabled() &&
@@ -1336,7 +1343,9 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     }
     if (motion_possible) {
         const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
-        if (vs) {
+        if (vs && Shader::MotionVectors::characters) {
+            sel.motion = true; // Uncharted: chosen per draw (GPU-written vertices)
+        } else if (vs) {
             // Shaders with a bone palette (motion_history.h). Small skeletons (weapons,
             // props) also include static world pieces: the rasterizer gives those
             // history only while their constants change.
@@ -1785,7 +1794,14 @@ vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
     auto translate_timer = std::make_optional<SpanTimer>(g_bb_translate_ns);
     std::vector<u32> scaled_code;
     std::span<const u32> program_code = code;
-    if (BbMovieShaderScaled(info.pgm_hash)) {
+    if (BbExposureFix::ExposureShader(info.pgm_hash)) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::printf("Exposure metering fix: on (BB_EXPOSURE_FIX): the two metering shaders are "
+                        "translated with the whole-row column step\n");
+        }
+    } else if (BbMovieShaderScaled(info.pgm_hash)) {
         scaled_code = ScaleMovieShader(code);
         program_code = scaled_code;
     }
@@ -1850,7 +1866,14 @@ static bool MovieShaderSize(u32* width, u32* height) {
 }
 
 bool BbMovieShaderScaled(u64 pgm_hash) {
-    return u32(pgm_hash) == 0xc85d9816u && MovieShaderSize(nullptr, nullptr);
+    // (Also the exposure metering shaders of bbport_exposure_fix.h: translated with the fix, they
+    // are neither loaded from nor saved to the shader cache either.)
+    return (u32(pgm_hash) == 0xc85d9816u && MovieShaderSize(nullptr, nullptr)) ||
+           BbExposureFix::ExposureShader(pgm_hash);
+}
+
+bool BbMovieShaderSize(u64 pgm_hash, u32& width, u32& height) {
+    return u32(pgm_hash) == 0xc85d9816u && MovieShaderSize(&width, &height);
 }
 
 static std::vector<u32> ScaleMovieShader(std::span<const u32> code) {

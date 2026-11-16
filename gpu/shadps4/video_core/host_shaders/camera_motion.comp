@@ -25,7 +25,8 @@ layout(push_constant) uniform Constants {
     vec2 jitter;       // current viewport shift in render pixels (x right, y down)
     vec2 previous_jitter;
     uint mode;         // motion: 1 = object motion vectors available, 2 = Uncharted's velocity
-                       // pass camera, 3 = none (zero); debug: 0 motion, 1 raw depth,
+                       // pass camera, 3 = none (zero), 4 = 2 with the object motion
+                       // (characters); debug: 0 motion, 1 raw depth,
                        // 2 view z / 50, 3 reprojected previous frame, 4 |difference|
 };
 
@@ -85,19 +86,40 @@ void main() {
     imageStore(color_img, pixel, vec4(mix(current.rgb, mv_color, 0.75), current.a));
 #else
     vec2 result = motion;
-    if (mode == 2) {
+    if (mode == 2 || mode == 4) {
         // Uncharted's camera velocity pass (CameraMotion::OnVelocityConstants): reproject holds
         // the view to previous clip x, y, w rows; proj the view from uv; prev_proj.xy the view
         // z from depth.
+        // Projection jitter (prototype, prev_proj.w = 1): the pass's view-from-uv constants are
+        // unjittered (scene_uv as with the viewport jitter), but its previous clip carries the
+        // previous frame's jitter, taken out here; the characters' vectors (both clip positions
+        // jittered) lose the difference of the two.
+        const bool in_projection = prev_proj.w > 0.5;
+        const vec2 base_uv = scene_uv;
+        const vec2 camera_fix = in_projection ? -previous_jitter : vec2(0.0);
+        const vec2 jitter_change = in_projection ? jitter - previous_jitter : vec2(0.0);
         const float view_z = prev_proj.y / (depth - prev_proj.x);
-        const vec4 view_pos = vec4(view_z * (proj.x * scene_uv.x + proj.z),
-                                   view_z * (proj.y * scene_uv.y + proj.w), view_z, 1.0);
+        const vec4 view_pos = vec4(view_z * (proj.x * base_uv.x + proj.z),
+                                   view_z * (proj.y * base_uv.y + proj.w), view_z, 1.0);
         const vec3 clip = vec3(dot(reproject[0], view_pos), dot(reproject[1], view_pos),
                                dot(reproject[2], view_pos));
         const vec2 previous_uv = vec2(0.5 * clip.x / clip.z + 0.5, 0.5 - 0.5 * clip.y / clip.z);
-        result = (previous_uv - scene_uv) * size;
+        result = (previous_uv - base_uv) * size + camera_fix;
         if (any(isnan(result)) || any(isinf(result))) {
             result = vec2(0.0);
+        }
+        // bbport (from BilalReloaded's Uncharted port, #84): characters' own motion from their
+        // vertices (previous minus current clip position, pixels, b = valid, a = the depth it was
+        // drawn at). A later draw over the pixel leaves another depth: then the camera's motion
+        // of that surface stays.
+        if (mode == 4 && depth < 1.0 && all(lessThan(pixel, textureSize(object_tex, 0)))) {
+            const vec4 object_motion = texelFetch(object_tex, pixel, 0);
+            const float object_z = prev_proj.y / (object_motion.a - prev_proj.x);
+            if (object_motion.b > 0.99 && !any(isnan(object_motion.rg)) &&
+                !any(isinf(object_motion.rg)) &&
+                abs(object_z - view_z) <= 0.01 * abs(view_z) + 1e-3) {
+                result = object_motion.rg + jitter_change;
+            }
         }
         // bbport: previous_uv - scene_uv cancels near 0.5: float rounding left +-0.0002 px that
         // alternated column by column with the camera still. DLSS (transformer) drew that field as

@@ -6,6 +6,7 @@
 #pragma once
 
 #include <atomic>
+#include <string>
 
 namespace BbSettings {
 
@@ -101,6 +102,39 @@ struct Values {
     std::atomic<int> dlssg_max_multiplier{1};
     std::atomic<const char*> frame_gen_problem{nullptr};
 
+    /// HDR10 output (BbHdr, bbport_hdr.h), live from the menu's HDR section. Paper white and peak
+    /// start from the launcher (BB_HDR_PAPER_WHITE / BB_HDR_PEAK_NITS) when it sets them. Scene
+    /// HDR (the tone pass replacement, RenoDX): exposure, saturation, highlight saturation,
+    /// contrast, colour restoration (per-channel chrominance correction), blowout restoration,
+    /// hue correction, per-channel tone mapping, highlights start (the SDR brightness above which
+    /// the scene's extended highlights take over; 0 = the earlier ramp, from the file or the
+    /// environment only). The game's SDR picture in HDR10: decode gamma and saturation (Oklab
+    /// chroma). Gamut expansion (everything): the colours spread towards a wider gamut.
+    std::atomic<float> hdr_paper_white{203.0f};
+    std::atomic<float> hdr_peak_nits{1000.0f};
+    std::atomic<float> hdr_exposure{1.0f};
+    std::atomic<float> hdr_saturation{1.1f};
+    std::atomic<float> hdr_highlight_saturation{1.0f};
+    std::atomic<float> hdr_contrast{1.0f};
+    std::atomic<float> hdr_chrominance{1.0f};
+    std::atomic<float> hdr_blowout{0.0f};
+    std::atomic<float> hdr_hue_correction{1.0f};
+    std::atomic<bool> hdr_per_channel{false};
+    std::atomic<float> hdr_highlight_start{0.6f};
+    /// Scene tone mapping (BbHdr::Tuning::scene_mode): 0 RenoDX, 1 extended game curve, 2 SDR + highlights.
+    std::atomic<int> hdr_scene_mode{0};
+    std::atomic<float> hdr_knee{0.5f};
+    /// Mode 2: the share of the scene's highlight range shown (in stops); 1 all of it.
+    std::atomic<float> hdr_strength{1.0f};
+    /// The HUD in wider colours (as a P3 screen shows SDR); scene HDR frames only.
+    std::atomic<bool> hdr_hud_vivid{false};
+    /// SDR|HDR compare: share of the screen (from the left) showing the SDR picture; 0 off.
+    std::atomic<float> hdr_split{0.0f};
+    std::atomic<float> hdr_sdr_gamma{2.2f};
+    std::atomic<float> hdr_sdr_saturation{1.1f};
+    /// Gamut expansion (both outputs): 0 accurate, 1 as Display P3, 2 as Rec. 2020.
+    std::atomic<float> hdr_gamut_expansion{0.0f};
+
     /// Startup settings for the explicit BB_RENDER_RES compatibility patch only.
     int startup_preset = NativeAA;
     int startup_upscaler = UpscalerFsr3;
@@ -109,6 +143,9 @@ struct Values {
     int startup_model_lod = 0;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;
+    /// The HDR section's Reset: paper white and peak as the game started (the launcher's).
+    float startup_hdr_paper_white = 203.0f;
+    float startup_hdr_peak_nits = 1000.0f;
 };
 
 Values& Get();
@@ -127,6 +164,12 @@ int RenderPreset();
 bool ResolutionNeedsRestart();
 /// Writes the file (menu changes).
 void Save();
+/// The HDR section's defaults (the menu's Reset); paper white and peak as at start.
+void ResetHdr();
+/// One of the HDR section's bbport.ini keys (hdr_*), set as the menu's slider would (clamped to
+/// its range): the HDR tune file (BbHdr::PollTuneFile). False for any other key; `applied` gets
+/// "key=value" when the value changed, else stays empty.
+bool SetHdrKey(const std::string& key, const std::string& value, std::string& applied);
 
 /// Render resolution divisor of a preset (1.0 native, 1.5 quality, ...).
 float PresetScale(int preset);
