@@ -1,12 +1,19 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <shared_mutex>
 #include <boost/container/small_vector.hpp>
 
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+
+namespace Vulkan {
+/// bbport: held shared while a pipeline is created in a pipeline cache, alone while the driver's cache data is read
+/// (vk_pipeline_cache.cpp).
+std::shared_mutex& PipelineCacheUse();
+} // namespace Vulkan
 
 namespace Vulkan {
 
@@ -109,8 +116,10 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .stage = shader_ci,
         .layout = *pipeline_layout,
     };
+    std::shared_lock cache_use{PipelineCacheUse()};
     auto [pipeline_result, pipe] =
         instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
+    cache_use.unlock();
     // bbport: as for graphics pipelines, a driver failure skips its dispatches. From SuperMedo's
     // ab12fa37, via drakolordx7's community fork.
     if (pipeline_result != vk::Result::eSuccess) {

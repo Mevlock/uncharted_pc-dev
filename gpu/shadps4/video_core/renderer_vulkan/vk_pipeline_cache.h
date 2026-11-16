@@ -138,6 +138,9 @@ struct PreparedDraw;
 /// bbport (shader variant list): one line of a variant list (vk_pipeline_serialization.cpp).
 struct ListedVariant;
 
+/// bbport: held shared while a pipeline is created in a pipeline cache, alone while the driver's cache data is read.
+std::shared_mutex& PipelineCacheUse();
+
 class PipelineCache {
 public:
     explicit PipelineCache(const Instance& instance, Scheduler& scheduler,

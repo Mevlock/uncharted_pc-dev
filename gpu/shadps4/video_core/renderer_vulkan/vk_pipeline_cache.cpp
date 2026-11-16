@@ -670,8 +670,19 @@ void PipelineCache::PublishGraphics() {
     }
 }
 
+// bbport: vkGetPipelineCacheData is not called while a pipeline is being created in the cache (the creations hold
+// this shared, the read alone; creations do not wait for each other): the Vulkan spec asks no such ordering, but a
+// driver faulted in it while another thread added a pipeline (Intel's; found and fixed this way in GR2port,
+// GPL-2.0-or-later, commit 25bb2acc). Here the save (every 20 s and at the exit) reads it while the preload, the
+// draw-preparation workers and the GPU thread create pipelines.
+std::shared_mutex& PipelineCacheUse() {
+    static std::shared_mutex use;
+    return use;
+}
+
 size_t PipelineCache::DriverCacheSize() {
     size_t size = 0;
+    std::unique_lock use{PipelineCacheUse()};
     if (pipeline_cache && instance.GetDevice().getPipelineCacheData(*pipeline_cache, &size,
                                                                    nullptr) != vk::Result::eSuccess) {
         return 0;
@@ -686,7 +697,21 @@ void PipelineCache::SaveDriverCache() {
     }
     std::scoped_lock lock{driver_cache_mutex};
     driver_cache_dirty.store(0);
+    const auto wait_start = std::chrono::steady_clock::now();
+    std::unique_lock use{PipelineCacheUse()}; // no pipeline creation while the data is read (PipelineCacheUse)
+    const auto read_start = std::chrono::steady_clock::now();
     auto [result, data] = instance.GetDevice().getPipelineCacheData(*pipeline_cache);
+    use.unlock();
+    // The first saves: how long the creations were held (and how long the save waited for them).
+    static int timed = 0;
+    if (timed < 3) {
+        ++timed;
+        const auto done = std::chrono::steady_clock::now();
+        std::printf("Pipeline cache: the driver's cache data (%zu KiB) read in %.1f ms with pipeline creation held "
+                    "(%.1f ms waiting for the creations under way)\n", data.size() / 1024,
+                    std::chrono::duration<double, std::milli>(done - read_start).count(),
+                    std::chrono::duration<double, std::milli>(read_start - wait_start).count());
+    }
     if (result != vk::Result::eSuccess || data.empty()) {
         return;
     }

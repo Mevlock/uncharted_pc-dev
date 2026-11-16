@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <shared_mutex>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -22,6 +23,12 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+
+namespace Vulkan {
+/// bbport: held shared while a pipeline is created in a pipeline cache, alone while the driver's cache data is read
+/// (vk_pipeline_cache.cpp).
+std::shared_mutex& PipelineCacheUse();
+} // namespace Vulkan
 
 namespace Vulkan {
 
@@ -513,8 +520,10 @@ GraphicsPipeline::GraphicsPipeline(
         .layout = *pipeline_layout,
     };
 
+    std::shared_lock cache_use{PipelineCacheUse()};
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+    cache_use.unlock();
     // bbport: a driver that cannot build one pipeline (ErrorUnknown on some AMD drivers) stopped
     // the game here; the pipeline stays empty instead and the draws that use it are skipped.
     // From SuperMedo's ab12fa37, via drakolordx7's community fork.
@@ -567,7 +576,9 @@ GraphicsPipeline::GraphicsPipeline(
             hdr_info.pNext = &hdr_rendering_ci;
             hdr_info.pStages = hdr_stages.data();
             hdr_info.stageCount = u32(hdr_stages.size());
+            std::shared_lock hdr_cache_use{PipelineCacheUse()};
             auto [hdr_result, hdr_pipe] = device.createGraphicsPipelineUnique(pipeline_cache, hdr_info);
+            hdr_cache_use.unlock();
             if (hdr_result == vk::Result::eSuccess && hdr_pipe) {
                 hdr_pipeline = std::move(hdr_pipe);
                 SetObjectName(device, *hdr_pipeline, "Graphics Pipeline {} HDR", debug_str);
@@ -795,7 +806,9 @@ void GraphicsPipeline::BuildFromLibraries(
         info.flags |= vk::PipelineCreateFlagBits::eLibraryKHR;
         info.pDynamicState = &part_dynamic[p];
         info.layout = *layout;
+        std::shared_lock part_cache_use{PipelineCacheUse()};
         auto [result, library] = device.createGraphicsPipelineUnique(pipeline_cache, info);
+        part_cache_use.unlock();
         if (result != vk::Result::eSuccess) {
             LOG_ERROR(Render_Vulkan, "Pipeline library part {} of {} failed: {}", p, debug_str,
                       vk::to_string(result));
@@ -841,7 +854,9 @@ void GraphicsPipeline::BuildFromLibraries(
         .pNext = &link_info,
         .layout = *pipeline_layout,
     };
+    std::shared_lock link_cache_use{PipelineCacheUse()};
     auto [link_result, linked] = device.createGraphicsPipelineUnique(pipeline_cache, linked_info);
+    link_cache_use.unlock();
     if (link_result != vk::Result::eSuccess) {
         LOG_ERROR(Render_Vulkan, "Linking pipeline libraries of {} failed: {}", debug_str,
                   vk::to_string(link_result));
