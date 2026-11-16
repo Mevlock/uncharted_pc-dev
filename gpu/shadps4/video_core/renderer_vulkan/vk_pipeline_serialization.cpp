@@ -2051,6 +2051,18 @@ void PipelineCache::WarmUpThread() {
             }
         }
     }
+    // bbport: with a variant list, every shader the cache holds too, not only those the stored keys name: a listed
+    // variant no key names yet (a U3 cache had ~1,950 of them) was found "not in the cache" at every start, built
+    // again and its files written again, although they were on disk.
+    if (std::getenv("BB_VARIANT_SHIP")) {
+        for (const auto& name : db.ListBlobNames(Storage::BlobType::ShaderMeta)) {
+            char* end = nullptr;
+            const u64 hash = std::strtoull(name.c_str(), &end, 16);
+            if (end && *end == '\0' && hash) {
+                stage_hashes.push_back(hash);
+            }
+        }
+    }
     std::ranges::sort(stage_hashes);
     stage_hashes.erase(std::unique(stage_hashes.begin(), stage_hashes.end()), stage_hashes.end());
     std::vector<LoadedStage> stages(stage_hashes.size());
