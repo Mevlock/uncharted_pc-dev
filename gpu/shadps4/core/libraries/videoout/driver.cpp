@@ -480,9 +480,12 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 
 void VideoOutDriver::Flip(const Request& req) {
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
-    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
+    // bbport: the flip argument (the game's frame number) goes with the frame for the low latency
+    // mode's present marker; -1: a blank frame.
+    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr,
+                  flip_arg = req.index >= 0 ? req.flip_arg : s64{-1}] {
         presenter->SetHDR(hdr);
-        presenter->Present(frame);
+        presenter->Present(frame, false, true, flip_arg);
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);

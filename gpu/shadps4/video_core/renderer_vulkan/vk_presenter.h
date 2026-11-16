@@ -115,7 +115,9 @@ public:
 
     Frame* PrepareBlankFrame(bool present_thread);
 
-    void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
+    /// flip_arg: the game's flip argument of this frame (low latency mode; -1: none).
+    void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true,
+                 s64 flip_arg = -1);
     Frame* PrepareLastFrame();
 
 private:

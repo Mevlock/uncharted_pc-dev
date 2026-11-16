@@ -588,6 +588,14 @@ extern "C" void bbgpu_input_sample(void) {
     Vulkan::LowLatency::InputSample();
 }
 
+extern "C" void bbgpu_game_frame_source(int found) {
+    Vulkan::LowLatency::SetFrameSource(found != 0);
+}
+
+extern "C" void bbgpu_game_frame_start(uint64_t frame, uint64_t kicked) {
+    Vulkan::LowLatency::GameFrameStart(frame, kicked);
+}
+
 extern "C" void bbgpu_prepare_exit(void) {
     // The menu's Quit (or a switch to another game of the collection): the window still shows the game; its title
     // says how many shader files are left (the window thread keeps pumping: closing it then minimizes it, and a

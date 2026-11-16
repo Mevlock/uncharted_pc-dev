@@ -59,9 +59,14 @@ int bbgpu_preparation_screen(void);
 /* 1 once after the game's window came back from the background while it was in gameplay (BB_PAUSE_ON_FOCUS_LOST=1;
  * the game stood still meanwhile): runtime_pad.c opens the game's pause menu then. */
 int bbgpu_take_back_request(void);
-/* The game reads the controller: the frame start of the low latency mode (NVIDIA Reflex / AMD
- * Anti-Lag 2, BB_LOW_LATENCY), which may sleep there until the GPU is ready for the next frame. */
+/* The game reads the controller (counted for the low latency log, BB_REFLEX_LOG=1). */
 void bbgpu_input_sample(void);
+/* probe.c, low latency mode (NVIDIA Reflex / AMD Anti-Lag 2, BB_LOW_LATENCY): whether the game's frame start was
+ * found and hooked (once, after the code patches, before the game runs), and each frame start: the game's own frame
+ * number (g_frameState.m_frameCount) and KickJob's lastFrameNumber then (UINT64_MAX: not known). May sleep there
+ * until the GPU is ready for the next frame. */
+void bbgpu_game_frame_source(int found);
+void bbgpu_game_frame_start(uint64_t frame, uint64_t kicked);
 /* The shader cache's last writes, before the process ends without destructors (runtime_quit). */
 void bbgpu_prepare_exit(void);
 /* Button prompts (button_prompts.cpp), the device used last: 0 keyboard or mouse (pictures of the
