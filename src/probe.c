@@ -1329,6 +1329,7 @@ void runtime_patch_ultrawide(unsigned char *code, uint64_t size, uint64_t image_
 extern int runtime_ultrawide_fill;
 void runtime_patch_resolution(unsigned char *code, uint64_t size, uint64_t image_end);
 void runtime_patch_projection_jitter(unsigned char *code, uint64_t size);
+void runtime_reserve_projection_jitter(unsigned char *image, uint64_t size);
 static void patch_rdtsc(uint64_t image_size) {
 #ifndef _WIN32
     (void)image_size;
@@ -2624,6 +2625,8 @@ int main(int argc, char **argv) {
     if (!image) image = allocate(round_page(size) + isa_area);
 #ifdef _WIN32
     red_zone_reserve(image, size);
+    /* The projection jitter's stub page, near the image and below 2 GiB, also before the GPU starts. */
+    runtime_reserve_projection_jitter(image, size);
 #endif
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);

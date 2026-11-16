@@ -1311,7 +1311,69 @@ static uint8_t *pj_rel(uint8_t *c, const void *target) {
     memcpy(c, &rel, 4);
     return c + 4;
 }
+
+/* The stub page (8 KiB, executable): within rel32 of the whole image (the join sites jump to it, it jumps back) and
+ * wholly below 2 GiB (the phase step and the record address their tables with 32-bit absolute displacements). Taken
+ * by runtime_reserve_projection_jitter right after the image is mapped, before the GPU starts: a player's Radeon
+ * (RX 7800 XT, driver 2.0.416) had taken every 64 KiB step of the 1.8 GiB above the image by the time the patch ran
+ * (image at 0xb600000 and 0xbc00000), so the projection jitter was never installed there. */
+static uint8_t *pj_page;
+static char pj_page_why[160];
+#define PJ_PAGE 8192u
+#define PJ_LIMIT UINT64_C(0x7fff0000) /* the page's end stays below 2 GiB */
+
+/* Free / reserved / committed address space between the image's end and the 2 GiB limit (why no page was found). */
+static void pj_describe(uintptr_t from, char *out, size_t out_size) {
+    uint64_t free_bytes = 0, reserved = 0, committed = 0, largest_free = 0;
+    MEMORY_BASIC_INFORMATION mbi;
+    for (uintptr_t at = from; at < PJ_LIMIT && VirtualQuery((void *)at, &mbi, sizeof(mbi)) == sizeof(mbi);) {
+        const uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        const uint64_t n = (end > PJ_LIMIT ? PJ_LIMIT : end) - at;
+        if (mbi.State == MEM_FREE) { free_bytes += n; if (n > largest_free) largest_free = n; }
+        else if (mbi.State == MEM_RESERVE) reserved += n;
+        else committed += n;
+        if (end <= at) break;
+        at = end;
+    }
+    snprintf(out, out_size, "from %#llx to 2 GiB: %llu MiB reserved, %llu MiB in use, %llu MiB free (largest %llu KiB)",
+             (unsigned long long)from, (unsigned long long)(reserved >> 20), (unsigned long long)(committed >> 20),
+             (unsigned long long)(free_bytes >> 20), (unsigned long long)(largest_free >> 10));
+}
+
+/* BB_TEST_TAKE_NEAR_IMAGE (test only, off by default): takes every free 64 KiB block between the image and 2 GiB, as
+ * the Radeon driver had: "after" = once the page is reserved (the driver starting after it, as now), "before" = first
+ * (the order of 0.3.6.57 and before, where the page was looked for at patch time, after the GPU had started). */
+static void pj_take_near_image(uintptr_t from) {
+    uint64_t taken = 0;
+    MEMORY_BASIC_INFORMATION mbi;
+    for (uintptr_t at = (from + 0xffff) & ~(uintptr_t)0xffff; at < PJ_LIMIT && VirtualQuery((void *)at, &mbi, sizeof(mbi)) == sizeof(mbi);) {
+        const uintptr_t end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        if (mbi.State == MEM_FREE) {
+            const uintptr_t stop = end > PJ_LIMIT ? (uintptr_t)PJ_LIMIT : end;
+            if (stop > at && VirtualAlloc((void *)at, stop - at, MEM_RESERVE, PAGE_NOACCESS)) taken += stop - at;
+        }
+        if (end <= at) break;
+        at = (end + 0xffff) & ~(uintptr_t)0xffff;
+    }
+    printf("Test: BB_TEST_TAKE_NEAR_IMAGE: %llu MiB between the image and 2 GiB taken\n", (unsigned long long)(taken >> 20));
+}
 #endif
+
+void runtime_reserve_projection_jitter(unsigned char *image, uint64_t size) {
+#ifdef _WIN32
+    const char *env = getenv("BB_PROJECTION_JITTER");
+    if (env && env[0] == '0') return;
+    const char *take = getenv("BB_TEST_TAKE_NEAR_IMAGE");
+    const uintptr_t start = (uintptr_t)image, from = (start + size + 0xffff) & ~(uintptr_t)0xffff;
+    if (take && !strcmp(take, "before")) pj_take_near_image(from);
+    for (uintptr_t at = from; at + PJ_PAGE <= PJ_LIMIT && at + PJ_PAGE - start < UINT64_C(0x7ff00000) && !pj_page; at += 1u << 16)
+        pj_page = VirtualAlloc((void *)at, PJ_PAGE, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!pj_page) pj_describe(from, pj_page_why, sizeof(pj_page_why));
+    if (take && !strcmp(take, "after")) pj_take_near_image(from);
+#else
+    (void)image; (void)size;
+#endif
+}
 
 void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     /* On by default where it is known to work: a recognised game program on NVIDIA's driver (the only one it was
@@ -1352,13 +1414,17 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
                "jitter and its fixes as in 0.3.6.57\n");
         return;
     }
-    /* An executable page within rel32 of the code: the stubs, and the slot at +0x800. */
-    uint8_t *page = NULL;
-    const uintptr_t base = ((uintptr_t)code + size + 0xffff) & ~(uintptr_t)0xffff;
-    for (uintptr_t step = 0; step < (1800ull << 20) && !page; step += 1u << 16)
-        page = VirtualAlloc((void *)(base + step), 8192, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    /* The stubs, and the slot at +0x800: the page reserved when the image was mapped (runtime_reserve_projection_jitter),
+     * within rel32 of the code and below 2 GiB. */
+    uint8_t *page = pj_page;
     if (!page) {
-        printf("Projection jitter: no memory near the game code: the upscaler jitter and its fixes as in 0.3.6.57\n");
+        printf("Projection jitter: no free memory within reach of the game code below 2 GiB when the image was mapped "
+               "(%s): the upscaler jitter and its fixes as in 0.3.6.57\n", pj_page_why[0] ? pj_page_why : "not reserved");
+        return;
+    }
+    if ((uintptr_t)page + PJ_PAGE - (uintptr_t)code >= UINT64_C(0x7ff00000)) {
+        printf("Projection jitter: the page reserved at %p is out of rel32 reach of the code at %p: the upscaler jitter "
+               "and its fixes as in 0.3.6.57\n", (void *)page, (void *)code);
         return;
     }
     float *slot = (float *)(page + 0x800);
