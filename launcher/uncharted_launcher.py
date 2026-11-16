@@ -2937,19 +2937,24 @@ class Launcher:
                         except OSError:
                             pass
                     self.detect_controller()
-                    if self.exit_left:
-                        self.status.configure(text=_('{} prepared shader files were not saved: the next start '
-                                                     'prepares them again.').format(self.exit_left), fg=MUTED)
-                    elif prepared and code == 0 and not self.stopping:
-                        self.status.configure(text=_('Shaders prepared.'), fg=GOLD)
-                    elif prepared and self.stopping:
-                        self.status.configure(text=_('Preparation stopped; it continues next time.'), fg=MUTED)
-                    # It failed to start or crashed (not Stop, not closing the window): say why.
-                    elif not self.stopping and (code != 0 or not self.entered):
+                    def crashed():
                         reason = self.last_problem or _('see the Log page')
                         self.status.configure(text=_('The game stopped: {}').format(reason[:110]),
                                               fg='#e07a4f')
                         self.show('log')
+                    # It crashed (not Stop, not closing the window): say why, also with files left unsaved.
+                    if not self.stopping and code != 0:
+                        crashed()
+                    elif self.exit_left:
+                        self.status.configure(text=_('{} shader files were not saved; they are built again when '
+                                                     'needed.').format(self.exit_left), fg=MUTED)
+                    elif prepared and code == 0 and not self.stopping:
+                        self.status.configure(text=_('Shaders prepared.'), fg=GOLD)
+                    elif prepared and self.stopping:
+                        self.status.configure(text=_('Preparation stopped; it continues next time.'), fg=MUTED)
+                    # It failed to start (not Stop, not closing the window): say why.
+                    elif not self.stopping and not self.entered:
+                        crashed()
                 elif item.startswith('PREP '):
                     self.show_preparation(item)
                     self.prep_shown = True
@@ -2994,6 +2999,8 @@ class Launcher:
                             except (IndexError, ValueError):
                                 self.exit_left = 0
                     elif item.startswith('Switching to '):
+                        self.exit_left = 0   # the next game of the collection starts its own count
+                        self.prep_behind = False
                         self.status.configure(text=_('Starting the next game of the collection…'), fg=GOLD)
                     self.append(item)
         except queue.Empty:
