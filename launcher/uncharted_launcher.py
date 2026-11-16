@@ -2010,7 +2010,7 @@ class Launcher:
                  _('FSR 1 keeps edges sharp when the image is enlarged; bilinear is softer.'))
         self.row(f, _('Sharpening'), self.choice(f, 'sharpening', SHARPENING, 34),
                  _('AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).'))
-        self.section(f, _('HDR'))
+        self.section(f, _('HDR (experimental)'))
         self.row(f, _('HDR'), self.choice(f, 'hdr', HDR_MODES, 34),
                  _("HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). The games also get the brighter highlights of their own scenes with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below."))
         self.row(f, _('HDR tone mapping'), self.choice(f, 'hdr_tone', HDR_TONE_MODES, 34),
