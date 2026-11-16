@@ -51,10 +51,7 @@ extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (protot
 // stub's record (count, entries of 16 bytes, camera addresses) to find that clock.
 extern "C" float* runtime_projection_jitter_table;
 extern "C" volatile uint32_t* runtime_projection_jitter_phases;
-extern "C" volatile uint64_t* runtime_projection_jitter_marker;
-extern "C" volatile uint32_t* runtime_projection_jitter_count;
-extern "C" const uint8_t* runtime_projection_jitter_ring;
-extern "C" const uint64_t* runtime_projection_jitter_cameras;
+extern "C" const volatile uint32_t* runtime_projection_jitter_frame;
 extern "C" int runtime_uncharted_game;            // runtime_ultrawide.c: 1, 2, 3 once the game code is patched
 static int g_frames_since_cut = 100000; // bbport: frames since the last camera cut (dumps)
 void BbDrawLogNote(const char* text); // vk_rasterizer.cpp
@@ -723,26 +720,19 @@ bool TemporalUpscaler::OnFrameStart() {
         const float w = float(SceneWidth());
         const float h = float(SceneHeight());
         const bool on = Active() && BbSettings::Get().jitter && !BbToggle::Disabled(1u << 25);
-        // The phase is advanced on the game side when it can be: the whole cycle is published (the same
-        // Halton values, in the projection's units) and the frame clock named: the camera the game
-        // builds last in every frame (the one address at every change of value in the stub's record).
-        // The stub then steps through the cycle itself, once per game frame: no frame gets the jitter of
-        // the frame before and no phase is skipped, which happened a few times in 600 frames while this
-        // thread wrote one value per shown frame (the two threads are not in step). Not with the
-        // camera-speed fade (BB_JITTER_FADE: a value per frame) and not without the record.
+        // The phase is advanced on the game side when the game's frame number was found (runtime_ultrawide.c): the
+        // whole cycle is published (the same Halton values, in the projection's units) and every camera build takes
+        // table[frame % phases] by the frame it belongs to. This thread writes one value per shown frame only
+        // without it (BB_PROJECTION_JITTER_GAME=0, BB_JITTER_FADE=1, or no frame check found in the game program).
         bool game_side = false;
-        static const bool fade_env = [] {
-            const char* env = std::getenv("BB_JITTER_FADE");
-            return env && env[0] == '1';
-        }();
-        if (runtime_projection_jitter_table && runtime_projection_jitter_marker &&
-            runtime_projection_jitter_count && runtime_projection_jitter_ring &&
-            runtime_projection_jitter_cameras && !fade_env && w > 0.0f && h > 0.0f) {
+        if (runtime_projection_jitter_table && runtime_projection_jitter_frame && w > 0.0f && h > 0.0f) {
             const u32 n = std::clamp(phases, 1u, 128u);
             static u32 table_n = 0;
             static float table_w = 0.0f, table_h = 0.0f;
             static bool table_on = false;
-            if (n != table_n || w != table_w || h != table_h || on != table_on) {
+            // (cleared when the jitter was off: written again)
+            const bool cleared = on && runtime_projection_jitter_table[1] == 0.0f;
+            if (n != table_n || w != table_w || h != table_h || on != table_on || cleared) {
                 for (u32 k = 0; k < n; ++k) {
                     const float jx = Halton(k + 1, 2) - 0.5f, jy = Halton(k + 1, 3) - 0.5f;
                     runtime_projection_jitter_table[k * 4 + 0] = on ? 2.0f * jx / w : 0.0f;
@@ -756,60 +746,18 @@ bool TemporalUpscaler::OnFrameStart() {
                 table_h = h;
                 table_on = on;
             }
-            // The frame clock, from the newest 54 records: the camera address before every change of value.
-            const u32 count = *runtime_projection_jitter_count;
-            const auto value = [](u32 place) {
-                std::array<float, 2> v;
-                std::memcpy(v.data(), runtime_projection_jitter_ring + (place & 63u) * 16u, sizeof(v));
-                return v;
-            };
-            u64 clock = 0;
-            u32 changes = 0, others = 0;
-            if (count > 60) {
-                for (u32 back = 54; back >= 2; --back) {
-                    if (value(count - back) != value(count - back + 1)) {
-                        const u64 address = runtime_projection_jitter_cameras[(count - back) & 63u];
-                        ++changes;
-                        if (!clock) {
-                            clock = address;
-                        } else if (address != clock) {
-                            ++others;
-                        }
-                    }
-                }
-            }
-            static u32 quiet = 0; // frames without a change of value while the cycle has several
-            const u64 marker = *runtime_projection_jitter_marker;
-            if (!marker) {
-                if (on && n > 1 && changes >= 3 && others == 0 && clock) {
-                    *runtime_projection_jitter_marker = clock;
-                    quiet = 0;
-                    std::printf("Upscaler: projection jitter: the game side steps the phase, once per frame "
-                                "(frame clock: the camera at %#llx, %u phases; BB_PROJECTION_JITTER_GAME=0: "
-                                "one value per shown frame from here, as before)\n",
-                                static_cast<unsigned long long>(clock), n);
-                }
-            } else if (on && n > 1) {
-                // That camera is no longer built (another level's): back to values from here until
-                // the next one is found.
-                quiet = changes == 0 ? quiet + 1 : 0;
-                if (quiet > 8) {
-                    *runtime_projection_jitter_marker = 0;
-                    quiet = 0;
-                    std::printf("Upscaler: projection jitter: the frame clock camera is gone: one value per "
-                                "shown frame until the next is found\n");
-                }
-            }
-            game_side = *runtime_projection_jitter_marker != 0;
+            game_side = true;
         }
         if (!game_side) {
             runtime_projection_jitter_slot[0] = on && w > 0.0f ? 2.0f * jitter[0] / w : 0.0f;
             runtime_projection_jitter_slot[1] = on && h > 0.0f ? -2.0f * jitter[1] / h : 0.0f;
-            camera_motion.NoteAskedJitter({runtime_projection_jitter_slot[0], runtime_projection_jitter_slot[1]});
         }
     } else if (runtime_projection_jitter_slot) {
         // Patched, but this upscaler keeps the viewport jitter (BB_PROJECTION_JITTER_FSR3=0): none in the projection.
         runtime_projection_jitter_slot[0] = runtime_projection_jitter_slot[1] = 0.0f;
+        if (runtime_projection_jitter_table && runtime_projection_jitter_table[1] != 0.0f) {
+            std::memset(runtime_projection_jitter_table, 0, 128 * 4 * sizeof(float));
+        }
     }
     // bbport diagnosis (BB_JITTER_DIAG=1): jitter steps per shown frame, and the distinct jitter
     // positions the upscaler was given over 5 s.
@@ -2130,7 +2078,7 @@ void TemporalUpscaler::UseProjectionJitter(u32 w, u32 h) {
         return;
     }
     // The jitter this frame was drawn with, as the velocity pass's projection shows it.
-    const auto ndc = camera_motion.ProjectionJitter();
+    const auto ndc = camera_motion.GiveProjectionJitter();
     jitter = {ndc[0] * 0.5f * float(w), -ndc[1] * 0.5f * float(h)};
     static int noted = 0;
     if (noted < 3 && (jitter[0] != 0.0f || jitter[1] != 0.0f)) {

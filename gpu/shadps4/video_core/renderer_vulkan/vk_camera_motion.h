@@ -162,15 +162,16 @@ private:
     bool has_last_camera = false;
     std::atomic<bool> camera_cut{false};
     std::atomic<float> picture_speed{0.0f}; ///< last frame's picture motion, fraction of the width
-    bool projection_mode = false; ///< prototype: the jitter is in the game's projection
+    bool projection_mode = false; ///< the jitter is in the game's projection
     std::array<float, 2> projection_jitter{}, previous_projection_jitter{}; ///< NDC
-    std::array<std::array<float, 2>, 16> asked_jitter{}; ///< the values written to the game's slot
+    s64 projection_frame = -1;                ///< the game frame of the last velocity pass (by the flip argument)
+    std::array<float, 2> given_jitter{};      ///< the jitter last given to the upscaler, and its frame
+    s64 given_frame = -1;
+    u32 given_without_pass = 0;               ///< frames given the game side's value (no velocity pass)
     std::array<float, 2> planes{}; ///< the last velocity pass's depth constants (z = y / (depth - x))
     bool planes_known = false;
     std::array<float, 16> still_reference{}; ///< last frame's view-to-world rows and view-from-uv
     bool has_still_reference = false;
-    u32 asked_count = 0, projection_lag = 0;
-    bool projection_matched = false;
 
 public:
     /// How far the picture moved in the last frame (screen points at view z 5), in fractions
@@ -183,14 +184,13 @@ public:
     [[nodiscard]] std::array<float, 2> ProjectionJitter() const noexcept {
         return projection_jitter;
     }
+    /// The jitter for the upscaler, once per upscaled frame: this frame's from its velocity pass; for a frame without
+    /// that pass, the game side's value for the frame's number (the flip argument). Noted for the check.
+    std::array<float, 2> GiveProjectionJitter() noexcept;
     /// The motion dead zone in pixels (BB_MOTION_DEADZONE; 0.01, or 0 with projection jitter).
     static float MotionDeadzone();
     /// The jitter is in the game's projection for the upscaler in use (BB_PROJECTION_JITTER_FSR3=0: not FSR 3.1).
     static bool ProjectionJitterActive();
-    /// The jitter (NDC) just written to the game's slot, once per shown frame.
-    void NoteAskedJitter(std::array<float, 2> ndc) noexcept {
-        asked_jitter[asked_count++ % asked_jitter.size()] = ndc;
-    }
     /// DLSS rework 9: the velocity pass's camera as NGX Frame Generation takes it (unjittered
     /// projection, current to previous clip, camera vectors); false without that camera.
     bool RealCamera(Dlss::FrameGenCamera& out) const;

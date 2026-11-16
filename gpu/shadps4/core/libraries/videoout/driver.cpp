@@ -908,7 +908,14 @@ void WaitEopFlipsReached(u64 count, u32 timeout_ms) {
     });
 }
 
+// bbport: the flip argument of the last flip the GPU command thread reached (in order after its frame's commands): the
+// games pass their frame number (the projection jitter's game side, CameraMotion).
+std::atomic<s64> g_gpu_flip_arg{-1};
+
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
+    if (index != -1) {
+        g_gpu_flip_arg.store(flip_arg, std::memory_order_relaxed);
+    }
     Vulkan::Frame* frame;
     if (index == -1) {
         frame = presenter->PrepareBlankFrame(false);
