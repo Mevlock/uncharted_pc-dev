@@ -935,6 +935,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                 hudless, hudless_view, frame->width, frame->height, outputs);
         }
     }
+    g_frame_gen_shown.store(frame->generated_count, std::memory_order_relaxed);
     if (frame_dump) {
         // The presented image as the swapchain blit reads it (General after the pass), and
         // the generated frames shown before it.

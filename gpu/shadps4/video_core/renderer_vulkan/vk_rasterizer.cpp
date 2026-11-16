@@ -34,6 +34,7 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "bbport_hdr.h"
 #include "video_core/renderer_vulkan/vk_guest_sync_stats.h"
+#include "video_core/renderer_vulkan/vk_frame_generation.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "bbport_threads.h"
 #include <vulkan/vulkan_format_traits.hpp>
@@ -1106,6 +1107,125 @@ void Rasterizer::RecordHdrShadow(const GraphicsPipeline& pipeline, const RenderS
                    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderStorageRead |
                        vk::AccessFlagBits2::eTransferRead);
     upscaler->HdrShadowDrawn(which);
+}
+
+// bbport: NVIDIA's DLSS-FG Programming Guide (p.17): with frame generation the game's motion blur
+// is shortened by the multiplier (1/2 for 2x, 1/4 for 4x): a game frame then stands for 1/n of
+// the time it did, and at full length the generated frames interpolate smeared pixels with the
+// sharp geometry's motion vectors (faces smeared in fast turns, Native before the
+// post-processing, where no accumulation softens the blur any more). The blur (compute
+// 19367542, all three games; the setup pass before it only marks where things move) steps along
+// each pixel's motion v (pixels: its velocity times constants 4 and 5) for a length of
+// max(0, c12 |v|^2 + c13) / |v| pixels, at most 18, if above a threshold (constants 8, 15):
+// constants 12 and 13 times the factor make that length, and with it the steps, the factor
+// times as long; nothing else reads them. The dispatch binds a copy of its constants with the
+// two scaled (from the constant ring's copy, or guest memory as the buffer cache reads it),
+// laid out as bound (the same offset before them); the HDR shadow's run of it uses the same.
+// Frame generation off, paused (above ~165 FPS) or not generating: the game's own constants.
+// BB_FG_MOTION_BLUR_SCALE=0: the blur at full length with frame generation (comparison).
+__attribute__((target("sse4.1"))) static void StreamLoad(__m128i* out, __m128i* from, u32 blocks);
+void Rasterizer::ScaleMotionBlur(const Shader::Info& cs) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_FG_MOTION_BLUR_SCALE");
+        return !(env && env[0] == '0');
+    }();
+    const u32 generated = g_frame_gen_shown.load(std::memory_order_relaxed);
+    const u32 multiplier = enabled ? generated + 1 : 1;
+    static u32 told_multiplier = 1;
+    static int tells = 0;
+    if (multiplier != told_multiplier && tells < 12) {
+        ++tells;
+        told_multiplier = multiplier;
+        if (multiplier > 1) {
+            std::printf("Frame generation: the game's motion blur at 1/%u (NVIDIA's rule)\n",
+                        multiplier);
+        } else {
+            std::printf("Frame generation: the game's motion blur at full length (no frames "
+                        "generated)\n");
+        }
+        std::fflush(stdout);
+    }
+    if (!enabled && generated) {
+        static bool noted = false;
+        if (!noted) {
+            noted = true;
+            std::printf("Frame generation: the game's motion blur at full length "
+                        "(BB_FG_MOTION_BLUR_SCALE=0)\n");
+            std::fflush(stdout);
+        }
+    }
+    if (multiplier == 1) {
+        return;
+    }
+    const auto skip = [](const char* why) {
+        static int noted = 0;
+        if (noted++ < 3) {
+            std::printf("Frame generation: motion blur left at full length (%s)\n", why);
+            std::fflush(stdout);
+        }
+    };
+    if (cs.buffers.empty() || cs.buffers[0].IsSpecial() || cs.buffers[0].is_written) {
+        skip("other constant binding");
+        return;
+    }
+    vk::WriteDescriptorSet* write = nullptr;
+    for (auto& candidate : set_writes) {
+        if (candidate.dstBinding == 0 && candidate.descriptorCount == 1 &&
+            candidate.descriptorType == vk::DescriptorType::eStorageBuffer &&
+            candidate.pBufferInfo) {
+            write = &candidate;
+            break;
+        }
+    }
+    // Constants read: 4..15 (the blur), at the shader's offset into its binding.
+    constexpr u32 ScaledFirst = 12, ScaledLast = 13, MaxBytes = 1024;
+    const u32 adjust = push_data.buf_offsets[0];
+    std::array<u8, MaxBytes + 256> bytes{};
+    u32 size = 0;
+    if (const RingBinding* ring = num_ring_stages ? FindRingBinding(cs, 0) : nullptr) {
+        // The constant ring is write-combined memory: streaming loads.
+        size = std::min<u32>(ring->size, MaxBytes) & ~15u;
+        if (adjust == 0 && size >= 16 && (ring->offset & 15) == 0) {
+            StreamLoad(reinterpret_cast<__m128i*>(bytes.data()),
+                       reinterpret_cast<__m128i*>(constant_ring->Data(ring->offset)), size / 16);
+        } else {
+            size = 0;
+        }
+    } else {
+        const auto sharp = ComputeSharp(cs, 0);
+        size = u32(std::min<u64>(sharp.GetSize(), MaxBytes));
+        if (!sharp.base_address || size == 0 ||
+            buffer_cache.IsRegionGpuModified(sharp.base_address, size) ||
+            !runtime_memory_read_backing(sharp.base_address, bytes.data() + adjust, size)) {
+            size = 0;
+        } else {
+            size += adjust;
+        }
+    }
+    if (!write || size < adjust + (ScaledLast + 1) * 4) {
+        skip("constants not readable");
+        return;
+    }
+    const float factor = 1.0f / float(multiplier);
+    for (u32 k = ScaledFirst; k <= ScaledLast; ++k) {
+        float value;
+        std::memcpy(&value, bytes.data() + adjust + k * 4, 4);
+        value *= factor;
+        std::memcpy(bytes.data() + adjust + k * 4, &value, 4);
+    }
+    static int shown = 0;
+    if (shown++ < 2) {
+        float c12, c13;
+        std::memcpy(&c12, bytes.data() + adjust + 48, 4);
+        std::memcpy(&c13, bytes.data() + adjust + 52, 4);
+        std::printf("Frame generation: motion blur constants 12/13 now %g %g (x%g)\n", c12, c13,
+                    factor);
+        std::fflush(stdout);
+    }
+    auto& stream = buffer_cache.GetStreamBuffer();
+    const u64 offset = stream.Copy(bytes.data(), size, instance.StorageMinAlignment());
+    blur_scale_info = vk::DescriptorBufferInfo{stream.Handle(), offset, size};
+    write->pBufferInfo = &blur_scale_info;
 }
 
 // bbport (scene HDR): the game's motion blur between the tone pass and the pass after it, in all
@@ -5904,6 +6024,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     dispatch_timer.Section(0);
     if (!BindResources(pipeline)) {
         return;
+    }
+    if (u32(cs.pgm_hash) == 0x19367542u) [[unlikely]] {
+        ScaleMotionBlur(cs);
     }
     NoteSmallWrittenBuffers(cs);
     if (StaleCheckEnabled()) {

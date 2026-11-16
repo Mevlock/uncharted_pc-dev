@@ -11,6 +11,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <span>
@@ -27,6 +28,12 @@ namespace Vulkan {
 
 class Instance;
 class Scheduler;
+
+/// bbport: the frames generated before the last game frame shown (0: none, frame generation off,
+/// paused above ~165 FPS, or a frame without the scene). Set by the Presenter every game frame;
+/// the game's motion blur is shortened by the multiplier while frames are generated
+/// (Rasterizer::ScaleMotionBlur).
+inline std::atomic<u32> g_frame_gen_shown{0};
 
 class FrameGenerator {
 public:

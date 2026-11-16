@@ -296,6 +296,10 @@ private:
     /// bbport (scene HDR): a motion blur dispatch after the tone pass again on the HDR values.
     void RecordHdrBlurShadow(const ComputePipeline& pipeline, u64 cs_hash, u32 groups_x,
                              u32 groups_y, u32 groups_z);
+    /// bbport: while frame generation generates frames, the game's motion blur dispatch
+    /// (19367542) binds a copy of its constants with the blur length at 1/multiplier.
+    void ScaleMotionBlur(const Shader::Info& cs);
+    vk::DescriptorBufferInfo blur_scale_info{}; ///< that copy's binding (until the next dispatch)
     vk::Buffer hdr_settings_buffer{}; ///< the tone pass replacement's settings (BbHdr::Tuning), a ring
     VmaAllocation hdr_settings_allocation{};
     void* hdr_settings_mapped = nullptr;
