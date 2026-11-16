@@ -3980,6 +3980,15 @@ bool TemporalUpscaler::RecordXess(vk::CommandBuffer cmdbuf, const Xess::Resource
                    compute, vk::AccessFlagBits2::eShaderRead);
         // The jitter and motion vectors FSR 3 gets: render pixels, current to previous.
         const float sign = BbToggle::Disabled(1u << 26) ? -1.0f : 1.0f;
+        // Diagnosis (BB_XESS_JITTER=<x sign>,<y sign>, e.g. -1,1): the jitter's sign per axis.
+        static const std::array<float, 2> axis = [] {
+            std::array<float, 2> v{1.0f, 1.0f};
+            if (const char* env = std::getenv("BB_XESS_JITTER")) {
+                std::sscanf(env, "%f,%f", &v[0], &v[1]);
+                std::printf("XeSS: jitter signs %.0f, %.0f (BB_XESS_JITTER)\n", v[0], v[1]);
+            }
+            return v;
+        }();
         ok = xess->Evaluate(cmdbuf, {
             .color = color,
             .depth = depth,
@@ -3987,8 +3996,8 @@ bool TemporalUpscaler::RecordXess(vk::CommandBuffer cmdbuf, const Xess::Resource
                        vk::ImageAspectFlagBits::eColor, w, h},
             .output = {vk::Image(output_image), *output_view, vk::Format::eR16G16B16A16Sfloat,
                        vk::ImageAspectFlagBits::eColor, ow, oh},
-            .jitter_x = sign * jitter[0],
-            .jitter_y = sign * jitter[1],
+            .jitter_x = sign * axis[0] * jitter[0],
+            .jitter_y = sign * axis[1] * jitter[1],
             .reset = reset,
         });
         transition(vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageLayout::eGeneral, compute,

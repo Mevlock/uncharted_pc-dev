@@ -11,6 +11,8 @@
 
 #include "bbport_toggles.h"
 extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (prototype), or null
+extern "C" volatile uint32_t* runtime_projection_jitter_count; // the stub's record of applied jitters, or null
+extern "C" const uint8_t* runtime_projection_jitter_ring;
 #include "shader_recompiler/runtime_info.h"
 
 #include "video_core/host_shaders/camera_motion_comp.h"
@@ -203,6 +205,22 @@ float CameraMotion::Near() const noexcept {
 }
 
 std::array<std::array<float, 4>, 3> CameraMotion::TaaDepthParameters() const noexcept {
+    // Velocity mode (Uncharted): the camera of the game's velocity pass, in the form taa.comp reads
+    // (view x, y = ndc z / proj.xy; z = proj.w / (depth - proj.z); the previous view z = previous_z .
+    // (view, 1); the previous depth = prev_proj.z + prev_proj.w / z). The pass gives view = z (c0 u +
+    // c2, c1 v + c3, 1) and z = c9 / (depth - c8), its previous clip w row the previous view z.
+    // Before, TAA got the other mode's camera here (never filled in velocity mode): its test of the
+    // history's depth failed everywhere, no history was kept, and the picture was each jittered
+    // frame alone (U3 street still view: 60-frame std p50 1.19 with either jitter path).
+    if (velocity_mode && velocity_camera.valid) {
+        const auto& c = velocity_camera;
+        const float sx = c.uv_to_view[0] != 0.0f ? 2.0f / c.uv_to_view[0] : 1.0f;
+        const float sy = c.uv_to_view[1] != 0.0f ? -2.0f / c.uv_to_view[1] : 1.0f;
+        const std::array<float, 4> proj{sx, sy, c.depth_to_z[0], c.depth_to_z[1]};
+        return {proj, proj,
+                {c.to_previous_clip[8], c.to_previous_clip[9], c.to_previous_clip[10],
+                 c.to_previous_clip[11]}};
+    }
     const auto transform = Multiply(previous.view, current.inv_view);
     return {current.proj, previous.proj,
             {transform[8], transform[9], transform[10], transform[11]}};
@@ -399,6 +417,29 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 j = 0.0f; // not a sub-pixel shift: a cut, another kind of camera
             }
         }
+        // How often the jitter given to the upscaler for a frame (the one inferred from the asked
+        // values) was not the one the frame was drawn with, as read back a frame later: a line
+        // every 600 frames (20 lines). A wrong one makes that frame shimmer with any upscaler.
+        {
+            static u32 frames = 0, wrong = 0, unmatched = 0, lines = 0, lag_changes = 0, last_lag = 0;
+            const bool moving = last[0] != 0.0f || last[1] != 0.0f || projection_jitter[0] != 0.0f ||
+                                projection_jitter[1] != 0.0f;
+            if (moving) {
+                ++frames;
+                wrong += std::abs(last[0] - projection_jitter[0]) > 2e-6f ||
+                         std::abs(last[1] - projection_jitter[1]) > 2e-6f;
+                unmatched += !projection_matched;
+                lag_changes += projection_matched && projection_lag != last_lag;
+                last_lag = projection_matched ? projection_lag : last_lag;
+                if (frames % 600 == 0 && lines < 20) {
+                    ++lines;
+                    std::printf("Projection jitter check: %u of 600 frames had another jitter than the "
+                                "upscaler was given (%u not found in the asked values, %u lag changes, "
+                                "lag now %u)\n", wrong, unmatched, lag_changes, projection_lag);
+                    wrong = unmatched = lag_changes = 0;
+                }
+            }
+        }
         previous_projection_jitter = last;
         projection_jitter = last; // unless the next asked value is found
         projection_matched = false;
@@ -406,6 +447,10 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
             const auto& a = asked_jitter[(asked_count - back) % asked_jitter.size()];
             if (std::abs(a[0] - last[0]) < 2e-6f && std::abs(a[1] - last[1]) < 2e-6f &&
                 (a[0] != 0.0f || a[1] != 0.0f)) {
+                // The value the game was given, not its read-back through the matrix product
+                // (off by up to the match tolerance, 0.003 pixels at 3440 wide): the previous
+                // jitter taken out of the motion vectors is then the one the upscaler was told.
+                previous_projection_jitter = a;
                 if (back >= 2) {
                     projection_jitter = asked_jitter[(asked_count - back + 1) % asked_jitter.size()];
                     projection_matched = true;
@@ -413,6 +458,143 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 }
                 break;
             }
+        }
+        // The stub's record (runtime_ultrawide.c): the jitters applied in the order the game built its
+        // cameras: several a frame (U3's street: nine, most of them objects of that frame alone), all
+        // with the frame's value. The game renders its frames in that order, so this frame's jitter is
+        // the record one frame's worth of cameras after the one last frame used; that one is found by
+        // its place (the place predicted a frame ago, checked against the read-back) or, to start and
+        // after a miss, by its value. No guess from the timing of the values asked: a change of the
+        // game's lead no longer gives the upscaler another jitter than the frame's.
+        if (runtime_projection_jitter_count && runtime_projection_jitter_ring) {
+            struct Entry {
+                float x, y;
+                u64 camera;
+            };
+            const u32 count = *runtime_projection_jitter_count;
+            const auto entry = [](u32 place) {
+                Entry e;
+                std::memcpy(&e, runtime_projection_jitter_ring + (place & 63u) * 16u, sizeof(e));
+                return e;
+            };
+            const auto same = [&](const Entry& e) {
+                return std::abs(e.x - last[0]) < 2e-6f && std::abs(e.y - last[1]) < 2e-6f;
+            };
+            // A record still in the ring (the newest 60 of its 64).
+            const auto in_ring = [&](u32 place) { return count - place - 1u < 60u; };
+            static u32 place = 0; // the record last frame's cameras were built from, once known
+            static bool known = false;
+            static u32 searched = 0, missing = 0, frames = 0, lines = 0;
+            // Cameras built per frame: the count's growth over the last 32 frames.
+            static u32 count_then = 0, frames_then = 0, period = 0;
+            if (frames == 0) {
+                count_then = count;
+            } else if (frames - frames_then >= 32) {
+                period = (count - count_then + 16) / 32;
+                count_then = count;
+                frames_then = frames;
+            }
+            // Last frame's record: the place predicted then, if it holds what the frame shows.
+            bool found = known && in_ring(place) && same(entry(place));
+            if (!found && (last[0] != 0.0f || last[1] != 0.0f)) {
+                ++searched;
+                for (u32 back = 1; back <= 60 && back <= count; ++back) {
+                    if (same(entry(count - back))) {
+                        place = count - back;
+                        found = true;
+                        break;
+                    }
+                }
+            } else if (!found && known && in_ring(place)) {
+                found = true; // no jitter in the frame (a fade, the jitter off): the place stands
+            }
+            known = false;
+            if (found && period >= 1 && period <= 30 && in_ring(place + period)) {
+                const Entry before = entry(place), now = entry(place + period);
+                previous_projection_jitter = {before.x, before.y};
+                projection_jitter = {now.x, now.y};
+                projection_matched = true;
+                place += period;
+                known = true;
+            }
+            // Diagnosis (BB_PROJECTION_JITTER_RING_LOG=1): the record's newest 48 entries, three times.
+            if (static const bool ring_log = std::getenv("BB_PROJECTION_JITTER_RING_LOG") != nullptr;
+                ring_log && (frames == 3000 || frames == 3001 || frames == 3002)) {
+                std::printf("Projection jitter ring at count %u (read back %.1f %.1f):", count,
+                            last[0] * 1e6f, last[1] * 1e6f);
+                for (u32 back = 48; back >= 1; --back) {
+                    const Entry e = entry(count - back);
+                    std::printf(" %.0f,%.0f@%05llx", e.x * 1e6f, e.y * 1e6f,
+                                static_cast<unsigned long long>(e.camera & 0xfffffu));
+                }
+                std::printf("\n");
+            }
+            missing += !known;
+            if (++frames % 600 == 0 && lines < 20) {
+                ++lines;
+                std::printf("Projection jitter record: in 600 frames %u looked up by value, %u without a "
+                            "record (inferred); %u cameras a frame\n", searched, missing, period);
+                searched = missing = 0;
+            }
+        }
+    }
+    // A camera that did not move: the same view-to-world rows and the same view-from-uv constants as
+    // in the last frame, up to the rounding of the game's own camera maths (a standing camera's
+    // values flip by one unit in the last place every 50-200 frames; four are allowed: a turn of
+    // 5e-7 radians, under 0.001 pixels). Its motion vectors are zero by definition; computed, they
+    // are rounding noise (the previous clip is world to clip times view to world, the world position
+    // cancelling in single precision: up to about 0.01 pixels on near surfaces), on which the
+    // upscalers do not hold a still picture. RecordVelocity then writes exact zeros for the camera
+    // (characters keep their own vectors). BB_STILL_CAMERA=0: off (the computed vectors).
+    {
+        static const bool on = [] {
+            const char* env = std::getenv("BB_STILL_CAMERA");
+            const bool v = !(env && env[0] == '0');
+            std::printf("Camera motion: exact zero motion for a still camera %s (BB_STILL_CAMERA)\n",
+                        v ? "on" : "off");
+            return v;
+        }();
+        std::array<float, 16> now{};
+        std::copy(c + 12, c + 24, now.begin());
+        std::copy(c, c + 4, now.begin() + 12);
+        bool same = has_still_reference;
+        for (u32 i = 0; i < now.size() && same; ++i) {
+            const float scale = std::max({std::abs(now[i]), std::abs(still_reference[i]), 1.0f});
+            same = std::abs(now[i] - still_reference[i]) <= 4.0f * 1.1920929e-7f * scale;
+        }
+        camera.still = on && same;
+        // Diagnosis (BB_STILL_CAMERA_LOG=1): a frame that is not still after still ones: what changed.
+        static const bool still_log = std::getenv("BB_STILL_CAMERA_LOG") != nullptr;
+        static u32 run = 0, lines = 0;
+        if (camera.still) {
+            ++run;
+        } else {
+            if (still_log && on && has_still_reference && run >= 20 && lines < 40) {
+                ++lines;
+                float worst = 0.0f;
+                int index = -1, changed = 0;
+                for (int i = 0; i < 16; ++i) {
+                    const float d = std::abs(now[i] - still_reference[i]);
+                    changed += d != 0.0f;
+                    if (d > worst) {
+                        worst = d;
+                        index = i;
+                    }
+                }
+                std::printf("Camera motion: not still after %u still frames: %d of 16 values changed, the "
+                            "largest by %g (value %d: %g -> %g)\n", run, changed, worst, index,
+                            index >= 0 ? still_reference[index] : 0.0f, index >= 0 ? now[index] : 0.0f);
+            }
+            run = 0;
+        }
+        still_reference = now;
+        has_still_reference = true;
+        static u32 frames = 0, still_frames = 0, still_lines = 0;
+        still_frames += camera.still;
+        if (++frames % 600 == 0 && still_lines < 20) {
+            ++still_lines;
+            std::printf("Camera motion: still camera in %u of 600 frames\n", still_frames);
+            still_frames = 0;
         }
     }
     std::copy(c + 12, c + 24, camera.to_world.begin());
@@ -618,7 +800,11 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
 
 /// bbport: BB_MOTION_DEADZONE=<pixels> (default 0.01; 0: off): velocity-pass motion below it is
 /// none (float rounding left +-0.0002 px alternating per column: DLSS drew stripes from it).
-/// With the jitter in the game's projection it is off unless set (the user's tests, 2026-11-15).
+/// With the jitter in the game's projection it is off unless set (the user's tests, 2026-11-15): a
+/// still camera gets exact zeros there without a threshold (OnVelocityConstants, camera.still).
+/// Without either a still view was less steady with every upscaler (U3 street, 3440x1440 native,
+/// 60-frame temporal std p50: DLSS 0.35 against 0.22 with the dead zone, FSR 3.1 0.30-0.40 against
+/// 0.22; the viewport-jitter path without it: DLSS 0.25 against 0.15, FSR 3.1 0.40 against 0.23).
 float CameraMotion::MotionDeadzone() {
     static const float set = [] {
         const char* env = std::getenv("BB_MOTION_DEADZONE");
@@ -675,8 +861,9 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
     const PushConstants push{
         .reproject = camera.to_previous_clip,
         .proj = camera.uv_to_view,
+        // w: 1 = projection jitter, + 2 = a still camera (exact zero camera motion).
         .prev_proj = {camera.depth_to_z[0], camera.depth_to_z[1], motion_deadzone(),
-                      projection_mode ? 1.0f : 0.0f},
+                      (projection_mode ? 1.0f : 0.0f) + (camera.still ? 2.0f : 0.0f)},
         .size = {float(width), float(height)},
         .jitter = now_jitter,
         .previous_jitter = before_jitter,

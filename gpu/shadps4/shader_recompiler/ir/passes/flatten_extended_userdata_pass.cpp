@@ -268,6 +268,9 @@ struct PassInfo {
     // lighting reads up to 128 lights through one), the small size in graphics stages, where the
     // copy goes with every draw and the large one cost ~4% in U3's Cartagena square.
     u32 window_dwords = ReadConstSmallWindowDwords;
+    // For the translation log.
+    u64 pgm_hash = 0;
+    const char* stage = "";
 
     PtrUserList* GetUsesAsPointer(IR::Inst* inst) {
         auto it = pointer_uses.find(inst);
@@ -635,6 +638,124 @@ static bool IsBindTimeOffset(const IR::Value& value) {
     return true;
 }
 
+// bbport: the largest value a 32-bit offset can take, as far as its arithmetic shows it: masks,
+// bit fields, minima and shifts bound it, sums and products of bounded values stay bounded (a
+// sum or product that could wrap counts as unbounded). 0xFFFFFFFF: no bound known.
+static u64 OffsetUpperBound(const IR::Value& value, u32 depth = 0) {
+    constexpr u64 Unknown = 0xFFFFFFFFull;
+    if (value.IsImmediate()) {
+        return value.Type() == IR::Type::U32 ? value.U32() : Unknown;
+    }
+    if (depth > 32) {
+        return Unknown;
+    }
+    const IR::Inst* inst = value.Inst();
+    const auto arg = [&](size_t index) { return OffsetUpperBound(inst->Arg(index), depth + 1); };
+    const auto all_ones = [](u64 bound) { // every bit up to the bound's highest
+        u64 mask = bound;
+        for (u32 shift = 1; shift < 64; shift <<= 1) {
+            mask |= mask >> shift;
+        }
+        return mask;
+    };
+    switch (inst->GetOpcode()) {
+    case IR::Opcode::BitwiseAnd32:
+        return std::min(arg(0), arg(1));
+    case IR::Opcode::BitwiseOr32:
+    case IR::Opcode::BitwiseXor32:
+        return all_ones(std::max(arg(0), arg(1)));
+    case IR::Opcode::IAdd32:
+        return std::min(arg(0) + arg(1), Unknown);
+    case IR::Opcode::IMul32:
+        return std::min(arg(0) * arg(1), Unknown);
+    case IR::Opcode::ShiftLeftLogical32: {
+        const IR::Value shift = inst->Arg(1);
+        if (!shift.IsImmediate() || shift.Type() != IR::Type::U32) {
+            return Unknown;
+        }
+        return std::min(arg(0) << (shift.U32() & 31), Unknown);
+    }
+    case IR::Opcode::ShiftRightLogical32: {
+        const IR::Value shift = inst->Arg(1);
+        if (!shift.IsImmediate() || shift.Type() != IR::Type::U32) {
+            return arg(0);
+        }
+        return arg(0) >> (shift.U32() & 31);
+    }
+    case IR::Opcode::UMin32:
+        return std::min(arg(0), arg(1));
+    case IR::Opcode::UMax32:
+        return std::max(arg(0), arg(1));
+    case IR::Opcode::UClamp32:
+        return std::min(std::max(arg(0), arg(1)), arg(2));
+    case IR::Opcode::UDiv32:
+        return arg(0);
+    case IR::Opcode::UMod32: {
+        const u64 divisor = arg(1);
+        return std::min(arg(0), divisor ? divisor - 1 : 0);
+    }
+    case IR::Opcode::SelectU32:
+        return std::max(arg(1), arg(2));
+    case IR::Opcode::BitFieldUExtract: {
+        const IR::Value count = inst->Arg(2);
+        if (!count.IsImmediate() || count.Type() != IR::Type::U32 || count.U32() >= 32) {
+            return arg(0);
+        }
+        return std::min(arg(0), (u64(1) << count.U32()) - 1);
+    }
+    case IR::Opcode::SMin32:
+    case IR::Opcode::SMax32: {
+        // Signed: only for two values known not to be negative.
+        const u64 a = arg(0), b = arg(1);
+        if (a > 0x7FFFFFFFull || b > 0x7FFFFFFFull) {
+            return Unknown;
+        }
+        return inst->GetOpcode() == IR::Opcode::SMin32 ? std::min(a, b) : std::max(a, b);
+    }
+    case IR::Opcode::BitCastU32F32: {
+        // The bits of a float constant, or of a choice between two (a comparison's result as
+        // the integer 0 or 1 passes through a float register this way).
+        const auto bits = [](const IR::Value& v) -> u64 {
+            if (!v.IsImmediate() || v.Type() != IR::Type::F32) {
+                return Unknown;
+            }
+            return std::bit_cast<u32>(v.F32());
+        };
+        const IR::Value source = inst->Arg(0);
+        if (source.IsImmediate()) {
+            return bits(source);
+        }
+        const IR::Inst* select = source.Inst();
+        if (select->GetOpcode() != IR::Opcode::SelectF32) {
+            return Unknown;
+        }
+        return std::max(bits(select->Arg(1)), bits(select->Arg(2)));
+    }
+    case IR::Opcode::BitCount32:
+        return 32;
+    case IR::Opcode::ConvertU32U16:
+        return 0xFFFF;
+    case IR::Opcode::ConvertU32U8:
+        return 0xFF;
+    case IR::Opcode::ReadFirstLane:
+        return arg(0);
+    default:
+        return Unknown;
+    }
+}
+
+// bbport: the dwords of a window for ReadConsts at these offsets (srt.h, ReadConstRange): up to
+// the farthest one they can reach when that is known (*exact), else the pass's fixed size.
+template <typename Offsets>
+static u32 WindowDwordsFor(const PassInfo& pass_info, const Offsets& offsets, bool* exact) {
+    u64 reach = 0;
+    for (const IR::Value& offset : offsets) {
+        reach = std::max(reach, OffsetUpperBound(offset) + 1);
+    }
+    *exact = ReadConstRange() && reach <= ReadConstMaxWindowDwords;
+    return *exact ? std::max<u32>(u32(reach), 1u) : pass_info.window_dwords;
+}
+
 static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& pass_info,
                           const IR::Value& off_dw) {
     ASSERT(reg != ecx && reg != edx);
@@ -754,12 +875,20 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
     // The bytes of this table the walk reads: pointers are two dwords, offsets that are not
     // immediates read within the window.
     u32 read_dw = 0;
+    boost::container::small_vector<IR::Value, 8> per_lane;
     for (const auto& [src_off_dw, use] : *use_list) {
         if (src_off_dw.IsImmediate()) {
             read_dw = std::max(read_dw, src_off_dw.U32() + (pass_info.GetUsesAsPointer(use) ? 2 : 1));
         } else {
             read_dw = std::max(read_dw, pass_info.window_dwords);
+            if (use->GetOpcode() == IR::Opcode::ReadConst && !IsBindTimeOffset(src_off_dw)) {
+                per_lane.push_back(src_off_dw);
+            }
         }
+    }
+    if (!per_lane.empty()) {
+        bool exact;
+        read_dw = std::max(read_dw, WindowDwordsFor(pass_info, per_lane, &exact));
     }
     if (!PushPtr(c, pass_info, off_dw, read_dw * 4)) {
         LOG_ERROR(Render_Recompiler, "Failed to compute offset for SRT walker");
@@ -797,13 +926,22 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         SetFlatbufOffset(use, pass_info.dst_off_dw);
         pass_info.dst_off_dw++;
     }
-    // bbport: reads at offsets that vary per lane share a copy of the block's first
-    // ReadConstWindowDwords() dwords (ReadConstWindowFlag). Flat buffer offsets are 16-bit: a
-    // window that would not leave room for the rest gets the small size (and its flag).
+    // bbport: reads at offsets that vary per lane share a copy of the block's first dwords
+    // (ReadConstWindowFlag), as many as their offsets can reach (WindowDwordsFor). Flat buffer
+    // offsets are 16-bit: a window that would not leave room for the rest gets the small size.
+    // A window shorter than its reads' reach is logged: reads past it get its last dword.
     if (!windowed.empty()) {
         const u32 start = pass_info.dst_off_dw;
-        const bool fits = start + pass_info.window_dwords + 4096u <= 0xFFFFu;
-        const u32 dwords = fits ? pass_info.window_dwords : ReadConstSmallWindowDwords;
+        boost::container::small_vector<IR::Value, 8> offsets;
+        for (IR::Inst* use : windowed) {
+            offsets.push_back(use->Arg(1));
+        }
+        bool exact;
+        u32 dwords = WindowDwordsFor(pass_info, offsets, &exact);
+        if (start + dwords + 4096u > 0xFFFFu && dwords > ReadConstSmallWindowDwords) {
+            dwords = ReadConstSmallWindowDwords;
+            exact = false;
+        }
         for (u32 i = 0; i < dwords; ++i) {
             c.mov(r10d, ptr[rdi + (i << 2)]);
             c.mov(ptr[rsi + ((start + i) << 2)], r10d);
@@ -811,7 +949,23 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         pass_info.dst_off_dw += dwords;
         for (IR::Inst* use : windowed) {
             use->SetFlags<u32>(start | ReadConstWindowFlag |
-                               (dwords == ReadConstWindowDwords() ? 0u : ReadConstSmallWindowFlag));
+                               ((dwords - 1) << ReadConstWindowSizeShift));
+        }
+        // Logged when a shader is translated (not when it comes from the shader cache), under
+        // g_srt_mutex. A window without a known range, once per shader, always: no read is
+        // clamped without a line in the log naming the shader (unless BB_READCONST_RANGE=0 puts
+        // all of them there). BB_READCONST_LOG=1: also the windows sized by their range.
+        static const bool log_all = std::getenv("BB_READCONST_LOG") != nullptr;
+        static std::unordered_map<u64, u32> logged;
+        if (exact) {
+            if (log_all && logged[pass_info.pgm_hash]++ < 4) {
+                std::printf("ReadConst window: %s shader 0x%08x: reach %u dwords\n", pass_info.stage,
+                            u32(pass_info.pgm_hash), dwords);
+            }
+        } else if ((ReadConstRange() || log_all) && !logged[pass_info.pgm_hash]++) {
+            std::printf("ReadConst window: %s shader 0x%08x reads a constant table at an offset with "
+                        "no known range: window of %u dwords, reads past it get its last dword\n",
+                        pass_info.stage, u32(pass_info.pgm_hash), dwords);
         }
     }
 
@@ -944,6 +1098,10 @@ void FlattenExtendedUserdataPass(IR::Program& program) {
     if (program.info.hw_stage == HwStage::Compute) {
         pass_info.window_dwords = ReadConstWindowDwords();
     }
+    pass_info.pgm_hash = program.info.pgm_hash;
+    pass_info.stage = program.info.hw_stage == HwStage::Compute    ? "compute"
+                      : program.info.hw_stage == HwStage::Fragment ? "pixel"
+                                                                    : "vertex";
 
     // traverse at end and assign offsets to duplicate readconsts, using
     // vn_to_inst as the source

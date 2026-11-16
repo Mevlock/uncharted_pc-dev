@@ -94,7 +94,10 @@ void main() {
         // unjittered (scene_uv as with the viewport jitter), but its previous clip carries the
         // previous frame's jitter, taken out here; the characters' vectors (both clip positions
         // jittered) lose the difference of the two.
-        const bool in_projection = prev_proj.w > 0.5;
+        // prev_proj.w: 1 = projection jitter, + 2 = a still camera (the same camera constants as
+        // last frame): its motion is zero, not the rounding noise of the reprojection.
+        const bool still_camera = prev_proj.w > 1.5;
+        const bool in_projection = prev_proj.w - (still_camera ? 2.0 : 0.0) > 0.5;
         const vec2 base_uv = scene_uv;
         const vec2 camera_fix = in_projection ? -previous_jitter : vec2(0.0);
         const vec2 jitter_change = in_projection ? jitter - previous_jitter : vec2(0.0);
@@ -105,7 +108,7 @@ void main() {
                                dot(reproject[2], view_pos));
         const vec2 previous_uv = vec2(0.5 * clip.x / clip.z + 0.5, 0.5 - 0.5 * clip.y / clip.z);
         result = (previous_uv - base_uv) * size + camera_fix;
-        if (any(isnan(result)) || any(isinf(result))) {
+        if (still_camera || any(isnan(result)) || any(isinf(result))) {
             result = vec2(0.0);
         }
         // bbport (from BilalReloaded's Uncharted port, #84): characters' own motion from their

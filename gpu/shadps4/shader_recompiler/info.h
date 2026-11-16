@@ -324,6 +324,10 @@ struct Info : InfoPersistent {
         if (!srt_info.walker_func) {
             return;
         }
+        if (g_flatbuf_stats) {
+            g_flatbuf_walks.fetch_add(1, std::memory_order_relaxed);
+            g_flatbuf_dwords.fetch_add(srt_info.flattened_bufsize_dw, std::memory_order_relaxed);
+        }
         if (!g_srt_read_check) {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
             return;
