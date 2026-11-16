@@ -1204,7 +1204,7 @@ void Presenter::ReadThumbnail() {
     BbThumbnail::Store(static_cast<const unsigned char*>(thumbnail.mapped));
 }
 
-void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
+void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame, s64 flip_arg) {
     // bbport: a finished save picture copy is read before any present_done fence is reset.
     ReadThumbnail();
     if (thumbnail.pending == frame->present_done) {
@@ -1282,15 +1282,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     if (shown && !behind()) {
         wait_until(start + step * shown);
     }
-    // bbport: low latency mode: the game's own frame carries its frame id (vk_low_latency.h).
+    // bbport: low latency mode: the game's own frame carries its frame id, from the game's frame
+    // number (its flip argument; vk_low_latency.h).
     const bool game_frame = !is_reusing_frame && is_game_frame;
-    const u64 latency_id = game_frame ? LowLatency::TakeGameFrame() : 0;
+    const u64 latency_id = game_frame ? LowLatency::PresentId(flip_arg) : 0;
     thumbnail_game_frame = game_frame;
     const bool presented = PresentImage(frame, frame->image, true, latency_id);
     thumbnail_game_frame = false;
-    if (game_frame) {
-        LowLatency::GameFramePresented();
-    }
     if (!presented) {
         free_frame();
         return;

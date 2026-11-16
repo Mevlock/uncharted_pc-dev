@@ -1238,6 +1238,9 @@ const volatile uint32_t *runtime_projection_jitter_frame;
 int runtime_gpu_nvidia = -1;
 /* Which game's program was recognised when the code was patched (1, 2, 3; 0: none / not yet): read by the GPU side. */
 int runtime_uncharted_game;
+/* KickJob's lastFrameNumber (the number of the last frame whose draw script was kicked), whatever
+ * BB_PROJECTION_JITTER says; NULL: not found. Read by the low latency log (probe.c, game_frame_start). */
+const volatile uint64_t *runtime_draw_frame_number;
 
 typedef struct {
     const char *name;
@@ -1376,8 +1379,15 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     for (unsigned i = 0; i < sizeof(projection_jitter_games) / sizeof(projection_jitter_games[0]); ++i) {
         const ProjectionJitterGame *t = &projection_jitter_games[i];
         if (size >= t->join + 0x400 && !memcmp(code + t->start, t->start_bytes, sizeof(t->start_bytes)) &&
-            !memcmp(code + t->join, t->join_bytes, sizeof(t->join_bytes)))
+            !memcmp(code + t->join, t->join_bytes, sizeof(t->join_bytes))) {
             runtime_uncharted_game = t->name[10] - '0'; /* "Uncharted N ..." */
+            const uint8_t *s = t->frame_site && t->frame_site + 10 <= size ? code + t->frame_site : NULL;
+            if (s && s[0] == 0x48 && s[1] == 0x8b && s[2] == 0x05 && s[7] == 0x48 && s[8] == 0xff && s[9] == 0xc0) {
+                int32_t rel; /* mov rax, [rip + lastFrameNumber]; inc rax */
+                memcpy(&rel, s + 3, 4);
+                runtime_draw_frame_number = (const volatile uint64_t *)(s + 7 + rel);
+            }
+        }
     }
 #endif
     const char *env = getenv("BB_PROJECTION_JITTER");

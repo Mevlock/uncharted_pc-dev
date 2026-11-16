@@ -1361,6 +1361,56 @@ static int is_patched_rdtsc(uintptr_t rip) {
 }
 
 static int64_t find_masked(const char *hex, uint64_t size);
+/* The game's frame start, for the low latency mode (NVIDIA Reflex / AMD Anti-Lag 2, BB_LOW_LATENCY; vk_low_latency.h).
+ * Each game's main loop is `do { Frame(); ++g_frameState.m_frameCount; scePthreadYield(); } while (!quit)`, the only
+ * write of m_frameCount in the program; KickJob asserts it steps by 1 per frame, and the games pass it as the flip
+ * argument. At the entry of the loop's frame function (called directly in U2/U3 1.02, run as the job the loop waits
+ * for in 1.00 and U1 1.02) m_frameCount is the number of the frame that starts: the low latency mode sleeps there
+ * and marks the frame's start with that number, and its submit and present by their flip argument, the same number. */
+static const volatile uint64_t *game_frame_count;
+extern const volatile uint64_t *runtime_draw_frame_number; /* runtime_ultrawide.c: KickJob's lastFrameNumber */
+static void __attribute__((ms_abi)) game_frame_start(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
+    (void)rdi; (void)rsi; (void)base; (void)r14;
+    const volatile uint64_t *kicked=runtime_draw_frame_number;
+    bbgpu_game_frame_start(*game_frame_count, kicked ? *kicked : UINT64_MAX);
+}
+static void install_game_frame_start(uint64_t image_size) {
+    const char *env=getenv("BB_LOW_LATENCY");
+    if (!env || !env[0] || env[0]=='0') return;
+    /* U1 1.00 + 1.02, U2 1.00, U3 1.00: lea r14, [frame]; lea rbx; lea r12, [g_frameState]; nop; the job call
+     * (rdi = r14, esi 0, edx 5, r8d 0, rcx = r9 = rbx); inc qword [r12 + d8]; call yield; cmp byte [r15], 0 */
+    int64_t frame=-1, count=-1;
+    const int64_t a=find_masked("4c8d35???????? 488d1d???????? 4c8d25???????? 0f1f00 31f6 ba05000000 4531c0 4c89f7 "
+                                "4889d9 4989d9 e8???????? 49ff4424?? e8???????? 41803f00",image_size);
+    /* U2 1.02, U3 1.02: lea rbx, [g_frameState]; nop; xor edi, edi; call frame; inc qword [rbx + d8]; call yield;
+     * cmp byte [r14], 0; je loop */
+    const int64_t b=a<0 ? find_masked("488d1d???????? 0f1f440000 31ff e8???????? 48ff43?? e8???????? 41803e00 74ea",image_size) : -1;
+    int32_t rel;
+    if (a>=0) {
+        memcpy(&rel,image+a+3,4); frame=a+7+rel;
+        memcpy(&rel,image+a+17,4); count=a+21+rel+image[a+52];
+    } else if (b>=0) {
+        memcpy(&rel,image+b+3,4); count=b+7+rel+image[b+22];
+        memcpy(&rel,image+b+15,4); frame=b+19+rel;
+    }
+    /* push rbp; mov rbp, rsp; push r15 (moved into the thunk) */
+    static const unsigned char entry[]={0x55,0x48,0x89,0xe5,0x41,0x57};
+    if (frame<0 || count<0 || (uint64_t)frame+16>image_size || (uint64_t)count+8>image_size ||
+        memcmp(image+frame,entry,sizeof(entry))) {
+        printf("Low latency: the game's frame start was not found (%s)\n",
+               a==-2 || b==-2 ? "main loop not unique" : frame<0 ? "no main loop" : "unexpected frame function");
+        bbgpu_game_frame_source(0);
+        return;
+    }
+    game_frame_count=(const volatile uint64_t *)(image+count);
+    if (!callback_thunk(image+frame,sizeof(entry),(const void *)game_frame_start)) {
+        bbgpu_game_frame_source(0);
+        return;
+    }
+    printf("Low latency: the game's frame start at %#" PRIx64 " (main loop at %#" PRIx64 ", frame number at %#" PRIx64 ")\n",
+           (uint64_t)frame,(uint64_t)(a>=0 ? a : b),(uint64_t)count);
+    bbgpu_game_frame_source(1);
+}
 static void patch_collection_skip(uint64_t image_size) {
     const char *skip=getenv("BB_SKIP_COLLECTION_MENU");
     if (!skip || skip[0]!='1') return;
@@ -2695,6 +2745,7 @@ int main(int argc, char **argv) {
         uint64_t image_end=0;
         for (uint64_t s=0;s<ns;++s) if (segments[s].address+segments[s].size>image_end) image_end=segments[s].address+segments[s].size;
         install_game_callbacks(segments, ns, image_end);
+        install_game_frame_start(image_end);
         runtime_mouselook_install_patches(near_image_memory);
 #ifdef _WIN32
         install_ndgi_hooks(image_end);

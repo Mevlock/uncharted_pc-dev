@@ -1933,7 +1933,7 @@ static ABI int32_t pad_close(int32_t handle) {
 static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
-    bbgpu_input_sample(); /* low latency mode: a new frame starts here and may wait (outside the lock) */
+    bbgpu_input_sample(); /* low latency log (BB_REFLEX_LOG=1): reads per second; the frame start is the game's own (probe.c) */
     pthread_mutex_lock(&lock);
     sample(data); ++reads;
     pthread_mutex_unlock(&lock);

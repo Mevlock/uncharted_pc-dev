@@ -187,7 +187,7 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode
               flipArg);
 
     if (bufferIndex != -1) {
-        Vulkan::LowLatency::RenderSubmit(); // bbport: low latency mode, the game's frame goes out (before the BB_FRAME_PACE wait)
+        Vulkan::LowLatency::RenderSubmit(flipArg); // bbport: low latency mode, the game's frame (its number: the flip argument) goes out (before the BB_FRAME_PACE wait)
         PaceGuestFlip(); // bbport: BB_FRAME_PACE
     }
     if (!driver->SubmitFlip(port, bufferIndex, flipArg)) {
