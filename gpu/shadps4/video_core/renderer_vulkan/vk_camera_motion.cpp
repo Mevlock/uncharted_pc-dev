@@ -629,9 +629,8 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 // bbport: a cut also when the picture moves more than half the render width in
                 // one frame (a swing that turns less than 35 degrees or moves less than 2 units,
                 // e.g. a narrow-FOV cutscene shot change): the screen points at view z 5 near the
-                // centre and both sides, reprojected into the previous frame. Idea from
-                // LanternEngine (Awaken), re-implemented. BB_CUT_MOTION=<fraction of the width>
-                // (default 0.5; 0: off).
+                // centre and both sides, reprojected into the previous frame.
+                // BB_CUT_MOTION=<fraction of the width> (default 0.5; 0: off).
                 static const float cut_motion = [] {
                     const char* env = std::getenv("BB_CUT_MOTION");
                     const float v = env && env[0] ? static_cast<float>(std::atof(env)) : 0.5f;

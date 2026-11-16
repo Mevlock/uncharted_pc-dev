@@ -177,8 +177,7 @@ void DumpImages(const Instance& instance, Scheduler& scheduler, vk::CommandBuffe
 /// jitter phases (AMD truncates the fractional viewport edge: the column is not drawn on half the
 /// frames; full-screen passes read past the edge): a shimmering or white line at the right and
 /// bottom edges once upscaled (FSR 4 on RDNA4, DLSS edge shimmer). The row and column before them
-/// are copied over them before the upscaler reads the scene. Idea from LanternEngine (Awaken),
-/// re-implemented. BB_UPSCALE_EDGE_CLAMP=0: off.
+/// are copied over them before the upscaler reads the scene. BB_UPSCALE_EDGE_CLAMP=0: off.
 static bool EdgeClampOn() {
     static const bool on = [] {
         const char* env = std::getenv("BB_UPSCALE_EDGE_CLAMP");
@@ -363,7 +362,6 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     // bbport (DLSS rework 3): Native at a patched size (render = output) upscales before the
     // post-processing: DLSS/FSR no longer accumulate the depth of field, bloom and motion blur
     // output, and get HDR colour (highlights, the game's dithered haze before it is blurred).
-    // Idea from LanternEngine (Awaken)'s BB_UPSCALE_EARLY, re-implemented on our 1080p path.
     if (scaled_session) {
         const char* env = std::getenv("BB_NATIVE_BEFORE_POST");
         const bool wanted = !(env && env[0] == '0');
@@ -688,8 +686,7 @@ bool TemporalUpscaler::OnFrameStart() {
     }
     // bbport (DLSS rework 5, opt-in BB_JITTER_FADE=1): the jitter shrinks while the camera moves:
     // full up to 0.25 render pixels of picture motion a frame, none from 1 pixel, the speed
-    // decaying slowly (x0.85 a frame) so a pan's end does not snap back. Idea from LanternEngine
-    // (Awaken), measured there on a pan: frame-to-frame wobble 0.32 -> 0.035 px. Off by default:
+    // decaying slowly (x0.85 a frame) so a pan's end does not snap back. Off by default:
     // NVIDIA's guide lists jitter only when static as a risk.
     if (static const bool fade = [] {
             const char* env = std::getenv("BB_JITTER_FADE");

@@ -672,9 +672,8 @@ void PipelineCache::PublishGraphics() {
 
 // bbport: vkGetPipelineCacheData is not called while a pipeline is being created in the cache (the creations hold
 // this shared, the read alone; creations do not wait for each other): the Vulkan spec asks no such ordering, but a
-// driver faulted in it while another thread added a pipeline (Intel's; found and fixed this way in GR2port,
-// GPL-2.0-or-later, commit 25bb2acc). Here the save (every 20 s and at the exit) reads it while the preload, the
-// draw-preparation workers and the GPU thread create pipelines.
+// driver (Intel's) has faulted in it while another thread added a pipeline. Here the save (every 20 s and at the
+// exit) reads it while the preload, the draw-preparation workers and the GPU thread create pipelines.
 std::shared_mutex& PipelineCacheUse() {
     static std::shared_mutex use;
     return use;

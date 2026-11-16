@@ -232,7 +232,7 @@ static u32 DlssPreset(int quality) {
     }
     // bbport (DLSS rework 11): no model chosen (launcher "default"): NVIDIA's recommendation per
     // mode, model M at Performance, L at Ultra Performance, the DLL's default (K) otherwise.
-    // Idea from LanternEngine (Awaken). BB_DLSS_AUTO_MODEL=0: the DLL's default for every mode.
+    // BB_DLSS_AUTO_MODEL=0: the DLL's default for every mode.
     static const bool automatic = [] {
         const char* env = std::getenv("BB_DLSS_AUTO_MODEL");
         return !(env && env[0] == '0');
