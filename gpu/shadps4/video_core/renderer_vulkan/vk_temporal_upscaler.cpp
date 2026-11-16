@@ -47,6 +47,14 @@
 namespace Vulkan {
 extern std::atomic<long long> g_fade_cut_ns; // below (FadeReset)
 extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (prototype), or null
+// The phase advanced on the game side (runtime_ultrawide.c): the cycle's table, its length, the frame clock; the
+// stub's record (count, entries of 16 bytes, camera addresses) to find that clock.
+extern "C" float* runtime_projection_jitter_table;
+extern "C" volatile uint32_t* runtime_projection_jitter_phases;
+extern "C" volatile uint64_t* runtime_projection_jitter_marker;
+extern "C" volatile uint32_t* runtime_projection_jitter_count;
+extern "C" const uint8_t* runtime_projection_jitter_ring;
+extern "C" const uint64_t* runtime_projection_jitter_cameras;
 extern "C" int runtime_uncharted_game;            // runtime_ultrawide.c: 1, 2, 3 once the game code is patched
 static int g_frames_since_cut = 100000; // bbport: frames since the last camera cut (dumps)
 void BbDrawLogNote(const char* text); // vk_rasterizer.cpp
@@ -654,6 +662,13 @@ bool TemporalUpscaler::OnFrameStart() {
     // Halton(2, 3); the menu or toggle 1 << 25 disables it.
     if (!jitter_on) {
         jitter = {};
+        // No jitter in the game's projection either (slot and cycle).
+        if (runtime_projection_jitter_slot) {
+            runtime_projection_jitter_slot[0] = runtime_projection_jitter_slot[1] = 0.0f;
+            if (runtime_projection_jitter_table) {
+                std::memset(runtime_projection_jitter_table, 0, 128 * 4 * sizeof(float));
+            }
+        }
         return changed;
     }
     // CameraMotion::OnDisplayPass has already cleared Depth(). Use the context's render
@@ -708,9 +723,90 @@ bool TemporalUpscaler::OnFrameStart() {
         const float w = float(SceneWidth());
         const float h = float(SceneHeight());
         const bool on = Active() && BbSettings::Get().jitter && !BbToggle::Disabled(1u << 25);
-        runtime_projection_jitter_slot[0] = on && w > 0.0f ? 2.0f * jitter[0] / w : 0.0f;
-        runtime_projection_jitter_slot[1] = on && h > 0.0f ? -2.0f * jitter[1] / h : 0.0f;
-        camera_motion.NoteAskedJitter({runtime_projection_jitter_slot[0], runtime_projection_jitter_slot[1]});
+        // The phase is advanced on the game side when it can be: the whole cycle is published (the same
+        // Halton values, in the projection's units) and the frame clock named: the camera the game
+        // builds last in every frame (the one address at every change of value in the stub's record).
+        // The stub then steps through the cycle itself, once per game frame: no frame gets the jitter of
+        // the frame before and no phase is skipped, which happened a few times in 600 frames while this
+        // thread wrote one value per shown frame (the two threads are not in step). Not with the
+        // camera-speed fade (BB_JITTER_FADE: a value per frame) and not without the record.
+        bool game_side = false;
+        static const bool fade_env = [] {
+            const char* env = std::getenv("BB_JITTER_FADE");
+            return env && env[0] == '1';
+        }();
+        if (runtime_projection_jitter_table && runtime_projection_jitter_marker &&
+            runtime_projection_jitter_count && runtime_projection_jitter_ring &&
+            runtime_projection_jitter_cameras && !fade_env && w > 0.0f && h > 0.0f) {
+            const u32 n = std::clamp(phases, 1u, 128u);
+            static u32 table_n = 0;
+            static float table_w = 0.0f, table_h = 0.0f;
+            static bool table_on = false;
+            if (n != table_n || w != table_w || h != table_h || on != table_on) {
+                for (u32 k = 0; k < n; ++k) {
+                    const float jx = Halton(k + 1, 2) - 0.5f, jy = Halton(k + 1, 3) - 0.5f;
+                    runtime_projection_jitter_table[k * 4 + 0] = on ? 2.0f * jx / w : 0.0f;
+                    runtime_projection_jitter_table[k * 4 + 1] = on ? -2.0f * jy / h : 0.0f;
+                    runtime_projection_jitter_table[k * 4 + 2] = 0.0f;
+                    runtime_projection_jitter_table[k * 4 + 3] = 0.0f;
+                }
+                *runtime_projection_jitter_phases = n;
+                table_n = n;
+                table_w = w;
+                table_h = h;
+                table_on = on;
+            }
+            // The frame clock, from the newest 54 records: the camera address before every change of value.
+            const u32 count = *runtime_projection_jitter_count;
+            const auto value = [](u32 place) {
+                std::array<float, 2> v;
+                std::memcpy(v.data(), runtime_projection_jitter_ring + (place & 63u) * 16u, sizeof(v));
+                return v;
+            };
+            u64 clock = 0;
+            u32 changes = 0, others = 0;
+            if (count > 60) {
+                for (u32 back = 54; back >= 2; --back) {
+                    if (value(count - back) != value(count - back + 1)) {
+                        const u64 address = runtime_projection_jitter_cameras[(count - back) & 63u];
+                        ++changes;
+                        if (!clock) {
+                            clock = address;
+                        } else if (address != clock) {
+                            ++others;
+                        }
+                    }
+                }
+            }
+            static u32 quiet = 0; // frames without a change of value while the cycle has several
+            const u64 marker = *runtime_projection_jitter_marker;
+            if (!marker) {
+                if (on && n > 1 && changes >= 3 && others == 0 && clock) {
+                    *runtime_projection_jitter_marker = clock;
+                    quiet = 0;
+                    std::printf("Upscaler: projection jitter: the game side steps the phase, once per frame "
+                                "(frame clock: the camera at %#llx, %u phases; BB_PROJECTION_JITTER_GAME=0: "
+                                "one value per shown frame from here, as before)\n",
+                                static_cast<unsigned long long>(clock), n);
+                }
+            } else if (on && n > 1) {
+                // That camera is no longer built (another level's): back to values from here until
+                // the next one is found.
+                quiet = changes == 0 ? quiet + 1 : 0;
+                if (quiet > 8) {
+                    *runtime_projection_jitter_marker = 0;
+                    quiet = 0;
+                    std::printf("Upscaler: projection jitter: the frame clock camera is gone: one value per "
+                                "shown frame until the next is found\n");
+                }
+            }
+            game_side = *runtime_projection_jitter_marker != 0;
+        }
+        if (!game_side) {
+            runtime_projection_jitter_slot[0] = on && w > 0.0f ? 2.0f * jitter[0] / w : 0.0f;
+            runtime_projection_jitter_slot[1] = on && h > 0.0f ? -2.0f * jitter[1] / h : 0.0f;
+            camera_motion.NoteAskedJitter({runtime_projection_jitter_slot[0], runtime_projection_jitter_slot[1]});
+        }
     } else if (runtime_projection_jitter_slot) {
         // Patched, but this upscaler keeps the viewport jitter (BB_PROJECTION_JITTER_FSR3=0): none in the projection.
         runtime_projection_jitter_slot[0] = runtime_projection_jitter_slot[1] = 0.0f;
@@ -1654,6 +1750,18 @@ void TemporalUpscaler::Run() {
         }
     }
     if (dispatched) {
+        // Diagnosis (BB_DUMP_TRIGGER): this path's inputs and output, and the jitter the upscaler was told.
+        if (const int dump = DumpFrame(); dump >= 0) {
+            const bool packed = color.info.pixel_format == vk::Format::eB10G11R11UfloatPack32;
+            std::printf("Dump: frame %d jitter %.5f %.5f px, reset %d, input format %d\n", dump, jitter[0],
+                        jitter[1], int(reset), int(color.info.pixel_format));
+            DumpImages(instance, scheduler, cmdbuf, dump,
+                       {{input_color, w, h, packed ? 4u : 8u, "input", packed ? "b10g11r11f" : "rgba16f"},
+                        {vk::Image(motion_image), w, h, 4, "motion", "rg16f"},
+                        {vk::Image(output_image), ow, oh, 8, "output", "rgba16f"}});
+            DumpImages(instance, scheduler, cmdbuf, dump,
+                       {{input_depth, w, h, 4, "depth", "f32", vk::ImageAspectFlagBits::eDepth}});
+        }
         reset = false;
         dispatched_last_frame = true;
         // bbport (DLSS rework 3c): Native before post: sharpening the HDR scene here left the final

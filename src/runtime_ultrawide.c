@@ -1245,6 +1245,18 @@ float *runtime_projection_jitter_slot;
  * inferring it from the values asked. Null when the stub's page is not addressable with 32 bits (then: inferred). */
 volatile uint32_t *runtime_projection_jitter_count;
 const uint8_t *runtime_projection_jitter_ring;
+/* Diagnosis: each record's camera address (64 entries, as the ring), and the camera's aspect / orthographic field
+ * offsets of the game in play. */
+const uint64_t *runtime_projection_jitter_cameras;
+uint32_t runtime_projection_jitter_offsets[2];
+/* The phase advanced on the game side: the GPU side publishes the jitter cycle (table: up to 128 entries of four
+ * floats, x, y, 0, 0, in the projection's units; phases: how many) and the frame clock (marker: the address of the
+ * camera the game builds last in every frame; 0: none, the GPU side writes the slot itself as before). After a
+ * build of that camera the stub's next build first steps the index and copies the table's entry into the slot: every
+ * game frame gets exactly the next phase, whatever the timing between the two threads. Null: not available. */
+float *runtime_projection_jitter_table;
+volatile uint32_t *runtime_projection_jitter_phases;
+volatile uint64_t *runtime_projection_jitter_marker;
 /* Set by the GPU side before the game code is patched: 1 on NVIDIA's driver, 0 on another, -1 not known yet. */
 int runtime_gpu_nvidia = -1;
 /* Which game's program was recognised when the code was patched (1, 2, 3; 0: none / not yet): read by the GPU side. */
@@ -1285,11 +1297,11 @@ static const ProjectionJitterGame projection_jitter_games[] = {
 static uint8_t *pj_emit_test(uint8_t *c, const ProjectionJitterGame *g, uint8_t **skip1, uint8_t **skip2) {
     const float lo = 0.995f, hi = 1.005f;
     *c++ = 0x80; *c++ = 0xbb; memcpy(c, &g->ortho, 4); c += 4; *c++ = 0x00;  /* cmp byte [rbx+ortho], 0 */
-    *c++ = 0x75; *skip1 = c++;                                               /* jne skip */
+    *c++ = 0x0f; *c++ = 0x85; *skip1 = c; c += 4;                            /* jne skip (rel32) */
     *c++ = 0x81; *c++ = 0xbb; memcpy(c, &g->aspect, 4); c += 4; memcpy(c, &lo, 4); c += 4; /* cmp dword [rbx+aspect], 0.995 */
     *c++ = 0x72; uint8_t *apply = c++;                                       /* jb apply */
     *c++ = 0x81; *c++ = 0xbb; memcpy(c, &g->aspect, 4); c += 4; memcpy(c, &hi, 4); c += 4; /* cmp dword [rbx+aspect], 1.005 */
-    *c++ = 0x76; *skip2 = c++;                                               /* jbe skip (square) */
+    *c++ = 0x0f; *c++ = 0x86; *skip2 = c; c += 4;                            /* jbe skip (square; rel32) */
     *apply = (uint8_t)(c - (apply + 1));
     return c;
 }
@@ -1344,7 +1356,7 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     uint8_t *page = NULL;
     const uintptr_t base = ((uintptr_t)code + size + 0xffff) & ~(uintptr_t)0xffff;
     for (uintptr_t step = 0; step < (1800ull << 20) && !page; step += 1u << 16)
-        page = VirtualAlloc((void *)(base + step), 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+        page = VirtualAlloc((void *)(base + step), 8192, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
     if (!page) {
         printf("Projection jitter: no memory near the game code: the upscaler jitter and its fixes as in 0.3.6.57\n");
         return;
@@ -1353,6 +1365,33 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     uint8_t *c = page, *skip1, *skip2;
     const uint8_t r = g->row;
     c = pj_emit_test(c, g, &skip1, &skip2);
+    /* The phase step (see runtime_projection_jitter_table): if the build before was the frame clock's (pending),
+     * index = (index + 1) % phases, slot = table[index]. BB_PROJECTION_JITTER_GAME=0: not emitted. */
+    uint32_t *phases = (uint32_t *)(page + 0x814), *index = (uint32_t *)(page + 0x818);
+    uint8_t *pending = page + 0x81c;
+    uint64_t *marker = (uint64_t *)(page + 0x820);
+    float *table = (float *)(page + 0x1000);
+    const char *game_env = getenv("BB_PROJECTION_JITTER_GAME");
+    const int game_on = !(game_env && game_env[0] == '0') && (uintptr_t)(page + 0x2000) < 0x7fffffffu;
+    if (game_on) {
+        const uint32_t table32 = (uint32_t)(uintptr_t)table;
+        uint8_t *none;
+        *c++ = 0x80; *c++ = 0x3d; c = pj_rel(c, pending - 1); *c++ = 0x00;     /* cmp byte [pending], 0 */
+        *c++ = 0x74; none = c++;                                              /* je none */
+        *c++ = 0xc6; *c++ = 0x05; c = pj_rel(c, pending - 1); *c++ = 0x00;     /* mov byte [pending], 0 */
+        *c++ = 0x50;                                                          /* push rax */
+        *c++ = 0x8b; *c++ = 0x05; c = pj_rel(c, index);                       /* mov eax, [index] */
+        *c++ = 0xff; *c++ = 0xc0;                                             /* inc eax */
+        *c++ = 0x3b; *c++ = 0x05; c = pj_rel(c, phases);                      /* cmp eax, [phases] */
+        *c++ = 0x72; *c++ = 0x02;                                             /* jb +2 */
+        *c++ = 0x31; *c++ = 0xc0;                                             /* xor eax, eax */
+        *c++ = 0x89; *c++ = 0x05; c = pj_rel(c, index);                       /* mov [index], eax */
+        *c++ = 0xc1; *c++ = 0xe0; *c++ = 0x04;                                /* shl eax, 4 */
+        *c++ = 0x48; *c++ = 0x8b; *c++ = 0x80; memcpy(c, &table32, 4); c += 4; /* mov rax, [rax + table] */
+        *c++ = 0x48; *c++ = 0x89; *c++ = 0x05; c = pj_rel(c, slot);           /* mov [slot], rax */
+        *c++ = 0x58;                                                          /* pop rax */
+        *none = (uint8_t)(c - (none + 1));
+    }
     /* The record of this application (BB_PROJECTION_JITTER_RING=0: none): count += 1 (atomic), ring[old count & 63] =
      * {the slot's two floats, rbx}. rax and rcx are saved on the stack (the function's frame is allocated down to
      * rsp: nothing of it lies below); the flags are dead here (the test above already changed them). */
@@ -1362,6 +1401,7 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     const int ring_on = !(ring_env && ring_env[0] == '0') && (uintptr_t)(ring + 0x400) < 0x7fffffffu;
     if (ring_on) {
         const uint32_t ring32 = (uint32_t)(uintptr_t)ring, ring32b = ring32 + 8;
+        const uint32_t cams32 = (uint32_t)(uintptr_t)(page + 0x200);
         *c++ = 0x50; *c++ = 0x51;                                             /* push rax; push rcx */
         *c++ = 0xb8; *c++ = 0x01; *c++ = 0x00; *c++ = 0x00; *c++ = 0x00;      /* mov eax, 1 */
         *c++ = 0xf0; *c++ = 0x0f; *c++ = 0xc1; *c++ = 0x05; c = pj_rel(c, count); /* lock xadd [count], eax */
@@ -1369,7 +1409,15 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
         *c++ = 0xc1; *c++ = 0xe0; *c++ = 0x04;                                /* shl eax, 4 */
         *c++ = 0x48; *c++ = 0x8b; *c++ = 0x0d; c = pj_rel(c, slot);           /* mov rcx, [slot] */
         *c++ = 0x48; *c++ = 0x89; *c++ = 0x88; memcpy(c, &ring32, 4); c += 4; /* mov [rax + ring], rcx */
-        *c++ = 0x48; *c++ = 0x89; *c++ = 0x98; memcpy(c, &ring32b, 4); c += 4; /* mov [rax + ring + 8], rbx */
+        *c++ = 0x48; *c++ = 0x89; *c++ = 0xc1;                                /* mov rcx, rax */
+        *c++ = 0x52;                                                          /* push rdx */
+        *c++ = 0x0f; *c++ = 0x31;                                             /* rdtsc */
+        *c++ = 0x48; *c++ = 0xc1; *c++ = 0xe2; *c++ = 0x20;                   /* shl rdx, 32 */
+        *c++ = 0x48; *c++ = 0x09; *c++ = 0xd0;                                /* or rax, rdx */
+        *c++ = 0x48; *c++ = 0x89; *c++ = 0x81; memcpy(c, &ring32b, 4); c += 4; /* mov [rcx + ring + 8], rax (the time) */
+        *c++ = 0x48; *c++ = 0xd1; *c++ = 0xe9;                                /* shr rcx, 1 */
+        *c++ = 0x48; *c++ = 0x89; *c++ = 0x99; memcpy(c, &cams32, 4); c += 4;  /* mov [rcx + cameras], rbx */
+        *c++ = 0x5a;                                                          /* pop rdx */
         *c++ = 0x59; *c++ = 0x58;                                             /* pop rcx; pop rax */
     }
     *c++ = 0xc5; *c++ = (uint8_t)(0x80 | ((~r & 15) << 3)); *c++ = 0x58; *c++ = (uint8_t)((r << 3) | 5);
@@ -1381,8 +1429,13 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
         *c++ = 0xc5; *c++ = 0xf8; *c++ = 0x58; *c++ = 0x05; c = pj_rel(c, slot);                 /* vaddps xmm0, xmm0, [slot] */
         *c++ = 0xc5; *c++ = 0xf8; *c++ = 0x29; *c++ = 0x85; memcpy(c, &g->stack_row, 4); c += 4; /* vmovaps [rbp+d], xmm0 */
     }
-    *skip1 = (uint8_t)(c - (skip1 + 1));
-    *skip2 = (uint8_t)(c - (skip2 + 1));
+    if (game_on) {
+        *c++ = 0x48; *c++ = 0x3b; *c++ = 0x1d; c = pj_rel(c, marker);         /* cmp rbx, [marker] */
+        *c++ = 0x75; *c++ = 0x07;                                             /* jne +7 */
+        *c++ = 0xc6; *c++ = 0x05; c = pj_rel(c, pending - 1); *c++ = 0x01;     /* mov byte [pending], 1 */
+    }
+    pj_rel(skip1, c);
+    pj_rel(skip2, c);
     memcpy(c, g->join_bytes, 5); c += 5;                                  /* the replaced load */
     *c++ = 0xe9; c = pj_rel(c, code + g->join + 5);                       /* jmp back */
     uint8_t *site = code + g->join;
@@ -1390,15 +1443,15 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     pj_rel(site + 1, page);
     if (g->const_row) {
         /* The second projection's third row is a constant loaded into xmm8: the load, then the same test and add. */
-        uint8_t *stub = (c = page + 0x100);
+        uint8_t *stub = (c = page + 0x180);
         uint8_t *load = code + g->const_row;
         int32_t rel;
         memcpy(&rel, load + 4, 4);
         *c++ = 0xc5; *c++ = 0x78; *c++ = 0x28; *c++ = 0x05; c = pj_rel(c, load + 8 + rel); /* vmovaps xmm8, [constant] */
         c = pj_emit_test(c, g, &skip1, &skip2);
         *c++ = 0xc5; *c++ = 0x38; *c++ = 0x58; *c++ = 0x05; c = pj_rel(c, slot);           /* vaddps xmm8, xmm8, [slot] */
-        *skip1 = (uint8_t)(c - (skip1 + 1));
-        *skip2 = (uint8_t)(c - (skip2 + 1));
+        pj_rel(skip1, c);
+        pj_rel(skip2, c);
         *c++ = 0xe9; c = pj_rel(c, load + 8);                                               /* jmp back */
         load[0] = 0xe9;
         pj_rel(load + 1, stub);
@@ -1407,6 +1460,17 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     if (ring_on) {
         runtime_projection_jitter_count = count;
         runtime_projection_jitter_ring = ring;
+        runtime_projection_jitter_cameras = (const uint64_t *)(page + 0x200);
+        runtime_projection_jitter_offsets[0] = g->aspect;
+        runtime_projection_jitter_offsets[1] = g->ortho;
+    }
+    if (game_on) {
+        runtime_projection_jitter_table = table;
+        runtime_projection_jitter_phases = phases;
+        runtime_projection_jitter_marker = marker;
+    }
+    if ((size_t)(c - page) > 0x800 || 0) {
+        printf("Projection jitter: stub too long\n");
     }
     runtime_projection_jitter_slot = slot;
     printf("Projection jitter: the game's projection takes the upscaler jitter (%s, camera update join at %#llx, "

@@ -14,6 +14,12 @@
 extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (prototype), or null
 extern "C" volatile uint32_t* runtime_projection_jitter_count; // the stub's record of applied jitters, or null
 extern "C" const uint8_t* runtime_projection_jitter_ring;
+extern "C" const uint64_t* runtime_projection_jitter_cameras; // diagnosis: the records' camera addresses
+extern "C" uint32_t runtime_projection_jitter_offsets[2];     // the camera's aspect / orthographic fields
+extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
+extern "C" float* runtime_projection_jitter_table;             // the cycle the game side steps through
+extern "C" volatile uint32_t* runtime_projection_jitter_phases;
+extern "C" volatile uint64_t* runtime_projection_jitter_marker; // != 0: the game side steps the phase
 #include "shader_recompiler/runtime_info.h"
 
 #include "video_core/host_shaders/camera_motion_comp.h"
@@ -478,6 +484,9 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 std::memcpy(&e, runtime_projection_jitter_ring + (place & 63u) * 16u, sizeof(e));
                 return e;
             };
+            const auto same_value = [](const Entry& a, const Entry& b) {
+                return a.x == b.x && a.y == b.y;
+            };
             const auto same = [&](const Entry& e) {
                 return std::abs(e.x - last[0]) < 2e-6f && std::abs(e.y - last[1]) < 2e-6f;
             };
@@ -510,6 +519,58 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 found = true; // no jitter in the frame (a fade, the jitter off): the place stands
             }
             known = false;
+            // With the frame clock known (the game side steps the phase after that camera's build, the
+            // last of a frame): this frame's jitter is the value of the build right after last frame's
+            // clock build: the frame's first build (all builds of a frame carry one value). Its own clock
+            // build comes late in the frame and may not be recorded yet when the frame is processed.
+            const u64 clock = runtime_projection_jitter_marker ? *runtime_projection_jitter_marker : 0;
+            if (found && clock && runtime_projection_jitter_cameras) {
+                u32 at = place; // a build of last frame: on to its clock build
+                while (in_ring(at) && runtime_projection_jitter_cameras[at & 63u] != clock) {
+                    ++at;
+                }
+                if (in_ring(at) && in_ring(at + 1)) {
+                    const Entry before = entry(at), now = entry(at + 1);
+                    previous_projection_jitter = {before.x, before.y};
+                    projection_jitter = {now.x, now.y};
+                    projection_matched = true;
+                    place = at + 1;
+                    known = true;
+                }
+            }
+            // The same without the record: the game side steps exactly once per game frame, so this
+            // frame's jitter is the cycle's value after last frame's (read back exactly). This is the
+            // rule; the record above, when it already holds the frame's first build, is the value really
+            // applied and wins if it ever differs (counted).
+            static u32 by_cycle = 0, cycle_differs = 0;
+            if (clock && runtime_projection_jitter_table && runtime_projection_jitter_phases &&
+                (last[0] != 0.0f || last[1] != 0.0f)) {
+                const u32 n = std::min(u32(*runtime_projection_jitter_phases), 128u);
+                for (u32 k = 0; k < n; ++k) {
+                    const float* t = runtime_projection_jitter_table + k * 4;
+                    if (std::abs(t[0] - last[0]) < 2e-6f && std::abs(t[1] - last[1]) < 2e-6f) {
+                        const float* next = runtime_projection_jitter_table + ((k + 1) % n) * 4;
+                        if (known) {
+                            cycle_differs += std::abs(next[0] - projection_jitter[0]) > 2e-6f ||
+                                             std::abs(next[1] - projection_jitter[1]) > 2e-6f;
+                        } else {
+                            previous_projection_jitter = {t[0], t[1]};
+                            projection_jitter = {next[0], next[1]};
+                            projection_matched = true;
+                            ++by_cycle;
+                        }
+                        break;
+                    }
+                }
+            }
+            if (frames % 600 == 598 && lines < 20 && clock) {
+                std::printf("Projection jitter cycle: in 600 frames %u took the cycle's next value without a "
+                            "record, %u records differed from the cycle\n", by_cycle, cycle_differs);
+                by_cycle = cycle_differs = 0;
+            }
+            if (clock) {
+                // (the frame clock's path above; the count of builds per frame is the other path)
+            } else
             if (found && period >= 1 && period <= 30 && in_ring(place + period)) {
                 const Entry before = entry(place), now = entry(place + period);
                 previous_projection_jitter = {before.x, before.y};
@@ -521,14 +582,33 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
             // Diagnosis (BB_PROJECTION_JITTER_RING_LOG=1): the record's newest 48 entries, three times.
             if (static const bool ring_log = std::getenv("BB_PROJECTION_JITTER_RING_LOG") != nullptr;
                 ring_log && (frames == 3000 || frames == 3001 || frames == 3002)) {
-                std::printf("Projection jitter ring at count %u (read back %.1f %.1f):", count,
-                            last[0] * 1e6f, last[1] * 1e6f);
-                for (u32 back = 48; back >= 1; --back) {
+                std::printf("Projection jitter ring at count %u (read back %.1f %.1f): per build: jitter x "
+                            "1e6, ticks since the build before, camera address, aspect, orthographic, "
+                            "projection [0][0] [1][1] [2][0] [2][1] [2][2] [3][2]\n", count, last[0] * 1e6f,
+                            last[1] * 1e6f);
+                u64 before = entry(count - 19).camera;
+                for (u32 back = 18; back >= 1; --back) {
                     const Entry e = entry(count - back);
-                    std::printf(" %.0f,%.0f@%05llx", e.x * 1e6f, e.y * 1e6f,
-                                static_cast<unsigned long long>(e.camera & 0xfffffu));
+                    const u64 address = runtime_projection_jitter_cameras
+                                            ? runtime_projection_jitter_cameras[(count - back) & 63u] : 0;
+                    float aspect = 0.0f, p[16] = {};
+                    u8 ortho = 0;
+                    const bool read =
+                        address &&
+                        runtime_memory_read_backing(address + runtime_projection_jitter_offsets[0], &aspect, 4) &&
+                        runtime_memory_read_backing(address + runtime_projection_jitter_offsets[1], &ortho, 1) &&
+                        runtime_memory_read_backing(address + 0x90, p, sizeof(p));
+                    std::printf("  %7.0f %7.0f  +%-9llu %012llx", e.x * 1e6f, e.y * 1e6f,
+                                static_cast<unsigned long long>(e.camera - before),
+                                static_cast<unsigned long long>(address));
+                    if (read) {
+                        std::printf("  %.4f %u  %.5f %.5f %.6f %.6f %.5f %.4f\n", aspect, ortho, p[0], p[5], p[8],
+                                    p[9], p[10], p[14]);
+                    } else {
+                        std::printf("  (not readable)\n");
+                    }
+                    before = e.camera;
                 }
-                std::printf("\n");
             }
             missing += !known;
             // The order of the jitters the frames get: a value used for two frames in a row, or one
@@ -544,6 +624,19 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                     ++repeated;
                 } else if (told_before[0] != 0.0f || told_before[1] != 0.0f) {
                     bool next_found = false;
+                    if (runtime_projection_jitter_table && runtime_projection_jitter_marker &&
+                        *runtime_projection_jitter_marker) {
+                        // The game side steps through the cycle: the successor is the table's.
+                        const u32 n = std::min(u32(*runtime_projection_jitter_phases), 128u);
+                        for (u32 k = 0; k < n; ++k) {
+                            const float* t = runtime_projection_jitter_table + k * 4;
+                            if (same_jitter(std::array<float, 2>{t[0], t[1]}, told_before)) {
+                                const float* next = runtime_projection_jitter_table + ((k + 1) % n) * 4;
+                                next_found = same_jitter(std::array<float, 2>{next[0], next[1]}, projection_jitter);
+                                break;
+                            }
+                        }
+                    } else
                     for (u32 back = 1; back + 1 < asked_jitter.size() && back < asked_count; ++back) {
                         if (same_jitter(asked_jitter[(asked_count - back - 1) % asked_jitter.size()], told_before)) {
                             next_found = same_jitter(asked_jitter[(asked_count - back) % asked_jitter.size()],
@@ -554,6 +647,32 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                     out_of_order += !next_found;
                 }
                 told_before = projection_jitter;
+            }
+            // Diagnosis: the time between camera builds (the record's second word is rdtsc): the longest
+            // gap inside a frame's group of builds and the shortest between two groups, over the newest
+            // 54 records, kept as the extremes of each 600 frames.
+            static u64 widest_inside = 0, narrowest_between = ~0ull;
+            if (period >= 2 && period <= 30 && count > 60) {
+                u64 before = entry(count - 55).camera;
+                for (u32 back = 54; back >= 1; --back) {
+                    const Entry e = entry(count - back);
+                    const u64 gap = e.camera - before;
+                    const bool boundary = !same_value(e, entry(count - back - 1));
+                    if (boundary) {
+                        narrowest_between = std::min(narrowest_between, gap);
+                    } else {
+                        widest_inside = std::max(widest_inside, gap);
+                    }
+                    before = e.camera;
+                }
+            }
+            if (frames % 600 == 599 && lines < 20) {
+                std::printf("Projection jitter record times: longest gap between builds with one value %llu, "
+                            "shortest gap at a change of value %llu (rdtsc ticks)\n",
+                            static_cast<unsigned long long>(widest_inside),
+                            static_cast<unsigned long long>(narrowest_between));
+                widest_inside = 0;
+                narrowest_between = ~0ull;
             }
             if (++frames % 600 == 0 && lines < 20) {
                 ++lines;
