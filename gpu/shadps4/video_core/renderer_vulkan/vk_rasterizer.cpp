@@ -56,7 +56,7 @@ extern "C" volatile int runtime_movie_opens;
 extern "C" volatile int runtime_movie_starts;
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* out, uint64_t size);
 
-extern "C" int runtime_gpu_nvidia; // runtime_ultrawide.c: projection jitter is on by default on NVIDIA only
+extern "C" int runtime_gpu_nvidia; // runtime_ultrawide.c: which driver runs (projection jitter is on with every GPU)
 
 namespace Vulkan {
 bool BbMovieShaderSize(u64 pgm_hash, u32& width, u32& height); // vk_pipeline_cache.cpp
@@ -714,7 +714,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         Shader::ClipJitter::enabled = env && *env ? env[0] != '0'
                                                   : instance.GetDriverID() != vk::DriverId::eNvidiaProprietary;
         std::printf("Upscaler jitter: %s\n", Shader::ClipJitter::enabled ? "in the vertex shaders" : "viewport offset");
-        // Projection jitter (runtime_ultrawide.c) is on by default on NVIDIA's driver only.
+        // The driver, for the game-side patches (projection jitter itself is on with every GPU).
         runtime_gpu_nvidia = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ? 1 : 0;
     }
     // bbport: from here the stored pipelines load on background threads (the motion shaders

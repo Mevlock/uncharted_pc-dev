@@ -1245,7 +1245,7 @@ float *runtime_projection_jitter_slot;
 float *runtime_projection_jitter_table;
 volatile uint32_t *runtime_projection_jitter_phases;
 const volatile uint32_t *runtime_projection_jitter_frame;
-/* Set by the GPU side before the game code is patched: 1 on NVIDIA's driver, 0 on another, -1 not known yet. */
+/* Set by the GPU side: 1 on NVIDIA's driver, 0 on another, -1 not known yet (no longer decides the projection jitter). */
 int runtime_gpu_nvidia = -1;
 /* Which game's program was recognised when the code was patched (1, 2, 3; 0: none / not yet): read by the GPU side. */
 int runtime_uncharted_game;
@@ -1380,9 +1380,9 @@ void runtime_reserve_projection_jitter(unsigned char *image, uint64_t size) {
 }
 
 void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
-    /* On by default where it is known to work: a recognised game program on NVIDIA's driver (the only one it was
-     * run on; the others keep the vertex shader jitter until someone has tried it there). BB_PROJECTION_JITTER=0:
-     * off; =1: on with any GPU. Whenever it is not installed the upscaler jitters as 0.3.6.57 did, with its fixes. */
+    /* On by default for a recognised game program, with every GPU (NVIDIA; from 0.3.6.57 AMD and Intel too, where the
+     * vertex shaders keep their jitter code and are given no offset while the projection carries the jitter).
+     * BB_PROJECTION_JITTER=0: off. Whenever it is not installed the upscaler jitters as before, with its fixes. */
 #ifdef _WIN32
     for (unsigned i = 0; i < sizeof(projection_jitter_games) / sizeof(projection_jitter_games[0]); ++i) {
         const ProjectionJitterGame *t = &projection_jitter_games[i];
@@ -1394,13 +1394,6 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     const char *env = getenv("BB_PROJECTION_JITTER");
     if (env && env[0] == '0') {
         printf("Projection jitter: off (BB_PROJECTION_JITTER=0): the upscaler jitter and its fixes as in 0.3.6.57\n");
-        return;
-    }
-    const int forced = env && env[0] == '1';
-    if (!forced && runtime_gpu_nvidia != 1) {
-        printf("Projection jitter: not used on this GPU (%s; tested on NVIDIA only, BB_PROJECTION_JITTER=1 turns it "
-               "on): the upscaler jitter and its fixes as in 0.3.6.57\n",
-               runtime_gpu_nvidia == 0 ? "not NVIDIA's driver" : "GPU not known yet");
         return;
     }
 #ifdef _WIN32
