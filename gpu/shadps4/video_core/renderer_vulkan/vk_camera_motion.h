@@ -181,6 +181,8 @@ public:
     }
     /// The motion dead zone in pixels (BB_MOTION_DEADZONE; 0.01, or 0 with projection jitter).
     static float MotionDeadzone();
+    /// The jitter is in the game's projection for the upscaler in use (BB_PROJECTION_JITTER_FSR3=0: not FSR 3.1).
+    static bool ProjectionJitterActive();
     /// The jitter (NDC) just written to the game's slot, once per shown frame.
     void NoteAskedJitter(std::array<float, 2> ndc) noexcept {
         asked_jitter[asked_count++ % asked_jitter.size()] = ndc;

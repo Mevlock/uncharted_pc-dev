@@ -466,7 +466,7 @@ bool FadeFixOn(const char* name) {
     if (env && env[0]) {
         return env[0] != '0';
     }
-    return runtime_projection_jitter_slot == nullptr;
+    return !CameraMotion::ProjectionJitterActive();
 }
 bool FadeNoJitter() {
     return FadeFixOn("BB_DLSS_FADE_NOJITTER");
@@ -698,6 +698,9 @@ bool TemporalUpscaler::OnFrameStart() {
         runtime_projection_jitter_slot[0] = on && w > 0.0f ? 2.0f * jitter[0] / w : 0.0f;
         runtime_projection_jitter_slot[1] = on && h > 0.0f ? -2.0f * jitter[1] / h : 0.0f;
         camera_motion.NoteAskedJitter({runtime_projection_jitter_slot[0], runtime_projection_jitter_slot[1]});
+    } else if (runtime_projection_jitter_slot) {
+        // Patched, but this upscaler keeps the viewport jitter (BB_PROJECTION_JITTER_FSR3=0): none in the projection.
+        runtime_projection_jitter_slot[0] = runtime_projection_jitter_slot[1] = 0.0f;
     }
     // bbport diagnosis (BB_JITTER_DIAG=1): jitter steps per shown frame, and the distinct jitter
     // positions the upscaler was given over 5 s.
@@ -1864,8 +1867,13 @@ float TemporalUpscaler::SceneMipBias() const {
 }
 
 bool TemporalUpscaler::ProjectionJitterOn() noexcept {
-    const bool on = runtime_projection_jitter_slot != nullptr;
-    static bool noted = false;
+    const bool on = CameraMotion::ProjectionJitterActive();
+    static bool noted = false, noted_fsr3 = false;
+    if (!on && runtime_projection_jitter_slot && !noted_fsr3) {
+        noted_fsr3 = true;
+        std::printf("Upscaler: FSR 3.1 keeps the viewport / vertex shader jitter and its fixes "
+                    "(BB_PROJECTION_JITTER_FSR3=0)\n");
+    }
     if (on && !noted) {
         noted = true;
         std::printf("Upscaler: projection jitter on: jitter source = the game's projection, read back "
@@ -1880,7 +1888,7 @@ void TemporalUpscaler::UseProjectionJitter(u32 w, u32 h) {
     static bool stated = false;
     if (!stated) {
         stated = true;
-        const bool projection = runtime_projection_jitter_slot != nullptr;
+        const bool projection = CameraMotion::ProjectionJitterActive();
         const char* small = std::getenv("BB_JITTER_SMALL");
         std::printf("Upscaler: jitter source = %s; fade reset %s, fade no-jitter %s, motion dead zone %.3f px, "
                     "small-draw jitter %s (BB_DLSS_FADE_RESET, BB_DLSS_FADE_NOJITTER, BB_MOTION_DEADZONE, "

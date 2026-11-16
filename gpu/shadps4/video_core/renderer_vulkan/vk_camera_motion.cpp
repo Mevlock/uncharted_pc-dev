@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "bbport_settings.h"
 #include "bbport_toggles.h"
 extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (prototype), or null
 extern "C" volatile uint32_t* runtime_projection_jitter_count; // the stub's record of applied jitters, or null
@@ -403,7 +404,7 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     // rows of M orthogonal, so jx = (row x . row w) / |row w|^2: last frame's jitter, exactly. The
     // game builds its camera a fixed number of frames ahead: that jitter is looked up in the
     // values asked of the game (NoteAskedJitter), and this frame's is the one asked next.
-    projection_mode = runtime_projection_jitter_slot != nullptr; // patched after the GPU starts
+    projection_mode = ProjectionJitterActive(); // patched after the GPU starts
     if (projection_mode) {
         const auto& p = camera.to_previous_clip;
         const float ww = p[8] * p[8] + p[9] * p[9] + p[10] * p[10];
@@ -530,11 +531,37 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 std::printf("\n");
             }
             missing += !known;
+            // The order of the jitters the frames get: a value used for two frames in a row, or one
+            // that is not the next of the cycle asked (a phase skipped), when the game built two
+            // cameras, or none, between two values asked.
+            static std::array<float, 2> told_before{};
+            static u32 repeated = 0, out_of_order = 0;
+            if (known && (projection_jitter[0] != 0.0f || projection_jitter[1] != 0.0f)) {
+                const auto same_jitter = [](const std::array<float, 2>& a, const std::array<float, 2>& b) {
+                    return std::abs(a[0] - b[0]) < 2e-6f && std::abs(a[1] - b[1]) < 2e-6f;
+                };
+                if (same_jitter(projection_jitter, told_before)) {
+                    ++repeated;
+                } else if (told_before[0] != 0.0f || told_before[1] != 0.0f) {
+                    bool next_found = false;
+                    for (u32 back = 1; back + 1 < asked_jitter.size() && back < asked_count; ++back) {
+                        if (same_jitter(asked_jitter[(asked_count - back - 1) % asked_jitter.size()], told_before)) {
+                            next_found = same_jitter(asked_jitter[(asked_count - back) % asked_jitter.size()],
+                                              projection_jitter);
+                            break;
+                        }
+                    }
+                    out_of_order += !next_found;
+                }
+                told_before = projection_jitter;
+            }
             if (++frames % 600 == 0 && lines < 20) {
                 ++lines;
                 std::printf("Projection jitter record: in 600 frames %u looked up by value, %u without a "
-                            "record (inferred); %u cameras a frame\n", searched, missing, period);
-                searched = missing = 0;
+                            "record (inferred), %u with the jitter of the frame before, %u with a phase "
+                            "skipped; %u cameras a frame\n", searched, missing, repeated, out_of_order,
+                            period);
+                searched = missing = repeated = out_of_order = 0;
             }
         }
     }
@@ -805,12 +832,29 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
 /// Without either a still view was less steady with every upscaler (U3 street, 3440x1440 native,
 /// 60-frame temporal std p50: DLSS 0.35 against 0.22 with the dead zone, FSR 3.1 0.30-0.40 against
 /// 0.22; the viewport-jitter path without it: DLSS 0.25 against 0.15, FSR 3.1 0.40 against 0.23).
+/// The jitter is in the game's projection for the upscaler in use: the game code is patched
+/// (runtime_ultrawide.c). BB_PROJECTION_JITTER_FSR3=0 (diagnosis): FSR 3.1 alone keeps the viewport /
+/// vertex-shader jitter with its fixes (fade, dead zone, small draws). With the projection jitter FSR
+/// 3.1's still picture measures about 10% less steady than with the old jitter (U3 street, 3440x1440
+/// native, 60-frame std p50 0.21-0.23 against 0.20-0.21), although it is told the frame's own jitter and
+/// gets zero motion: cause open.
+bool CameraMotion::ProjectionJitterActive() {
+    if (!runtime_projection_jitter_slot) {
+        return false;
+    }
+    static const bool fsr3_old = [] {
+        const char* env = std::getenv("BB_PROJECTION_JITTER_FSR3");
+        return env && env[0] == '0';
+    }();
+    return !fsr3_old || BbSettings::Get().upscaler != BbSettings::UpscalerFsr3;
+}
+
 float CameraMotion::MotionDeadzone() {
     static const float set = [] {
         const char* env = std::getenv("BB_MOTION_DEADZONE");
         return env && env[0] ? static_cast<float>(std::atof(env)) : -1.0f;
     }();
-    return set >= 0.0f ? set : runtime_projection_jitter_slot ? 0.0f : 0.01f;
+    return set >= 0.0f ? set : ProjectionJitterActive() ? 0.0f : 0.01f;
 }
 static float motion_deadzone() {
     return CameraMotion::MotionDeadzone();
