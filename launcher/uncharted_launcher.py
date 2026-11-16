@@ -139,6 +139,8 @@ ULTRAWIDE = [('auto', 'Fill wide screens (wider view)'),
 HUD_LAYOUTS = [('16:9', 'In the middle (16:9)'),
                ('wide', 'Wide: sides at the screen edges'),
                ('wide-21:9', 'Wide: sides at the edges of 21:9')]
+# Hidden for now: the wide HUD cut long centred text (subtitles, titles) at the thirds; its fix is in test.
+HUD_LAYOUT_HIDDEN = True
 # The games' field of view in percent (BB_FOV), on every screen.
 FIELDS_OF_VIEW = [('100', "100% (the games' own)"), ('110', '110%'), ('120', '120%'), ('130', '130%')]
 SCALERS = [('fsr1', 'FSR 1 (AMD FidelityFX, sharp)'), ('bilinear', 'Smooth (bilinear)')]
@@ -933,7 +935,10 @@ def game_environment(s, start=None):
         # at Native had no anti-aliasing at all, only the sub-pixel jitter).
         env['BB_RENDER_RES'], env['BB_OUTPUT_RES'] = sizes
     env['BB_ULTRAWIDE'] = str(s.get('ultrawide') or 'auto')
-    hud = str(s.get('hud_layout') or '16:9')
+    # The wide HUD option is hidden for now (it cut long centred text such as subtitles; a fix is in
+    # test): a 'wide' choice saved by a test build is not applied. BB_HUD_LAYOUT=wide in the Extra
+    # variables still turns it on for testing.
+    hud = '16:9' if HUD_LAYOUT_HIDDEN else str(s.get('hud_layout') or '16:9')
     if hud.startswith('wide'):
         env['BB_HUD_LAYOUT'] = 'wide'
         if hud == 'wide-21:9':
@@ -1982,10 +1987,11 @@ class Launcher:
                    'and fills it. Menus, loading screens and cutscene videos stay 16:9; the in-game HUD '
                    'is stretched for now. Always fill never switches to 16:9 (if the switching '
                    'misfires for you): menus, loading screens and videos are then stretched.'))
-        self.row(f, _('HUD at wide screens'), self.choice(f, 'hud_layout', HUD_LAYOUTS, 34),
-                 _('On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in its '
-                   'left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the edges of '
-                   'a 21:9 area (for 32:9 screens). Menus and videos stay 16:9.'))
+        if not HUD_LAYOUT_HIDDEN:
+            self.row(f, _('HUD at wide screens'), self.choice(f, 'hud_layout', HUD_LAYOUTS, 34),
+                     _('On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in '
+                       'its left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the '
+                       'edges of a 21:9 area (for 32:9 screens). Menus and videos stay 16:9.'))
         self.row(f, _('Field of view'), self.choice(f, 'fov', FIELDS_OF_VIEW, 34),
                  _('Shows more of the scene in every direction, also when aiming and in cutscenes.'))
         self.row(f, _('Texture filtering'), self.choice(f, 'anisotropy', ANISOTROPY, 34),
