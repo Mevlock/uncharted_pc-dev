@@ -1985,8 +1985,7 @@ class Launcher:
         self.row(f, _('HUD at wide screens'), self.choice(f, 'hud_layout', HUD_LAYOUTS, 34),
                  _('On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in its '
                    'left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the edges of '
-                   'a 21:9 area (for 32:9 screens). Menus and videos stay 16:9. The wide HUD comes from '
-                   "Ferosnow95's Uncharted 2 HUD in BilalReloaded's port."))
+                   'a 21:9 area (for 32:9 screens). Menus and videos stay 16:9.'))
         self.row(f, _('Field of view'), self.choice(f, 'fov', FIELDS_OF_VIEW, 34),
                  _('Shows more of the scene in every direction, also when aiming and in cutscenes.'))
         self.row(f, _('Texture filtering'), self.choice(f, 'anisotropy', ANISOTROPY, 34),
