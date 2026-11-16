@@ -149,6 +149,8 @@ ANISOTROPY = [('0', "Off (the game's own)"), ('4', '4x'), ('8', '8x'), ('16', '1
 SHARPENING = [('off', 'Off'), ('1000', 'Low'), ('500', 'Medium'), ('250', 'High'), ('0', 'Maximum')]
 # HDR10 output (BB_HDR, BB_HDR_PEAK_NITS, BB_HDR_PAPER_WHITE; off by default).
 HDR_MODES = [('off', 'Off'), ('on', 'On')]
+# Scene HDR tone mapping (BB_HDR_SCENE_MODE; the in-game menu's Tone mapping starts from this choice).
+HDR_TONE_MODES = [('2', 'SDR + highlights'), ('1', 'Game curve extended'), ('0', 'RenoDX tone mapping')]
 HDR_PEAK_NITS = [('auto', 'Auto (as Windows reports)'), ('400', '400'), ('600', '600'), ('800', '800'), ('1000', '1000'), ('1500', '1500'), ('2000', '2000'), ('4000', '4000'), ('10000', '10000')]
 HDR_PAPER_WHITE = [('80', '80'), ('100', '100'), ('150', '150'), ('203', '203'), ('250', '250'), ('300', '300'), ('400', '400'), ('500', '500')]
 # Temporal anti-aliasing at the render resolution (BB_UPSCALER): it takes the scene before the
@@ -244,7 +246,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'hdr': 'off', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
+                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'hud_layout': '16:9', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
@@ -944,6 +946,8 @@ def game_environment(s, start=None):
         env['BB_HDR'] = '1'
         env['BB_HDR_PEAK_NITS'] = str(s.get('hdr_peak_nits') or '1000')
         env['BB_HDR_PAPER_WHITE'] = str(s.get('hdr_paper_white') or '203')
+        tone = str(s.get('hdr_tone') or '2')
+        env['BB_HDR_SCENE_MODE'] = tone if tone in ('0', '1', '2') else '2'
     env['BB_DOF'] = str(s.get('depth_of_field') or '1')
     # The logo movie (off by default). The faster boot (the vblank runs fast from the shader preparation's end until
     # the title, paused while the logos play) is on for everyone in the port itself (BB_FAST_BOOT=0: off).
@@ -2009,7 +2013,13 @@ class Launcher:
                  _('AMD RCAS on the final picture (after FSR 1 when the image is enlarged, also at native size).'))
         self.section(f, _('HDR'))
         self.row(f, _('HDR'), self.choice(f, 'hdr', HDR_MODES, 34),
-                 _("HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below."))
+                 _("HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). The games also get the brighter highlights of their own scenes with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below."))
+        self.row(f, _('HDR tone mapping'), self.choice(f, 'hdr_tone', HDR_TONE_MODES, 34),
+                 _("How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR "
+                   "picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the "
+                   "game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone "
+                   "mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR "
+                   "section); the game starts with the choice made here."))
         self.row(f, _('Peak brightness (nits)'), self.choice(f, 'hdr_peak_nits', HDR_PEAK_NITS, 34),
                  _("The brightest highlights: set it to your display's peak brightness."))
         self.row(f, _('Paper white (nits)'), self.choice(f, 'hdr_paper_white', HDR_PAPER_WHITE, 34),

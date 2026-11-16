@@ -122,7 +122,7 @@ struct Values {
     std::atomic<bool> hdr_per_channel{false};
     std::atomic<float> hdr_highlight_start{0.6f};
     /// Scene tone mapping (BbHdr::Tuning::scene_mode): 0 RenoDX, 1 extended game curve, 2 SDR + highlights.
-    std::atomic<int> hdr_scene_mode{0};
+    std::atomic<int> hdr_scene_mode{2};
     std::atomic<float> hdr_knee{0.5f};
     /// Mode 2: the share of the scene's highlight range shown (in stops); 1 all of it.
     std::atomic<float> hdr_strength{1.0f};

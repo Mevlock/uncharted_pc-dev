@@ -11,8 +11,8 @@ EXTRA_TRANSLATIONS = {
         'Spitzenhelligkeit (Nits)',
         'Paper white (nits)':
         'Papierweiß (Nits)',
-        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
-        'HDR10-Ausgabe auf einem HDR-Bildschirm (schalte zuerst „HDR verwenden“ in den Windows-Anzeigeeinstellungen ein; sonst startet das Spiel in SDR). Uncharted 2 erhält mit einer Renderauflösung und DLSS, FSR 4, XeSS oder TAA auf einer GeForce auch die helleren Lichter seiner eigenen Szene; sonst wird das Bild des Spiels in HDR10 mit dem Papierweiß unten gezeigt.',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). The games also get the brighter highlights of their own scenes with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        'HDR10-Ausgabe auf einem HDR-Bildschirm (schalte zuerst „HDR verwenden“ in den Windows-Anzeigeeinstellungen ein; sonst startet das Spiel in SDR). Die Spiele erhalten mit einer Renderauflösung und DLSS, FSR 4, XeSS oder TAA auf einer GeForce auch die helleren Lichter ihrer eigenen Szenen; sonst wird das Bild des Spiels in HDR10 mit dem Papierweiß unten gezeigt.',
         "The brightest highlights: set it to your display's peak brightness.":
         'Die hellsten Lichter: stelle die Spitzenhelligkeit deines Bildschirms ein.',
         'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
@@ -436,6 +436,11 @@ EXTRA_TRANSLATIONS = {
         'Wide: sides at the screen edges': 'Breit: Seiten an den Bildschirmrändern',
         'Wide: sides at the edges of 21:9': 'Breit: Seiten an den Rändern von 21:9',
         "On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in its left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the edges of a 21:9 area (for 32:9 screens). Menus and videos stay 16:9. The wide HUD comes from Ferosnow95's Uncharted 2 HUD in BilalReloaded's port.": 'Auf einem Bildschirm breiter als 16:9: das HUD im Spiel in der Mitte (16:9), oder Breit: was es in seinem linken und rechten Drittel zeigt (Munition, Waffe, Hinweise), rückt an die Bildschirmränder oder an die Ränder eines 21:9-Bereichs (für 32:9-Bildschirme). Menüs und Videos bleiben 16:9. Das breite HUD stammt aus Ferosnow95s Uncharted-2-HUD in BilalReloadeds Port.',
+        'HDR tone mapping': 'HDR-Tone-Mapping',
+        'SDR + highlights': 'SDR + Spitzlichter',
+        'Game curve extended': 'Spielkurve verlängert',
+        'RenoDX tone mapping': 'RenoDX-Tone-Mapping',
+        "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": 'Wie die helleren Lichter der eigenen Szenen der Spiele (siehe HDR oben) entstehen. SDR + Spitzlichter: das SDR-Bild des Spiels unverändert; nur was heller als ein Kniepunkt ist, erhält die eigene Helligkeit der Szene. Spielkurve verlängert: die eigene Filmkurve des Spiels bis zu ihrem Wendepunkt, danach geradlinig weiter ins HDR. RenoDX-Tone-Mapping: der RenoDX-Tone-Mapper mit eigenen Bildeinstellungen. Lässt sich auch beim Spielen ändern (Menü im Spiel, Taste Einfg, Abschnitt HDR); das Spiel startet mit der hier getroffenen Wahl.',
     },
     'it': {
         'Auto (as Windows reports)':
@@ -446,8 +451,8 @@ EXTRA_TRANSLATIONS = {
         'Luminosità di picco (nit)',
         'Paper white (nits)':
         'Bianco carta (nit)',
-        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
-        "Uscita HDR10 su uno schermo HDR (attiva prima «Usa HDR» nelle impostazioni dello schermo di Windows; altrimenti il gioco parte in SDR). Uncharted 2 ottiene anche le luci più brillanti della sua scena con una risoluzione di rendering e DLSS, FSR 4, XeSS o TAA su una GeForce; altrimenti l'immagine del gioco è mostrata in HDR10 con il bianco carta qui sotto.",
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). The games also get the brighter highlights of their own scenes with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        "Uscita HDR10 su uno schermo HDR (attiva prima «Usa HDR» nelle impostazioni dello schermo di Windows; altrimenti il gioco parte in SDR). I giochi ottengono anche le luci più brillanti delle loro scene con una risoluzione di rendering e DLSS, FSR 4, XeSS o TAA su una GeForce; altrimenti l'immagine del gioco è mostrata in HDR10 con il bianco carta qui sotto.",
         "The brightest highlights: set it to your display's peak brightness.":
         'Le luci più brillanti: impostala sulla luminosità di picco del tuo schermo.',
         'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
@@ -871,6 +876,11 @@ EXTRA_TRANSLATIONS = {
         'Wide: sides at the screen edges': 'Largo: lati ai bordi dello schermo',
         'Wide: sides at the edges of 21:9': 'Largo: lati ai bordi di 21:9',
         "On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in its left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the edges of a 21:9 area (for 32:9 screens). Menus and videos stay 16:9. The wide HUD comes from Ferosnow95's Uncharted 2 HUD in BilalReloaded's port.": 'Su uno schermo più largo di 16:9: l’HUD di gioco al centro (16:9), oppure Largo: ciò che mostra nei terzi sinistro e destro (munizioni, arma, indicazioni) si sposta ai bordi dello schermo, o ai bordi di un’area 21:9 (per schermi 32:9). Menu e video restano 16:9. L’HUD largo viene dall’HUD di Uncharted 2 di Ferosnow95 nel port di BilalReloaded.',
+        'HDR tone mapping': 'Mappatura dei toni HDR',
+        'SDR + highlights': 'SDR + alte luci',
+        'Game curve extended': 'Curva del gioco estesa',
+        'RenoDX tone mapping': 'Mappatura dei toni RenoDX',
+        "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": "Come nascono le luci più brillanti delle scene dei giochi (vedi HDR sopra). SDR + alte luci: l'immagine SDR del gioco così com'è; solo ciò che è più luminoso di un ginocchio riceve la luminosità propria della scena. Curva del gioco estesa: la curva filmica del gioco fino al suo punto di flesso, poi dritta verso l'HDR. Mappatura dei toni RenoDX: il tone mapper RenoDX con le proprie impostazioni d'immagine. Si può cambiare anche mentre si gioca (menu di gioco, tasto Ins, sezione HDR); il gioco parte con la scelta fatta qui.",
     },
     'ja': {
         'Auto (as Windows reports)':
@@ -881,8 +891,8 @@ EXTRA_TRANSLATIONS = {
         'ピーク輝度 (nit)',
         'Paper white (nits)':
         'ペーパーホワイト (nit)',
-        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
-        'HDR ディスプレイで HDR10 出力します（先に Windows のディスプレイ設定で「HDR を使用する」をオンにしてください。オフのままだと SDR で起動します）。Uncharted 2 は、描画解像度と GeForce の DLSS・FSR 4・XeSS・TAA を使うと、シーン自体のより明るいハイライトも得られます。それ以外ではゲームの映像を下のペーパーホワイトで HDR10 表示します。',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). The games also get the brighter highlights of their own scenes with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        'HDR ディスプレイで HDR10 出力します（先に Windows のディスプレイ設定で「HDR を使用する」をオンにしてください。オフのままだと SDR で起動します）。各ゲームは、描画解像度と GeForce の DLSS・FSR 4・XeSS・TAA を使うと、シーン自体のより明るいハイライトも得られます。それ以外ではゲームの映像を下のペーパーホワイトで HDR10 表示します。',
         "The brightest highlights: set it to your display's peak brightness.":
         '最も明るいハイライトです。ディスプレイのピーク輝度に合わせてください。',
         'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
@@ -1300,6 +1310,11 @@ EXTRA_TRANSLATIONS = {
         'Wide: sides at the screen edges': 'ワイド：左右を画面の端に',
         'Wide: sides at the edges of 21:9': 'ワイド：左右を21:9の端に',
         "On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in its left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the edges of a 21:9 area (for 32:9 screens). Menus and videos stay 16:9. The wide HUD comes from Ferosnow95's Uncharted 2 HUD in BilalReloaded's port.": '16:9より横長の画面で：ゲーム中のHUDを中央の16:9に表示するか、ワイドでは左右3分の1にある表示（弾薬、武器、ボタン表示）を画面の端、または21:9の範囲の端（32:9画面向け）へ移します。メニューと動画は16:9のままです。ワイドHUDはBilalReloadedの移植版にあるFerosnow95のアンチャーテッド2用HUDによるものです。',
+        'HDR tone mapping': 'HDR トーンマッピング',
+        'SDR + highlights': 'SDR + ハイライト',
+        'Game curve extended': 'ゲームのカーブを延長',
+        'RenoDX tone mapping': 'RenoDX トーンマッピング',
+        "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": 'ゲームのシーン自体のより明るいハイライト（上の HDR を参照）の作り方です。SDR + ハイライト：ゲームの SDR 映像をそのまま使い、ニーより明るい部分だけがシーン本来の明るさになります。ゲームのカーブを延長：ゲーム自体のフィルミックカーブを変曲点まで使い、その先はまっすぐ HDR へ延ばします。RenoDX トーンマッピング：独自の画質設定を持つ RenoDX のトーンマッパーです。プレイ中にも変更できます（ゲーム内メニュー、Insert キー、HDR の項目）。ゲームはここで選んだ設定で起動します。',
     },
     'es': {
         'Auto (as Windows reports)':
@@ -1310,8 +1325,8 @@ EXTRA_TRANSLATIONS = {
         'Brillo máximo (nits)',
         'Paper white (nits)':
         'Blanco de papel (nits)',
-        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
-        'Salida HDR10 en una pantalla HDR (activa antes «Usar HDR» en la configuración de pantalla de Windows; si no, el juego empieza en SDR). Uncharted 2 también obtiene las luces más brillantes de su propia escena con una resolución de renderizado y DLSS, FSR 4, XeSS o TAA en una GeForce; si no, la imagen del juego se muestra en HDR10 con el blanco de papel de abajo.',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). The games also get the brighter highlights of their own scenes with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        'Salida HDR10 en una pantalla HDR (activa antes «Usar HDR» en la configuración de pantalla de Windows; si no, el juego empieza en SDR). Los juegos también obtienen las luces más brillantes de sus propias escenas con una resolución de renderizado y DLSS, FSR 4, XeSS o TAA en una GeForce; si no, la imagen del juego se muestra en HDR10 con el blanco de papel de abajo.',
         "The brightest highlights: set it to your display's peak brightness.":
         'Las luces más brillantes: ajústalo al brillo máximo de tu pantalla.',
         'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
@@ -1634,6 +1649,11 @@ EXTRA_TRANSLATIONS = {
         'Wide: sides at the screen edges': 'Ancho: lados en los bordes de la pantalla',
         'Wide: sides at the edges of 21:9': 'Ancho: lados en los bordes de 21:9',
         "On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in its left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the edges of a 21:9 area (for 32:9 screens). Menus and videos stay 16:9. The wide HUD comes from Ferosnow95's Uncharted 2 HUD in BilalReloaded's port.": 'En una pantalla más ancha que 16:9: el HUD del juego en el centro (16:9), o Ancho: lo que muestra en sus tercios izquierdo y derecho (munición, arma, indicaciones) pasa a los bordes de la pantalla, o a los bordes de un área 21:9 (para pantallas 32:9). Los menús y los vídeos siguen en 16:9. El HUD ancho viene del HUD de Uncharted 2 de Ferosnow95 en el port de BilalReloaded.',
+        'HDR tone mapping': 'Mapeo de tonos HDR',
+        'SDR + highlights': 'SDR + luces altas',
+        'Game curve extended': 'Curva del juego extendida',
+        'RenoDX tone mapping': 'Mapeo de tonos RenoDX',
+        "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": 'Cómo se crean las luces más brillantes de las propias escenas de los juegos (véase HDR arriba). SDR + luces altas: la imagen SDR del juego tal cual; solo lo que es más brillante que un codo recibe el brillo propio de la escena. Curva del juego extendida: la curva fílmica del juego hasta su punto de inflexión y, desde ahí, recta hacia el HDR. Mapeo de tonos RenoDX: el mapeador de tonos RenoDX con sus propios ajustes de imagen. También se puede cambiar mientras juegas (menú del juego, tecla Insert, sección HDR); el juego empieza con lo elegido aquí.',
     },
     'pt': {
         'Auto (as Windows reports)':
@@ -1644,8 +1664,8 @@ EXTRA_TRANSLATIONS = {
         'Brilho máximo (nits)',
         'Paper white (nits)':
         'Branco de papel (nits)',
-        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
-        'Saída HDR10 em uma tela HDR (ative antes "Usar HDR" nas configurações de vídeo do Windows; sem isso o jogo começa em SDR). Uncharted 2 também ganha os realces mais brilhantes da própria cena com uma resolução de renderização e DLSS, FSR 4, XeSS ou TAA em uma GeForce; caso contrário, a imagem do jogo é mostrada em HDR10 com o branco de papel abaixo.',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). The games also get the brighter highlights of their own scenes with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        'Saída HDR10 em uma tela HDR (ative antes "Usar HDR" nas configurações de vídeo do Windows; sem isso o jogo começa em SDR). Os jogos também ganham os realces mais brilhantes das próprias cenas com uma resolução de renderização e DLSS, FSR 4, XeSS ou TAA em uma GeForce; caso contrário, a imagem do jogo é mostrada em HDR10 com o branco de papel abaixo.',
         "The brightest highlights: set it to your display's peak brightness.":
         'Os realces mais brilhantes: ajuste para o brilho máximo da sua tela.',
         'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
@@ -1969,6 +1989,11 @@ EXTRA_TRANSLATIONS = {
         'Wide: sides at the screen edges': 'Largo: laterais nas bordas da tela',
         'Wide: sides at the edges of 21:9': 'Largo: laterais nas bordas de 21:9',
         "On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in its left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the edges of a 21:9 area (for 32:9 screens). Menus and videos stay 16:9. The wide HUD comes from Ferosnow95's Uncharted 2 HUD in BilalReloaded's port.": 'Numa tela mais larga que 16:9: o HUD do jogo no centro (16:9), ou Largo: o que ele mostra nos terços esquerdo e direito (munição, arma, indicações) vai para as bordas da tela, ou para as bordas de uma área 21:9 (para telas 32:9). Menus e vídeos continuam em 16:9. O HUD largo vem do HUD de Uncharted 2 de Ferosnow95 no port de BilalReloaded.',
+        'HDR tone mapping': 'Mapeamento de tons HDR',
+        'SDR + highlights': 'SDR + realces',
+        'Game curve extended': 'Curva do jogo estendida',
+        'RenoDX tone mapping': 'Mapeamento de tons RenoDX',
+        "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": 'Como são criados os realces mais brilhantes das próprias cenas dos jogos (veja HDR acima). SDR + realces: a imagem SDR do jogo como ela é; só o que é mais brilhante que um joelho recebe o brilho próprio da cena. Curva do jogo estendida: a curva fílmica do próprio jogo até o seu ponto de inflexão e, a partir daí, reta até o HDR. Mapeamento de tons RenoDX: o mapeador de tons RenoDX com seus próprios ajustes de imagem. Também pode ser alterado durante o jogo (menu do jogo, tecla Insert, seção HDR); o jogo começa com a escolha feita aqui.',
     },
     'fr': {
         'Auto (as Windows reports)':
@@ -1979,8 +2004,8 @@ EXTRA_TRANSLATIONS = {
         'Luminosité maximale (nits)',
         'Paper white (nits)':
         'Blanc papier (nits)',
-        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). Uncharted 2 also gets the brighter highlights of its own scene with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
-        "Sortie HDR10 sur un écran HDR (activez d'abord « Utiliser le HDR » dans les paramètres d'affichage de Windows ; sinon le jeu démarre en SDR). Uncharted 2 obtient aussi les hautes lumières plus vives de sa propre scène avec une résolution de rendu et DLSS, FSR 4, XeSS ou TAA sur une GeForce ; sinon l'image du jeu est affichée en HDR10 au blanc papier ci-dessous.",
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). The games also get the brighter highlights of their own scenes with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.":
+        "Sortie HDR10 sur un écran HDR (activez d'abord « Utiliser le HDR » dans les paramètres d'affichage de Windows ; sinon le jeu démarre en SDR). Les jeux obtiennent aussi les hautes lumières plus vives de leurs propres scènes avec une résolution de rendu et DLSS, FSR 4, XeSS ou TAA sur une GeForce ; sinon l'image du jeu est affichée en HDR10 au blanc papier ci-dessous.",
         "The brightest highlights: set it to your display's peak brightness.":
         'Les hautes lumières les plus vives : réglez-la sur la luminosité maximale de votre écran.',
         'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.':
@@ -2305,6 +2330,11 @@ EXTRA_TRANSLATIONS = {
         'Wide: sides at the screen edges': 'Large : côtés aux bords de l’écran',
         'Wide: sides at the edges of 21:9': 'Large : côtés aux bords du 21:9',
         "On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in its left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the edges of a 21:9 area (for 32:9 screens). Menus and videos stay 16:9. The wide HUD comes from Ferosnow95's Uncharted 2 HUD in BilalReloaded's port.": 'Sur un écran plus large que 16:9 : le HUD en jeu au centre (16:9), ou Large : ce qu’il affiche dans ses tiers gauche et droit (munitions, arme, indications) passe aux bords de l’écran, ou aux bords d’une zone 21:9 (pour les écrans 32:9). Les menus et les vidéos restent en 16:9. Le HUD large vient du HUD d’Uncharted 2 de Ferosnow95 dans le portage de BilalReloaded.',
+        'HDR tone mapping': 'Mappage tonal HDR',
+        'SDR + highlights': 'SDR + hautes lumières',
+        'Game curve extended': 'Courbe du jeu prolongée',
+        'RenoDX tone mapping': 'Mappage tonal RenoDX',
+        "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": "Comment sont créées les hautes lumières plus vives des scènes des jeux (voir HDR ci-dessus). SDR + hautes lumières : l'image SDR du jeu telle quelle ; seul ce qui est plus lumineux qu'un coude reçoit la luminosité propre de la scène. Courbe du jeu prolongée : la courbe filmique du jeu jusqu'à son point d'inflexion, puis tout droit vers le HDR. Mappage tonal RenoDX : le mappeur tonal RenoDX avec ses propres réglages d'image. Modifiable aussi en jouant (menu en jeu, touche Inser, section HDR) ; le jeu démarre avec le choix fait ici.",
     },
     # Russian (EU-Russian CUSA02344 players): poncho-ajmv's translation from the upstream port (PR #713)
     # where the English text is the same as ours, the rest translated for this port; the shared
@@ -2708,5 +2738,16 @@ EXTRA_TRANSLATIONS = {
         'Wide: sides at the screen edges': 'Широкий: стороны у краёв экрана',
         'Wide: sides at the edges of 21:9': 'Широкий: стороны у краёв 21:9',
         "On a screen wider than 16:9: the in-game HUD in the middle 16:9, or Wide: what it shows in its left and right thirds (ammo, weapon, prompts) moves out to the screen edges, or to the edges of a 21:9 area (for 32:9 screens). Menus and videos stay 16:9. The wide HUD comes from Ferosnow95's Uncharted 2 HUD in BilalReloaded's port.": 'На экране шире 16:9: игровой интерфейс по центру (16:9), или «Широкий»: то, что он показывает в левой и правой третях (патроны, оружие, подсказки), уходит к краям экрана или к краям области 21:9 (для экранов 32:9). Меню и видео остаются 16:9. Широкий интерфейс взят из интерфейса Uncharted 2 от Ferosnow95 в порте BilalReloaded.',
+        'HDR': 'HDR',
+        'Peak brightness (nits)': 'Пиковая яркость (нит)',
+        'Paper white (nits)': 'Опорный белый (нит)',
+        "HDR10 output on an HDR display (turn on 'Use HDR' in the Windows display settings first; without it the game starts in SDR). The games also get the brighter highlights of their own scenes with a render resolution and DLSS, FSR 4, XeSS or TAA on a GeForce; otherwise the game's picture is shown in HDR10 at the paper white below.": 'Вывод HDR10 на HDR-дисплей (сначала включите «Использовать HDR» в параметрах дисплея Windows; иначе игра запустится в SDR). С разрешением рендеринга и DLSS, FSR 4, XeSS или TAA на GeForce игры получают также более яркие блики собственных сцен; иначе картинка игры показывается в HDR10 с опорным белым, заданным ниже.',
+        "The brightest highlights: set it to your display's peak brightness.": 'Самые яркие блики: укажите пиковую яркость вашего дисплея.',
+        'The brightness of white in the game, the HUD and the menus. 203 is the HDR reference; raise it in a bright room.': 'Яркость белого в игре, интерфейсе и меню. 203 — эталон HDR; в светлой комнате увеличьте.',
+        'HDR tone mapping': 'Тональное отображение HDR',
+        'SDR + highlights': 'SDR + блики',
+        'Game curve extended': 'Продлённая кривая игры',
+        'RenoDX tone mapping': 'Тональное отображение RenoDX',
+        "How the brighter highlights of the games' own scenes (see HDR above) are made. SDR + highlights: the game's SDR picture as it is; only what is brighter than a knee gets the scene's own brightness. Game curve extended: the game's own film curve up to its turning point, then straight on into HDR. RenoDX tone mapping: the RenoDX tone mapper with its own picture settings. It can also be changed while playing (in-game menu, Insert key, HDR section); the game starts with the choice made here.": 'Как создаются более яркие блики собственных сцен игр (см. HDR выше). SDR + блики: SDR-картинка игры как есть; только то, что ярче точки перегиба, получает собственную яркость сцены. Продлённая кривая игры: собственная кинокривая игры до точки поворота, дальше по прямой в HDR. Тональное отображение RenoDX: тональный преобразователь RenoDX со своими настройками изображения. Можно менять и во время игры (игровое меню, клавиша Insert, раздел HDR); игра запускается с выбранным здесь вариантом.',
     },
 }
