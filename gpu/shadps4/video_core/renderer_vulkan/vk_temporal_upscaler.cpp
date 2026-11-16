@@ -780,7 +780,7 @@ bool TemporalUpscaler::OnFrameStart() {
                 // That camera is no longer built (another level's): back to values from here until
                 // the next one is found.
                 quiet = changes == 0 ? quiet + 1 : 0;
-                if (quiet > 120) {
+                if (quiet > 8) {
                     *runtime_projection_jitter_marker = 0;
                     quiet = 0;
                     std::printf("Upscaler: projection jitter: the frame clock camera is gone: one value per "

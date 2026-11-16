@@ -519,6 +519,58 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 found = true; // no jitter in the frame (a fade, the jitter off): the place stands
             }
             known = false;
+            // With the frame clock known (the game side steps the phase after that camera's build, the
+            // last of a frame): this frame's jitter is the value of the build right after last frame's
+            // clock build: the frame's first build (all builds of a frame carry one value). Its own clock
+            // build comes late in the frame and may not be recorded yet when the frame is processed.
+            const u64 clock = runtime_projection_jitter_marker ? *runtime_projection_jitter_marker : 0;
+            if (found && clock && runtime_projection_jitter_cameras) {
+                u32 at = place; // a build of last frame: on to its clock build
+                while (in_ring(at) && runtime_projection_jitter_cameras[at & 63u] != clock) {
+                    ++at;
+                }
+                if (in_ring(at) && in_ring(at + 1)) {
+                    const Entry before = entry(at), now = entry(at + 1);
+                    previous_projection_jitter = {before.x, before.y};
+                    projection_jitter = {now.x, now.y};
+                    projection_matched = true;
+                    place = at + 1;
+                    known = true;
+                }
+            }
+            // The same without the record: the game side steps exactly once per game frame, so this
+            // frame's jitter is the cycle's value after last frame's (read back exactly). This is the
+            // rule; the record above, when it already holds the frame's first build, is the value really
+            // applied and wins if it ever differs (counted).
+            static u32 by_cycle = 0, cycle_differs = 0;
+            if (clock && runtime_projection_jitter_table && runtime_projection_jitter_phases &&
+                (last[0] != 0.0f || last[1] != 0.0f)) {
+                const u32 n = std::min(u32(*runtime_projection_jitter_phases), 128u);
+                for (u32 k = 0; k < n; ++k) {
+                    const float* t = runtime_projection_jitter_table + k * 4;
+                    if (std::abs(t[0] - last[0]) < 2e-6f && std::abs(t[1] - last[1]) < 2e-6f) {
+                        const float* next = runtime_projection_jitter_table + ((k + 1) % n) * 4;
+                        if (known) {
+                            cycle_differs += std::abs(next[0] - projection_jitter[0]) > 2e-6f ||
+                                             std::abs(next[1] - projection_jitter[1]) > 2e-6f;
+                        } else {
+                            previous_projection_jitter = {t[0], t[1]};
+                            projection_jitter = {next[0], next[1]};
+                            projection_matched = true;
+                            ++by_cycle;
+                        }
+                        break;
+                    }
+                }
+            }
+            if (frames % 600 == 598 && lines < 20 && clock) {
+                std::printf("Projection jitter cycle: in 600 frames %u took the cycle's next value without a "
+                            "record, %u records differed from the cycle\n", by_cycle, cycle_differs);
+                by_cycle = cycle_differs = 0;
+            }
+            if (clock) {
+                // (the frame clock's path above; the count of builds per frame is the other path)
+            } else
             if (found && period >= 1 && period <= 30 && in_ring(place + period)) {
                 const Entry before = entry(place), now = entry(place + period);
                 previous_projection_jitter = {before.x, before.y};
