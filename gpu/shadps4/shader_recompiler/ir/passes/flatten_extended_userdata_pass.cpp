@@ -641,7 +641,10 @@ static bool IsBindTimeOffset(const IR::Value& value) {
 // bbport: the largest value a 32-bit offset can take, as far as its arithmetic shows it: masks,
 // bit fields, minima and shifts bound it, sums and products of bounded values stay bounded (a
 // sum or product that could wrap counts as unbounded). 0xFFFFFFFF: no bound known.
-static u64 OffsetUpperBound(const IR::Value& value, u32 depth = 0) {
+// Each instruction is walked once (memo): an expression that uses a value twice, as a hash chain does, would
+// otherwise be walked 2^depth times (the depth cap is the only other limit).
+using OffsetBoundMemo = std::unordered_map<const IR::Inst*, u64>;
+static u64 OffsetUpperBound(const IR::Value& value, OffsetBoundMemo& memo, u32 depth = 0) {
     constexpr u64 Unknown = 0xFFFFFFFFull;
     if (value.IsImmediate()) {
         return value.Type() == IR::Type::U32 ? value.U32() : Unknown;
@@ -650,7 +653,11 @@ static u64 OffsetUpperBound(const IR::Value& value, u32 depth = 0) {
         return Unknown;
     }
     const IR::Inst* inst = value.Inst();
-    const auto arg = [&](size_t index) { return OffsetUpperBound(inst->Arg(index), depth + 1); };
+    if (const auto it = memo.find(inst); it != memo.end()) {
+        return it->second;
+    }
+    const u64 bound = [&]() -> u64 {
+    const auto arg = [&](size_t index) { return OffsetUpperBound(inst->Arg(index), memo, depth + 1); };
     const auto all_ones = [](u64 bound) { // every bit up to the bound's highest
         u64 mask = bound;
         for (u32 shift = 1; shift < 64; shift <<= 1) {
@@ -687,12 +694,17 @@ static u64 OffsetUpperBound(const IR::Value& value, u32 depth = 0) {
     case IR::Opcode::UMax32:
         return std::max(arg(0), arg(1));
     case IR::Opcode::UClamp32:
-        return std::min(std::max(arg(0), arg(1)), arg(2));
+        // The emitted clamp is max(min(value, max), min): with min above max it returns min.
+        return std::max(std::min(arg(0), arg(2)), arg(1));
     case IR::Opcode::UDiv32:
-        return arg(0);
     case IR::Opcode::UMod32: {
-        const u64 divisor = arg(1);
-        return std::min(arg(0), divisor ? divisor - 1 : 0);
+        // A division by zero gives 0xFFFFFFFF on a GPU: bounded only by a divisor known to be a non-zero constant.
+        const IR::Value divisor = inst->Arg(1);
+        if (!divisor.IsImmediate() || divisor.Type() != IR::Type::U32 || divisor.U32() == 0) {
+            return Unknown;
+        }
+        return inst->GetOpcode() == IR::Opcode::UDiv32 ? arg(0)
+                                                      : std::min<u64>(arg(0), divisor.U32() - 1);
     }
     case IR::Opcode::SelectU32:
         return std::max(arg(1), arg(2));
@@ -742,6 +754,9 @@ static u64 OffsetUpperBound(const IR::Value& value, u32 depth = 0) {
     default:
         return Unknown;
     }
+    }();
+    memo.emplace(inst, bound);
+    return bound;
 }
 
 // bbport: the dwords of a window for ReadConsts at these offsets (srt.h, ReadConstRange): up to
@@ -749,8 +764,9 @@ static u64 OffsetUpperBound(const IR::Value& value, u32 depth = 0) {
 template <typename Offsets>
 static u32 WindowDwordsFor(const PassInfo& pass_info, const Offsets& offsets, bool* exact) {
     u64 reach = 0;
+    OffsetBoundMemo memo;
     for (const IR::Value& offset : offsets) {
-        reach = std::max(reach, OffsetUpperBound(offset) + 1);
+        reach = std::max(reach, OffsetUpperBound(offset, memo) + 1);
     }
     *exact = ReadConstRange() && reach <= ReadConstMaxWindowDwords;
     return *exact ? std::max<u32>(u32(reach), 1u) : pass_info.window_dwords;
@@ -956,13 +972,13 @@ static void VisitPointer(const IR::Value& off_dw, IR::Inst* subtree, PassInfo& p
         // clamped without a line in the log naming the shader (unless BB_READCONST_RANGE=0 puts
         // all of them there). BB_READCONST_LOG=1: also the windows sized by their range.
         static const bool log_all = std::getenv("BB_READCONST_LOG") != nullptr;
-        static std::unordered_map<u64, u32> logged;
+        static std::unordered_map<u64, u32> logged, logged_open; // windows with a range / without one
         if (exact) {
             if (log_all && logged[pass_info.pgm_hash]++ < 4) {
                 std::printf("ReadConst window: %s shader 0x%08x: reach %u dwords\n", pass_info.stage,
                             u32(pass_info.pgm_hash), dwords);
             }
-        } else if ((ReadConstRange() || log_all) && !logged[pass_info.pgm_hash]++) {
+        } else if ((ReadConstRange() || log_all) && !logged_open[pass_info.pgm_hash]++) {
             std::printf("ReadConst window: %s shader 0x%08x reads a constant table at an offset with "
                         "no known range: window of %u dwords, reads past it get its last dword\n",
                         pass_info.stage, u32(pass_info.pgm_hash), dwords);
