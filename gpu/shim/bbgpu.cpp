@@ -265,6 +265,8 @@ static void StartProfileWriter() {
 
 void BbSamplerStart(); // bbport_sampler.cpp (BB_SAMPLE_THREADS)
 
+extern "C" void runtime_freeze_reason(unsigned reason, int on, const char* why); // runtime_thread.c
+
 extern "C" int bbgpu_init(const BbGpuConfig* config) {
     BbSettings::Load();
     BbSamplerStart();
@@ -338,6 +340,9 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             SDL_HideWindow(sdl_window);
         } else {
             SDL_MinimizeWindow(sdl_window);
+            // The game stops where it is while its shader files are saved (its sound and its writes with it), as on
+            // the preparation page; the process ends after the wait.
+            runtime_freeze_reason(4, 1, "saving shader files at the exit");
         }
         SDL_PumpEvents();
         Vulkan::FlushPipelineCacheForExit([sdl_window](u32 left) {
