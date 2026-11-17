@@ -252,7 +252,13 @@ static void old_frame(const OldBuild *b, uint64_t image) {
         (void)rdi; (void)rsi; (void)r14; (void)regs; old_frame(&old_builds[i],image); }
 OLD_FRAME(runtime_checkpoint_frame_u1_eu,0)
 OLD_FRAME(runtime_checkpoint_frame_u1_us,1)
-OLD_FRAME(runtime_checkpoint_frame_u2_eu,2)
+void runtime_u2_sniper_test_frame(uint64_t image, int version); /* BB_SNIPER_TEST (runtime_u2sniper.c) */
+void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_eu(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                           const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)r14; (void)regs;
+    runtime_u2_sniper_test_frame(image,1);
+    old_frame(&old_builds[2],image);
+}
 void runtime_npcdiag_frame(uint64_t image, int code);
 void runtime_npclog_frame(uint64_t image);
 void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_us(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
@@ -260,5 +266,6 @@ void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_us(uint64_t rdi, uint64
     (void)rdi; (void)rsi; (void)r14; (void)regs;
     runtime_npcdiag_frame(image,3); /* BB_NPC_DUMP diagnosis (runtime_npcdiag.c) */
     runtime_npclog_frame(image);    /* BB_NPC_LOG diagnosis */
+    runtime_u2_sniper_test_frame(image,0);
     old_frame(&old_builds[3],image);
 }
