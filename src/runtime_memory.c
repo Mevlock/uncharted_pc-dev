@@ -1086,8 +1086,7 @@ static void near_space(const char *when) {
         at=end;
     }
     printf("Thunk memory: below 2 GiB %s: %" PRIu64 " MiB free (largest %" PRIu64 " MiB), %" PRIu64 " MiB private, %"
-           PRIu64 " MiB mapped, %" PRIu64 " MiB modules
-",when,free_bytes>>20,largest>>20,used[0]>>20,used[1]>>20,used[2]>>20);
+           PRIu64 " MiB mapped, %" PRIu64 " MiB modules\n",when,free_bytes>>20,largest>>20,used[0]>>20,used[1]>>20,used[2]>>20);
 }
 #endif
 void runtime_near_image_reserve(const unsigned char *image, uint64_t size) {
