@@ -16,6 +16,9 @@
 // BB_LOW_LATENCY: 0 off (default), 1 on, 2 on with NVIDIA's boost (GPU clocks stay up),
 // m: markers only (the driver's timings for A/B, no sleep).
 // BB_REFLEX_LOG=1: about once a second, the id sequence of each stage, its gaps and repeats.
+// NVIDIA: the same markers and ids also go out as NVIDIA's PC Latency Stats ETW events through
+// bbport_dlss.dll's optional exports (PresentMon's MsPCLatency, the NVIDIA overlay's PC latency);
+// BB_PCLSTATS=0: not.
 #pragma once
 
 #include <string>

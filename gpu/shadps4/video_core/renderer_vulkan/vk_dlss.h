@@ -107,4 +107,8 @@ private:
     std::unique_ptr<Impl> impl;
 };
 
+/// An optional export of bbport_dlss.dll next to the executable (loaded on the first call, whether
+/// DLSS is used or not; the low latency mode's PCLStats): nullptr without the bridge or the export.
+void* DlssBridgeExport(const char* name);
+
 } // namespace Vulkan

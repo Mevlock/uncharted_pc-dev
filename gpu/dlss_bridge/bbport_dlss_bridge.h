@@ -96,6 +96,13 @@ typedef int32_t (*BbDlssgEvaluateCameraFn)(VkCommandBuffer command,
                                            const BbDlssgEvaluate* evaluate,
                                            const BbDlssgCamera* camera);
 
+// Optional exports, NVIDIA Reflex PC Latency Stats (bbport_pclstats.cpp, built with the Reflex SDK's pclstats.h):
+// bridges without them (or built without that header) mean no PCLStats; the ABI number stays 2.
+// "BbPclStatsInit": registers the ETW provider and the ping receiver once; 1: ready.
+// "BbPclStatsMarker": a marker for a frame id, VkLatencyMarkerNV numbers (the same as PCLStats'); from any thread.
+typedef int32_t (*BbPclStatsInitFn)(void);
+typedef void (*BbPclStatsMarkerFn)(uint32_t marker, uint64_t frame_id);
+
 typedef struct BbDlssApi {
     uint32_t abi;
     // UTF-16 paths: the directory with nvngx_dlss.dll, and a writable data directory.

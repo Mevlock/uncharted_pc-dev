@@ -13,6 +13,8 @@
 #include <mutex>
 
 #include "core/emulator_settings.h"
+#include "video_core/renderer_vulkan/vk_dlss.h"
+#include "../../../dlss_bridge/bbport_dlss_bridge.h"
 
 namespace Vulkan::LowLatency {
 namespace {
@@ -42,6 +44,11 @@ u64 sleep_value = 0; ///< swapchain_mutex
 
 std::mutex swapchain_mutex;
 VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+
+/// NVIDIA Reflex PC Latency Stats (bbport_dlss.dll's optional exports, its bbport_pclstats.cpp): the same markers
+/// and ids as an ETW event, for PresentMon, FrameView and the NVIDIA overlay's PC latency. Set once in OnDevice
+/// (Reflex only; BB_PCLSTATS=0: off); null: none.
+BbPclStatsMarkerFn pcl_marker = nullptr;
 
 /// The runtime found no frame start of the game (SetFrameSource): off from then on.
 std::atomic<bool> no_source{false};
@@ -185,6 +192,9 @@ u32 MinimumIntervalUs() {
 void Marker(VkLatencyMarkerNV marker, u64 id) {
     if (!id) {
         return;
+    }
+    if (pcl_marker) {
+        pcl_marker(static_cast<uint32_t>(marker), id); // an ETW flag test when no tool listens
     }
     std::scoped_lock lk{swapchain_mutex};
     if (!swapchain) {
@@ -356,6 +366,24 @@ void OnDevice(vk::Device dev) {
         }
         std::printf("Low latency: NVIDIA Reflex %s%s\n",
                     sleep_on ? "on" : "off (markers only)", boost ? " + boost" : "");
+        // PC Latency Stats: the same markers as ETW events (NVIDIA GPUs only, as the Reflex SDK's licence).
+        const char* pcl = std::getenv("BB_PCLSTATS");
+        if (pcl && pcl[0] == '0') {
+            std::printf("Low latency: PCLStats off (BB_PCLSTATS=0)\n");
+        } else {
+            const auto init = reinterpret_cast<BbPclStatsInitFn>(DlssBridgeExport("BbPclStatsInit"));
+            const auto marker =
+                reinterpret_cast<BbPclStatsMarkerFn>(DlssBridgeExport("BbPclStatsMarker"));
+            if (init && marker && init()) {
+                pcl_marker = marker;
+                std::printf("Low latency: PCLStats markers on (PC latency for PresentMon, FrameView "
+                            "and the NVIDIA overlay)\n");
+            } else {
+                std::printf("Low latency: no PCLStats (%s)\n",
+                            init && marker ? "the bridge could not start it"
+                                           : "bbport_dlss.dll missing or without it");
+            }
+        }
     } else {
         anti_lag_update = reinterpret_cast<PFN_vkAntiLagUpdateAMD>(load("vkAntiLagUpdateAMD"));
         if (!anti_lag_update) {
