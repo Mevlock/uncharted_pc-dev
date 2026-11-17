@@ -224,10 +224,22 @@ inline void TakeRenderCore(int which) {
         }
         // Every core must have exactly two hardware threads, and the process must be allowed on all.
         DWORD_PTR mask = 0, system_mask = 0;
-        if (!GetProcessAffinityMask(GetCurrentProcess(), &mask, &system_mask) || mask != system_mask) {
+        // Test only (BB_RENDER_CORES_TEST=1): under an affinity limit the cores inside it are used, as
+        // if the CPU had only those (a 6-core CPU on an 8-core one); BB_RENDER_CORES_MIN=<cores> (8).
+        static const bool test = [] {
+            const char* env = std::getenv("BB_RENDER_CORES_TEST");
+            return env && env[0] == '1';
+        }();
+        if (!GetProcessAffinityMask(GetCurrentProcess(), &mask, &system_mask) ||
+            (mask != system_mask && !test)) {
             std::printf("Render cores: not reserved (the process has an affinity limit)\n");
             return p;
         }
+        if (test) {
+            std::erase_if(cpus, [mask](const Cpu& c) { return c.slot >= 64 || !(mask >> c.slot & 1); });
+        }
+        const char* min_env = std::getenv("BB_RENDER_CORES_MIN");
+        const size_t min_cores = test && min_env ? std::strtoul(min_env, nullptr, 10) : 8;
         std::vector<unsigned> cores;
         for (const auto& c : cpus) {
             if (std::find(cores.begin(), cores.end(), c.core) == cores.end()) {
@@ -235,7 +247,7 @@ inline void TakeRenderCore(int which) {
             }
         }
         std::sort(cores.begin(), cores.end());
-        if (cores.size() < 8 || cpus.size() != cores.size() * 2) {
+        if (cores.size() < min_cores || cpus.size() != cores.size() * 2) {
             std::printf("Render cores: not reserved (%zu cores, %zu hardware threads)\n", cores.size(),
                         cpus.size());
             return p;
