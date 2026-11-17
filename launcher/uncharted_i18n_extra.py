@@ -146,6 +146,7 @@ EXTRA_TRANSLATIONS = {
         'The folder of this game': 'Der Ordner dieses Spiels',
         'Empty: the collection folder.': 'Leer: der Sammlungsordner.',
         'Skip intro logos': 'Intro-Logos überspringen',
+        'Collection menu': 'Sammlungsmenü',
         'Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos and their music (they cannot be skipped with a button). All three games.':
         'Startet im Titelbildschirm ohne die Logos von Sony, Naughty Dog und Bluepoint und ihre Musik (sie lassen sich nicht per Taste überspringen). Alle drei Spiele.',
         'Unlock all chapters': 'Alle Kapitel freischalten',
@@ -586,6 +587,7 @@ EXTRA_TRANSLATIONS = {
         'The folder of this game': 'La cartella di questo gioco',
         'Empty: the collection folder.': 'Vuoto: la cartella della raccolta.',
         'Skip intro logos': 'Salta i loghi iniziali',
+        'Collection menu': 'Menu della raccolta',
         'Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos and their music (they cannot be skipped with a button). All three games.':
         'Parte dalla schermata del titolo senza i loghi di Sony, Naughty Dog e Bluepoint e la loro musica (non si possono saltare con un pulsante). In tutti e tre i giochi.',
         'Unlock all chapters': 'Sblocca tutti i capitoli',
@@ -1025,6 +1027,7 @@ EXTRA_TRANSLATIONS = {
         'The folder of this game': 'このゲームのフォルダー',
         'Empty: the collection folder.': '空欄: コレクションフォルダー。',
         'Skip intro logos': 'オープニングロゴをスキップ',
+        'Collection menu': 'コレクションメニュー',
         'Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos and their music (they cannot be skipped with a button). All three games.':
         'Sony、Naughty Dog、Bluepoint のロゴとその音楽(ボタンではスキップできません)を飛ばしてタイトル画面から始めます。3作品すべてに適用されます。',
         'Unlock all chapters': 'すべてのチャプターを解放',
@@ -1358,6 +1361,7 @@ EXTRA_TRANSLATIONS = {
         'The folder of this game': 'La carpeta de este juego',
         'Empty: the collection folder.': 'Vacío: la carpeta de la colección.',
         'Skip intro logos': 'Saltar los logotipos iniciales',
+        'Collection menu': 'Menú de la colección',
         'Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos and their music (they cannot be skipped with a button). All three games.':
         'Empieza en la pantalla de título sin los logotipos de Sony, Naughty Dog y Bluepoint ni su música (no se pueden saltar con un botón). En los tres juegos.',
         'Unlock all chapters': 'Desbloquear todos los capítulos',
@@ -1696,6 +1700,7 @@ EXTRA_TRANSLATIONS = {
         'The folder of this game': 'A pasta deste jogo',
         'Empty: the collection folder.': 'Vazio: a pasta da coleção.',
         'Skip intro logos': 'Pular logotipos iniciais',
+        'Collection menu': 'Menu da coletânea',
         'Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos and their music (they cannot be skipped with a button). All three games.':
         'Começa na tela de título sem os logotipos da Sony, Naughty Dog e Bluepoint e sua música (eles não podem ser pulados com um botão). Nos três jogos.',
         'Unlock all chapters': 'Desbloquear todos os capítulos',
@@ -2035,6 +2040,7 @@ EXTRA_TRANSLATIONS = {
         'The folder of this game': 'Le dossier de ce jeu',
         'Empty: the collection folder.': 'Vide : le dossier de la collection.',
         'Skip intro logos': 'Passer les logos d’introduction',
+        'Collection menu': 'Menu de la collection',
         'Starts at the title screen without the Sony, Naughty Dog and Bluepoint logos and their music (they cannot be skipped with a button). All three games.':
         'Démarre à l’écran titre sans les logos Sony, Naughty Dog et Bluepoint ni leur musique (ils ne peuvent pas être passés avec un bouton). Pour les trois jeux.',
         'Unlock all chapters': 'Débloquer tous les chapitres',
@@ -2686,6 +2692,7 @@ EXTRA_TRANSLATIONS = {
         'Shows at most this many frames per second, generated frames included. It only lowers the rate: a limit at or above what the frame rate (and frame generation) give changes nothing. Lower it for a steadier picture on a slower PC or to save power.': 'Показывает не больше этого числа кадров в секунду, включая сгенерированные. Он только снижает частоту: предел на уровне или выше того, что дают частота кадров (и генерация кадров), ничего не меняет. Понизьте его для более ровной картинки на медленном ПК или для экономии энергии.',
         'Shows more of the scene in every direction, also when aiming and in cutscenes.': 'Показывает больше сцены во все стороны, также при прицеливании и в роликах.',
         'Skip intro logos': 'Пропускать логотипы при запуске',
+        'Collection menu': 'Меню сборника',
         "Skip the friends' stats notice": 'Пропускать сообщение о статистике друзей',
         'Sleep (saves CPU)': 'Сон (экономит процессор)',
         'Speed': 'Скорость',

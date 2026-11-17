@@ -1604,6 +1604,9 @@ class Launcher:
             side='left', padx=(self.px(24), 0))
         self.pill(row, _('Desktop shortcut'), self.shortcut, background=SURFACE, padding=(14, 6)).pack(
             side='left', padx=(self.px(8), 0))
+        # The collection's own menu (it lives in Uncharted 1's eboot.bin): pick any of the three games, as on the PS4.
+        self.pill(row, _('Collection menu'), lambda: self.play(collection=True), background=SURFACE,
+                  padding=(14, 6)).pack(side='left', padx=(self.px(8), 0))
         self.ready = tk.Label(shell, text='', bg=SURFACE, fg=MUTED, font=self.font_ui_sm,
                               wraplength=self.px(820), justify='left')
         self.ready.pack(anchor='w', padx=self.px(22), pady=(0, self.px(16)))
@@ -2813,9 +2816,11 @@ class Launcher:
             (folder / f'prepared_{lists[0].stem}').unlink(missing_ok=True)
         self.play(prepare=True)
 
-    def play(self, prepare=False):
+    def play(self, prepare=False, collection=False):
         if self.process:
             return
+        if collection:  # Uncharted 1's executable with its collection menu (the skip stays off this once)
+            self.var('start').set('u1')
         if prepare and not shader_list(self.current()['start']):
             self.messagebox.showinfo(NAME, _('There is no shader list for this game yet.'))
             return
@@ -2835,6 +2840,8 @@ class Launcher:
             return
         self.set_log('')
         env = game_environment(self.app)
+        if collection:
+            env.pop('BB_SKIP_COLLECTION_MENU', None)
         self.show_imported_controls()
         if prepare:
             # No window and no game (BB_PREPARE_ONLY): the progress comes back as PREP lines for the bar.
