@@ -39,8 +39,8 @@
  *
  * BB_SNIPER_TRACE=1: logs each spawn, gate nav blocker change and kill-player of this fight, with positions.
  * BB_SNIPER_TEST=1 (tests): from the first sniper spawn, kills NPCs through npc-die in the order that seals sniper-7
- * (snipers 1-4, which brings sniper-6 and the bridge waves; the bridge waves; sniper-5 after the gate has closed, which
- * brings sniper-7) and logs where sniper-7 goes. */
+ * (the RPG soldier and snipers 1-3, which brings sniper-4..6 and the bridge waves; the bridge waves; sniper-4 after the
+ * gate has closed, which brings sniper-7) and logs where sniper-7 goes. */
 #include "runtime.h"
 #include <math.h>
 #include <stdint.h>
@@ -55,9 +55,9 @@ typedef void (SYSV *WorldLocator)(float *out, const void *spawner);
 typedef uint64_t (SYSV *DcNative)(int argc, uint64_t *argv);
 
 enum { V102, V100 };
-static const struct { uint64_t find, table, locator, npc_die, group_count; const char *name; } code[2]={
-    {0x56c7b0,0x1130390,0x4bdfe0,0x2e4680,0x2db160,"1.02"},
-    {0x257e90,0xf1ddb0,0,0x83790,0x8a060,"1.00"},
+static const struct { uint64_t find, table, locator, npc_die, group_count, can_die, animate, nav_on; const char *name; } code[2]={
+    {0x56c7b0,0x1130390,0x4bdfe0,0x2e4680,0x2db160,0x2dd410,0x397c50,0xa04f60,"1.02"},
+    {0x257e90,0xf1ddb0,0,0x83790,0x8a060,0x881b0,0x100230,0x3ff550,"1.00"},
 };
 
 #define SID_SNIPER_6 0x6531040cu   /* ai-gt02-sniper-6 */
@@ -66,8 +66,22 @@ static const struct { uint64_t find, table, locator, npc_die, group_count; const
 #define SID_GATE     0x818f051du   /* entrance-tunnel-door-1 */
 #define SID_GROUP_SNIPERS 0x888ee2f0u
 #define SID_GROUP_BRIDGE  0xf1df19f3u
+#define SID_CLOSE    0x9e920916u   /* 'close (the gate's animation) */
+#define SID_HELD     0x00bb0001u   /* no such object: animate / enable-nav-blocker-object do nothing (held close) */
+
+/* The gate in the world (the gompa-entrance-tunnel record (118.62 20.11 -151.67) + the levels' origin (-300 0 -300),
+ * checked against the gompa-tower spawners' world positions in the trace) and its forward (yaw 135.4: 0.703 0 -0.711),
+ * which points into the tunnel. */
+static const float gate_pos[3]={-181.38f,20.11f,-451.67f}, gate_fwd[2]={0.703f,-0.711f};
+/* The NPCs of this fight that come out of the tunnel: the bridge waves and snipers 6 and 7. */
+static const struct { uint32_t sid; const char *name; } through_gate[]={
+    {0x84a5dd27u,"ai-gt02-bridge-wave1-1"},{0x89e6fbfeu,"ai-gt02-bridge-wave1-2"},{0x8d27e649u,"ai-gt02-bridge-wave1-3"},
+    {0x9360b64cu,"ai-gt02-bridge-wave1-4"},{0x97a1abfbu,"ai-gt02-bridge-wave1-5"},{0x9ae28d22u,"ai-gt02-bridge-wave1-6"},
+    {0x9e239095u,"ai-gt02-bridge-wave1-7"},{0xa66c2d28u,"ai-gt02-bridge-wave1-8"},{0xa2ad309fu,"ai-gt02-bridge-wave1-9"},
+    {0x0be7dca2u,"ai-gt02-bridge-wave1-10"},{0x6531040cu,"ai-gt02-sniper-6"},{0x61f019bbu,"ai-gt02-sniper-7"}};
 
 static volatile int gate_closed;   /* entrance-tunnel-door-1's nav blocker is on (enable/disable seen) */
+static volatile int hold;          /* the gate's close is held (on_animate) */
 static volatile int version=-1;
 static volatile int fight_seen;    /* ai-gt02-sniper-1 spawned (BB_SNIPER_TEST starts then) */
 static uint64_t image_base;
@@ -106,6 +120,21 @@ static const unsigned char *spawner_npc(const unsigned char *s) {
     return oid==id ? (const unsigned char *)(uintptr_t)obj : NULL;
 }
 
+/* The first live NPC of this fight still in the tunnel or in the doorway (up to 1 m out on the bridge side, the gate
+ * leaf's swing), within 30 m of the gate; NULL when everyone is out. *side: how far in (m). */
+static const char *still_inside(float *side) {
+    for (size_t i=0;i<sizeof(through_gate)/sizeof(*through_gate);++i) {
+        const unsigned char *s=(const unsigned char *)find_spawner(through_gate[i].sid);
+        const unsigned char *n=s ? spawner_npc(s) : NULL;
+        if (!n) continue;
+        float p[3]; memcpy(p,n+0x110,12);
+        const float dx=p[0]-gate_pos[0], dz=p[2]-gate_pos[2];
+        const float in=dx*gate_fwd[0]+dz*gate_fwd[1];
+        if (in>-1.0f && dx*dx+dz*dz<30.0f*30.0f && fabsf(p[1]-gate_pos[1])<8.0f) { *side=in; return through_gate[i].name; }
+    }
+    return NULL;
+}
+
 /* one moved spawner per sniper: where it was, where it was put */
 static struct { const unsigned char *spawner; float was[3], put[3]; } moved[2];
 
@@ -115,7 +144,7 @@ static void on_spawn(int v, uint64_t image, uint64_t argc, uint64_t argv) {
     uint32_t sid; memcpy(&sid,(const void *)(uintptr_t)argv,4);
     const char *name=who(sid);
     if (!name) return;
-    if (sid==0x7b765409u) fight_seen=1;
+    if (sid==0x7b765409u) { fight_seen=1; hold=0; }   /* the fight (re)starts: no held close carries over */
     unsigned char *s=(unsigned char *)find_spawner(sid);
     if (trace_on()) {
         float p[3]={0,0,0}; if (s) spawner_pos(s,p);
@@ -166,11 +195,67 @@ void __attribute__((ms_abi)) runtime_u2_sniper_spawn_100(uint64_t rdi, uint64_t 
     (void)r14; (void)regs; on_spawn(V100,image,rdi,rsi);
 }
 
+static void dump_alive(const char *why);
+/* The held close: the gate script's (animate 'entrance-tunnel-door-1 'close) and (enable-nav-blocker-object
+ * 'entrance-tunnel-door-1) are kept back while someone of this fight is still inside; the frame hook makes both calls
+ * once everyone is out. */
+static volatile int closing;         /* the frame hook's own calls go through */
+static int held_argc; static uint64_t held_argv[8];
+static double held_since;
+static double now_s(void);
+
+static void on_animate(int v, uint64_t image, uint64_t argc, uint64_t argv) {
+    version=v; image_base=image;
+    if ((int)argc<2 || (int)argc>8 || argv<0x10000 || closing) return;
+    uint64_t *a=(uint64_t *)(uintptr_t)argv;
+    if ((uint32_t)a[0]!=SID_GATE || (uint32_t)a[1]!=SID_CLOSE) return;
+    if (!fix_on()) return;
+    float side=0;
+    const char *inside=still_inside(&side);
+    if (!inside) return;
+    held_argc=(int)argc; memcpy(held_argv,a,8*(size_t)argc);
+    held_since=now_s();
+    hold=1;
+    a[0]=SID_HELD;   /* the animate finds no such object: no close now */
+    printf("U2 monastery sniper: entrance-tunnel-door-1 not closed yet: %s is still inside (%.1f m behind the gate); "
+           "it closes when everyone is out (Monastery #309 fix)\n",inside,(double)side);
+    fflush(stdout);
+}
+void __attribute__((ms_abi)) runtime_u2_sniper_animate_102(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                           const uint64_t *regs) {
+    (void)r14; (void)regs; on_animate(V102,image,rdi,rsi);
+}
+void __attribute__((ms_abi)) runtime_u2_sniper_animate_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                           const uint64_t *regs) {
+    (void)r14; (void)regs; on_animate(V100,image,rdi,rsi);
+}
+
+/* the frame hook: the held close, once nobody is inside */
+static void hold_frame(void) {
+    if (!hold) return;
+    float side=0;
+    if (still_inside(&side)) return;
+    hold=0;
+    closing=1;
+    uint64_t a[8]; memcpy(a,held_argv,sizeof(a));
+    ((DcNative)(uintptr_t)(image_base+code[version].animate))(held_argc,a);
+    uint64_t b[2]={SID_GATE,0};
+    ((DcNative)(uintptr_t)(image_base+code[version].nav_on))(1,b);
+    closing=0;
+    printf("U2 monastery sniper: entrance-tunnel-door-1 closes now, everyone is out (held %.1f s)\n",now_s()-held_since);
+    fflush(stdout);
+}
+
 static void on_blocker(int v, uint64_t image, uint64_t argc, uint64_t argv, int on) {
     version=v; image_base=image;
     if ((int)argc<1 || argv<0x10000) return;
     uint32_t sid; memcpy(&sid,(const void *)(uintptr_t)argv,4);
     if (sid!=SID_GATE) return;
+    if (on && hold && !closing) {   /* the script's nav blocker, right after its held close: held too */
+        *(uint64_t *)(uintptr_t)argv=SID_HELD;
+        return;
+    }
+    if (!on) hold=0;                /* the gate opened (a checkpoint restart): nothing held any more */
     gate_closed=on;
     if (trace_on()) {
         printf("U2 monastery sniper trace: entrance-tunnel-door-1 nav blocker %s\n",on ? "on (gate closed)" : "off (gate open)");
@@ -180,6 +265,7 @@ static void on_blocker(int v, uint64_t image, uint64_t argc, uint64_t argv, int 
             if (n) printf("U2 monastery sniper trace:   %s alive at (%.2f %.2f %.2f)\n",k ? "ai-gt02-sniper-7" : "ai-gt02-sniper-6",
                           (double)((const float *)(n+0x110))[0],(double)((const float *)(n+0x110))[1],(double)((const float *)(n+0x110))[2]);
         }
+        if (on) dump_alive("gate closed");
         fflush(stdout);
     }
 }
@@ -191,11 +277,13 @@ BLOCKER(runtime_u2_sniper_gate_off_102,V102,0)
 BLOCKER(runtime_u2_sniper_gate_on_100,V100,1)
 BLOCKER(runtime_u2_sniper_gate_off_100,V100,0)
 
+static void dump_alive(const char *why);
 static unsigned long long kill_players;
 void __attribute__((ms_abi)) runtime_u2_sniper_kill_player(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                            const uint64_t *regs) {
-    (void)rdi; (void)rsi; (void)image; (void)r14; (void)regs;
+    (void)rdi; (void)rsi; (void)r14; (void)regs;
     printf("U2 monastery sniper trace: kill-player (%llu)\n",++kill_players);
+    if (version>=0 && image==image_base) dump_alive("kill-player");
     fflush(stdout);
 }
 
@@ -209,9 +297,51 @@ static int alive_sid(uint32_t sid) {
     const unsigned char *s=(const unsigned char *)find_spawner(sid);
     return s && spawner_npc(s)!=NULL;
 }
+/* BB_SNIPER_TRACE: who of this fight is alive (the two groups' counts, every known spawner's live NPC, and on 1.02
+ * every NPC of the NPC manager, 0x110dcb8: +0 count, entries at +0x10 {slot, id}) */
+static const struct { uint32_t sid; const char *name; } known[]={
+    {0x7b765409u,"sniper-1"},{0x763572d0u,"sniper-2"},{0x72f46f67u,"sniper-3"},{0x6cb33f62u,"sniper-4"},
+    {0x687222d5u,"sniper-5"},{SID_SNIPER_6,"sniper-6"},{SID_SNIPER_7,"sniper-7"},{0xf56cdee1u,"rpg-1"},
+    {0x84a5dd27u,"wave1-1"},{0x89e6fbfeu,"wave1-2"},{0x8d27e649u,"wave1-3"},{0x9360b64cu,"wave1-4"},{0x97a1abfbu,"wave1-5"},
+    {0x9ae28d22u,"wave1-6"},{0x9e239095u,"wave1-7"},{0xa66c2d28u,"wave1-8"},{0xa2ad309fu,"wave1-9"},{0x0be7dca2u,"wave1-10"}};
+static void dump_alive(const char *why) {
+    const int snipers=(int)native(code[version].group_count,SID_GROUP_SNIPERS);
+    const int bridge=(int)native(code[version].group_count,SID_GROUP_BRIDGE);
+    printf("U2 monastery sniper trace: %s: sniper group alive %d, bridge group alive %d, gate %s\n",why,snipers,bridge,
+           gate_closed ? "closed" : "open");
+    const unsigned char *mine[sizeof(known)/sizeof(*known)];
+    for (size_t i=0;i<sizeof(known)/sizeof(*known);++i) {
+        const unsigned char *s=(const unsigned char *)find_spawner(known[i].sid);
+        mine[i]=s ? spawner_npc(s) : NULL;
+        if (mine[i]) {
+            const float *p=(const float *)(mine[i]+0x110);
+            printf("U2 monastery sniper trace:   alive %s (%08x) at (%.2f %.2f %.2f)\n",known[i].name,
+                   *(const uint32_t *)(mine[i]+0x44),(double)p[0],(double)p[1],(double)p[2]);
+        }
+    }
+    if (version==V102) {
+        const unsigned char *mgr=(const unsigned char *)(uintptr_t)(image_base+0x110dcb8);
+        uint32_t count; memcpy(&count,mgr,4);
+        if (count>64) count=64;
+        for (uint32_t i=0;i<count;++i) {
+            uint64_t slot; uint32_t id; memcpy(&slot,mgr+0x10+16*i,8); memcpy(&id,mgr+0x18+16*i,4);
+            if (slot<0x10000 || !id) continue;
+            uint64_t obj; memcpy(&obj,(const void *)(uintptr_t)slot,8);
+            if (obj<0x10000 || *(const uint32_t *)(uintptr_t)(obj+0x44)!=id) continue;
+            const char *nm="other";
+            for (size_t k=0;k<sizeof(known)/sizeof(*known);++k) if (mine[k]==(const unsigned char *)(uintptr_t)obj) nm=known[k].name;
+            const float *p=(const float *)(uintptr_t)(obj+0x110);
+            printf("U2 monastery sniper trace:   NPC %08x %s at (%.2f %.2f %.2f) type %08x\n",id,nm,(double)p[0],(double)p[1],
+                   (double)p[2],*(const uint32_t *)(uintptr_t)(obj+0x30));
+        }
+    }
+    fflush(stdout);
+}
 static void test_kill(uint32_t sid, const char *name) {
     printf("U2 monastery sniper test: npc-die %s\n",name);
     fflush(stdout);
+    uint64_t argv[2]={sid,1};   /* npc-set-can-die <name> #t first (the RPG soldier can't die by script) */
+    ((DcNative)(uintptr_t)(image_base+code[version].can_die))(2,argv);
     native(code[version].npc_die,sid);
 }
 static void test_status(const char *tag) {
@@ -229,7 +359,13 @@ static void test_status(const char *tag) {
     } else printf("U2 monastery sniper test: %s: snipers alive %d, bridge alive %d; sniper-7 not alive\n",tag,snipers,bridge);
     fflush(stdout);
 }
-void runtime_u2_sniper_test_frame(uint64_t image, int v) {
+static void test_frame(uint64_t image, int v);
+/* the U2 frame hook (runtime_checkpoint.c): the held gate close, then BB_SNIPER_TEST */
+void runtime_u2_sniper_frame(uint64_t image, int v) {
+    if (version==v && image==image_base) hold_frame();
+    test_frame(image,v);
+}
+static void test_frame(uint64_t image, int v) {
     static int on=-1, step;
     static double t0, next;
     static int wave_i;
@@ -237,11 +373,12 @@ void runtime_u2_sniper_test_frame(uint64_t image, int v) {
     if (!on || !fight_seen || version!=v) return;   /* starts once this fight's first sniper spawned */
     image_base=image;
     const double t=now_s();
-    if (!t0) { t0=t; next=t+8; printf("U2 monastery sniper test: start\n"); fflush(stdout); }
+    if (!t0) { t0=t; next=t+3; printf("U2 monastery sniper test: start\n"); fflush(stdout); }
     if (t<next) return;
-    /* the RPG soldier counts in the sniper group (4 alive at the start): kills 2, 3, 4 bring sniper-4, -5, -6 */
-    static const uint32_t first[4]={0x7b765409u,0x763572d0u,0x72f46f67u,0x6cb33f62u};
-    static const char *const first_name[4]={"ai-gt02-sniper-1","ai-gt02-sniper-2","ai-gt02-sniper-3","ai-gt02-sniper-4"};
+    /* the RPG soldier counts in the sniper group (4 alive at the start): he goes first (his rockets knock Nate off the
+     * roof), then kills 2, 3, 4 bring sniper-4, -5, -6 */
+    static const uint32_t first[4]={0xf56cdee1u,0x7b765409u,0x763572d0u,0x72f46f67u};
+    static const char *const first_name[4]={"ai-gt02-rpg-1","ai-gt02-sniper-1","ai-gt02-sniper-2","ai-gt02-sniper-3"};
     static const uint32_t waves[10]={0x84a5dd27u,0x89e6fbfeu,0x8d27e649u,0x9360b64cu,0x97a1abfbu,0x9ae28d22u,0x9e239095u,
                                      0xa66c2d28u,0xa2ad309fu,0x0be7dca2u};
     if (step<4) { test_kill(first[step],first_name[step]); ++step; next=t+1.5; test_status("after a sniper kill"); return; }
@@ -260,8 +397,8 @@ void runtime_u2_sniper_test_frame(uint64_t image, int v) {
         if (t-last_status>10) { last_status=t; test_status("bridge waves"); }
         return;
     }
-    if (step==5) { test_kill(0x687222d5u,"ai-gt02-sniper-5"); step=6; next=t+1; return; }   /* brings sniper-7 */
-    if (step>=6 && step<26) { test_status("after sniper-5"); ++step; next=t+1; return; }
-    if (step==26) { test_kill(SID_SNIPER_6,"ai-gt02-sniper-6"); test_kill(SID_SNIPER_7,"ai-gt02-sniper-7"); ++step; next=t+2; return; }
+    if (step==5) { test_kill(0x6cb33f62u,"ai-gt02-sniper-4"); step=6; next=t+1; return; }   /* brings sniper-7 */
+    if (step>=6 && step<26) { test_status("after sniper-4"); ++step; next=t+1; return; }
+    if (step==26) { test_kill(0x687222d5u,"ai-gt02-sniper-5"); test_kill(SID_SNIPER_6,"ai-gt02-sniper-6"); test_kill(SID_SNIPER_7,"ai-gt02-sniper-7"); ++step; next=t+2; return; }
     if (step==27) { test_status("final"); ++step; printf("U2 monastery sniper test: done\n"); fflush(stdout); on=0; }
 }

@@ -1273,6 +1273,12 @@ static const unsigned char u2_sniper_kill_100[]={0x55,0x48,0x89,0xe5,0x53,0x48,0
 SNIPER_CB(runtime_u2_sniper_spawn_102) SNIPER_CB(runtime_u2_sniper_spawn_100) SNIPER_CB(runtime_u2_sniper_gate_on_102)
 SNIPER_CB(runtime_u2_sniper_gate_off_102) SNIPER_CB(runtime_u2_sniper_gate_on_100) SNIPER_CB(runtime_u2_sniper_gate_off_100)
 SNIPER_CB(runtime_u2_sniper_kill_player)
+SNIPER_CB(runtime_u2_sniper_animate_102) SNIPER_CB(runtime_u2_sniper_animate_100)
+/* the animate natives' shared body (DcAnimate is a thunk to it: lea rcx,[name]; xor edx,edx; jmp) */
+static const unsigned char u2_sniper_animate_102[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,
+                                                   0xec,0x68,0x01,0x00,0x00,0x49,0x89,0xf7,0x4c};
+static const unsigned char u2_sniper_animate_100[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,
+                                                   0xec,0x68,0x01,0x00,0x00,0x41,0x89,0xd4,0x49};
 static const RuntimeGuestCallback guest_callbacks[]={
     {"U2 monastery sniper: spawn (1.02)",0x2e57b0,u2_sniper_spawn_102,sizeof(u2_sniper_spawn_102),6,runtime_u2_sniper_spawn_102,NULL},
     {"U2 monastery sniper: spawn (1.00)",0x82a80,u2_sniper_spawn_100,sizeof(u2_sniper_spawn_100),6,runtime_u2_sniper_spawn_100,NULL},
@@ -1284,6 +1290,10 @@ static const RuntimeGuestCallback guest_callbacks[]={
      runtime_u2_sniper_gate_on_100,NULL},
     {"U2 monastery sniper: gate opens (1.00)",0x3ff5b0,u2_sniper_gate_off_100,sizeof(u2_sniper_gate_off_100),6,
      runtime_u2_sniper_gate_off_100,NULL},
+    {"U2 monastery sniper: gate animate (1.02)",0x396180,u2_sniper_animate_102,sizeof(u2_sniper_animate_102),6,
+     runtime_u2_sniper_animate_102,NULL},
+    {"U2 monastery sniper: gate animate (1.00)",0xffa80,u2_sniper_animate_100,sizeof(u2_sniper_animate_100),6,
+     runtime_u2_sniper_animate_100,NULL},
     {"U2 monastery sniper trace: kill-player (1.02)",0x90c790,u2_sniper_kill_102,sizeof(u2_sniper_kill_102),6,
      runtime_u2_sniper_kill_player,NULL},
     {"U2 monastery sniper trace: kill-player (1.00)",0x384380,u2_sniper_kill_100,sizeof(u2_sniper_kill_100),5,
