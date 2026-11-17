@@ -177,6 +177,102 @@ inline void PreferPerformanceCores() {
     SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &state, sizeof(state));
 }
 
+/// perf15 experiment (BB_RENDER_CORES=1, off by default; Windows, 6 or more physical cores, all with two
+/// hardware threads, no affinity limit on the process): the GPU command thread and the draw recording thread
+/// each get a physical core of their own. The process's default CPU sets leave those two cores out, so the
+/// game's threads (its six job workers spin while idle: ~5 cores of load on purpose, for an even camera), the
+/// driver's and the port's other threads stay off them, and each of the two threads selects its core's two
+/// hardware threads. Without this the two threads that set the frame rate share physical cores with
+/// spinning siblings (9800X3D: 9+ busy threads on 8 cores).
+/// `which`: 0 the GPU command thread, 1 the draw recording thread.
+inline void TakeRenderCore(int which) {
+    static const bool wanted = [] {
+        const char* env = std::getenv("BB_RENDER_CORES");
+        return env && env[0] == '1';
+    }();
+    if (!wanted || which < 0 || which > 1) {
+        return;
+    }
+    struct Plan {
+        bool ok = false;
+        ULONG core[2][2]{}; // CPU set ids of the two reserved cores
+    };
+    static const Plan plan = [] {
+        Plan p;
+        ULONG length = 0;
+        GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
+        std::vector<unsigned char> buffer(length);
+        if (!length || !GetSystemCpuSetInformation(
+                           reinterpret_cast<SYSTEM_CPU_SET_INFORMATION*>(buffer.data()), length,
+                           &length, GetCurrentProcess(), 0)) {
+            return p;
+        }
+        struct Cpu {
+            ULONG id;
+            unsigned core; // group * 256 + core index
+            unsigned slot;
+        };
+        std::vector<Cpu> cpus;
+        for (ULONG at = 0; at < length;) {
+            const auto* e = reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() + at);
+            if (e->Type == CpuSetInformation) {
+                cpus.push_back({e->CpuSet.Id, e->CpuSet.Group * 256u + e->CpuSet.CoreIndex,
+                                e->CpuSet.Group * 64u + e->CpuSet.LogicalProcessorIndex});
+            }
+            at += e->Size;
+        }
+        // Every core must have exactly two hardware threads, and the process must be allowed on all.
+        DWORD_PTR mask = 0, system_mask = 0;
+        if (!GetProcessAffinityMask(GetCurrentProcess(), &mask, &system_mask) || mask != system_mask) {
+            std::printf("Render cores: not reserved (the process has an affinity limit)\n");
+            return p;
+        }
+        std::vector<unsigned> cores;
+        for (const auto& c : cpus) {
+            if (std::find(cores.begin(), cores.end(), c.core) == cores.end()) {
+                cores.push_back(c.core);
+            }
+        }
+        std::sort(cores.begin(), cores.end());
+        if (cores.size() < 6 || cpus.size() != cores.size() * 2) {
+            std::printf("Render cores: not reserved (%zu cores, %zu hardware threads)\n", cores.size(),
+                        cpus.size());
+            return p;
+        }
+        const unsigned reserved[2] = {cores[cores.size() - 2], cores[cores.size() - 1]};
+        std::vector<ULONG> others;
+        unsigned filled[2] = {0, 0};
+        for (const auto& c : cpus) {
+            bool taken = false;
+            for (int r = 0; r < 2; ++r) {
+                if (c.core == reserved[r] && filled[r] < 2) {
+                    p.core[r][filled[r]++] = c.id;
+                    taken = true;
+                }
+            }
+            if (!taken) {
+                others.push_back(c.id);
+            }
+        }
+        if (filled[0] != 2 || filled[1] != 2 ||
+            !SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(),
+                                      static_cast<ULONG>(others.size()))) {
+            std::printf("Render cores: not reserved (CPU sets refused)\n");
+            return p;
+        }
+        p.ok = true;
+        std::printf("Render cores: the GPU command thread and the draw recording thread have the last two "
+                    "of %zu cores to themselves (BB_RENDER_CORES=1); everything else runs on the other "
+                    "%zu hardware threads\n",
+                    cores.size(), others.size());
+        std::fflush(stdout);
+        return p;
+    }();
+    if (plan.ok) {
+        SetThreadSelectedCpuSets(GetCurrentThread(), plan.core[which], 2);
+    }
+}
+
 /// bbport (from the Bloodborne PC port, BB_GPU_THREAD_PRIORITY): the GPU command, draw
 /// recording and Vulkan recording threads above the game's ~60 threads, so a busy CPU does not
 /// preempt the thread that sets the frame rate. BB_GPU_THREAD_PRIORITY=0: normal priority.
@@ -232,6 +328,7 @@ inline void MakeBackground() {
 
 /// Windows only (see above).
 inline void MakeRenderThread() {}
+inline void TakeRenderCore(int) {}
 inline void PreferPerformanceCores() {}
 enum CoreRole : int { CoreGpuCommand, CoreDrawRecording, CoreVulkanRecording, CorePresent, CoreRoles };
 inline void SampleCore(CoreRole) {}

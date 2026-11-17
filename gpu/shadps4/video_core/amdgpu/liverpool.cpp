@@ -279,6 +279,7 @@ void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
     VideoCore::ChainedWrites::AllowWait();
     BbThreads::MakeRenderThread();
+    BbThreads::TakeRenderCore(0); // perf15 experiment (BB_RENDER_CORES=1)
     on_processor_thread = true;
 #ifndef _WIN32
     if (clockid_t clock; pthread_getcpuclockid(pthread_self(), &clock) == 0) {

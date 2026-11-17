@@ -195,6 +195,7 @@ private:
         Common::SetCurrentThreadName("bb:DrawRec");
         VideoCore::ChainedWrites::AllowWait();
         BbThreads::MakeRenderThread();
+        BbThreads::TakeRenderCore(1); // perf15 experiment (BB_RENDER_CORES=1)
         on_stage_b = true;
         stage_b_tid.store(static_cast<u32>(gettid()), std::memory_order_release);
         u64 at = 0;
