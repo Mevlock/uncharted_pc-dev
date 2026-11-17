@@ -291,6 +291,7 @@ const s64 max_hold_pct = std::clamp<s64>(EnvInt("BB_SMOOTH_MAXHOLD", 50), 0, 100
 constexpr u32 Ids = 64;
 std::atomic<u64> start_id[Ids]{};
 std::atomic<s64> start_ns[Ids]{};
+std::atomic<s64> ready_ns[Ids]{}; ///< when the frame's flip reached the present queue
 s64 samples[128]{}; ///< GPU thread: the last frames' start -> ready times
 u32 count = 0, next = 0;
 std::atomic<s64> target_ns{0}; ///< the usual start -> ready time (0: not known yet)
@@ -313,7 +314,9 @@ void Ready(u64 id) {
     if (!enabled || start_id[id % Ids].load(std::memory_order_acquire) != id) {
         return;
     }
-    samples[next] = Now() - start_ns[id % Ids].load(std::memory_order_relaxed);
+    const s64 now = Now();
+    ready_ns[id % Ids].store(now, std::memory_order_relaxed);
+    samples[next] = now - start_ns[id % Ids].load(std::memory_order_relaxed);
     next = (next + 1) % window;
     count = std::min(count + 1, window);
     if (count < 8) {
@@ -676,8 +679,11 @@ s64 PresentNotBefore(s64 flip_arg, s64 now) {
         Smooth::start_id[id % Smooth::Ids].load(std::memory_order_acquire) != id) {
         return 0;
     }
+    // at most part of a period after the frame was ready (not after `now`: the present thread
+    // asks again after a vblank tick)
     const s64 at = std::min(Smooth::start_ns[id % Smooth::Ids].load(std::memory_order_relaxed) + target,
-                            now + period * Smooth::max_hold_pct / 100);
+                            Smooth::ready_ns[id % Smooth::Ids].load(std::memory_order_relaxed) +
+                                period * Smooth::max_hold_pct / 100);
     if (at <= now) {
         return 0;
     }
@@ -926,7 +932,13 @@ void GameFrameStart(u64 frame, u64 kicked) {
         }
         return;
     }
-    if (sleep_on) {
+    // test switch BB_REFLEX_SLEEP=0: no driver sleep while the frame start paces (markers and
+    // boost stay): the cap already keeps the queue empty
+    static const bool driver_sleep = [] {
+        const char* env = std::getenv("BB_REFLEX_SLEEP");
+        return !(env && env[0] == '0');
+    }();
+    if (sleep_on && (driver_sleep || Pace::last_target == 0)) {
         u64 value = 0;
         bool sleeping = false;
         {
