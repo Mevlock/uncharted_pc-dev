@@ -242,8 +242,9 @@ std::atomic<u64> shown_later{0};
 /// lt13) and at the cap without room (slow CPU, frames longer than two periods: -1.5%, lt15).
 /// Engaged when the game's frames were shown on at least 97% of the ticks of the last 64 frames
 /// (as the old hold keeps it at the cap too, with its standing queue); left when that falls below
-/// 95% (the game went below the cap: back after 2 s at it again) or when the paced frames need more
-/// than two periods from start to the present thread (no room: back after 10 s, then 20, 40, 80).
+/// 95% (the game went below the cap: back after 2 s at it again) or when, 2 s after engaging (the
+/// old hold's queue drained by then), 10% of the frames need two periods or more from start to the
+/// present thread (no room: back after 10 s, then 20, 40, 80).
 /// Not engaged, nothing is paced: the old present-thread hold as before.
 constexpr u32 RateWindow = 64;
 s64 rate_ns[RateWindow]{};
@@ -421,7 +422,8 @@ void BeforeFrame(u64 id) {
             leaves.fetch_add(1, std::memory_order_relaxed);
             Stop();
             return;
-        } else if (peak && peak >= 2 * period && now - engaged_at > 2'000'000'000) {
+        } else if (now - engaged_at > 2'000'000'000 &&
+                   Kth(lead_v, n_lead, n_lead * 90 / 100) >= 2 * period) {
             engaged = false;
             retry_at = now + backoff_ns;
             backoff_ns = std::min<s64>(backoff_ns * 2, 80'000'000'000);
