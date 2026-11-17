@@ -168,4 +168,20 @@ private:
 /// with the real clock). Called from the guest's flip submissions only, never the GPU thread.
 void PaceGuestFlip();
 
+/// bbport latency pacing (vk_low_latency.cpp): when the present thread shows the game's next flip.
+/// `period_ns` 0: no fixed schedule now (a movie, the boot's fast vblank, the game frozen, a flip
+/// rate): the frame start does not wait. `on_ticks`: flips are shown on vblank ticks (`next_ns` the
+/// next one, then every period); else (a frame limit) as soon as they come, at most one per period
+/// after `next_ns` - the limiter's own hold is off while the frame start paces (SetStartPaced).
+struct FlipSchedule {
+    s64 next_ns;   ///< steady clock
+    s64 period_ns; ///< 0: no schedule
+    bool on_ticks;
+    u64 backlogs; ///< ticks in a row that found another game flip queued behind the one they took
+};
+FlipSchedule CurrentFlipSchedule();
+/// The game's frame start paces the frames (one pacer): the frame limit's present-thread hold
+/// stands aside (it holds again as soon as this goes false: loads, a stalled pacer).
+void SetStartPaced(bool paced);
+
 } // namespace Libraries::VideoOut

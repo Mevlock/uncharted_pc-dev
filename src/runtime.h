@@ -199,6 +199,8 @@ float *runtime_callback_xmm(const uint64_t *regs, int x);
 /* BB_PAD_TIMING=1 (diagnosis): blocking waits noted per thread (name, start, duration); the pad
  * read prints the ones since the last read. runtime_wait_begin returns 0 when off. */
 double runtime_wait_begin(void);
+/* BB_LATENCY_TRACE=1: this thread's waits by kind since the last call (seconds), taken and reset; returns the count. */
+int runtime_frame_waits_take(const char **what, double *seconds, int max);
 void runtime_wait_end(const char *what, double start);
 /* Shader preparation page (on by default; BB_PREP_FREEZE=0: off, the game runs behind the page): while it shows, the game's threads stop at their next wait,
  * lock, yield or sound output (runtime_freeze_point; cooperative: never inside a host lock) and all go on together

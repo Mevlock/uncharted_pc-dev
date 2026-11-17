@@ -26,6 +26,7 @@
 #include "core/libraries/kernel/time.h"
 #include <array>
 #include "core/libraries/videoout/driver.h"
+#include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "core/libraries/videoout/game_frame.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
@@ -484,6 +485,9 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
 std::atomic<s64> g_presented_flip_arg{-1};
 
 void VideoOutDriver::Flip(const Request& req) {
+    if (req.index >= 0) {
+        Vulkan::LowLatency::TraceFlip(Vulkan::LowLatency::FlipStage::Taken, req.flip_arg);
+    }
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
     // bbport: the flip argument (the game's frame number) goes with the frame for the low latency
     // mode's present marker; -1: a blank frame.
@@ -979,6 +983,9 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
             .eop = is_eop,
         });
     }
+    if (index != -1) {
+        Vulkan::LowLatency::TraceFlip(Vulkan::LowLatency::FlipStage::GpuReached, flip_arg);
+    }
     request_cv.notify_one();
 }
 
@@ -1092,6 +1099,26 @@ void PaceGuestFlip() {
     }
 }
 
+namespace {
+// bbport latency pacing: the present thread's schedule for the frame start (CurrentFlipSchedule).
+std::atomic<s64> schedule_next_ns{0};
+std::atomic<s64> schedule_period_ns{0};
+std::atomic<bool> schedule_on_ticks{true};
+std::atomic<bool> start_paced{false};
+std::atomic<u64> schedule_backlogs{0};
+} // namespace
+
+FlipSchedule CurrentFlipSchedule() {
+    return {schedule_next_ns.load(std::memory_order_acquire),
+            schedule_period_ns.load(std::memory_order_acquire),
+            schedule_on_ticks.load(std::memory_order_relaxed),
+            schedule_backlogs.load(std::memory_order_relaxed)};
+}
+
+void SetStartPaced(bool paced) {
+    start_paced.store(paced, std::memory_order_relaxed);
+}
+
 void VideoOutDriver::PresentThread(std::stop_token token) {
     const std::chrono::nanoseconds vblank_period(1000000000 /
                                                  EmulatorSettings.GetVblankFrequency());
@@ -1111,11 +1138,28 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     std::printf("VideoOut: vblank %u Hz, frame limit %u FPS\n",
                 EmulatorSettings.GetVblankFrequency(), frame_limit);
 
-    const auto receive_request = [this] -> Request {
+    // bbport latency pacing: `tick_ns` (vblank ticks, else 0): a game frame paced for a later tick
+    // than this one stays queued until its tick (a frame that came early is not shown before the
+    // frame paced for this tick). The ticks in a row that found a second game frame queued behind
+    // the one they took and due on the same tick (a standing queue) are counted for the pacer.
+    const auto receive_request = [this](s64 tick_ns) -> Request {
         std::scoped_lock lk{mutex};
         if (!requests.empty()) {
             const auto request = requests.front();
+            if (tick_ns && request.index >= 0 &&
+                Vulkan::LowLatency::PacedForLater(request.flip_arg, tick_ns)) {
+                return {};
+            }
             requests.pop();
+            if (tick_ns && request.index >= 0) {
+                // another frame due on this same tick (not one paced for a later tick)
+                if (!requests.empty() && requests.front().index >= 0 &&
+                    !Vulkan::LowLatency::PacedForLater(requests.front().flip_arg, tick_ns)) {
+                    schedule_backlogs.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    schedule_backlogs.store(0, std::memory_order_relaxed);
+                }
+            }
             return request;
         }
         return {};
@@ -1176,12 +1220,31 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
             next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
         }
+        // bbport latency pacing: with the frame start pacing, the frame limit's hold stands aside
+        const bool paced_at_start = frame_limit && start_paced.load(std::memory_order_relaxed);
+        if (paced_at_start && next_flip > now) {
+            next_flip = now;
+        }
         const bool flip_slot = movie || !frame_limit || boot_boost || now >= next_flip;
         // bbport: while the game's threads are frozen (preparation page/hold) its clocks stand still
         // (runtime_kernel.c) and so do its vblanks: no count step and no events, so it resumes without a jump. A
         // host tick count paces the frames here meanwhile (the frozen vblank count would stall them).
         static u64 frozen_ticks = 0;
         const bool guest_frozen = runtime_freeze_flag != 0;
+        {
+            // bbport latency pacing: the schedule the frame start aims at (none while a movie, the
+            // fast boot vblank, a freeze or a flip rate changes the cadence)
+            const bool steady = !movie && !boot_boost && !guest_frozen && main_port.flip_rate == 0;
+            if (frame_limit) {
+                schedule_on_ticks.store(false, std::memory_order_relaxed);
+                schedule_next_ns.store(next_flip.time_since_epoch().count(), std::memory_order_release);
+                schedule_period_ns.store(steady ? frame_period.count() : 0, std::memory_order_release);
+            } else {
+                schedule_on_ticks.store(true, std::memory_order_relaxed);
+                schedule_next_ns.store(tick_deadline.time_since_epoch().count(), std::memory_order_release);
+                schedule_period_ns.store(steady ? vblank_period.count() : 0, std::memory_order_release);
+            }
+        }
         const u64 tick = guest_frozen ? frozen_ticks++ : vblank_status.count;
         // bbport: the full-screen preparation page is drawn opaque over whatever is presented; before the game opens
         // its video port, blank frames carry it at half the vblank rate (holding the game's flips instead upset its
@@ -1191,7 +1254,8 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 DrawBlankFrame();
             }
         } else if (flip_slot && tick % (main_port.flip_rate + 1) == 0) {
-            const auto request = receive_request();
+            const auto request =
+                receive_request(frame_limit ? 0 : (now + vblank_period / 2).time_since_epoch().count());
             if (request && frame_limit) {
                 next_flip = std::max(next_flip + frame_period, now - frame_period);
             }
@@ -1247,6 +1311,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                     break; // next vblank
                 }
             }
+            if (start_paced.load(std::memory_order_relaxed)) {
+                next_flip = std::min(next_flip, std::chrono::steady_clock::now());
+            }
             if (std::chrono::steady_clock::now() < next_flip) {
                 if (next_flip >= tick_deadline) {
                     break;
@@ -1254,7 +1321,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 std::this_thread::sleep_until(next_flip);
             }
             const auto now = std::chrono::steady_clock::now();
-            const auto request = receive_request();
+            const auto request = receive_request(0);
             if (request) {
                 next_flip = std::max(next_flip + frame_period, now - frame_period);
                 Flip(request);
