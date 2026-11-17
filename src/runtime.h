@@ -157,13 +157,18 @@ void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_eu(uint64_t rdi, uint64
                                                            const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_us(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                            const uint64_t *regs);
-/* runtime_onehit.c: Uncharted 2 Npc::ComputeArmorDamage (One Hit Kills; BB_ONEHIT_LOG=1 prints each attack). */
+/* runtime_onehit.c: Uncharted 2 damage after Npc::ComputeArmorDamage's armour step (One Hit Kills; BB_ONEHIT_LOG=1
+ * prints each attack); runtime_u2_npc_damage notes the attack at the function's start (1.02). */
 void __attribute__((ms_abi)) runtime_u2_npc_damage(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                           const uint64_t *regs);
 /* runtime_onehit.c: Uncharted 3 damage after Npc::ComputeArmorDamage's armour step (One Hit Kills vs body armour). */
 void __attribute__((ms_abi)) runtime_u3_armor_damage_102(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                          const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_u3_armor_damage_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                         const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_u2_armor_damage_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                         const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_u2_armor_damage_102(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                          const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_u1_jetski_skill(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                      const uint64_t *regs);
