@@ -2451,16 +2451,14 @@ static DWORD WINAPI isa_stats_thread(void *unused) {
  * runtime_output_flush() lets the writer finish before the process ends (every exit and crash
  * path). BB_DIRECT_OUTPUT=1: write straight through as before. */
 static HANDLE output_read = NULL, output_target = NULL;
-static volatile LONG output_writing; /* the writer holds bytes it has read and not yet written */
+static HANDLE output_thread = NULL;
 static DWORD WINAPI output_writer(void *unused) {
     (void)unused;
     static char buffer[1 << 16];
     int target_ok = 1;
     for (;;) {
         DWORD got = 0;
-        InterlockedExchange(&output_writing, 0);
         if (!ReadFile(output_read, buffer, sizeof(buffer), &got, NULL) || !got) return 0;
-        InterlockedExchange(&output_writing, 1);
         for (DWORD at = 0; target_ok && at < got;) {
             DWORD put = 0;
             if (!WriteFile(output_target, buffer + at, got - at, &put, NULL)) target_ok = 0; /* gone: drop */
@@ -2468,40 +2466,51 @@ static DWORD WINAPI output_writer(void *unused) {
         }
     }
 }
+/* The process is about to end: the console streams are closed, so the writer reads what is left, then the end of
+ * the pipe, and stops; waited for at most 2 s. (42299e98 asked the pipe how much was left, PeekNamedPipe, which
+ * waited behind the writer's own pending ReadFile on that handle (synchronous I/O on one file object runs one call
+ * at a time) for good: every exit through it hung, the launcher's 'bb-probe --controller-info' included.) */
 void runtime_output_flush(void) {
-    if (!output_read) return;
-    fflush(NULL);
-    for (int waited = 0; waited < 2000; ++waited) { /* at most 2 s */
-        DWORD avail = 0;
-        if (!PeekNamedPipe(output_read, NULL, 0, NULL, &avail, NULL)) return;
-        if (!avail && !InterlockedCompareExchange(&output_writing, 0, 0)) return;
-        Sleep(1);
+    if (!output_thread) return; /* not redirected (BB_DIRECT_OUTPUT=1, or the start failed) */
+    static volatile LONG closed;
+    if (!InterlockedExchange(&closed, 1)) {
+        fflush(NULL);
+        _close(1);
+        _close(2);
     }
+    if (output_thread) WaitForSingleObject(output_thread, 2000);
 }
 static void output_start(void) {
     const char *direct = getenv("BB_DIRECT_OUTPUT");
     if (direct && direct[0] == '1') return;
-    HANDLE original = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (!original || original == INVALID_HANDLE_VALUE) return;
+    /* The CRT's own handles behind fd 1 and fd 2. Run by the launcher (stderr=STDOUT) both can be the same
+     * handle, which _dup2 would close twice (the second time possibly a reused value): the originals are kept
+     * from being closed while the descriptors move; the writer thread then owns stdout's original. */
+    const HANDLE out = (HANDLE)_get_osfhandle(1), err = (HANDLE)_get_osfhandle(2);
+    if (!out || out == INVALID_HANDLE_VALUE) return;
     HANDLE write_end = NULL;
     if (!CreatePipe(&output_read, &write_end, NULL, 16u << 20)) { output_read = NULL; return; }
-    if (!DuplicateHandle(GetCurrentProcess(), original, GetCurrentProcess(), &output_target, 0, FALSE,
-                         DUPLICATE_SAME_ACCESS)) {
-        CloseHandle(output_read); CloseHandle(write_end); output_read = NULL; return;
-    }
+    output_target = out;
+    output_thread = CreateThread(NULL, 0, output_writer, NULL, 0, NULL);
+    if (!output_thread) { CloseHandle(output_read); CloseHandle(write_end); output_read = NULL; return; }
     fflush(NULL);
-    /* the same text/binary mode as the streams had (text: \n -> \r\n, as before) */
+    /* the same text/binary mode as the streams had (text: LF -> CRLF, as before) */
     const int mode = _setmode(1, _O_BINARY);
     _setmode(1, mode);
     const int fd = _open_osfhandle((intptr_t)write_end, mode == -1 ? _O_TEXT : mode);
-    if (fd < 0 || _dup2(fd, 1) || _dup2(fd, 2)) {
-        CloseHandle(output_read); output_read = NULL; return;
+    if (fd < 0) { /* the writer gets the pipe's end at once and stops; the streams stay as they were */
+        CloseHandle(write_end); CloseHandle(output_thread); output_thread = NULL; return;
     }
+    SetHandleInformation(out, HANDLE_FLAG_PROTECT_FROM_CLOSE, HANDLE_FLAG_PROTECT_FROM_CLOSE);
+    const int err_separate = err && err != INVALID_HANDLE_VALUE && err != out;
+    if (err_separate) SetHandleInformation(err, HANDLE_FLAG_PROTECT_FROM_CLOSE, HANDLE_FLAG_PROTECT_FROM_CLOSE);
+    _dup2(fd, 1);
+    _dup2(fd, 2);
     _close(fd);
+    SetHandleInformation(out, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0);
+    if (err_separate) { SetHandleInformation(err, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0); CloseHandle(err); }
     SetStdHandle(STD_OUTPUT_HANDLE, (HANDLE)_get_osfhandle(1));
     SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(2));
-    HANDLE thread = CreateThread(NULL, 0, output_writer, NULL, 0, NULL);
-    if (thread) CloseHandle(thread);
     atexit(runtime_output_flush);
 }
 #endif
