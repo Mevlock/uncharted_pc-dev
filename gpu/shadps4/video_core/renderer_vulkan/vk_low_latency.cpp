@@ -237,14 +237,21 @@ u32 tick_count = 0, tick_next = 0;
 std::atomic<u64> late_frames{0}, skipped_ticks{0}, stops{0}, planned{0}; ///< counts for BB_LATENCY_TRACE
 std::atomic<s64> planned_sleep_ns{0}, lead_ns{0}, late_by_max{0}, tick_err_min{INT64_MAX}, tick_err_max{INT64_MIN};
 std::atomic<u64> shown_later{0};
-/// Below the cap (frame thread): the game's frames were shown on fewer than 95% of the ticks of
-/// the last ~64 frames. A start held back to a tick the frame then misses is only lost time there
-/// (uncapped A/B: -2.5% fps). Frames that come late while the game is shown on every tick are late
-/// because of a standing queue (the old hold's): those starts must stay held so that it drains.
+/// Vblank ticks: paced only while the game holds the cap with room (frame thread). A start held
+/// back for a tick the frame then misses is only lost time: below the cap (uncapped A/B -2.5% fps,
+/// lt13) and at the cap without room (slow CPU, frames longer than two periods: -1.5%, lt15).
+/// Engaged when the game's frames were shown on at least 97% of the ticks of the last 64 frames
+/// (as the old hold keeps it at the cap too, with its standing queue); left when that falls below
+/// 95% (the game went below the cap: back after 2 s at it again) or when the paced frames need more
+/// than two periods from start to the present thread (no room: back after 10 s, then 20, 40, 80).
+/// Not engaged, nothing is paced: the old present-thread hold as before.
 constexpr u32 RateWindow = 64;
 s64 rate_ns[RateWindow]{};
 u64 rate_shown[RateWindow]{};
 u32 rate_next = 0, rate_count = 0;
+bool engaged = false;
+s64 engaged_at = 0, retry_at = 0, backoff_ns = 10'000'000'000;
+std::atomic<u32> engages{0}, leaves{0}; ///< counts for BB_LATENCY_TRACE
 u64 taken_id = 0;
 s64 taken_ns = 0;
 /// The longest lead of the paced frames (mutex), held for 10 s and then let down by 0.5 ms a
@@ -329,7 +336,6 @@ s64 Kth(s64* v, u32 n, u32 k) {
 }
 
 void Stop() {
-    rate_count = rate_next = 0;
     {
         std::scoped_lock lk{mutex};
         lead_peak = 0;
@@ -384,12 +390,45 @@ void BeforeFrame(u64 id) {
     if (period <= 0 || schedule.next_ns < now - 4 * period || !shown_id || shown_id + 8 < id ||
         n_lead < 16) {
         Stop();
+        engaged = false;
+        rate_count = rate_next = 0;
         stops.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     s64 target;
     s64 wake;
     if (schedule.on_ticks) {
+        rate_ns[rate_next] = now;
+        rate_shown[rate_next] = shown_id;
+        rate_next = (rate_next + 1) % RateWindow;
+        rate_count = std::min(rate_count + 1, RateWindow);
+        const u32 oldest = rate_count < RateWindow ? 0 : rate_next;
+        const double ticks = double(now - rate_ns[oldest]) / double(period);
+        const double shown = double(shown_id - std::min(shown_id, rate_shown[oldest]));
+        const bool full = rate_count == RateWindow && ticks > 0;
+        if (!engaged) {
+            if (full && now >= retry_at && shown >= 0.97 * ticks) {
+                engaged = true;
+                engaged_at = now;
+                engages.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                Stop();
+                return;
+            }
+        } else if (full && shown < 0.95 * ticks) {
+            engaged = false;
+            retry_at = now + 2'000'000'000;
+            leaves.fetch_add(1, std::memory_order_relaxed);
+            Stop();
+            return;
+        } else if (peak && peak >= 2 * period && now - engaged_at > 2'000'000'000) {
+            engaged = false;
+            retry_at = now + backoff_ns;
+            backoff_ns = std::min<s64>(backoff_ns * 2, 80'000'000'000);
+            leaves.fetch_add(1, std::memory_order_relaxed);
+            Stop();
+            return;
+        }
         // The lead: the held longest one of the paced frames (from the 90th percentile of the
         // frames measured so far when pacing starts), how early the timer's ticks came, and the
         // margin. A frame late for its tick is shown a tick later (the display repeats one) and a
@@ -427,19 +466,7 @@ void BeforeFrame(u64 id) {
             }
         }
         wake = target - lead_used;
-        rate_ns[rate_next] = now;
-        rate_shown[rate_next] = shown_id;
-        rate_next = (rate_next + 1) % RateWindow;
-        rate_count = std::min(rate_count + 1, RateWindow);
-        const u32 oldest = rate_count < RateWindow ? 0 : rate_next;
-        const double ticks = double(now - rate_ns[oldest]) / double(period);
-        const bool below_cap = rate_count == RateWindow && ticks > 0 &&
-                               double(shown_id - rate_shown[oldest]) < 0.95 * ticks;
-        if (below_cap) {
-            // below the cap: start at once, aimed at the first tick the frame can reach
-            target = tick_at(now + lead_used);
-            wake = now;
-        } else if (wake - now > 2 * period) {
+        if (wake - now > 2 * period) {
             // the schedule ran ahead of the game (a frame that did not come for a while): from now
             target = tick_at(now + lead_used);
             wake = target - lead_used;
@@ -734,7 +761,7 @@ void Print(u64 current) {
         wait_frames = 0;
     }
     if (at < sizeof(line)) {
-        std::snprintf(line + at, sizeof(line) - at, " | paced: %llu late (by up to %.2f), %llu shown later than aimed, shown-aimed %.2f..%.2f, %llu ticks skipped, %llu stops, planned sleep %.2f, lead %.2f",
+        std::snprintf(line + at, sizeof(line) - at, " | paced: %llu late (by up to %.2f), %llu shown later than aimed, shown-aimed %.2f..%.2f, %llu ticks skipped, %llu stops, planned sleep %.2f, lead %.2f, engaged %u left %u",
                       static_cast<unsigned long long>(Pace::late_frames.exchange(0)),
                       double(Pace::late_by_max.exchange(0)) / 1e6,
                       static_cast<unsigned long long>(Pace::shown_later.exchange(0)),
@@ -744,7 +771,8 @@ void Print(u64 current) {
                       static_cast<unsigned long long>(Pace::stops.exchange(0)),
                       double(Pace::planned_sleep_ns.exchange(0)) / 1e6 /
                           double(std::max<u64>(1, Pace::planned.exchange(0))),
-                      double(Pace::lead_ns.load()) / 1e6);
+                      double(Pace::lead_ns.load()) / 1e6, Pace::engages.exchange(0),
+                      Pace::leaves.exchange(0));
     }
     std::printf("%s (ms)\n", line);
     // every 10 s: the present intervals of the whole run so far
@@ -774,6 +802,10 @@ void Print(u64 current) {
 } // namespace Trace
 
 } // namespace
+
+bool PacingActive() {
+    return Pace::active.load(std::memory_order_relaxed);
+}
 
 bool PacedForLater(s64 flip_arg, s64 tick_ns) {
     if (flip_arg < 0 || !Pace::active.load(std::memory_order_relaxed)) {

@@ -68,6 +68,8 @@ bool UsesPresentId();
 enum class FlipStage { GpuReached, Taken };
 void TraceFlip(FlipStage stage, s64 flip_arg);
 
+/// Latency pacing is on (the frame start paces the game's frames).
+bool PacingActive();
 /// Latency pacing: the game's flip with this argument was paced for a tick later than `tick_ns`
 /// (steady clock): the present thread keeps it queued until then.
 bool PacedForLater(s64 flip_arg, s64 tick_ns);
