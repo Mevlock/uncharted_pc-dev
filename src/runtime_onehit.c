@@ -1,14 +1,26 @@
-/* One Hit Kills for Uncharted 2 (Uncharted 3 has its own debug switch): a hook at the start of the NPCs'
- * Npc::ComputeArmorDamage (npc code), which applies an attack's damage to the NPC's health (Npc::RespondToAttack, " -
- * received attack for %d damage", runs after it and only reacts: damage changed there killed nothing): rdi = the NPC hit, rsi = the attack record
- * {+4 kind, +8 attacker handle (slot pointer, +0x10 its id), +0x24 damage}. The attacker comes from the handle as the
- * game itself reads it (slot -> object, valid while object+0x44 == the id); its +0x30 is its type id, +0x150 its
- * faction (the friend/enemy table's row).
+/* One Hit Kills for Uncharted 2 (Uncharted 3 has its own debug switch). Npc::ComputeArmorDamage (npc code) works out
+ * what an attack does to the NPC hit: rdi = the NPC, rsi = the attack record {+4 kind, +8 attacker handle (slot
+ * pointer, +0x10 its id), +0x20 "does damage" (bullets: 0 = none), +0x24 damage, +0x30 hit points}. The armour step
+ * runs the damage through the NPC's armour pieces (npc+0x4098, count +0x40a0): each piece hit takes what it still
+ * holds out of the damage (a table by attack and armour type can replace the damage first) and lets only a share of
+ * the rest through (the piece's own factor), so the heavies in body armour and the helmeted shotgunners took next to
+ * nothing until their armour was off, whatever the attack's damage was. The damage after armour then goes (scaled by
+ * the difficulty's player damage when the attacker is the player) into the record the caller hands on to the
+ * health code (Npc::RespondToAttack only reacts).
+ * The hooks sit where the damage after armour is final, so armour can no longer absorb it:
+ * - 1.00 (EU and US alike): in the caller, right after both helpers (kind 3: 0x300f0, the rest: 0x30430) return it in
+ *   eax: mov r14d, eax at 0x2fff0, r14 = the attack.
+ * - 1.02 (EU, US and RU alike; both helpers inlined into 0x244ef0, which also writes the record): where the final
+ *   damage at [rbp-0x4040] is copied into the record, 0x245b3e (after the player's difficulty scale: 100000 stays
+ *   lethal). No register holds the attack there, so the hook at the function's start (0x244ef0) notes it per thread.
+ * The attacker comes from the handle as the game itself reads it (slot -> object, valid while object+0x44 == the id);
+ * its +0x30 is its type id, +0x150 its faction (the friend/enemy table's row).
  * The player's type id is 0xa5a63e9b (faction 1; measured 2026-11-11: its bullets did 13-54, an ally, type
  * 3c5648dd faction 7, always 9, enemies fd2c9c09 faction 2). With the cheat on (BB_CHEATS holds "onehit", run.py: this
- * game's cheats) an attack of the player's does 100000 damage: the NPC dies at once; allies' and enemies' attacks
- * stay as they are (an ally shot by an enemy is not a one-hit kill).
- * BB_ONEHIT_LOG=1: each attack is printed (kind, damage, attacker type and faction, the NPC's faction). */
+ * game's cheats) an attack of the player's with damage does 100000 after armour: the NPC dies at once; allies' and
+ * enemies' attacks stay as they are (an ally shot by an enemy is not a one-hit kill), and so do the player's attacks
+ * the game gives no damage (no damage before armour, or a bullet with +0x20 clear).
+ * BB_ONEHIT_LOG=1: each attack is printed (kind, damage before and after armour, attacker type and faction). */
 #include "runtime.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -48,28 +60,54 @@ static const unsigned char *attacker_of(const unsigned char *attack) {
     return object_id==id ? object : NULL;
 }
 
-void __attribute__((ms_abi)) runtime_u2_npc_damage(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
-                                                          const uint64_t *regs) {
-    (void)image; (void)r14; (void)regs;
-    if ((!onehit_on() && !onehit_log()) || !rsi || !rdi) return;
-    unsigned char *attack=(unsigned char *)(uintptr_t)rsi;
-    const unsigned char *npc=(const unsigned char *)(uintptr_t)rdi;
+/* The damage after armour (*damage, the low 32 bits) of `attack`: the player's attacks with damage do 100000. */
+static void u2_armor_damage(const unsigned char *attack, uint32_t *damage) {
     const unsigned char *attacker=attacker_of(attack);
-    if (onehit_on() && attacker) {
-        uint32_t attacker_type; int32_t current;
-        memcpy(&attacker_type,attacker+0x30,4); memcpy(&current,attack+0x24,4);
-        if (attacker_type==U2_PLAYER_TYPE && current>0 && current<ONE_HIT_DAMAGE) {
-            const int32_t lethal=ONE_HIT_DAMAGE;
-            memcpy(attack+0x24,&lethal,4);
-        }
-    }
-    if (!onehit_log()) return;
-    uint32_t kind, type=0, faction=0xffffffff, npc_faction, npc_type; int32_t damage;
-    memcpy(&kind,attack+4,4); memcpy(&damage,attack+0x24,4);
-    memcpy(&npc_faction,npc+0x150,4); memcpy(&npc_type,npc+0x30,4);
+    uint32_t kind, type=0, faction=0xffffffff; int32_t raw; unsigned char does_damage;
+    memcpy(&kind,attack+4,4); memcpy(&does_damage,attack+0x20,1); memcpy(&raw,attack+0x24,4);
     if (attacker) { memcpy(&type,attacker+0x30,4); memcpy(&faction,attacker+0x150,4); }
-    printf("OneHit: attack kind %u, damage %d, attacker %p type %08x faction %u -> npc %p type %08x faction %u\n",
-           kind,damage,(const void *)attacker,type,faction,(const void *)npc,npc_type,npc_faction);
+    const int32_t after=(int32_t)*damage;
+    /* kind 3 does not look at +0x20; for the rest, 0 there with nothing after armour = an attack without damage */
+    const int harmless=after==0 && kind!=3 && !does_damage;
+    if (onehit_on() && type==U2_PLAYER_TYPE && raw>0 && !harmless && after<ONE_HIT_DAMAGE)
+        *damage=(uint32_t)ONE_HIT_DAMAGE;
+    if (onehit_log())
+        printf("OneHit: attack kind %u, damage %d before armour, %d after, attacker %p type %08x faction %u -> %d\n",
+               kind,raw,after,(const void *)attacker,type,faction,(int32_t)*damage);
+}
+
+/* 1.00: the caller after both helpers, r14 = the attack, rax = the damage after armour (regs[7]). */
+void __attribute__((ms_abi)) runtime_u2_armor_damage_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                         const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)image;
+    if ((!onehit_on() && !onehit_log()) || !r14) return;
+    uint64_t *rax=&((uint64_t *)(uintptr_t)regs)[7];
+    uint32_t damage=(uint32_t)*rax;
+    u2_armor_damage((const unsigned char *)(uintptr_t)r14,&damage);
+    *rax=(*rax&~(uint64_t)0xffffffffu)|damage;
+}
+
+/* 1.02: the attack of the Npc::ComputeArmorDamage running on this thread (its start notes it; nothing it calls
+ * computes another NPC's damage), taken by the copy into the record below. */
+static _Thread_local const unsigned char *u2_attack_102;
+void __attribute__((ms_abi)) runtime_u2_npc_damage(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                   const uint64_t *regs) {
+    (void)rdi; (void)image; (void)r14; (void)regs;
+    u2_attack_102=(const unsigned char *)(uintptr_t)rsi;
+}
+/* 1.02: mov rax, [rbp-0x4040] (the final damage) at 0x245b3e; rsp = rbp-0x4120 there (fixed frame: sub rsp,0x40f8
+ * after six pushes), so the damage is at the guest's rsp + 0xe0. */
+void __attribute__((ms_abi)) runtime_u2_armor_damage_102(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
+                                                         const uint64_t *regs) {
+    (void)rdi; (void)rsi; (void)image; (void)r14;
+    const unsigned char *attack=u2_attack_102;
+    u2_attack_102=NULL;
+    if ((!onehit_on() && !onehit_log()) || !attack) return;
+    const uint64_t rsp=(uint64_t)(uintptr_t)&regs[25];
+    uint32_t damage;
+    memcpy(&damage,(const void *)(uintptr_t)(rsp+0xe0),4);
+    u2_armor_damage(attack,&damage);
+    memcpy((void *)(uintptr_t)(rsp+0xe0),&damage,4);
 }
 
 /* Uncharted 1's jet ski (chapters 8 and 12-13): Nate drives, Elena shoots where the player aims, and the game counts
