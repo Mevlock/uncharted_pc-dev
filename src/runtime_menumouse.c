@@ -291,8 +291,21 @@ static int menu_dialog_find(uint64_t now, DialogInfo *d) {
     }
     return found;
 }
-/* A carousel screen (cinematics, chapters): its item draws a 13x13 arrow text. There the wheel and the left/right keys move
- * sideways, not up and down. A confirmation has the same wheel. */
+/* The arrow draws of a menu item: 1 the small ones, 10x10 in the rows and 13x13 in the carousels (cinematics, chapters); 2 the
+ * collection's game carousel (its front end in Uncharted 1's eboot.bin): two 56.3x56.3 draws of the item on one line, placed
+ * symmetrically about the screen's middle (x 164.8 and 1058.9, y 456.8). menu_text_lock held. */
+static int arrow_size(const MenuText *t) {
+    if (t->w<=14.0f && t->h<=14.0f) return 1;
+    if (t->w<54.0f || t->w>59.0f || fabsf(t->h-t->w)>=1.0f) return 0;
+    for (int j=0;j<menu_text_count;++j) {
+        const MenuText *o=&menu_texts[j];
+        if (o!=t && o->item==t->item && o->ordinal>=1 && fabsf(o->w-t->w)<0.5f && fabsf(o->h-t->h)<0.5f && fabsf(o->y-t->y)<1.0f &&
+            fabsf(o->x+o->w*0.5f+t->x+t->w*0.5f-1280.0f)<4.0f) return 2;
+    }
+    return 0;
+}
+/* A carousel screen (cinematics, chapters, the collection's games): its item draws an arrow (13x13, or the collection's). There
+ * the wheel and the left/right keys move sideways, not up and down. A confirmation has the same wheel. */
 static int menu_carousel_recent(uint64_t now) {
     DialogInfo dialog;
     if (menu_dialog_find(now,&dialog)) return 1;
@@ -300,7 +313,7 @@ static int menu_carousel_recent(uint64_t now) {
     pthread_mutex_lock(&menu_text_lock);
     for (int i=0;i<menu_text_count && !found;++i) {
         const MenuText *t=&menu_texts[i];
-        if (t->ordinal>=1 && now-t->us<100000 && t->w>=12.0f && t->w<=14.0f && t->h>=12.0f && t->h<=14.0f && t->style[0]>0.0f) found=1;
+        if (t->ordinal>=1 && now-t->us<100000 && ((t->w>=12.0f && t->w<=14.0f && t->h>=12.0f && t->h<=14.0f) || arrow_size(t)==2) && t->style[0]>0.0f) found=1;
     }
     pthread_mutex_unlock(&menu_text_lock);
     return found;
@@ -415,13 +428,14 @@ static int menu_control_at(float ux, float uy, uint64_t now, MenuControl *c) {
         const MenuText *t=&menu_texts[i];
         if (t->ordinal<1 || now-t->us>100000) continue;
         int kind=0;
-        if (t->w<=14.0f && t->h<=14.0f) {                       /* an arrow (10x10 in the rows, 13x13 in the carousels) */
+        const int arrow=arrow_size(t);
+        if (arrow) {                                            /* an arrow (see arrow_size) */
             if (ux<t->x-8 || ux>t->x+t->w+8 || uy<t->y-8 || uy>t->y+t->h+8) continue;
             int partners=0;
             kind=1;   /* the left arrow, unless another arrow of the row lies further left */
             for (int j=0;j<menu_text_count;++j) {
                 const MenuText *o=&menu_texts[j];
-                if (j!=i && o->item==t->item && o->ordinal>=1 && o->w<=14.0f && o->h<=14.0f) { ++partners; if (o->x<t->x) kind=2; }
+                if (j!=i && o->item==t->item && o->ordinal>=1 && arrow_size(o)==arrow) { ++partners; if (o->x<t->x) kind=2; }
             }
             if (!partners) kind=t->x+t->w*0.5f<640.0f ? 1 : 2;   /* one arrow alone (a carousel end): left half or right half */
             if (t->style[0]<=0.0f) continue;
@@ -758,7 +772,7 @@ static uint32_t menu_mouse_buttons(const bool *k, uint32_t mouse, uint64_t now) 
         if (mouse_debug()) printf("Runtime: menu click ui=(%.0f %.0f) on_row=%d control=%d texts=%d rows=%d\n",ux,uy,on_row,on_control ? ctl.kind : 0,texts,rows);
         if (mouse_debug() && (texts<=4 || (!on_row && !on_control && !list_ctl))) {   /* (also a click on nothing known: what is drawn there) */ {   /* a confirmation box has few texts: list them (to tell it from the other screens) */
             pthread_mutex_lock(&menu_text_lock);
-            for (int i=0;i<menu_text_count;++i) { const MenuText *t=&menu_texts[i]; if (now-t->us<100000) printf("Runtime:   text item ord=%d x=%.1f y=%.1f w=%.1f h=%.1f\n",t->ordinal,t->x,t->y,t->w,t->h); }
+            for (int i=0;i<menu_text_count;++i) { const MenuText *t=&menu_texts[i]; if (now-t->us<100000) printf("Runtime:   text item ord=%d x=%.1f y=%.1f w=%.1f h=%.1f style0=%.2f\n",t->ordinal,t->x,t->y,t->w,t->h,t->style[0]); }
             for (int i=0;i<free_text_count;++i) { const MenuText *t=&free_texts[i]; if (now-t->us<100000) printf("Runtime:   text free x=%.1f y=%.1f w=%.1f h=%.1f\n",t->x,t->y,t->w,t->h); }
             pthread_mutex_unlock(&menu_text_lock); }
         }
