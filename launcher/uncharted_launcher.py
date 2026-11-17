@@ -402,6 +402,15 @@ def shader_list(key):
     return (ship, ship.with_name(f'{key}_keys.txt')) if ship.is_file() else None
 
 
+CLEARED_CACHE = 'cache.cleared-'  # user/cache renamed by Clear shader cache, waiting to be deleted
+
+
+def delete_cleared_caches():
+    """Deletes the caches set aside by Clear shader cache (also ones a closed launcher left half deleted)."""
+    for folder in (DATA_DIR / 'user').glob(f'{CLEARED_CACHE}*'):
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def shader_cache_dirs(s, key):
     """The game's shader cache folders (<title id>-<build>, not the dotted backups)."""
     info = game_info(game_folder(s, key))
@@ -1111,6 +1120,7 @@ class Launcher:
         if self.app.get('notes_seen') != VERSION and not self.app.get('notes_hide_after_update'):
             root.after(900, self.show_new_notes)
         threading.Thread(target=self.find_vram, daemon=True).start()
+        threading.Thread(target=delete_cleared_caches, daemon=True).start()
         if UPDATES and self.app.get('check_updates', True):
             threading.Thread(target=self.check_update, daemon=True).start()
 
@@ -3277,9 +3287,18 @@ class Launcher:
         threading.Thread(target=work, daemon=True).start()
 
     def clear_cache(self):
+        """The cache folder is renamed at once (the next start finds none) and deleted on a thread. Deleting it here
+        held the window for as long as the deletion took: minutes with a large cache, and the launcher looked hung."""
         if self.process:
             return
-        shutil.rmtree(DATA_DIR / 'user' / 'cache', ignore_errors=True)
+        cache = DATA_DIR / 'user' / 'cache'
+        if cache.exists():
+            try:
+                cache.rename(cache.with_name(f'{CLEARED_CACHE}{time.time_ns()}'))
+            except OSError as error:
+                self.messagebox.showerror(NAME, str(error))
+                return
+            threading.Thread(target=delete_cleared_caches, daemon=True).start()
         self.messagebox.showinfo(NAME, _('Shader cache cleared. The next start stutters for a while as it is rebuilt.'))
 
     def shortcut(self):
