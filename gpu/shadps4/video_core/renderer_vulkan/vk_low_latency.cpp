@@ -250,10 +250,15 @@ void BeforeFrame(u64 id) {
         unpaced.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    // one period after the last frame's start; a frame that comes later starts at once and the
-    // next period counts from it (no burst of frames to catch up)
-    const s64 wake = last_wake ? std::max(now, last_wake + period) : now;
-    last_wake = wake;
+    // The frame's slot: one period after the last one's, at most one period in the past (as the
+    // old slot limiter on the present thread). A frame that comes late starts at once, and the
+    // next one may then start sooner than a period after it: the cap holds the average rate. With
+    // each frame held a full period after the last one's start instead, a game whose frames
+    // straddle the period (a slow one, a fast one) lost the fast one's spare time: slow CPU at
+    // 144, -4.5% fps against the old hold (fe2, low latency off).
+    const s64 slot = last_wake ? std::max(last_wake + period, now - period) : now;
+    const s64 wake = std::max(now, slot);
+    last_wake = slot;
     Libraries::VideoOut::SetStartPaced(true);
     paced.fetch_add(1, std::memory_order_relaxed);
     if (wake > now) {
