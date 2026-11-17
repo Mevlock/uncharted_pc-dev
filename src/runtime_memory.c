@@ -1070,6 +1070,26 @@ void *runtime_image_map(size_t size, int prot) {
 #define NEAR_REACH UINT64_C(0x7ff00000)     /* rel32 reach with room to spare */
 static unsigned char *near_pool;
 static size_t near_pool_used;
+#ifdef _WIN32
+/* How the space below 2 GiB is used (diagnosis: what had taken the hooks' space when they looked for it
+ * after the GPU had started): free (and the largest free block), private, mapped and module memory. */
+static void near_space(const char *when) {
+    uint64_t free_bytes=0, largest=0, used[3]={0,0,0};
+    MEMORY_BASIC_INFORMATION mbi;
+    for (uintptr_t at=0x10000; at<UINT64_C(0x80000000) && VirtualQuery((void *)at,&mbi,sizeof(mbi))==sizeof(mbi);) {
+        uintptr_t end=(uintptr_t)mbi.BaseAddress+mbi.RegionSize;
+        if (end>UINT64_C(0x80000000)) end=UINT64_C(0x80000000);
+        if (end<=at) break;
+        const uint64_t n=end-at;
+        if (mbi.State==MEM_FREE) { free_bytes+=n; if (n>largest) largest=n; }
+        else used[mbi.Type==MEM_IMAGE ? 2 : mbi.Type==MEM_MAPPED ? 1 : 0]+=n;
+        at=end;
+    }
+    printf("Thunk memory: below 2 GiB %s: %" PRIu64 " MiB free (largest %" PRIu64 " MiB), %" PRIu64 " MiB private, %"
+           PRIu64 " MiB mapped, %" PRIu64 " MiB modules
+",when,free_bytes>>20,largest>>20,used[0]>>20,used[1]>>20,used[2]>>20);
+}
+#endif
 void runtime_near_image_reserve(const unsigned char *image, uint64_t size) {
 #ifdef _WIN32
     if (near_pool) return;
@@ -1106,6 +1126,7 @@ void runtime_near_image_reserve(const unsigned char *image, uint64_t size) {
         if (best)
             near_pool=VirtualAlloc((void *)best,NEAR_POOL_SIZE,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
     }
+    near_space("when the image was mapped");
     if (near_pool) {
         const int64_t offset=(int64_t)((uintptr_t)near_pool-start);
         printf("Thunk memory: %zu KiB %s the image (%s%" PRId64 " MiB), reserved before the GPU started\n",
@@ -1123,6 +1144,10 @@ void runtime_near_image_reserve(const unsigned char *image, uint64_t size) {
 void *runtime_near_image_alloc(size_t size) {
     size=size ? (size+4095)&~(size_t)4095 : 4096;   /* whole pages: a hook may change its page's protection */
     size_t used=__atomic_load_n(&near_pool_used,__ATOMIC_RELAXED);
+#ifdef _WIN32
+    static int reported;
+    if (!__atomic_exchange_n(&reported,1,__ATOMIC_RELAXED)) near_space("at the first hook");
+#endif
     do {
         if (!near_pool || size>NEAR_POOL_SIZE-used) {
             if (near_pool) printf("WARNING: thunk memory used up (%zu of %zu KiB; %zu KiB more wanted)\n",
