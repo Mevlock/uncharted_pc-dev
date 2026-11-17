@@ -177,25 +177,26 @@ inline void PreferPerformanceCores() {
     SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &state, sizeof(state));
 }
 
-/// perf15 experiment (BB_RENDER_CORES=1, off by default; Windows, 6 or more physical cores, all with two
+/// perf15 experiment (BB_RENDER_CORES=1, off by default; Windows, 8 or more physical cores, all with two
 /// hardware threads, no affinity limit on the process): the GPU command thread and the draw recording thread
 /// each get a physical core of their own. The process's default CPU sets leave those two cores out, so the
 /// game's threads (its six job workers spin while idle: ~5 cores of load on purpose, for an even camera), the
 /// driver's and the port's other threads stay off them, and each of the two threads selects its core's two
 /// hardware threads. Without this the two threads that set the frame rate share physical cores with
 /// spinning siblings (9800X3D: 9+ busy threads on 8 cores).
-/// `which`: 0 the GPU command thread, 1 the draw recording thread.
+/// `which`: 0 the GPU command thread, 1 the draw recording thread, 2 the Vulkan recording thread
+/// (BB_RENDER_CORES=2 only: three cores reserved).
 inline void TakeRenderCore(int which) {
-    static const bool wanted = [] {
+    static const int wanted = [] {
         const char* env = std::getenv("BB_RENDER_CORES");
-        return env && env[0] == '1';
+        return env && (env[0] == '1' || env[0] == '2') ? env[0] - '0' + 1 : 0; // cores to reserve
     }();
-    if (!wanted || which < 0 || which > 1) {
+    if (which < 0 || which >= wanted) {
         return;
     }
     struct Plan {
         bool ok = false;
-        ULONG core[2][2]{}; // CPU set ids of the two reserved cores
+        ULONG core[3][2]{}; // CPU set ids of the reserved cores
     };
     static const Plan plan = [] {
         Plan p;
@@ -234,17 +235,18 @@ inline void TakeRenderCore(int which) {
             }
         }
         std::sort(cores.begin(), cores.end());
-        if (cores.size() < 6 || cpus.size() != cores.size() * 2) {
+        if (cores.size() < 8 || cpus.size() != cores.size() * 2) {
             std::printf("Render cores: not reserved (%zu cores, %zu hardware threads)\n", cores.size(),
                         cpus.size());
             return p;
         }
-        const unsigned reserved[2] = {cores[cores.size() - 2], cores[cores.size() - 1]};
+        const unsigned reserved[3] = {cores[cores.size() - 2], cores[cores.size() - 1],
+                                      wanted == 3 ? cores[cores.size() - 3] : ~0u};
         std::vector<ULONG> others;
-        unsigned filled[2] = {0, 0};
+        unsigned filled[3] = {0, 0, wanted == 3 ? 0u : 2u};
         for (const auto& c : cpus) {
             bool taken = false;
-            for (int r = 0; r < 2; ++r) {
+            for (int r = 0; r < wanted; ++r) {
                 if (c.core == reserved[r] && filled[r] < 2) {
                     p.core[r][filled[r]++] = c.id;
                     taken = true;
@@ -254,17 +256,18 @@ inline void TakeRenderCore(int which) {
                 others.push_back(c.id);
             }
         }
-        if (filled[0] != 2 || filled[1] != 2 ||
+        if (filled[0] != 2 || filled[1] != 2 || filled[2] != 2 ||
             !SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(),
                                       static_cast<ULONG>(others.size()))) {
             std::printf("Render cores: not reserved (CPU sets refused)\n");
             return p;
         }
         p.ok = true;
-        std::printf("Render cores: the GPU command thread and the draw recording thread have the last two "
-                    "of %zu cores to themselves (BB_RENDER_CORES=1); everything else runs on the other "
+        std::printf("Render cores: the GPU command thread and the draw recording thread%s have the last "
+                    "%d of %zu cores to themselves (BB_RENDER_CORES=%d); everything else runs on the other "
                     "%zu hardware threads\n",
-                    cores.size(), others.size());
+                    wanted == 3 ? " and the Vulkan recording thread" : "", wanted, cores.size(), wanted - 1,
+                    others.size());
         std::fflush(stdout);
         return p;
     }();

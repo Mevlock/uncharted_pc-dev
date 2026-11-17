@@ -685,6 +685,7 @@ bool Scheduler::OnRecorderThread() {
 void Scheduler::RecorderThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("bb:VkRecorder");
     BbThreads::MakeRenderThread();
+    BbThreads::TakeRenderCore(2); // perf15 experiment (BB_RENDER_CORES=2)
     t_on_recorder_thread = true;
     while (true) {
         // Spin briefly before sleeping: the next chunk usually follows within microseconds,
