@@ -200,6 +200,7 @@ std::atomic<bool> active{false};
 /// The last game frame whose flip reached the present thread (GPU thread).
 std::atomic<u64> queued_last{0};
 s64 last_wake = 0; ///< frame thread: when the last paced frame was let start
+s64 last_target = 0; ///< frame thread: the last frame's wake time (BB_LATENCY_TRACE)
 std::atomic<u64> paced{0}, unpaced{0}; ///< counts for BB_LATENCY_TRACE
 std::atomic<s64> slept_ns{0};
 
@@ -238,6 +239,7 @@ void BeforeFrame(u64 id) {
     // No cap now (a movie, the boot's fast vblank, the game frozen), or frames that do not reach
     // the present thread (a load: the cap would only slow it): not paced, and the present
     // thread's slot hold keeps the cap meanwhile.
+    last_target = 0;
     if (period <= 0 || queued_last.load(std::memory_order_relaxed) + 8 < id) {
         Stop();
         unpaced.fetch_add(1, std::memory_order_relaxed);
@@ -252,6 +254,7 @@ void BeforeFrame(u64 id) {
     const s64 slot = last_wake ? std::max(last_wake + period, now - period) : now;
     const s64 wake = std::max(now, slot);
     last_wake = slot;
+    last_target = wake;
     Libraries::VideoOut::SetStartPaced(true);
     paced.fetch_add(1, std::memory_order_relaxed);
     if (wake > now) {
@@ -376,7 +379,7 @@ const bool on = [] {
     const char* env = std::getenv("BB_LATENCY_TRACE");
     return env && env[0] == '1';
 }();
-enum Stage : u32 { Enter, Awake, Submit, Gpu, Take, PresentStart, PresentEnd, Stages };
+enum Stage : u32 { Enter, Awake, Submit, Gpu, Take, PresentStart, PresentEnd, Target, Paced, Stages };
 constexpr u64 Ring = 256;
 struct Slot {
     std::atomic<u64> id{0};
@@ -407,6 +410,25 @@ void Stamp(u64 id, Stage stage) {
     }
     slot.t[stage].store(Now(), std::memory_order_relaxed);
 }
+/// The frame's intended wake (the pacer's slot) and the time the pacer let it go.
+void StampPace(u64 id) {
+    Slot& slot = ring[id % Ring];
+    if (slot.id.load(std::memory_order_acquire) != id) {
+        return;
+    }
+    slot.t[Target].store(Pace::last_target, std::memory_order_relaxed);
+    slot.t[Paced].store(Now(), std::memory_order_relaxed);
+}
+/// BB_LATENCY_FRAMES=<file> (with the trace): one CSV line per game frame, each stage in us
+/// after the frame's start (-1: none), for offline pacing analysis.
+FILE* frames_csv = [] {
+    const char* path = std::getenv("BB_LATENCY_FRAMES");
+    FILE* f = path && path[0] ? std::fopen(path, "w") : nullptr;
+    if (f) {
+        std::fprintf(f, "id,enter_us,target,paced,awake,submit,gpu,take,pstart,pend,period_us\n");
+    }
+    return f;
+}();
 
 extern "C" int runtime_frame_waits_take(const char** what, double* seconds, int max);
 struct WaitSum {
@@ -463,6 +485,19 @@ void Print(u64 current) {
             t[i] = a.t[i].load(std::memory_order_relaxed);
         }
         printed = id;
+        if (frames_csv && t[Enter]) {
+            static const s64 base = t[Enter];
+            const auto rel = [&](u32 i) { return t[i] ? (t[i] - t[Enter]) / 1000 : s64{-1}; };
+            std::fprintf(frames_csv, "%llu,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld\n",
+                         static_cast<unsigned long long>(id),
+                         static_cast<long long>((t[Enter] - base) / 1000),
+                         static_cast<long long>(rel(Target)), static_cast<long long>(rel(Paced)),
+                         static_cast<long long>(rel(Awake)), static_cast<long long>(rel(Submit)),
+                         static_cast<long long>(rel(Gpu)), static_cast<long long>(rel(Take)),
+                         static_cast<long long>(rel(PresentStart)),
+                         static_cast<long long>(rel(PresentEnd)),
+                         static_cast<long long>(Libraries::VideoOut::FrameCapPeriodNs() / 1000));
+        }
         // presented: the present marker, else (the low latency mode off) the present thread taking it
         const s64 end = t[PresentEnd] ? t[PresentEnd] : t[Take];
         if (!t[Enter] || !t[Awake] || !end) {
@@ -527,6 +562,9 @@ void Print(u64 current) {
                       static_cast<unsigned long long>(Pace::unpaced.exchange(0)));
     }
     std::printf("%s (ms)\n", line);
+    if (frames_csv) {
+        std::fflush(frames_csv);
+    }
     // every 10 s: the present intervals of the whole run so far
     static u32 seconds = 0;
     const double period = double(Libraries::VideoOut::FrameCapPeriodNs()) / 1e6;
@@ -726,6 +764,7 @@ void GameFrameStart(u64 frame, u64 kicked) {
             }
             Pace::BeforeFrame(id);
             if (Trace::on) {
+                Trace::StampPace(id);
                 Trace::Stamp(id, Trace::Awake);
             }
         }
@@ -760,6 +799,9 @@ void GameFrameStart(u64 frame, u64 kicked) {
         PrintLog();
     }
     Pace::BeforeFrame(id);
+    if (Trace::on) {
+        Trace::StampPace(id);
+    }
     if (kind == Kind::AntiLag) {
         AntiLag(VK_ANTI_LAG_STAGE_INPUT_AMD, id); // the driver sleeps here when it is on
         if (Trace::on) {
