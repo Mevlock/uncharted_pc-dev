@@ -15,6 +15,7 @@
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
 #include "common/thread.h"
+#include "core/libraries/videoout/game_frame.h"
 #include "video_core/landing_gate.h"
 #include "common/alignment.h"
 #include "core/memory.h"
@@ -1687,8 +1688,10 @@ bool BufferCache::WaitLandingTick(u64 tick) {
         }
         if (!reported && std::chrono::steady_clock::now() - begin > std::chrono::seconds(5)) {
             reported = true;
-            std::printf("GPU stall: the landing thread waits 5 s for tick %llu\n",
-                        static_cast<unsigned long long>(tick));
+            char game_frame[96];
+            std::printf("GPU stall: the landing thread waits 5 s for tick %llu (%s)\n",
+                        static_cast<unsigned long long>(tick),
+                        Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
         }
     }
     return false;
@@ -2010,8 +2013,10 @@ void BufferCache::WaitLanding(u64 seq) {
     // the GPU, which ends the game when the device is lost).
     const auto done = [&] { return landing_stop || landing_done_seq >= seq; };
     if (!landing_done_cv.wait_for(lk, std::chrono::seconds(5), done)) {
-        std::printf("GPU stall: a label waits 5 s for the landing of copy %llu\n",
-                    static_cast<unsigned long long>(seq));
+        char game_frame[96];
+        std::printf("GPU stall: a label waits 5 s for the landing of copy %llu (%s)\n",
+                    static_cast<unsigned long long>(seq),
+                    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
         landing_done_cv.wait(lk, done);
     }
 }
@@ -3868,7 +3873,9 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
         submit_result = instance.GetSparseQueue().bindSparse(sparse_info);
     }
     if (submit_result == vk::Result::eErrorDeviceLost) {
-        std::printf("Device lost during a sparse bind\n");
+        char game_frame[96];
+        std::printf("Device lost during a sparse bind (%s)\n",
+                    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame)));
         Vulkan::DeviceLost(instance.GetDevice());
     } else if (submit_result != vk::Result::eSuccess) {
         std::printf("Arena: sparse bind failed (%s), %zu arenas\n",

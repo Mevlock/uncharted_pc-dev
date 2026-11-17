@@ -26,6 +26,7 @@
 #include "core/libraries/kernel/time.h"
 #include <array>
 #include "core/libraries/videoout/driver.h"
+#include "core/libraries/videoout/game_frame.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -50,6 +51,7 @@ extern "C" double runtime_time_scale_now(void);
 extern "C" volatile int runtime_freeze_flag; // runtime_thread.c: the game's threads are held (preparation page/hold)
 extern "C" volatile int runtime_title_shown; // runtime_menumouse.c: a game menu showed (the title, after the boot)
 
+extern "C" const volatile uint64_t* runtime_game_frame_count; // runtime_ultrawide.c: g_frameState.m_frameCount
 extern "C" volatile int runtime_movie_starts; // src/probe.c patch_movie_start: the game asked for a movie
 
 // bbport: faster boot (on for everyone; BB_FAST_BOOT=0: off). From the end of the shader preparation (the stored
@@ -478,6 +480,9 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
     return 0;
 }
 
+// bbport: the flip argument (the game's frame number) of the last game flip whose present finished (game_frame.h).
+std::atomic<s64> g_presented_flip_arg{-1};
+
 void VideoOutDriver::Flip(const Request& req) {
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
     // bbport: the flip argument (the game's frame number) goes with the frame for the low latency
@@ -486,6 +491,9 @@ void VideoOutDriver::Flip(const Request& req) {
                   flip_arg = req.index >= 0 ? req.flip_arg : s64{-1}] {
         presenter->SetHDR(hdr);
         presenter->Present(frame, false, true, flip_arg);
+        if (flip_arg >= 0) {
+            g_presented_flip_arg.store(flip_arg, std::memory_order_relaxed);
+        }
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
@@ -549,9 +557,11 @@ void VideoOutDriver::Flip(const Request& req) {
         const u64 image_bytes = BbStats::image_upload_bytes.load();
         const u64 buffer_bytes = BbStats::buffer_upload_bytes.load();
         if (frame_ms > 40.0 && last_gpu_ns != 0) {
-            std::printf("Stall: %.1f ms frame; GPU thread on CPU %.1f ms; %llu images registered, "
+            char game_frame[96];
+            std::printf("Stall: %.1f ms frame (%s); GPU thread on CPU %.1f ms; %llu images registered, "
                         "%.1f MB image uploads, %.1f MB buffer uploads\n",
-                        frame_ms, (gpu_ns - last_gpu_ns) / 1e6,
+                        frame_ms, GameFrameText(game_frame, sizeof(game_frame), true),
+                        (gpu_ns - last_gpu_ns) / 1e6,
                         static_cast<unsigned long long>(images - last_images),
                         (image_bytes - last_image_bytes) / 1e6,
                         (buffer_bytes - last_buffer_bytes) / 1e6);
@@ -635,6 +645,7 @@ void VideoOutDriver::Flip(const Request& req) {
             window_draws = all_draws;
             window_gpu_us = gpu_us;
             const u64 side_downloads = BbStats::gpu_side_downloads.exchange(0);
+            char game_frame[96];
             std::printf("Frame stats: %.1f FPS, worst frame %.1f ms (vblank %u Hz); "
                         "%u shader/pipeline compiles, %.1f ms; %llu recorder syncs; "
                         "%.0f write faults/s (%.0f/s over dead GPU data, "
@@ -643,7 +654,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         "%lld hot pages; GPU thread %.2f us/draw, "
                         "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%%, host copies "
                         "%.1f%% (%.0f/frame), copy threads %.1f%%, GPU ticks %.1f%%; "
-                        "reduced-size draws %.0f/frame of %.0f in the scene\n",
+                        "reduced-size draws %.0f/frame of %.0f in the scene; %s\n",
                         frames / window, worst_ms, EmulatorSettings.GetVblankFrequency(), compiles,
                         compile_ns / 1e6, static_cast<unsigned long long>(direct),
                         faults / window, BbStats::dead_gpu_drops.exchange(0) / window,
@@ -662,7 +673,8 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::copy_threads_wait_ns.exchange(0) / (window * 1e7),
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
-                        frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
+                        frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0,
+                        GameFrameText(game_frame, sizeof(game_frame)));
             // bbport diagnosis: the shaders' resource table walks (flat buffers with their
             // per-lane read windows, srt.h): what the copies amount to per frame.
             if (const u64 walks = Shader::g_flatbuf_walks.exchange(0)) {
@@ -914,6 +926,34 @@ void WaitEopFlipsReached(u64 count, u32 timeout_ms) {
 // bbport: the flip argument of the last flip the GPU command thread reached (in order after its frame's commands): the
 // games pass their frame number (the projection jitter's game side, CameraMotion).
 std::atomic<s64> g_gpu_flip_arg{-1};
+
+GameFrames CurrentGameFrames() {
+    const volatile u64* count = runtime_game_frame_count;
+    return {count ? static_cast<s64>(*count) : s64{-1}, g_gpu_flip_arg.load(std::memory_order_relaxed),
+            g_presented_flip_arg.load(std::memory_order_relaxed)};
+}
+
+const char* GameFrameText(char* out, std::size_t size, bool full) {
+    const GameFrames f = CurrentGameFrames();
+    if (f.started < 0) {
+        std::snprintf(out, size, "game frame unknown");
+        return out;
+    }
+    if (!full) {
+        std::snprintf(out, size, "game frame %lld", static_cast<long long>(f.started));
+        return out;
+    }
+    char submitted[24] = "none", presented[24] = "none";
+    if (f.submitted >= 0) {
+        std::snprintf(submitted, sizeof(submitted), "%lld", static_cast<long long>(f.submitted));
+    }
+    if (f.presented >= 0) {
+        std::snprintf(presented, sizeof(presented), "%lld", static_cast<long long>(f.presented));
+    }
+    std::snprintf(out, size, "game frame %lld started, %s submitted, %s presented",
+                  static_cast<long long>(f.started), submitted, presented);
+    return out;
+}
 
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
     if (index != -1) {

@@ -2,6 +2,7 @@
  * GnmDriver, VideoOut and kernel event queues, adapted to the native loader. */
 #ifndef BBGPU_H
 #define BBGPU_H
+#include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
@@ -67,6 +68,10 @@ void bbgpu_input_sample(void);
  * until the GPU is ready for the next frame. */
 void bbgpu_game_frame_source(int found);
 void bbgpu_game_frame_start(uint64_t frame, uint64_t kicked);
+/* The game frame for a report line (core/libraries/videoout/game_frame.h): "game frame N" or, full, "game frame N
+ * started, S submitted, P presented" ("game frame unknown" without the number). Writes into out, returns it. Only
+ * loads; safe in the fault handler. */
+const char *bbgpu_game_frame_text(char *out, size_t size, int full);
 /* The shader cache's last writes, before the process ends without destructors (runtime_quit). */
 void bbgpu_prepare_exit(void);
 /* Button prompts (button_prompts.cpp), the device used last: 0 keyboard or mouse (pictures of the

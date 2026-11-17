@@ -389,12 +389,14 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (fiber) snprintf(thread,sizeof(thread),"thread %lu '%s', fiber '%s'",GetCurrentThreadId(),guest ? guest : "?",fiber);
     else if (guest) snprintf(thread,sizeof(thread),"thread %lu '%s'",GetCurrentThreadId(),guest);
     else snprintf(thread,sizeof(thread),"thread %lu, host",GetCurrentThreadId());
+    char game_frame[96]; /* the last game frame started, submitted and presented (loads only) */
+    bbgpu_game_frame_text(game_frame,sizeof(game_frame),1);
     if (record->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2)
-        fprintf(stderr,"Fault: %s access to %p at %s (%s)\n",
+        fprintf(stderr,"Fault: %s access to %p at %s (%s; %s)\n",
                 record->ExceptionInformation[0]==1 ? "write" : record->ExceptionInformation[0]==8 ? "execute" : "read",
-                (void *)record->ExceptionInformation[1],where,thread);
+                (void *)record->ExceptionInformation[1],where,thread,game_frame);
     else
-        fprintf(stderr,"Fault: exception 0x%08lx at %s (%s)\n",record->ExceptionCode,where,thread);
+        fprintf(stderr,"Fault: exception 0x%08lx at %s (%s; %s)\n",record->ExceptionCode,where,thread,game_frame);
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n"
             "  r8=%016llx  r9=%016llx  r10=%016llx r11=%016llx\n  r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp,
@@ -1377,16 +1379,18 @@ static int64_t find_masked(const char *hex, uint64_t size);
  * argument. At the entry of the loop's frame function (called directly in U2/U3 1.02, run as the job the loop waits
  * for in 1.00 and U1 1.02) m_frameCount is the number of the frame that starts: the low latency mode sleeps there
  * and marks the frame's start with that number, and its submit and present by their flip argument, the same number. */
-static const volatile uint64_t *game_frame_count;
+/* The same number names the frame in the crash, device-lost, hitch, stall and frame stats lines (bbgpu_game_frame_text):
+ * found always (one search at boot, nothing per frame), hooked only with the low latency mode on. */
+extern const volatile uint64_t *runtime_game_frame_count; /* runtime_ultrawide.c: g_frameState.m_frameCount */
 extern const volatile uint64_t *runtime_draw_frame_number; /* runtime_ultrawide.c: KickJob's lastFrameNumber */
 static void __attribute__((ms_abi)) game_frame_start(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
     (void)rdi; (void)rsi; (void)base; (void)r14;
     const volatile uint64_t *kicked=runtime_draw_frame_number;
-    bbgpu_game_frame_start(*game_frame_count, kicked ? *kicked : UINT64_MAX);
+    bbgpu_game_frame_start(*runtime_game_frame_count, kicked ? *kicked : UINT64_MAX);
 }
 static void install_game_frame_start(uint64_t image_size) {
     const char *env=getenv("BB_LOW_LATENCY");
-    if (!env || !env[0] || env[0]=='0') return;
+    const int low_latency=env && env[0] && env[0]!='0';
     /* U1 1.00 + 1.02, U2 1.00, U3 1.00: lea r14, [frame]; lea rbx; lea r12, [g_frameState]; nop; the job call
      * (rdi = r14, esi 0, edx 5, r8d 0, rcx = r9 = rbx); inc qword [r12 + d8]; call yield; cmp byte [r15], 0 */
     int64_t frame=-1, count=-1;
@@ -1405,14 +1409,24 @@ static void install_game_frame_start(uint64_t image_size) {
     }
     /* push rbp; mov rbp, rsp; push r15 (moved into the thunk) */
     static const unsigned char entry[]={0x55,0x48,0x89,0xe5,0x41,0x57};
-    if (frame<0 || count<0 || (uint64_t)frame+16>image_size || (uint64_t)count+8>image_size ||
-        memcmp(image+frame,entry,sizeof(entry))) {
-        printf("Low latency: the game's frame start was not found (%s)\n",
-               a==-2 || b==-2 ? "main loop not unique" : frame<0 ? "no main loop" : "unexpected frame function");
+    if (count<0 || (uint64_t)count+8>image_size) {
+        printf("Game frame: the game's frame number was not found (%s); reports carry no frame number\n",
+               a==-2 || b==-2 ? "main loop not unique" : "no main loop");
+        if (low_latency) {
+            printf("Low latency: the game's frame start was not found\n");
+            bbgpu_game_frame_source(0);
+        }
+        return;
+    }
+    runtime_game_frame_count=(const volatile uint64_t *)(image+count);
+    printf("Game frame: the game's frame number at %#" PRIx64 " (main loop at %#" PRIx64 "): named in the frame stats, "
+           "hitch, stall, fault and device-lost lines\n",(uint64_t)count,(uint64_t)(a>=0 ? a : b));
+    if (!low_latency) return;
+    if (frame<0 || (uint64_t)frame+16>image_size || memcmp(image+frame,entry,sizeof(entry))) {
+        printf("Low latency: the game's frame start was not found (unexpected frame function)\n");
         bbgpu_game_frame_source(0);
         return;
     }
-    game_frame_count=(const volatile uint64_t *)(image+count);
     if (!callback_thunk(image+frame,sizeof(entry),(const void *)game_frame_start)) {
         bbgpu_game_frame_source(0);
         return;
@@ -1713,9 +1727,10 @@ static ABI float u1_frame_time(float want, float cap) {
         if (want>cap) ++u1_dt_stats.cut;
         if (u1_dt_stats.frames>=300) {
             const double n=u1_dt_stats.frames, mean=u1_dt_stats.out/n, sd=sqrt(fmax(0.0,u1_dt_stats.sq/n-mean*mean));
-            printf("U1 frame time: %u frames, step %.2f ms (sd %.2f, %.2f-%.2f), %u cut by the %.0f ms cap\n",
+            char game_frame[96];
+            printf("U1 frame time: %u frames, step %.2f ms (sd %.2f, %.2f-%.2f), %u cut by the %.0f ms cap; %s\n",
                    u1_dt_stats.frames,mean*1000.0,sd*1000.0,u1_dt_stats.lo*1000.0,u1_dt_stats.hi*1000.0,
-                   u1_dt_stats.cut,cap*1000.0);
+                   u1_dt_stats.cut,cap*1000.0,bbgpu_game_frame_text(game_frame,sizeof(game_frame),0));
             fflush(stdout);
             memset(&u1_dt_stats,0,sizeof(u1_dt_stats));
         }

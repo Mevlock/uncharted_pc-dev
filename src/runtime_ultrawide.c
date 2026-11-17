@@ -1252,6 +1252,10 @@ int runtime_uncharted_game;
 /* KickJob's lastFrameNumber (the number of the last frame whose draw script was kicked), whatever
  * BB_PROJECTION_JITTER says; NULL: not found. Read by the low latency log (probe.c, game_frame_start). */
 const volatile uint64_t *runtime_draw_frame_number;
+/* g_frameState.m_frameCount, the game's own frame number (+1 per frame in its main loop, the number it passes as its
+ * flip argument); NULL: not found. Set by probe.c (install_game_frame_start) before the game runs; read by the low
+ * latency mode and by the reports that name the game frame (bbgpu_game_frame_text). */
+const volatile uint64_t *runtime_game_frame_count;
 
 typedef struct {
     const char *name;

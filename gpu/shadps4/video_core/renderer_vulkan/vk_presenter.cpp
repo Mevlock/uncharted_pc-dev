@@ -8,6 +8,7 @@
 #include "common/singleton.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/videoout/game_frame.h"
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
@@ -469,8 +470,9 @@ Frame* Presenter::PrepareLastFrame() {
         if (result == vk::Result::eTimeout) {
             continue;
         }
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
+        char game_frame[96];
+        ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during waiting for a frame ({})",
+                   Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
     }
 
     auto& scheduler = flip_scheduler;
@@ -1526,8 +1528,9 @@ Frame* Presenter::GetRenderFrame(bool fill) {
 
     // Wait for the presentation to be finished so all frame resources are free
     while (wait() != vk::Result::eSuccess) {
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
-                   "Device lost during waiting for a frame");
+        char game_frame[96];
+        ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during waiting for a frame ({})",
+                   Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
         // Retry if the waiting times out
         if (result == vk::Result::eTimeout) {
             continue;

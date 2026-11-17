@@ -34,6 +34,7 @@
 #include "common/logging/log.h"
 #include "common/rdtsc.h"
 #include "core/libraries/kernel/orbis_error.h"
+#include "core/libraries/videoout/game_frame.h"
 #include "core/libraries/libs.h"
 #include "core/memory.h"
 #include "core/signals.h"
@@ -594,6 +595,10 @@ extern "C" void bbgpu_game_frame_source(int found) {
 
 extern "C" void bbgpu_game_frame_start(uint64_t frame, uint64_t kicked) {
     Vulkan::LowLatency::GameFrameStart(frame, kicked);
+}
+
+extern "C" const char* bbgpu_game_frame_text(char* out, size_t size, int full) {
+    return Libraries::VideoOut::GameFrameText(out, size, full != 0);
 }
 
 extern "C" void bbgpu_prepare_exit(void) {

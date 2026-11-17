@@ -29,6 +29,7 @@
 #include <tlhelp32.h>
 
 #include "common/thread.h"
+#include "core/libraries/videoout/game_frame.h"
 
 extern "C" void bb_describe_address(char* out, size_t size, uintptr_t address); // src/probe.c
 
@@ -314,8 +315,10 @@ void HitchReport(const std::vector<Sampled>& threads, u64 begin_ns, u64 end_ns) 
         ++per_thread[s.thread][path];
         ++totals[s.thread];
     }
-    std::printf("Hitch: %.1f ms frame; where each thread spent it (2 ms samples):\n",
-                (end_ns - begin_ns) / 1e6);
+    char game_frame[96];
+    std::printf("Hitch: %.1f ms frame (%s at the report); where each thread spent it (2 ms samples):\n",
+                (end_ns - begin_ns) / 1e6,
+                Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
     for (size_t t = 0; t < threads.size(); ++t) {
         if (!totals[t]) {
             continue;

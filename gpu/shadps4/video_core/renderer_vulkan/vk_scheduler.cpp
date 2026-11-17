@@ -25,6 +25,7 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
+#include "core/libraries/videoout/game_frame.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -124,13 +125,15 @@ std::vector<std::pair<const Scheduler*, const Instance*>> g_schedulers;
 
 void Scheduler::ReportStall() {
     std::scoped_lock lk{g_recent_mutex};
+    char game_frame[96];
+    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true);
     for (const auto& [scheduler, inst] : g_schedulers) {
         const VkSemaphore timeline = scheduler->work_semaphore.Handle();
         const auto [result, value] = inst->GetDevice().getSemaphoreCounterValue(timeline);
-        std::printf("GPU stall: scheduler %p timeline %p: GPU reached %llu, next tick %llu\n",
+        std::printf("GPU stall: scheduler %p timeline %p: GPU reached %llu, next tick %llu (%s)\n",
                     static_cast<const void*>(scheduler), static_cast<void*>(timeline),
                     static_cast<unsigned long long>(value),
-                    static_cast<unsigned long long>(scheduler->work_semaphore.CurrentTick()));
+                    static_cast<unsigned long long>(scheduler->work_semaphore.CurrentTick()), game_frame);
         scheduler->ReportBreadcrumbs();
     }
     const u64 count = std::min<u64>(g_recent_count, g_recent.size());
@@ -143,7 +146,7 @@ void Scheduler::ReportStall() {
             std::printf(" %p=%llu", static_cast<void*>(r.wait_semaphore[w]),
                         static_cast<unsigned long long>(r.wait_value[w]));
         }
-        std::printf("\n");
+        std::printf(" (%s)\n", game_frame);
     }
     std::fflush(stdout);
     // bbport: a tick nobody submits means the port's threads wait for each other: their stacks
@@ -844,7 +847,9 @@ void Scheduler::SubmitOnRecorder(u64 signal_value) {
         submit_result = instance.GetGraphicsQueue().submit(submit_info, nullptr);
     }
     if (submit_result == vk::Result::eErrorDeviceLost) {
-        std::printf("Device lost during submit\n");
+        char game_frame[96];
+        std::printf("Device lost during submit (%s)\n",
+                    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame)));
         DeviceLost(instance.GetDevice());
     }
     g_async_submits_done.fetch_add(1, std::memory_order_release);
@@ -1016,7 +1021,9 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     }
     if (submit_result == vk::Result::eErrorDeviceLost) {
-        std::printf("Device lost during submit\n");
+        char game_frame[96];
+        std::printf("Device lost during submit (%s)\n",
+                    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame)));
         DeviceLost(instance.GetDevice());
     }
 
