@@ -1161,23 +1161,6 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         return {};
     };
 
-    // bbport latency pacing: while the frame start keeps the cap, the slot hold stands aside and
-    // a game frame is held only by the present smoother (vk_low_latency.cpp): until its start +
-    // the recent frames' usual start -> ready time, so it is shown at its start's spacing.
-    const auto paced_flip_at = [this](std::chrono::steady_clock::time_point now) {
-        s64 flip_arg = -1;
-        {
-            std::scoped_lock lk{mutex};
-            if (!requests.empty() && requests.front().index >= 0) {
-                flip_arg = requests.front().flip_arg;
-            }
-        }
-        const s64 at = flip_arg < 0 ? 0
-                                    : Vulkan::LowLatency::PresentNotBefore(
-                                          flip_arg, now.time_since_epoch().count());
-        return at ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(at)) : now;
-    };
-
     // bbport: with a frame limit (uncapped presets) a queued flip is presented as soon as it
     // arrives and its slot allows, between vblanks, instead of on the next vblank tick.
     const bool immediate_flips = frame_limit != 0;
@@ -1236,8 +1219,8 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
         // bbport latency pacing: while the frame start keeps the cap, the slot hold stands aside
         // (one limiter); the cap the frame start keeps (0: none now: a movie, the boot's fast
         // vblank, a freeze or a flip rate change the cadence)
-        if (frame_limit && start_paced.load(std::memory_order_relaxed)) {
-            next_flip = paced_flip_at(now);
+        if (frame_limit && start_paced.load(std::memory_order_relaxed) && next_flip > now) {
+            next_flip = now;
         }
         cap_period_ns.store(frame_limit && !movie && !boot_boost && runtime_freeze_flag == 0 &&
                                     main_port.flip_rate == 0
@@ -1315,21 +1298,14 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                     break; // next vblank
                 }
             }
-            const bool paced = start_paced.load(std::memory_order_relaxed);
-            if (paced) {
-                next_flip = paced_flip_at(std::chrono::steady_clock::now());
+            if (start_paced.load(std::memory_order_relaxed)) {
+                next_flip = std::min(next_flip, std::chrono::steady_clock::now());
             }
-            if (const auto before = std::chrono::steady_clock::now(); before < next_flip) {
+            if (std::chrono::steady_clock::now() < next_flip) {
                 if (next_flip >= tick_deadline) {
                     break;
                 }
-                if (paced) {
-                    // the smoother's hold, to the time (a plain sleep overshoots up to ~1 ms)
-                    Vulkan::LowLatency::SleepUntilNs(next_flip.time_since_epoch().count());
-                    Vulkan::LowLatency::CountHold((next_flip - before).count());
-                } else {
-                    std::this_thread::sleep_until(next_flip);
-                }
+                std::this_thread::sleep_until(next_flip);
             }
             const auto now = std::chrono::steady_clock::now();
             const auto request = receive_request();

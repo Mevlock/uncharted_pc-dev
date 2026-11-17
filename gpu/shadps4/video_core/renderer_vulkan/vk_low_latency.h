@@ -73,16 +73,6 @@ void TraceFlip(FlipStage stage, s64 flip_arg);
 /// game's frame start hook the present thread's slot hold keeps the cap).
 bool StartPacingRequested();
 
-/// Present thread, while the frame start paces: the steady_clock time (ns) before which the game's
-/// flip with this argument is held (its frame's start + the recent frames' usual start -> ready
-/// time), so frames are shown evenly spaced after their start (the time the game read its clock
-/// and input); 0: show it now. `now`: the present thread's clock.
-s64 PresentNotBefore(s64 flip_arg, s64 now);
-/// Sleeps until `wake` (steady_clock ns) to within a few us (a coarse sleep, then yields).
-void SleepUntilNs(s64 wake);
-/// BB_LATENCY_TRACE: a flip held that long by the present smoother.
-void CountHold(s64 ns);
-
 /// "Reflex", "Anti-Lag 2" while active, else nullptr (FPS counter).
 const char* Name();
 
