@@ -11,29 +11,40 @@
  *    to zone-sniper-7-1 on the bridge.
  *  - sniper-6 and sniper-7 spawn 2.4-2.6 m BEHIND entrance-tunnel-door-1 (the gate at the far end of the bridge), in
  *    the tunnel, and walk out through it.
- *  - The bridge controller spawns 3 waves (wave1-1..10); with the third it tells ss-gompa-entrance-tunnel-gate-1 to
- *    close: 4 s later the gate closes and its nav blocker goes on (enable-nav-blocker-object entrance-tunnel-door-1).
- *  - sniper-7 spawns only on a sniper death after sniper-6 has spawned. A player who clears the bridge waves first
- *    (with three snipers still up) gets the gate closed before sniper-7 exists; the next sniper kill spawns him
- *    behind the closed gate. He can't get out (nav blocker, closed gate), can't be seen or reached, but he is alive:
- *    the sniper group never empties, the fight never ends.
+ *  - The bridge controller spawns 3 waves (wave1-1..10, all in the tunnel); with the third it tells
+ *    ss-gompa-entrance-tunnel-gate-1 to close: 4 s later the gate closes and its nav blocker goes on
+ *    (animate entrance-tunnel-door-1 'close; enable-nav-blocker-object entrance-tunnel-door-1).
  *  - The walkway's anti-rush region (script 6ac870f5, on enter): while the task is not done and the bridge group or the
  *    sniper group has anyone alive, it raises the snipers' accuracy and damage x200, waits 1 s and calls kill-player.
- *    That kill ignores the health cheat. With sniper-7 sealed in, it fires every time.
+ *    That kill ignores the health cheat.
+ *  - THE BUG (the user's play, trace + NPC dump, 1.02): the third wave (wave1-8/9/10) spawns 8-14 m inside the tunnel
+ *    and needs ~10 s to come down to the gate; the gate shuts 4 s after their spawn. They stay alive, pressed against
+ *    the closed gate 1.7-2.0 m inside, and fire through it: the bridge group never empties, so the walkway kills the
+ *    player every time ("an invisible sniper"; the shot comes from the gate).
+ *  - The same can happen to sniper-7 (and in theory sniper-6): sniper-7 spawns only on a sniper death after sniper-6
+ *    has spawned, so a player who clears the bridge first gets the gate closed before sniper-7 exists; the next sniper
+ *    kill spawns him behind the closed gate.
  *
- * The fix (the user's choice, 2026-11-17: the developers meant the sniper to come out of the gate): when sniper-6 or
- * sniper-7 is spawned (c-spawn-npc) while entrance-tunnel-door-1's nav blocker is on (the gate has closed), his
- * spawner is moved to zone-sniper-6-1 for that spawn: the game's own spot for sniper-6, 2.8 m outside the gate on the
- * bridge side, at the start of both snipers' route to the bridge. He then takes his post as scripted and can be
- * killed. While the gate is open nothing changes; the spawner's position goes back on its next spawn with the gate
- * open (a checkpoint restart). One line in the log each time it acts.
+ * The fix (the user's choice, 2026-11-17: the developers meant everyone to come out of the gate before it closes):
+ *  - The gate script's (animate entrance-tunnel-door-1 'close) and (enable-nav-blocker-object entrance-tunnel-door-1)
+ *    are held while any live bridge-wave NPC or sniper-6/7 is on the tunnel side of the gate or in its doorway (up to
+ *    1 m out, within 30 m): their object argument is swapped for a name that does not exist, so both do nothing. The
+ *    U2 frame hook makes the same two calls as soon as everyone is out. A restart of the fight drops a held close.
+ *  - When sniper-6 or sniper-7 is spawned (c-spawn-npc) after the gate has closed, his spawner is moved to
+ *    zone-sniper-6-1 for that spawn: the game's own spot for sniper-6, 2.8 m outside the gate on the bridge side, at
+ *    the start of both snipers' route to the bridge. While the gate is open nothing changes; the spawner's position goes
+ *    back on its next spawn with the gate open (a checkpoint restart).
+ *  One line in the log each time it acts.
  *
  * Code sites (DC natives, argc = edi, argv = rsi; 8-byte arguments, a symbol is its 32-bit string id):
  *   1.02: c-spawn-npc 0x2e57b0 (spawner lookup 0x56c7b0 on the table 0x1130390), enable-nav-blocker-object 0xa04f60,
  *         disable-nav-blocker-object 0xa04ef0, kill-player 0x90c790 (trace), npc-die 0x2e4680 and
- *         npc-group-alive-count 0x2db160 (BB_SNIPER_TEST), spawner world locator 0x4bdfe0 (trace).
- *   1.00: c-spawn-npc 0x82a80 (spawner lookup 0x257e90, table 0xf1ddb0), enable 0x3ff550, disable 0x3ff5b0,
- *         kill-player 0x384380, npc-die 0x83790, npc-group-alive-count 0x8a060.
+ *         npc-group-alive-count 0x2db160 (BB_SNIPER_TEST), spawner world locator 0x4bdfe0 (trace); the animate natives'
+ *         shared body 0x396180 (DcAnimate 0x397c50 is a thunk to it).
+ *   1.00 (EU and US: the same bytes at every site): c-spawn-npc 0x82a80 (spawner lookup 0x257e90, table 0xf1ddb0),
+ *         enable 0x3ff550, disable 0x3ff5b0, kill-player 0x384380, npc-die 0x83790, npc-group-alive-count 0x8a060,
+ *         animate body 0xffa80 (DcAnimate 0x100230).
+ * An NPC: +0x44 its id, +0x110 its position (world).
  * A spawner (EntitySpawner): +0x00 position (local), +0x10 rotation, +0x30/+0x38 its process handle and id, +0x58 the
  * level, +0x60 a parent spawner.
  *
