@@ -171,7 +171,7 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
 
     // Add the windowing system specific extension
     std::vector<const char*> extensions;
-    extensions.reserve(7);
+    extensions.reserve(8);
 
     switch (window_type) {
     case Frontend::WindowSystemType::Headless:
@@ -203,6 +203,12 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
 
     if (EmulatorSettings.IsHdrAllowed()) {
         extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+    }
+
+    // bbport: the VRR indicator's present timing source reads the surface's timing capabilities
+    // (bbport_vrr.cpp); dropped below when not offered.
+    if (window_type != Frontend::WindowSystemType::Headless) {
+        extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
     }
 
     if (enable_debug_utils) {
