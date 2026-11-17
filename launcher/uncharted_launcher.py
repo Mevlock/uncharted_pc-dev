@@ -41,6 +41,11 @@ DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
 # expanduser, not Path.home(): started without USERPROFILE or HOME, the launcher still opens.
 CONFIG_DIR = Path(os.environ.get('APPDATA') or os.path.expanduser('~')) / 'uncharted-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
+# Portable (Game page): the launcher's settings live in this file next to the launcher instead of %APPDATA%;
+# the file being there is the switch.
+PORTABLE_FILE = DATA_DIR / 'launcher_settings.json'
+if PORTABLE_FILE.is_file():
+    CONFIG_DIR, CONFIG_FILE = DATA_DIR, PORTABLE_FILE
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
@@ -51,7 +56,7 @@ RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
 UPDATES = True
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'uncharted-update'
 # Never copied over an installation by an update (the package does not hold them either).
-USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log')
+USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log', 'launcher_settings.json')
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -64,6 +69,7 @@ GAMES = [
     ('u2', 'Among Thieves', 'Uncharted 2 · 2009', 'big2-ps4_Shipping.elf'),
     ('u3', "Drake's Deception", 'Uncharted 3 · 2011', 'big3-ps4_Shipping.elf'),
 ]
+PORTABLE_HINT = "The launcher's own settings are kept in launcher_settings.json next to the launcher instead of your Windows user profile (%APPDATA%), so the folder can be moved or copied to another PC with them. Saves and shaders are kept here already, unless you chose another Saves folder above."
 # Console language (system parameter 1), as the PS4 numbers them.
 LANGUAGES = [('1', 'English (United States)'), ('18', 'English (United Kingdom)'), ('2', 'French'),
              ('22', 'French (Canada)'), ('4', 'German'), ('5', 'Italian'), ('3', 'Spanish'),
@@ -240,7 +246,7 @@ CAMERA_VERTICAL_MAX = 8.0   # the normal camera's up / down (its arc is 1.3-5x s
 RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
-APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
+APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'portable': False, 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
                 'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
@@ -1068,6 +1074,7 @@ def load_settings():
             saved['mouse_aim_sensitivity'] = value
         saved['mouse_camera_vertical'] = '2.0'
     settings = {**APP_DEFAULTS, **saved}
+    settings['portable'] = CONFIG_FILE == PORTABLE_FILE
     if import_game_controls(settings):   # the in-game menu's Controls page changed them in the last game
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1911,6 +1918,8 @@ class Launcher:
                     on_change=self.refresh)
         self.folder(f, 'user_dir', _('Saves folder'), _('Where saves and the shader cache are kept'),
                     _('Empty: the user folder next to the launcher.'))
+        self.check(f, 'portable', _('Portable: keep the launcher settings in this folder'), _(PORTABLE_HINT))
+        self.var('portable').trace_add('write', lambda *_a: self.set_portable(self.var('portable').get()))
         self.section(f, _('Separate game folders'))
         self.note(f, _('Only when the games are not in one collection folder (each dumped on its own). A game with '
                        'a folder here is taken from it; the others from the collection folder above.'), top=2)
@@ -2674,6 +2683,23 @@ class Launcher:
                                   else _('Preparing shaders…') if self.preparing
                                   else _('Preparing the game; it opens in its own window…'), fg=GOLD)
         self.detect_controller()
+
+    def set_portable(self, on):
+        """Moves the launcher's settings between %APPDATA% and launcher_settings.json next to the launcher."""
+        global CONFIG_DIR, CONFIG_FILE
+        if on == (CONFIG_FILE == PORTABLE_FILE):
+            return
+        appdata = Path(os.environ.get('APPDATA') or os.path.expanduser('~')) / 'uncharted-launcher'
+        old_file = CONFIG_FILE
+        CONFIG_DIR, CONFIG_FILE = (DATA_DIR, PORTABLE_FILE) if on else (appdata, appdata / 'settings.json')
+        try:
+            self.collect()   # writes the settings to the new place
+            if not on:
+                PORTABLE_FILE.unlink(missing_ok=True)
+        except OSError as error:
+            CONFIG_DIR, CONFIG_FILE = old_file.parent, old_file
+            self.var('portable').set(not on)
+            self.messagebox.showerror(NAME, _('Could not move the launcher settings: {}').format(error))
 
     def collect(self):
         for key, v in self.vars.items():
