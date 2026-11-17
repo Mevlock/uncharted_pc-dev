@@ -60,6 +60,15 @@ void PresentEnd(u64 id);
 /// VkPresentIdKHR is chained to the presents.
 bool UsesPresentId();
 
+/// BB_LATENCY_TRACE=1 (diagnosis): the video driver's stages of the game's flip with this argument:
+/// the GPU reached it (its commands are done in order before it) and the present thread took it.
+enum class FlipStage { GpuReached, Taken };
+void TraceFlip(FlipStage stage, s64 flip_arg);
+
+/// Latency pacing: the game's flip with this argument was paced for a tick later than `tick_ns`
+/// (steady clock): the present thread keeps it queued until then.
+bool PacedForLater(s64 flip_arg, s64 tick_ns);
+
 /// "Reflex", "Anti-Lag 2" while active, else nullptr (FPS counter).
 const char* Name();
 

@@ -425,15 +425,21 @@ s32 PS4_SYSV_ABI sceVideoOutGetDeviceCapabilityInfo(
     return ORBIS_OK;
 }
 
+extern "C" double runtime_wait_begin(void);
+extern "C" void runtime_wait_end(const char* what, double start);
 s32 PS4_SYSV_ABI sceVideoOutWaitVblank(s32 handle) {
     auto* port = driver->GetPort(handle);
     if (!port) {
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
-    std::unique_lock lock{port->vo_mutex};
-    const auto prev_counter = port->vblank_status.count;
-    port->vblank_cv.wait(lock, [&]() { return prev_counter != port->vblank_status.count; });
+    const double t0 = runtime_wait_begin(); // bbport: BB_PAD_TIMING / BB_LATENCY_TRACE
+    {
+        std::unique_lock lock{port->vo_mutex};
+        const auto prev_counter = port->vblank_status.count;
+        port->vblank_cv.wait(lock, [&]() { return prev_counter != port->vblank_status.count; });
+    }
+    runtime_wait_end("vblank", t0);
     return ORBIS_OK;
 }
 
