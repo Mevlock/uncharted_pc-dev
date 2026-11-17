@@ -15,6 +15,7 @@
 #ifdef _WIN32
 // windows.h would clash with WAIT_TIMEOUT below.
 extern "C" __declspec(dllimport) int __stdcall TerminateProcess(void* process, unsigned int code);
+extern "C" void runtime_output_flush(void); // src/probe.c
 extern "C" __declspec(dllimport) void* __stdcall GetCurrentProcess();
 #endif
 
@@ -95,6 +96,7 @@ namespace Vulkan {
     std::fflush(stdout);
 #ifdef _WIN32
     // bbport: no DLL detach code (ExitProcess could hang in libsrt's; see runtime_quit).
+    runtime_output_flush();
     TerminateProcess(GetCurrentProcess(), 5);
 #endif
     std::_Exit(5);

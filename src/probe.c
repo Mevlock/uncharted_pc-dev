@@ -27,6 +27,8 @@ uint64_t runtime_guest_tsc(void);
 #ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
+#include <io.h>
+#include <fcntl.h>
 #else
 #include <sys/mman.h>
 #include <malloc.h>
@@ -158,6 +160,7 @@ void runtime_quit(int code) {
     if (!__atomic_exchange_n(&quitting,1,__ATOMIC_ACQ_REL) && gpu_enabled) bbgpu_prepare_exit();
     fflush(NULL);
 #ifdef _WIN32
+    runtime_output_flush();
     TerminateProcess(GetCurrentProcess(),(UINT)code);
 #endif
     _exit(code);
@@ -472,6 +475,7 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     fflush(NULL);
     write_crash_dump(info);
     fflush(NULL);
+    runtime_output_flush();
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -2419,6 +2423,7 @@ void runtime_restart(void) {
     }
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
     /* The new launch waits for this process's GPU device to go away (run.py --after). */
+    runtime_output_flush();
     TerminateProcess(GetCurrentProcess(),0);
 #else
     puts("Runtime: restarting through run.sh");
@@ -2435,9 +2440,78 @@ static DWORD WINAPI isa_stats_thread(void *unused) {
     (void)unused;
     for (;;) { Sleep(30000); if (isa_table) isa_rewrite_report(isa_table, stdout); }
 }
+
+/* The port's console output (stdout and stderr) goes into a pipe of its own with a large buffer,
+ * which a writer thread copies to where the output went before (the launcher's pipe, a log file or
+ * a console). A thread that prints never waits for that destination: the launcher's pipe holds
+ * about 4 KB and its reader is a Python thread, so a full pipe held the printing thread (the
+ * present thread's 5-second frame stats, the GPU thread's draw preparation line, the frame thread's
+ * trace) until the launcher read it, and with frames shown as soon as they are done that was a
+ * visible late frame every 5 seconds. One pipe for both streams keeps the lines in order;
+ * runtime_output_flush() lets the writer finish before the process ends (every exit and crash
+ * path). BB_DIRECT_OUTPUT=1: write straight through as before. */
+static HANDLE output_read = NULL, output_target = NULL;
+static volatile LONG output_writing; /* the writer holds bytes it has read and not yet written */
+static DWORD WINAPI output_writer(void *unused) {
+    (void)unused;
+    static char buffer[1 << 16];
+    int target_ok = 1;
+    for (;;) {
+        DWORD got = 0;
+        InterlockedExchange(&output_writing, 0);
+        if (!ReadFile(output_read, buffer, sizeof(buffer), &got, NULL) || !got) return 0;
+        InterlockedExchange(&output_writing, 1);
+        for (DWORD at = 0; target_ok && at < got;) {
+            DWORD put = 0;
+            if (!WriteFile(output_target, buffer + at, got - at, &put, NULL)) target_ok = 0; /* gone: drop */
+            at += put;
+        }
+    }
+}
+void runtime_output_flush(void) {
+    if (!output_read) return;
+    fflush(NULL);
+    for (int waited = 0; waited < 2000; ++waited) { /* at most 2 s */
+        DWORD avail = 0;
+        if (!PeekNamedPipe(output_read, NULL, 0, NULL, &avail, NULL)) return;
+        if (!avail && !InterlockedCompareExchange(&output_writing, 0, 0)) return;
+        Sleep(1);
+    }
+}
+static void output_start(void) {
+    const char *direct = getenv("BB_DIRECT_OUTPUT");
+    if (direct && direct[0] == '1') return;
+    HANDLE original = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!original || original == INVALID_HANDLE_VALUE) return;
+    HANDLE write_end = NULL;
+    if (!CreatePipe(&output_read, &write_end, NULL, 16u << 20)) { output_read = NULL; return; }
+    if (!DuplicateHandle(GetCurrentProcess(), original, GetCurrentProcess(), &output_target, 0, FALSE,
+                         DUPLICATE_SAME_ACCESS)) {
+        CloseHandle(output_read); CloseHandle(write_end); output_read = NULL; return;
+    }
+    fflush(NULL);
+    /* the same text/binary mode as the streams had (text: \n -> \r\n, as before) */
+    const int mode = _setmode(1, _O_BINARY);
+    _setmode(1, mode);
+    const int fd = _open_osfhandle((intptr_t)write_end, mode == -1 ? _O_TEXT : mode);
+    if (fd < 0 || _dup2(fd, 1) || _dup2(fd, 2)) {
+        CloseHandle(output_read); output_read = NULL; return;
+    }
+    _close(fd);
+    SetStdHandle(STD_OUTPUT_HANDLE, (HANDLE)_get_osfhandle(1));
+    SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(2));
+    HANDLE thread = CreateThread(NULL, 0, output_writer, NULL, 0, NULL);
+    if (thread) CloseHandle(thread);
+    atexit(runtime_output_flush);
+}
 #endif
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+#ifdef _WIN32
+    output_start();
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+#endif
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */

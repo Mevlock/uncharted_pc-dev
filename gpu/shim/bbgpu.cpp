@@ -267,6 +267,7 @@ static void StartProfileWriter() {
 void BbSamplerStart(); // bbport_sampler.cpp (BB_SAMPLE_THREADS)
 
 extern "C" void runtime_freeze_reason(unsigned reason, int on, const char* why); // runtime_thread.c
+extern "C" void runtime_output_flush(void); // src/probe.c: the console output written before an exit
 
 extern "C" int bbgpu_init(const BbGpuConfig* config) {
     BbSettings::Load();
@@ -288,6 +289,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         std::printf("Preparation only: done\n");
         std::fflush(stdout);
 #ifdef _WIN32
+        runtime_output_flush();
         TerminateProcess(GetCurrentProcess(), 0);
 #endif
         std::_Exit(0);
@@ -359,6 +361,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         // bbport: _Exit is ExitProcess on Windows, which still runs every DLL's detach code with
         // the other threads already gone: libsrt's (through FFmpeg) joined a thread through a
         // winpthread lock one of them held, and the process never ended (exit hang, lldb).
+        runtime_output_flush();
         TerminateProcess(GetCurrentProcess(), 0);
 #endif
         std::_Exit(0);

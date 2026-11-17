@@ -30,6 +30,9 @@ int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
  * code (TerminateProcess; ExitProcess could hang in libsrt's detach, and exit()'s destructors
  * waited for the GPU). Every exit of the game and every STOP go through it. */
 __attribute__((noreturn)) void runtime_quit(int code);
+/* Windows: waits (at most 2 s) until the console output written so far has reached its destination
+ * (probe.c's output writer thread); call before ending the process without runtime_quit. */
+void runtime_output_flush(void);
 /* Fault handler: a fault inside a partial remap in progress waits for it; returns 1 to retry. */
 int runtime_memory_wait_carve(uintptr_t address);
 const char *runtime_import_name(const char *name);
