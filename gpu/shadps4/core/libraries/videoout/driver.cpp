@@ -628,6 +628,7 @@ void VideoOutDriver::Flip(const Request& req) {
         ++frames;
         const double window = std::chrono::duration<double>(now - window_start).count();
         if (window >= 5.0) {
+            const auto stats_begin = Clock::now(); // bbport: how long this block holds the present thread
             const u32 compiles = Vulkan::g_bb_compiles.exchange(0);
             const u64 compile_ns = Vulkan::g_bb_compile_ns.exchange(0);
             if (const u32 mismatches = Shader::g_spec_count_mismatches.exchange(0)) {
@@ -786,6 +787,8 @@ void VideoOutDriver::Flip(const Request& req) {
             window_start = now;
             frames = 0;
             worst_ms = 0;
+            std::printf("Frame stats block: %.2f ms on the present thread\n",
+                        std::chrono::duration<double, std::milli>(Clock::now() - stats_begin).count());
         }
     }
 
