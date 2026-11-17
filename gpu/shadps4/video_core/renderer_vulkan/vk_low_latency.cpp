@@ -230,6 +230,7 @@ u32 tick_count = 0, tick_next = 0;
 std::atomic<u64> late_frames{0}, skipped_ticks{0}, stops{0}, planned{0}; ///< counts for BB_LATENCY_TRACE
 std::atomic<s64> planned_sleep_ns{0}, lead_ns{0}, late_by_max{0}, tick_err_min{INT64_MAX}, tick_err_max{INT64_MIN};
 std::atomic<u64> shown_later{0};
+std::atomic<u32> window_lates{0}; ///< late frames in the engage window (frame thread resets)
 u64 taken_id = 0;
 s64 taken_ns = 0;
 /// The longest lead of the paced frames (mutex), held for 10 s and then let down by 0.5 ms a
@@ -244,6 +245,16 @@ s64 lead_peak_at = 0;
 s64 last_target = 0;   ///< the last frame's tick
 s64 last_wake = 0;     ///< the last frame's start (a frame limit)
 u64 skip_until = 0;    ///< no other tick skipped before this frame (the last skip takes effect)
+/// Vblank ticks: paced only while the game holds the cap. Below it there is nothing to wait for
+/// (a frame is late for its tick whatever its start; the driver's own sleep still keeps the GPU
+/// queue short), and pacing there would only cost frames. Each second: engaged after two seconds
+/// in which the game's frames were shown on (almost) every tick; left when a quarter of a second's
+/// frames came late.
+bool engaged = false;
+s64 window_at = 0;
+u64 window_shown = 0;
+u32 good_seconds = 0;
+std::atomic<u32> engages{0}, leaves{0}; ///< counts for BB_LATENCY_TRACE
 
 void Queued(u64 id) {
     const u64 slot = id % Ring;
@@ -259,7 +270,9 @@ void Queued(u64 id) {
         leads[lead_next] = lead;
         lead_next = (lead_next + 1) % Samples;
         lead_count = std::min(lead_count + 1, Samples);
-        if (target && lead_peak) {
+        if (target && lead_peak && lead <= lead_peak + lead_peak / 2 + 1'000'000) {
+            // (a much slower frame is a hitch: late whatever the lead, not a reason to start
+            // every frame earlier)
             if (lead >= lead_peak) {
                 lead_peak = lead;
                 lead_peak_at = now;
@@ -270,6 +283,7 @@ void Queued(u64 id) {
     }
     if (target && target < now) {
         late_frames.fetch_add(1, std::memory_order_relaxed);
+        window_lates.fetch_add(1, std::memory_order_relaxed);
         s64 v = late_by_max.load(std::memory_order_relaxed);
         while (now - target > v && !late_by_max.compare_exchange_weak(v, now - target)) {
         }
@@ -368,6 +382,9 @@ void BeforeFrame(u64 id) {
     if (period <= 0 || schedule.next_ns < now - 4 * period || !shown_id || shown_id + 8 < id ||
         n_lead < 16) {
         Stop();
+        engaged = false;
+        good_seconds = 0;
+        window_at = 0;
         stops.fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -381,8 +398,36 @@ void BeforeFrame(u64 id) {
         // needed against the earliest tick. At most two periods: a longer lead puts so many
         // frames in flight that the game itself waits for them (its own hold, as with the old
         // limiter), which the lead would then measure and keep.
+        if (!window_at || now - window_at >= 1'000'000'000) {
+            if (window_at) {
+                const double ticks = double(now - window_at) / double(period);
+                const double shown = double(shown_id - std::min(shown_id, window_shown));
+                const u32 lates = window_lates.exchange(0, std::memory_order_relaxed);
+                if (!engaged) {
+                    good_seconds = shown >= 0.97 * ticks ? good_seconds + 1 : 0;
+                    if (good_seconds >= 2) {
+                        engaged = true;
+                        engages.fetch_add(1, std::memory_order_relaxed);
+                    }
+                } else if (lates > 0.25 * ticks) {
+                    engaged = false;
+                    good_seconds = 0;
+                    leaves.fetch_add(1, std::memory_order_relaxed);
+                }
+            } else {
+                window_lates.store(0, std::memory_order_relaxed);
+            }
+            window_at = now;
+            window_shown = shown_id;
+        }
+        if (!engaged) {
+            Stop();
+            return;
+        }
         if (!peak) {
-            peak = Kth(lead_v, n_lead, n_lead * 90 / 100);
+            // from the measured frames, at most one period: before pacing they include the wait
+            // the old hold put into the game (it goes away once the frames are paced)
+            peak = std::min(Kth(lead_v, n_lead, n_lead * 90 / 100), period);
             std::scoped_lock lk{mutex};
             lead_peak = peak;
             lead_peak_at = now;
@@ -701,7 +746,7 @@ void Print(u64 current) {
         wait_frames = 0;
     }
     if (at < sizeof(line)) {
-        std::snprintf(line + at, sizeof(line) - at, " | paced: %llu late (by up to %.2f), %llu shown later than aimed, shown-aimed %.2f..%.2f, %llu ticks skipped, %llu stops, planned sleep %.2f, lead %.2f",
+        std::snprintf(line + at, sizeof(line) - at, " | paced: %llu late (by up to %.2f), %llu shown later than aimed, shown-aimed %.2f..%.2f, %llu ticks skipped, %llu stops, planned sleep %.2f, lead %.2f, engaged %u left %u",
                       static_cast<unsigned long long>(Pace::late_frames.exchange(0)),
                       double(Pace::late_by_max.exchange(0)) / 1e6,
                       static_cast<unsigned long long>(Pace::shown_later.exchange(0)),
@@ -711,7 +756,8 @@ void Print(u64 current) {
                       static_cast<unsigned long long>(Pace::stops.exchange(0)),
                       double(Pace::planned_sleep_ns.exchange(0)) / 1e6 /
                           double(std::max<u64>(1, Pace::planned.exchange(0))),
-                      double(Pace::lead_ns.load()) / 1e6);
+                      double(Pace::lead_ns.load()) / 1e6,
+                      Pace::engages.exchange(0), Pace::leaves.exchange(0));
     }
     std::printf("%s (ms)\n", line);
     // every 10 s: the present intervals of the whole run so far
