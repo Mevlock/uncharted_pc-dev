@@ -1107,6 +1107,11 @@ static const unsigned char u2_menu_update_eu_code[]={0x55,0x48,0x89,0xe5,0x41,0x
 /* Uncharted 2 Npc::ComputeArmorDamage (runtime_onehit.c), where an attack's damage reaches the NPC's health (before
  * RespondToAttack, which only reacts): push rbp; mov rbp,rsp; push r15/r14/r13/r12/rbx; sub rsp,.. (EU 0x30430: 0x88,
  * 1.02 0x244ef0: 0x40f8). */
+/* Uncharted 3 damage after the armour step (runtime_onehit.c): 1.02 inside Npc::ComputeArmorDamage, mov [rbp-0x4040],
+ * ebx (6 bytes moved; then mov rax, [r14+8]); 1.00 in its caller after both helpers, mov r15d, eax; mov [rbp-0x4040],
+ * r15d (10 bytes moved; then mov rax, [r14+8]). */
+static const unsigned char u3_armor_damage_102[]={0x89,0x9d,0xc0,0xbf,0xff,0xff,0x49,0x8b,0x46,0x08};
+static const unsigned char u3_armor_damage_100[]={0x41,0x89,0xc7,0x44,0x89,0xbd,0xc0,0xbf,0xff,0xff,0x49,0x8b,0x46,0x08};
 /* Uncharted 1 Npc::RespondToAttack (runtime_onehit.c), EU and 1.02 alike: push rbp ... sub rsp,0xa8. */
 static const unsigned char u1_respond_attack[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0x00,0x00,0x00};
 /* Uncharted 1 BuddyJetskiSkill update (runtime_onehit.c), all four code versions: push rbp ... sub rsp,0xb8; mov r14,rsi. */
@@ -1339,6 +1344,10 @@ static const RuntimeGuestCallback guest_callbacks[]={
      runtime_u2_npc_damage,NULL},
     {"U2 NPC armor damage (1.02)",0x244ef0,u2_armor_damage_us,sizeof(u2_armor_damage_us),6,
      runtime_u2_npc_damage,NULL},
+    {"U3 NPC damage after armour (1.02)",0x35784e,u3_armor_damage_102,sizeof(u3_armor_damage_102),6,
+     runtime_u3_armor_damage_102,NULL},
+    {"U3 NPC damage after armour (EU)",0x2a6ff,u3_armor_damage_100,sizeof(u3_armor_damage_100),10,
+     runtime_u3_armor_damage_100,NULL},
     {"U3 checkpoint jumps (EU)",0x6cbdb0,u3_menu_update_eu_code,sizeof(u3_menu_update_eu_code),20,
      runtime_checkpoint_frame_eu,NULL},
     {"U3 checkpoint jumps (1.02)",0x103ff10,u3_menu_update_us_code,sizeof(u3_menu_update_us_code),23,
