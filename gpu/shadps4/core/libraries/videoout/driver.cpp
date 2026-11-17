@@ -1158,13 +1158,43 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     const std::chrono::nanoseconds boot_period(1000000000 / std::max<u32>(BootVblankHz(), 1));
     Common::AccurateTimer boot_timer{boot_period};
     Common::AccurateTimer& vblank_timer = timer;
+    // bbport latency pacing: while the frame start paces, the vblank ticks keep a fixed grid (each
+    // one period after the last one's time, never before it) instead of the timer that shortens
+    // the next wait by the last one's oversleep: that put ticks up to ~1.5 ms before their time
+    // and the frame start had to allow for it. BB_LATENCY_GRID=0: the timer as before.
+    const bool grid_allowed = !(std::getenv("BB_LATENCY_GRID") && std::getenv("BB_LATENCY_GRID")[0] == '0');
+    bool grid_was = false;
+    auto grid_next = std::chrono::steady_clock::now();
 
     while (!token.stop_requested()) {
         BbThreads::SampleCore(BbThreads::CorePresent);
         const bool boot_boost =
             BootVblankBoost(main_port.is_open, MovieActive(std::chrono::steady_clock::now()));
         Common::AccurateTimer& timer = boot_boost ? boot_timer : vblank_timer;
-        timer.Start();
+        const bool grid = grid_allowed && !boot_boost && Vulkan::LowLatency::PacingActive();
+        if (grid) {
+            const auto start = std::chrono::steady_clock::now();
+            grid_next += vblank_period;
+            if (!grid_was || start > grid_next + vblank_period) {
+                grid_next = start; // the first grid tick, or after a long stall: from now
+            }
+            if (grid_next > start) {
+                const auto wait = grid_next - start;
+                Common::AccurateSleep(wait - std::min<std::chrono::nanoseconds>(wait, std::chrono::microseconds(700)),
+                                      nullptr, false);
+                while (std::chrono::steady_clock::now() < grid_next) {
+                    std::this_thread::yield();
+                }
+            }
+            timer = Common::AccurateTimer{vblank_period}; // no carried wait: the grid keeps the time
+            timer.Start();
+        } else {
+            timer.Start();
+        }
+        if (grid != grid_was) {
+            std::printf("VideoOut: vblank ticks %s\n", grid ? "on a fixed grid (latency pacing)" : "on the timer");
+            grid_was = grid;
+        }
         if (debug_tick_jitter_us > 0) {
             jitter_state ^= jitter_state << 13;
             jitter_state ^= jitter_state >> 7;
@@ -1175,7 +1205,9 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 std::this_thread::yield();
             }
         }
-        const auto tick_deadline = std::chrono::steady_clock::now() + (boot_boost ? boot_period : vblank_period);
+        const auto tick_deadline =
+            grid ? grid_next + vblank_period
+                 : std::chrono::steady_clock::now() + (boot_boost ? boot_period : vblank_period);
 
         if (DebugState.IsGuestThreadsPaused()) {
             DrawLastFrame();
