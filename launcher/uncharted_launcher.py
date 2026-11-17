@@ -164,7 +164,7 @@ AA_SHARPNESS = [('0', 'Off'), ('0.2', 'Low'), ('0.4', 'Medium'), ('0.7', 'High')
 # Frames generated between two of the game's (BB_FRAME_GEN, BB_FRAME_GEN_MULTIPLIER).
 FRAME_GENERATION = [('off', 'Off'), ('fsr3', 'AMD FSR 3 Frame Generation (any GPU)'),
                     ('dlss', 'NVIDIA DLSS Frame Generation (GeForce RTX 40/50)')]
-LOW_LATENCY = [('0', 'Off'), ('1', 'On'), ('2', 'On + boost (NVIDIA: GPU clocks stay up)')]
+LOW_LATENCY = [('0', 'Off'), ('1', 'On'), ('2', 'On + boost (NVIDIA Reflex Boost: GPU clocks stay up)')]
 # The speaker layout the games are told (BB_SPEAKERS; from drakolordx7's upstream change, PR #392).
 SPEAKERS = [('auto', 'Automatic (the Windows speaker setup)'), ('2', 'Stereo'), ('6', '5.1 surround'),
             ('8', '7.1 surround')]
@@ -2055,7 +2055,7 @@ class Launcher:
         self.row(f, _('Multiplier'), self.choice(f, 'frame_gen_multiplier', FRAME_GEN_MULTIPLIERS, 34),
                  _('FSR 3 makes one frame (2×). DLSS makes up to three on a GeForce RTX 50 (4×), '
                    'one on an RTX 40.'))
-        self.row(f, _('Low latency'), self.choice(f, 'low_latency', LOW_LATENCY, 34),
+        self.row(f, _('Low latency (NVIDIA Reflex / AMD Anti-Lag 2)'), self.choice(f, 'low_latency', LOW_LATENCY, 34),
                  _('NVIDIA Reflex on GeForce cards, AMD Anti-Lag 2 on Radeon cards (with a recent driver). '
                    'The game waits to read the controller until the GPU is ready for the next frame, so '
                    'what you press shows sooner. It helps most when the GPU is the limit; the FPS '
