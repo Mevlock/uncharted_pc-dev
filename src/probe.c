@@ -970,23 +970,7 @@ static void install_guest_hooks(Segment *segments, uint64_t ns) {
  * the expected bytes calls a host function first, with rdi, rsi, the image base and r14 (Microsoft
  * x64 convention on every host). The thunk keeps the guest's registers and flags, so it also
  * works inside a function. */
-static unsigned char *near_image_memory(size_t size) {
-    unsigned char *memory=NULL;
-#ifdef _WIN32
-    /* rel32 jumps: within 2 GiB of the image. */
-    uint64_t end_of_image=round_page(guest_image_size ? guest_image_size : 1);
-    uint64_t base=((uint64_t)(uintptr_t)image+end_of_image+(32u<<20)+0xffff)&~(uint64_t)0xffff;
-    for (uint64_t step=0;!memory && step<(1900ull<<20);step+=1u<<16) {
-        memory=VirtualAlloc((void *)(uintptr_t)(base+step),size,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
-        if (!memory && (uint64_t)(uintptr_t)image>step+(2u<<20))
-            memory=VirtualAlloc((void *)(uintptr_t)(((uint64_t)(uintptr_t)image-step-(2u<<20))&~(uint64_t)0xffff),
-                                size,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
-    }
-#else
-    (void)size;
-#endif
-    return memory;
-}
+static unsigned char *near_image_memory(size_t size) { return runtime_near_image_alloc(size); }
 /* A thunk that calls `callback` (Microsoft x64: rdi, rsi, the image base, r14) with the guest's
  * registers and flags kept, runs the `moved` bytes of position-independent instructions from `f`
  * and jumps back; `f` jumps to it. 0 without thunk memory. */
@@ -2695,6 +2679,8 @@ int main(int argc, char **argv) {
     if (!image) image = allocate(round_page(size) + isa_area);
 #ifdef _WIN32
     red_zone_reserve(image, size);
+    /* The hooks' thunk pool, before the GPU starts (the Radeon driver takes the space near the image). */
+    runtime_near_image_reserve(image, round_page(size) + isa_area);
     /* The projection jitter's stub page, near the image and below 2 GiB, also before the GPU starts. */
     runtime_reserve_projection_jitter(image, size);
 #endif
