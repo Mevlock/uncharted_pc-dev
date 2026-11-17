@@ -53,24 +53,13 @@ void runtime_ultrawide_select(int wide) {
     }
 }
 
-/* A writable page within 2 GiB of the code (rel32 from the stubs). */
+/* A writable page within 2 GiB of the code (rel32 from the stubs): from the pool reserved near the
+ * image before the GPU started (`code` is the image). */
+void *runtime_near_image_alloc(size_t size); /* runtime_memory.c */
 static float *alloc_near(uint8_t *code, uint64_t size) {
-#ifdef _WIN32
-    const uintptr_t base = ((uintptr_t)code + size + 0xffff) & ~(uintptr_t)0xffff;
-    for (uintptr_t step = 0; step < (1800ull << 20); step += 1u << 16) {
-        void *p = VirtualAlloc((void *)(base + step), 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (p) return (float *)p;
-        if ((uintptr_t)code > step + (2u << 20)) {
-            p = VirtualAlloc((void *)((((uintptr_t)code - step) & ~(uintptr_t)0xffff) - 0x10000), 4096,
-                             MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-            if (p) return (float *)p;
-        }
-    }
-#else
     (void)code;
     (void)size;
-#endif
-    return NULL;
+    return (float *)runtime_near_image_alloc(4096);
 }
 
 typedef struct {
