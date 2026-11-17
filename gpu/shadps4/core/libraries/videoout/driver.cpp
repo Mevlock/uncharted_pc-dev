@@ -1126,6 +1126,24 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     Common::SetCurrentThreadName("shadPS4:PresentThread");
     BbThreads::PreferPerformanceCores(); // bbport: hybrid CPUs
     Common::SetCurrentThreadRealtime(vblank_period);
+    // bbport test switches (latency pacing under other PCs' conditions): BB_DEBUG_PRESENT_CPU=<n>
+    // pins this thread to logical CPU n; BB_DEBUG_TICK_JITTER_US=<us> wakes each vblank tick up to
+    // that much late at random (a coarse or busy timer).
+    const long debug_tick_jitter_us = [] {
+        const char* env = std::getenv("BB_DEBUG_TICK_JITTER_US");
+        return env && env[0] ? std::strtol(env, nullptr, 10) : 0L;
+    }();
+    if (const char* cpu = std::getenv("BB_DEBUG_PRESENT_CPU"); cpu && cpu[0]) {
+#ifdef _WIN32
+        SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR(1) << std::strtol(cpu, nullptr, 10));
+#endif
+        std::printf("VideoOut: present thread pinned to CPU %s (BB_DEBUG_PRESENT_CPU)\n", cpu);
+    }
+    if (debug_tick_jitter_us > 0) {
+        std::printf("VideoOut: vblank ticks up to %ld us late at random (BB_DEBUG_TICK_JITTER_US)\n",
+                    debug_tick_jitter_us);
+    }
+    u64 jitter_state = 0x9E3779B97F4A7C15ull;
 
     Common::AccurateTimer timer{vblank_period};
 
@@ -1187,6 +1205,16 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             BootVblankBoost(main_port.is_open, MovieActive(std::chrono::steady_clock::now()));
         Common::AccurateTimer& timer = boot_boost ? boot_timer : vblank_timer;
         timer.Start();
+        if (debug_tick_jitter_us > 0) {
+            jitter_state ^= jitter_state << 13;
+            jitter_state ^= jitter_state >> 7;
+            jitter_state ^= jitter_state << 17;
+            const auto until = std::chrono::steady_clock::now() +
+                               std::chrono::microseconds(jitter_state % u64(debug_tick_jitter_us));
+            while (std::chrono::steady_clock::now() < until) {
+                std::this_thread::yield();
+            }
+        }
         const auto tick_deadline = std::chrono::steady_clock::now() + (boot_boost ? boot_period : vblank_period);
 
         if (DebugState.IsGuestThreadsPaused()) {

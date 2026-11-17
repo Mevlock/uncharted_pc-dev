@@ -237,6 +237,9 @@ u32 tick_count = 0, tick_next = 0;
 std::atomic<u64> late_frames{0}, skipped_ticks{0}, stops{0}, planned{0}; ///< counts for BB_LATENCY_TRACE
 std::atomic<s64> planned_sleep_ns{0}, lead_ns{0}, late_by_max{0}, tick_err_min{INT64_MAX}, tick_err_max{INT64_MIN};
 std::atomic<u64> shown_later{0};
+/// The last frame that came after its tick (GPU thread): while frames come late the game is
+/// below the cap, and a start held back to a tick it then misses is only lost time.
+std::atomic<u64> last_late_id{0};
 u64 taken_id = 0;
 s64 taken_ns = 0;
 /// The longest lead of the paced frames (mutex), held for 10 s and then let down by 0.5 ms a
@@ -266,9 +269,7 @@ void Queued(u64 id) {
         leads[lead_next] = lead;
         lead_next = (lead_next + 1) % Samples;
         lead_count = std::min(lead_count + 1, Samples);
-        if (target && lead_peak && lead <= lead_peak + lead_peak / 2 + 1'000'000) {
-            // (a much slower frame is a hitch: late whatever the lead, not a reason to start
-            // every frame earlier)
+        if (target && lead_peak) {
             if (lead >= lead_peak) {
                 lead_peak = lead;
                 lead_peak_at = now;
@@ -279,6 +280,7 @@ void Queued(u64 id) {
     }
     if (target && target < now) {
         late_frames.fetch_add(1, std::memory_order_relaxed);
+        last_late_id.store(id, std::memory_order_relaxed);
         s64 v = late_by_max.load(std::memory_order_relaxed);
         while (now - target > v && !late_by_max.compare_exchange_weak(v, now - target)) {
         }
@@ -420,7 +422,12 @@ void BeforeFrame(u64 id) {
             }
         }
         wake = target - lead_used;
-        if (wake - now > 2 * period) {
+        if (last_late_id.load(std::memory_order_relaxed) + 8 > id) {
+            // one of the last frames came late (below the cap): start at once, aimed at the first
+            // tick the frame can reach
+            target = tick_at(now + lead_used);
+            wake = now;
+        } else if (wake - now > 2 * period) {
             // the schedule ran ahead of the game (a frame that did not come for a while): from now
             target = tick_at(now + lead_used);
             wake = target - lead_used;
