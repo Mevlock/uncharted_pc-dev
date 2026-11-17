@@ -271,6 +271,62 @@ void BeforeFrame(u64 id) {
 }
 } // namespace Pace
 
+/// Present smoother (with the frame start pacing). A real-clock game's frame shows the moment it
+/// read its clock (about its frame start), so motion is even when every frame is shown the same
+/// time after its start. Shown as soon as done, a frame's spacing on screen took the change in its
+/// CPU + GPU time (start -> ready) from the frame before; the old tick hold hid that by queueing
+/// ~1.3 frames (its own judder came from uneven starts). Here a frame done early is held until
+/// its start + the recent frames' usual start -> ready time (a high percentile of the last ones),
+/// so frames are shown at their start spacing; a slower frame is shown when done. The hold is at
+/// most part of a period, so it never builds a queue.
+namespace Smooth {
+s64 EnvInt(const char* name, s64 fallback) {
+    const char* env = std::getenv(name);
+    return env && env[0] ? std::strtoll(env, nullptr, 10) : fallback;
+}
+const bool enabled = EnvInt("BB_LATENCY_SMOOTH", 1) != 0;
+const u32 quantile = u32(std::clamp<s64>(EnvInt("BB_SMOOTH_Q", 90), 50, 100));
+const u32 window = u32(std::clamp<s64>(EnvInt("BB_SMOOTH_N", 32), 8, 128));
+const s64 max_hold_pct = std::clamp<s64>(EnvInt("BB_SMOOTH_MAXHOLD", 50), 0, 100);
+constexpr u32 Ids = 64;
+std::atomic<u64> start_id[Ids]{};
+std::atomic<s64> start_ns[Ids]{};
+s64 samples[128]{}; ///< GPU thread: the last frames' start -> ready times
+u32 count = 0, next = 0;
+std::atomic<s64> target_ns{0}; ///< the usual start -> ready time (0: not known yet)
+std::atomic<u64> held{0};
+std::atomic<s64> held_ns{0};
+
+s64 Now() {
+    return std::chrono::steady_clock::now().time_since_epoch().count();
+}
+/// The frame thread: frame `id` starts now (after the pacer's and the driver's sleeps).
+void Started(u64 id) {
+    if (!enabled) {
+        return;
+    }
+    start_ns[id % Ids].store(Now(), std::memory_order_relaxed);
+    start_id[id % Ids].store(id, std::memory_order_release);
+}
+/// The GPU thread: frame `id`'s flip reached the present queue (its frame is done).
+void Ready(u64 id) {
+    if (!enabled || start_id[id % Ids].load(std::memory_order_acquire) != id) {
+        return;
+    }
+    samples[next] = Now() - start_ns[id % Ids].load(std::memory_order_relaxed);
+    next = (next + 1) % window;
+    count = std::min(count + 1, window);
+    if (count < 8) {
+        return;
+    }
+    s64 v[128];
+    std::copy(samples, samples + count, v);
+    const u32 k = std::min(count - 1, count * quantile / 100);
+    std::nth_element(v, v + k, v + count);
+    target_ns.store(v[k], std::memory_order_relaxed);
+}
+} // namespace Smooth
+
 u32 MinimumIntervalUs() {
     if (Pace::enabled) {
         return 0; // the frame start paces (one pacer)
@@ -565,11 +621,16 @@ void Print(u64 current) {
     }
     if (at < sizeof(line)) {
         const u64 n = Pace::paced.exchange(0);
+        const u64 h = Smooth::held.exchange(0);
         std::snprintf(line + at, sizeof(line) - at,
-                      " | paced: %llu frames, slept %.2f per frame, %llu not paced",
+                      " | paced: %llu frames, slept %.2f per frame, %llu not paced | smoother: %llu "
+                      "held %.2f each, usual start->ready %.2f",
                       static_cast<unsigned long long>(n),
                       double(Pace::slept_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, n)),
-                      static_cast<unsigned long long>(Pace::unpaced.exchange(0)));
+                      static_cast<unsigned long long>(Pace::unpaced.exchange(0)),
+                      static_cast<unsigned long long>(h),
+                      double(Smooth::held_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, h)),
+                      double(Smooth::target_ns.load()) / 1e6);
     }
     std::printf("%s (ms)\n", line);
     if (frames_csv) {
@@ -607,12 +668,38 @@ bool StartPacingRequested() {
     return Pace::enabled;
 }
 
+s64 PresentNotBefore(s64 flip_arg, s64 now) {
+    const u64 id = static_cast<u64>(flip_arg) + 1;
+    const s64 target = Smooth::target_ns.load(std::memory_order_relaxed);
+    const s64 period = Libraries::VideoOut::FrameCapPeriodNs();
+    if (!Smooth::enabled || flip_arg < 0 || target <= 0 || period <= 0 ||
+        Smooth::start_id[id % Smooth::Ids].load(std::memory_order_acquire) != id) {
+        return 0;
+    }
+    const s64 at = std::min(Smooth::start_ns[id % Smooth::Ids].load(std::memory_order_relaxed) + target,
+                            now + period * Smooth::max_hold_pct / 100);
+    if (at <= now) {
+        return 0;
+    }
+    return at;
+}
+
+void SleepUntilNs(s64 wake) {
+    Pace::SleepUntil(wake);
+}
+
+void CountHold(s64 ns) {
+    Smooth::held.fetch_add(1, std::memory_order_relaxed);
+    Smooth::held_ns.fetch_add(ns, std::memory_order_relaxed);
+}
+
 void TraceFlip(FlipStage stage, s64 flip_arg) {
     if (flip_arg < 0) {
         return;
     }
     if (stage == FlipStage::GpuReached) {
         Pace::Queued(static_cast<u64>(flip_arg) + 1);
+        Smooth::Ready(static_cast<u64>(flip_arg) + 1);
     }
     if (!Trace::on) {
         return;
@@ -791,6 +878,7 @@ void GameFrameStart(u64 frame, u64 kicked) {
                 Trace::Print(id);
             }
             Pace::BeforeFrame(id);
+            Smooth::Started(id);
             if (Trace::on) {
                 Trace::StampPace(id);
                 Trace::Stamp(id, Trace::Awake);
@@ -832,6 +920,7 @@ void GameFrameStart(u64 frame, u64 kicked) {
     }
     if (kind == Kind::AntiLag) {
         AntiLag(VK_ANTI_LAG_STAGE_INPUT_AMD, id); // the driver sleeps here when it is on
+        Smooth::Started(id);
         if (Trace::on) {
             Trace::Stamp(id, Trace::Awake);
         }
@@ -860,6 +949,7 @@ void GameFrameStart(u64 frame, u64 kicked) {
             VULKAN_HPP_DEFAULT_DISPATCHER.vkWaitSemaphores(device, &wait, 50'000'000);
         }
     }
+    Smooth::Started(id);
     if (Trace::on) {
         Trace::Stamp(id, Trace::Awake);
     }
