@@ -468,7 +468,9 @@ void Print(u64 current) {
             t[i] = a.t[i].load(std::memory_order_relaxed);
         }
         printed = id;
-        if (!t[Enter] || !t[Awake] || !t[PresentEnd]) {
+        // presented: the present marker, else (the low latency mode off) the present thread taking it
+        const s64 end = t[PresentEnd] ? t[PresentEnd] : t[Take];
+        if (!t[Enter] || !t[Awake] || !end) {
             continue; // not presented (a load step, a dropped frame)
         }
         const auto ms = [](s64 x, s64 y) { return double(y - x) / 1e6; };
@@ -476,10 +478,10 @@ void Print(u64 current) {
         if (t[Submit]) v[1].push_back(ms(t[Awake], t[Submit]));
         if (t[Submit] && t[Gpu]) v[2].push_back(ms(t[Submit], t[Gpu]));
         if (t[Gpu] && t[Take]) v[3].push_back(ms(t[Gpu], t[Take]));
-        if (t[Take]) v[4].push_back(ms(t[Take], t[PresentEnd]));
-        v[5].push_back(ms(t[Awake], t[PresentEnd]));
-        if (last_present && t[PresentEnd] > last_present && intervals.size() < 4'000'000) {
-            const double d = ms(last_present, t[PresentEnd]);
+        if (t[Take] && t[PresentEnd]) v[4].push_back(ms(t[Take], t[PresentEnd]));
+        v[5].push_back(ms(t[Awake], end));
+        if (last_present && end > last_present && intervals.size() < 4'000'000) {
+            const double d = ms(last_present, end);
             if (d < 250.0) { // not across a load or a pause
                 const double period =
                     double(Libraries::VideoOut::FrameCapPeriodNs()) / 1e6;
@@ -491,7 +493,7 @@ void Print(u64 current) {
                 intervals.push_back(float(d));
             }
         }
-        last_present = t[PresentEnd];
+        last_present = end;
         const Slot& b = ring[(id + 1) % Ring];
         const s64 next =
             b.id.load(std::memory_order_acquire) == id + 1 ? b.t[Enter].load(std::memory_order_relaxed) : 0;
@@ -559,8 +561,7 @@ void Print(u64 current) {
 } // namespace
 
 bool StartPacingRequested() {
-    const char setting = Setting();
-    return Pace::enabled && (setting == '1' || setting == '2');
+    return Pace::enabled;
 }
 
 void TraceFlip(FlipStage stage, s64 flip_arg) {
@@ -704,6 +705,13 @@ void OnSwapchainDestroy() {
 }
 
 void SetFrameSource(bool found) {
+    // the frame rate cap at the frame start: with or without the low latency mode, on any GPU
+    if (found && Pace::enabled) {
+        Pace::active.store(true, std::memory_order_relaxed);
+        std::printf("Frame pacing: the frame rate cap is kept at the game's frame start (before "
+                    "its input; frames shown as soon as they are done; BB_LATENCY_PACING=0: off)\n");
+        std::fflush(stdout);
+    }
     if (kind == Kind::Off) {
         return;
     }
@@ -711,11 +719,6 @@ void SetFrameSource(bool found) {
         std::printf("Low latency: frame ids from the game's own frame number (start, submit, "
                     "present)%s\n",
                     log_on ? "; BB_REFLEX_LOG=1: the id sequence once a second" : "");
-        if (sleep_on && Pace::enabled) {
-            Pace::active.store(true, std::memory_order_relaxed);
-            std::printf("Low latency: the frame rate cap is kept at the frame start (before its "
-                        "input; frames shown as soon as they are done; BB_LATENCY_PACING=0: off)\n");
-        }
         std::fflush(stdout);
         return;
     }
@@ -734,6 +737,21 @@ void SetFrameSource(bool found) {
 
 void GameFrameStart(u64 frame, u64 kicked) {
     if (!On()) {
+        // the frame rate cap alone (the low latency mode off or not supported here)
+        const u64 id = frame + 1;
+        static u64 last_alone = 0; // the frame thread's: a second entry in one frame is no start
+        if (id > last_alone) {
+            last_alone = id;
+            if (Trace::on) {
+                Trace::TakeWaits();
+                Trace::Stamp(id, Trace::Enter);
+                Trace::Print(id);
+            }
+            Pace::BeforeFrame(id);
+            if (Trace::on) {
+                Trace::Stamp(id, Trace::Awake);
+            }
+        }
         return;
     }
     const u64 id = frame + 1;

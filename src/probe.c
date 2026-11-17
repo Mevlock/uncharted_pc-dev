@@ -1395,7 +1395,10 @@ static void __attribute__((ms_abi)) game_frame_start(uint64_t rdi, uint64_t rsi,
 }
 static void install_game_frame_start(uint64_t image_size) {
     const char *env=getenv("BB_LOW_LATENCY");
-    const int low_latency=env && env[0] && env[0]!='0';
+    const char *pace=getenv("BB_LATENCY_PACING");
+    /* the frame start is hooked for the low latency mode and for the frame rate cap at the frame start
+     * (vk_low_latency.cpp Pace; on unless BB_LATENCY_PACING=0) */
+    const int low_latency=(env && env[0] && env[0]!='0') || !(pace && pace[0]=='0');
     /* U1 1.00 + 1.02, U2 1.00, U3 1.00: lea r14, [frame]; lea rbx; lea r12, [g_frameState]; nop; the job call
      * (rdi = r14, esi 0, edx 5, r8d 0, rcx = r9 = rbx); inc qword [r12 + d8]; call yield; cmp byte [r15], 0 */
     int64_t frame=-1, count=-1;

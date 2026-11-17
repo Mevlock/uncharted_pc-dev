@@ -68,10 +68,9 @@ bool UsesPresentId();
 enum class FlipStage { GpuReached, Taken };
 void TraceFlip(FlipStage stage, s64 flip_arg);
 
-/// Latency pacing asked for (BB_LOW_LATENCY 1 or 2, BB_LATENCY_PACING not 0): the video driver
-/// then keeps the Frame rate as a cap at the game's frame start and shows frames as they come
-/// (read from the settings at its start; without a frame start hook or a supported GPU the
-/// present thread's slot hold keeps the cap).
+/// Frame pacing asked for (BB_LATENCY_PACING not 0, the default): the video driver then keeps the
+/// Frame rate as a cap at the game's frame start and shows frames as they come (without the
+/// game's frame start hook the present thread's slot hold keeps the cap).
 bool StartPacingRequested();
 
 /// "Reflex", "Anti-Lag 2" while active, else nullptr (FPS counter).
