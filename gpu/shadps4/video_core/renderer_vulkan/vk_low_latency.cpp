@@ -237,9 +237,14 @@ u32 tick_count = 0, tick_next = 0;
 std::atomic<u64> late_frames{0}, skipped_ticks{0}, stops{0}, planned{0}; ///< counts for BB_LATENCY_TRACE
 std::atomic<s64> planned_sleep_ns{0}, lead_ns{0}, late_by_max{0}, tick_err_min{INT64_MAX}, tick_err_max{INT64_MIN};
 std::atomic<u64> shown_later{0};
-/// The last frame that came after its tick (GPU thread): while frames come late the game is
-/// below the cap, and a start held back to a tick it then misses is only lost time.
-std::atomic<u64> last_late_id{0};
+/// Below the cap (frame thread): the game's frames were shown on fewer than 95% of the ticks of
+/// the last ~64 frames. A start held back to a tick the frame then misses is only lost time there
+/// (uncapped A/B: -2.5% fps). Frames that come late while the game is shown on every tick are late
+/// because of a standing queue (the old hold's): those starts must stay held so that it drains.
+constexpr u32 RateWindow = 64;
+s64 rate_ns[RateWindow]{};
+u64 rate_shown[RateWindow]{};
+u32 rate_next = 0, rate_count = 0;
 u64 taken_id = 0;
 s64 taken_ns = 0;
 /// The longest lead of the paced frames (mutex), held for 10 s and then let down by 0.5 ms a
@@ -280,7 +285,6 @@ void Queued(u64 id) {
     }
     if (target && target < now) {
         late_frames.fetch_add(1, std::memory_order_relaxed);
-        last_late_id.store(id, std::memory_order_relaxed);
         s64 v = late_by_max.load(std::memory_order_relaxed);
         while (now - target > v && !late_by_max.compare_exchange_weak(v, now - target)) {
         }
@@ -325,6 +329,7 @@ s64 Kth(s64* v, u32 n, u32 k) {
 }
 
 void Stop() {
+    rate_count = rate_next = 0;
     {
         std::scoped_lock lk{mutex};
         lead_peak = 0;
@@ -422,9 +427,16 @@ void BeforeFrame(u64 id) {
             }
         }
         wake = target - lead_used;
-        if (last_late_id.load(std::memory_order_relaxed) + 8 > id) {
-            // one of the last frames came late (below the cap): start at once, aimed at the first
-            // tick the frame can reach
+        rate_ns[rate_next] = now;
+        rate_shown[rate_next] = shown_id;
+        rate_next = (rate_next + 1) % RateWindow;
+        rate_count = std::min(rate_count + 1, RateWindow);
+        const u32 oldest = rate_count < RateWindow ? 0 : rate_next;
+        const double ticks = double(now - rate_ns[oldest]) / double(period);
+        const bool below_cap = rate_count == RateWindow && ticks > 0 &&
+                               double(shown_id - rate_shown[oldest]) < 0.95 * ticks;
+        if (below_cap) {
+            // below the cap: start at once, aimed at the first tick the frame can reach
             target = tick_at(now + lead_used);
             wake = now;
         } else if (wake - now > 2 * period) {
