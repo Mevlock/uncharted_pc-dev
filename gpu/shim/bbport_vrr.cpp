@@ -47,7 +47,7 @@ const bool timing_forced = [] {
 std::atomic<void*> window{nullptr};
 u32 vendor = 0; ///< the Vulkan device's PCI vendor (0x10de NVIDIA, 0x1002 AMD)
 
-/// Raw state of a source: -1 not known, 0 off, 1 on.
+/// Raw state of a source: -2 not certain (the indicator hides), -1 not known, 0 off, 1 on.
 struct Raw {
     int state = -1;
     std::string why;
@@ -213,8 +213,10 @@ bool Load() {
     return ok;
 }
 
-/// NVAPI's display id of the monitor (by adapter and target), 0: none.
+/// NVAPI's display id of the monitor (by adapter and target), 0: none, or more than one (a lookup
+/// failed or the match is not unique).
 u32 DisplayIdOf(const Monitor& m) {
+    u32 found = 0, matches = 0;
     void* gpus[64]{};
     u32 gpu_count = 0;
     if (enum_gpus(gpus, &gpu_count) != 0) {
@@ -237,11 +239,12 @@ u32 DisplayIdOf(const Monitor& m) {
             info.version = Ver(sizeof(info), 1);
             if (id_info(ids[i].display_id, &info) == 0 && info.target == m.target &&
                 info.adapter.LowPart == m.adapter.LowPart && info.adapter.HighPart == m.adapter.HighPart) {
-                return ids[i].display_id;
+                found = ids[i].display_id;
+                ++matches;
             }
         }
     }
-    return 0;
+    return matches == 1 ? found : 0;
 }
 
 /// NVAPI's own source number of each display id (NvAPI_DISP_GetDisplayConfig).
@@ -289,6 +292,7 @@ struct NvSource {
     u32 query_id = 0;
     Clock::time_point checked{};
     std::string name;
+    std::string hidden; ///< why the display is not certain (query_id 0)
 
     Raw Sample(HWND hwnd) {
         const auto now = Clock::now();
@@ -298,13 +302,13 @@ struct NvSource {
             checked = now;
         }
         if (query_id == 0) {
-            return {-1, "no NVIDIA display found for the window"};
+            return {-2, hidden};
         }
         Nv::VrrInfo info{};
         info.version = Nv::Ver(sizeof(info), 1);
         const int status = Nv::vrr_info(query_id, &info);
         if (status != 0) {
-            return {-1, "NvAPI_Disp_GetVRRInfo " + std::to_string(status)};
+            return {-2, "NvAPI_Disp_GetVRRInfo failed (" + std::to_string(status) + ")"};
         }
         char why[96];
         std::snprintf(why, sizeof(why), "NVAPI %s: active %u possible %u requested %u", name.c_str(),
@@ -318,13 +322,12 @@ struct NvSource {
         const u32 old = query_id;
         query_id = 0;
         if (!m.valid) {
+            hidden = "the window's monitor is not in Windows' display paths";
             return;
         }
         const u32 id = Nv::DisplayIdOf(m);
         if (!id) {
-            if (old) {
-                Log("VRR: %s is not on the NVIDIA GPU\n", m.name.c_str());
-            }
+            hidden = "no single NVIDIA display matches " + m.name;
             return;
         }
         // The driver keeps the VRR state per Windows source, and NvAPI_Disp_GetVRRInfo finds the
@@ -333,18 +336,30 @@ struct NvSource {
         // game's VRR state came back for the other display id, following the game's focus there).
         // So the state of this monitor's Windows source comes from the display id NVAPI numbers
         // with that source; with both numberings the same that is the monitor's own id.
-        u32 query = id;
-        u32 nv_source = ~0u;
+        // Only when this is certain: the monitor's id once in NVAPI's layout, one display on the
+        // monitor's Windows source number, and with the numberings different at most two displays
+        // (where the crossing was seen); else the indicator hides.
+        u32 query = 0, nv_source = ~0u, own = 0, on_source = 0;
         const auto sources = Nv::SourcesOfDisplays();
         for (const auto& [display, source] : sources) {
             if (display == id) {
                 nv_source = source;
+                ++own;
+            }
+            if (source == m.source) {
+                query = display;
+                ++on_source;
             }
         }
-        for (const auto& [display, source] : sources) {
-            if (source == m.source && nv_source != ~0u && nv_source != m.source) {
-                query = display;
-            }
+        if (own != 1 || on_source != 1) {
+            hidden = "NVAPI's display layout does not place " + m.name + " on one source";
+            return;
+        }
+        if (nv_source == m.source) {
+            query = id;
+        } else if (sources.size() > 2) {
+            hidden = "Windows and NVAPI number the sources differently, with more than two displays";
+            return;
         }
         query_id = query;
         name = m.name;
@@ -453,11 +468,16 @@ void Drain() {
 /// Whether the frames reach the screen on the refresh grid: composed by the desktop or a fixed
 /// refresh (on), or when they are ready (VRR, or a tear-through flip).
 Raw Judge() {
-    if (interval_ns == refresh_ns && refresh_ns != 0) {
+    if (properties_counter == ~0ull) {
+        return {-1, "present timing: no report yet"};
+    }
+    if (refresh_ns == 0 || (interval_ns != refresh_ns && interval_ns != UINT64_MAX)) {
+        return {-2, "the presentation engine does not report VRR or fixed refresh (present timing)"};
+    }
+    if (interval_ns == refresh_ns) {
         return {0, "present timing: fixed refresh"};
     }
-    const bool vrr_mode = interval_ns == UINT64_MAX;
-    if (refresh_ns == 0 || deltas.size() < 6) {
+    if (deltas.size() < 6) {
         return {-1, "present timing: too few frames"};
     }
     const double period = double(refresh_ns);
@@ -472,7 +492,7 @@ Raw Judge() {
     const double n = double(deltas.size());
     char why[96];
     std::snprintf(why, sizeof(why), "present timing: %s, %.0f%% on the refresh grid (%zu frames)",
-                  vrr_mode ? "VRR mode" : "mode not reported", 100.0 * on_grid / n, deltas.size());
+                  "VRR mode", 100.0 * on_grid / n, deltas.size());
     if (at_limit >= 0.8 * n) {
         return {-1, std::string(why) + ", at the refresh limit"}; // VRR and fixed look the same
     }
@@ -480,9 +500,7 @@ Raw Judge() {
         return {0, why}; // composed or a fixed refresh
     }
     if (on_grid <= 0.5 * n) {
-        // Off the grid: flipped when ready. That is VRR only when the engine says so; a fixed
-        // refresh tears there too.
-        return {vrr_mode ? 1 : -1, why};
+        return {1, why}; // off the grid in VRR mode: flipped when ready
     }
     return {-1, why};
 }
@@ -509,7 +527,7 @@ void PollThread() {
     const bool use_nv = false;
 #endif
     if (!use_nv && !Timing::swapchain_on && !Timing::device_on) {
-        Log("VRR: no source on this GPU/driver (NVAPI or VK_EXT_present_timing): no indicator\n");
+        Log("VRR indicator hidden: no source on this GPU/driver (NVAPI or VK_EXT_present_timing)\n");
         std::scoped_lock lk{shown_mutex};
         label = nullptr;
         return;
@@ -519,6 +537,7 @@ void PollThread() {
     int candidate = -2;
     Clock::time_point candidate_since{};
     std::string last_raw;
+    std::string hidden_logged;
     int shown = -2;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -539,13 +558,26 @@ void PollThread() {
         }
 #ifdef _WIN32
         void* hwnd = window.load();
-        if (use_nv && hwnd) {
-            raw = nv.Sample(static_cast<HWND>(hwnd));
+        if (use_nv) {
+            raw = hwnd ? nv.Sample(static_cast<HWND>(hwnd)) : Raw{-1, "no window yet"};
         } else
 #endif
         {
-            raw = timing;
+            raw = Timing::swapchain_on ? timing
+                                       : Raw{-2, "present timing is not offered for the game's window"};
         }
+        // Not certain: no indicator at all (a diagnostic that may be wrong is worse than none).
+        if (raw.state == -2) {
+            if (raw.why != hidden_logged) {
+                Log("VRR indicator hidden: %s\n", raw.why.c_str());
+                hidden_logged = raw.why;
+            }
+            candidate = shown = -2;
+            std::scoped_lock lk{shown_mutex};
+            shown_known = false;
+            continue;
+        }
+        hidden_logged.clear();
         // The driver's or the presentation engine's own answer, also with the game behind other
         // windows (NVIDIA's indicator goes to "Normal" then, and so does NVAPI's state).
         if (!front) {
@@ -568,7 +600,7 @@ void PollThread() {
         }
         // Half a second steady before the indicator follows (not known: keep what is shown).
         if (candidate != shown && candidate != -1 && now - candidate_since >= std::chrono::milliseconds(500)) {
-            Log("VRR: %s -> %s (%s)\n", shown == 1 ? "active" : shown == 0 ? "off" : "start",
+            Log("VRR: %s -> %s (%s)\n", shown == 1 ? "active" : shown == 0 ? "off" : "hidden",
                 candidate == 1 ? "active" : "off", raw.why.c_str());
             shown = candidate;
             std::scoped_lock lk{shown_mutex};
