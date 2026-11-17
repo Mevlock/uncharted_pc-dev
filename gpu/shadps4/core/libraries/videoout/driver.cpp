@@ -1100,19 +1100,14 @@ void PaceGuestFlip() {
 }
 
 namespace {
-// bbport latency pacing: the present thread's schedule for the frame start (CurrentFlipSchedule).
-std::atomic<s64> schedule_next_ns{0};
-std::atomic<s64> schedule_period_ns{0};
-std::atomic<bool> schedule_on_ticks{true};
+// bbport latency pacing (vk_low_latency.cpp): the frame rate cap the frame start keeps, and
+// whether it does (then the present thread's slot hold stands aside).
+std::atomic<s64> cap_period_ns{0};
 std::atomic<bool> start_paced{false};
-std::atomic<u64> schedule_backlogs{0};
 } // namespace
 
-FlipSchedule CurrentFlipSchedule() {
-    return {schedule_next_ns.load(std::memory_order_acquire),
-            schedule_period_ns.load(std::memory_order_acquire),
-            schedule_on_ticks.load(std::memory_order_relaxed),
-            schedule_backlogs.load(std::memory_order_relaxed)};
+s64 FrameCapPeriodNs() {
+    return cap_period_ns.load(std::memory_order_relaxed);
 }
 
 void SetStartPaced(bool paced) {
@@ -1126,58 +1121,38 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     Common::SetCurrentThreadName("shadPS4:PresentThread");
     BbThreads::PreferPerformanceCores(); // bbport: hybrid CPUs
     Common::SetCurrentThreadRealtime(vblank_period);
-    // bbport test switches (latency pacing under other PCs' conditions): BB_DEBUG_PRESENT_CPU=<n>
-    // pins this thread to logical CPU n; BB_DEBUG_TICK_JITTER_US=<us> wakes each vblank tick up to
-    // that much late at random (a coarse or busy timer).
-    const long debug_tick_jitter_us = [] {
-        const char* env = std::getenv("BB_DEBUG_TICK_JITTER_US");
-        return env && env[0] ? std::strtol(env, nullptr, 10) : 0L;
-    }();
+    // bbport test switch: BB_DEBUG_PRESENT_CPU=<n> pins this thread to logical CPU n (a slow core)
     if (const char* cpu = std::getenv("BB_DEBUG_PRESENT_CPU"); cpu && cpu[0]) {
 #ifdef _WIN32
         SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR(1) << std::strtol(cpu, nullptr, 10));
 #endif
         std::printf("VideoOut: present thread pinned to CPU %s (BB_DEBUG_PRESENT_CPU)\n", cpu);
     }
-    if (debug_tick_jitter_us > 0) {
-        std::printf("VideoOut: vblank ticks up to %ld us late at random (BB_DEBUG_TICK_JITTER_US)\n",
-                    debug_tick_jitter_us);
-    }
-    u64 jitter_state = 0x9E3779B97F4A7C15ull;
 
     Common::AccurateTimer timer{vblank_period};
 
     // bbport: frame limit (see EmulatorSettings::GetFrameLimit). A request waits in the queue
     // until its slot; slots advance by one period (no drift) but never lag behind by more.
-    const u32 frame_limit = EmulatorSettings.GetFrameLimit();
+    // bbport latency pacing (vk_low_latency.cpp, with the low latency mode on): the Frame rate is
+    // also the frame limit, kept at the game's frame start (before its input) instead of by
+    // holding finished frames for a vblank tick: a frame is shown as soon as it is done. The game
+    // still gets its vblanks at the Frame rate.
+    const u32 frame_limit = EmulatorSettings.GetFrameLimit()
+                                ? EmulatorSettings.GetFrameLimit()
+                                : (Vulkan::LowLatency::StartPacingRequested()
+                                       ? EmulatorSettings.GetVblankFrequency()
+                                       : 0u);
     const auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
                                           : std::chrono::nanoseconds(0);
     auto next_flip = std::chrono::steady_clock::now();
     std::printf("VideoOut: vblank %u Hz, frame limit %u FPS\n",
                 EmulatorSettings.GetVblankFrequency(), frame_limit);
 
-    // bbport latency pacing: `tick_ns` (vblank ticks, else 0): a game frame paced for a later tick
-    // than this one stays queued until its tick (a frame that came early is not shown before the
-    // frame paced for this tick). The ticks in a row that found a second game frame queued behind
-    // the one they took and due on the same tick (a standing queue) are counted for the pacer.
-    const auto receive_request = [this](s64 tick_ns) -> Request {
+    const auto receive_request = [this] -> Request {
         std::scoped_lock lk{mutex};
         if (!requests.empty()) {
             const auto request = requests.front();
-            if (tick_ns && request.index >= 0 &&
-                Vulkan::LowLatency::PacedForLater(request.flip_arg, tick_ns)) {
-                return {};
-            }
             requests.pop();
-            if (tick_ns && request.index >= 0) {
-                // another frame due on this same tick (not one paced for a later tick)
-                if (!requests.empty() && requests.front().index >= 0 &&
-                    !Vulkan::LowLatency::PacedForLater(requests.front().flip_arg, tick_ns)) {
-                    schedule_backlogs.fetch_add(1, std::memory_order_relaxed);
-                } else {
-                    schedule_backlogs.store(0, std::memory_order_relaxed);
-                }
-            }
             return request;
         }
         return {};
@@ -1198,56 +1173,14 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     const std::chrono::nanoseconds boot_period(1000000000 / std::max<u32>(BootVblankHz(), 1));
     Common::AccurateTimer boot_timer{boot_period};
     Common::AccurateTimer& vblank_timer = timer;
-    // bbport latency pacing: while the frame start paces, the vblank ticks keep a fixed grid (each
-    // one period after the last one's time, never before it) instead of the timer that shortens
-    // the next wait by the last one's oversleep: that put ticks up to ~1.5 ms before their time
-    // and the frame start had to allow for it. BB_LATENCY_GRID=0: the timer as before.
-    const bool grid_allowed = !(std::getenv("BB_LATENCY_GRID") && std::getenv("BB_LATENCY_GRID")[0] == '0');
-    bool grid_was = false;
-    auto grid_next = std::chrono::steady_clock::now();
 
     while (!token.stop_requested()) {
         BbThreads::SampleCore(BbThreads::CorePresent);
         const bool boot_boost =
             BootVblankBoost(main_port.is_open, MovieActive(std::chrono::steady_clock::now()));
         Common::AccurateTimer& timer = boot_boost ? boot_timer : vblank_timer;
-        const bool grid = grid_allowed && !boot_boost && Vulkan::LowLatency::PacingActive();
-        if (grid) {
-            const auto start = std::chrono::steady_clock::now();
-            grid_next += vblank_period;
-            if (!grid_was || start > grid_next + vblank_period) {
-                grid_next = start; // the first grid tick, or after a long stall: from now
-            }
-            if (grid_next > start) {
-                const auto wait = grid_next - start;
-                Common::AccurateSleep(wait - std::min<std::chrono::nanoseconds>(wait, std::chrono::microseconds(700)),
-                                      nullptr, false);
-                while (std::chrono::steady_clock::now() < grid_next) {
-                    std::this_thread::yield();
-                }
-            }
-            timer = Common::AccurateTimer{vblank_period}; // no carried wait: the grid keeps the time
-            timer.Start();
-        } else {
-            timer.Start();
-        }
-        if (grid != grid_was) {
-            std::printf("VideoOut: vblank ticks %s\n", grid ? "on a fixed grid (latency pacing)" : "on the timer");
-            grid_was = grid;
-        }
-        if (debug_tick_jitter_us > 0) {
-            jitter_state ^= jitter_state << 13;
-            jitter_state ^= jitter_state >> 7;
-            jitter_state ^= jitter_state << 17;
-            const auto until = std::chrono::steady_clock::now() +
-                               std::chrono::microseconds(jitter_state % u64(debug_tick_jitter_us));
-            while (std::chrono::steady_clock::now() < until) {
-                std::this_thread::yield();
-            }
-        }
-        const auto tick_deadline =
-            grid ? grid_next + vblank_period
-                 : std::chrono::steady_clock::now() + (boot_boost ? boot_period : vblank_period);
+        timer.Start();
+        const auto tick_deadline = std::chrono::steady_clock::now() + (boot_boost ? boot_period : vblank_period);
 
         if (DebugState.IsGuestThreadsPaused()) {
             DrawLastFrame();
@@ -1280,31 +1213,23 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
             next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
         }
-        // bbport latency pacing: with the frame start pacing, the frame limit's hold stands aside
-        const bool paced_at_start = frame_limit && start_paced.load(std::memory_order_relaxed);
-        if (paced_at_start && next_flip > now) {
+        // bbport latency pacing: while the frame start keeps the cap, the slot hold stands aside
+        // (one limiter); the cap the frame start keeps (0: none now: a movie, the boot's fast
+        // vblank, a freeze or a flip rate change the cadence)
+        if (frame_limit && start_paced.load(std::memory_order_relaxed) && next_flip > now) {
             next_flip = now;
         }
+        cap_period_ns.store(frame_limit && !movie && !boot_boost && runtime_freeze_flag == 0 &&
+                                    main_port.flip_rate == 0
+                                ? frame_period.count()
+                                : 0,
+                            std::memory_order_relaxed);
         const bool flip_slot = movie || !frame_limit || boot_boost || now >= next_flip;
         // bbport: while the game's threads are frozen (preparation page/hold) its clocks stand still
         // (runtime_kernel.c) and so do its vblanks: no count step and no events, so it resumes without a jump. A
         // host tick count paces the frames here meanwhile (the frozen vblank count would stall them).
         static u64 frozen_ticks = 0;
         const bool guest_frozen = runtime_freeze_flag != 0;
-        {
-            // bbport latency pacing: the schedule the frame start aims at (none while a movie, the
-            // fast boot vblank, a freeze or a flip rate changes the cadence)
-            const bool steady = !movie && !boot_boost && !guest_frozen && main_port.flip_rate == 0;
-            if (frame_limit) {
-                schedule_on_ticks.store(false, std::memory_order_relaxed);
-                schedule_next_ns.store(next_flip.time_since_epoch().count(), std::memory_order_release);
-                schedule_period_ns.store(steady ? frame_period.count() : 0, std::memory_order_release);
-            } else {
-                schedule_on_ticks.store(true, std::memory_order_relaxed);
-                schedule_next_ns.store(tick_deadline.time_since_epoch().count(), std::memory_order_release);
-                schedule_period_ns.store(steady ? vblank_period.count() : 0, std::memory_order_release);
-            }
-        }
         const u64 tick = guest_frozen ? frozen_ticks++ : vblank_status.count;
         // bbport: the full-screen preparation page is drawn opaque over whatever is presented; before the game opens
         // its video port, blank frames carry it at half the vblank rate (holding the game's flips instead upset its
@@ -1314,8 +1239,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 DrawBlankFrame();
             }
         } else if (flip_slot && tick % (main_port.flip_rate + 1) == 0) {
-            const auto request =
-                receive_request(frame_limit ? 0 : (now + vblank_period / 2).time_since_epoch().count());
+            const auto request = receive_request();
             if (request && frame_limit) {
                 next_flip = std::max(next_flip + frame_period, now - frame_period);
             }
@@ -1381,7 +1305,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                 std::this_thread::sleep_until(next_flip);
             }
             const auto now = std::chrono::steady_clock::now();
-            const auto request = receive_request(0);
+            const auto request = receive_request();
             if (request) {
                 next_flip = std::max(next_flip + frame_period, now - frame_period);
                 Flip(request);
