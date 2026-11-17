@@ -1250,7 +1250,54 @@ void __attribute__((ms_abi)) runtime_u2_buddy_move_100(uint64_t rdi, uint64_t rs
 void __attribute__((ms_abi)) runtime_u2_buddy_zone_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
 static const unsigned char u2_navcmd_102[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0x00,0x00,0x00,0x49,0x89,0xf4};
 void __attribute__((ms_abi)) runtime_npclog_command(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
+/* U2 ch22 Monastery #309: sniper-6/7 spawned behind the closed tunnel gate (runtime_u2sniper.c; BB_U2_MONASTERY_SNIPER=0:
+ * off): the DC natives c-spawn-npc and enable/disable-nav-blocker-object at their entry (push rbp; mov rbp,rsp; push
+ * r15|r14 moved); kill-player only with BB_SNIPER_TRACE=1. */
+static const unsigned char u2_sniper_spawn_102[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,
+                                                 0x38,0x01,0x00,0x00,0x4c,0x8b,0x2d,0x35,0x54,0xd6,0x00};
+static const unsigned char u2_sniper_spawn_100[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,
+                                                 0x38,0x01,0x00,0x00,0x4c,0x8b,0x2d,0x8d,0xea,0xdd,0x00};
+static const unsigned char u2_sniper_gate_on_102[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x85,0xff,0x7e,0x43,0x8b,0x1e,0x31,0xf6,0x89,
+                                                   0xdf,0xe8,0x2a,0xe4,0x2d,0x00};
+static const unsigned char u2_sniper_gate_off_102[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x85,0xff,0x7e,0x57,0x8b,0x1e,0x31,0xf6,0x89,
+                                                    0xdf,0xe8,0x9a,0xe4,0x2d,0x00};
+static const unsigned char u2_sniper_gate_on_100[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x85,0xff,0x7e,0x46,0x8b,0x1e,0x89,0xdf,0xe8,
+                                                   0x7c,0x8d,0x23,0x00};
+static const unsigned char u2_sniper_gate_off_100[]={0x55,0x48,0x89,0xe5,0x41,0x56,0x53,0x85,0xff,0x7e,0x43,0x8b,0x1e,0x89,0xdf,0xe8,
+                                                    0x1c,0x8d,0x23,0x00};
+static const unsigned char u2_sniper_kill_102[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x48,0x81,0xec,0x88,0x00,0x00,0x00,
+                                                0x4c,0x8b,0x3d,0x59,0xe4,0x73,0x00};
+static const unsigned char u2_sniper_kill_100[]={0x55,0x48,0x89,0xe5,0x53,0x48,0x81,0xec,0x88,0x00,0x00,0x00,0x48,0x8b,0x1d,0x95,
+                                                0xd1,0xad,0x00};
+#define SNIPER_CB(n) void __attribute__((ms_abi)) n(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
+SNIPER_CB(runtime_u2_sniper_spawn_102) SNIPER_CB(runtime_u2_sniper_spawn_100) SNIPER_CB(runtime_u2_sniper_gate_on_102)
+SNIPER_CB(runtime_u2_sniper_gate_off_102) SNIPER_CB(runtime_u2_sniper_gate_on_100) SNIPER_CB(runtime_u2_sniper_gate_off_100)
+SNIPER_CB(runtime_u2_sniper_kill_player)
+SNIPER_CB(runtime_u2_sniper_animate_102) SNIPER_CB(runtime_u2_sniper_animate_100)
+/* the animate natives' shared body (DcAnimate is a thunk to it: lea rcx,[name]; xor edx,edx; jmp) */
+static const unsigned char u2_sniper_animate_102[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,
+                                                   0xec,0x68,0x01,0x00,0x00,0x49,0x89,0xf7,0x4c};
+static const unsigned char u2_sniper_animate_100[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,
+                                                   0xec,0x68,0x01,0x00,0x00,0x41,0x89,0xd4,0x49};
 static const RuntimeGuestCallback guest_callbacks[]={
+    {"U2 monastery sniper: spawn (1.02)",0x2e57b0,u2_sniper_spawn_102,sizeof(u2_sniper_spawn_102),6,runtime_u2_sniper_spawn_102,NULL},
+    {"U2 monastery sniper: spawn (1.00)",0x82a80,u2_sniper_spawn_100,sizeof(u2_sniper_spawn_100),6,runtime_u2_sniper_spawn_100,NULL},
+    {"U2 monastery sniper: gate closes (1.02)",0xa04f60,u2_sniper_gate_on_102,sizeof(u2_sniper_gate_on_102),6,
+     runtime_u2_sniper_gate_on_102,NULL},
+    {"U2 monastery sniper: gate opens (1.02)",0xa04ef0,u2_sniper_gate_off_102,sizeof(u2_sniper_gate_off_102),6,
+     runtime_u2_sniper_gate_off_102,NULL},
+    {"U2 monastery sniper: gate closes (1.00)",0x3ff550,u2_sniper_gate_on_100,sizeof(u2_sniper_gate_on_100),6,
+     runtime_u2_sniper_gate_on_100,NULL},
+    {"U2 monastery sniper: gate opens (1.00)",0x3ff5b0,u2_sniper_gate_off_100,sizeof(u2_sniper_gate_off_100),6,
+     runtime_u2_sniper_gate_off_100,NULL},
+    {"U2 monastery sniper: gate animate (1.02)",0x396180,u2_sniper_animate_102,sizeof(u2_sniper_animate_102),6,
+     runtime_u2_sniper_animate_102,NULL},
+    {"U2 monastery sniper: gate animate (1.00)",0xffa80,u2_sniper_animate_100,sizeof(u2_sniper_animate_100),6,
+     runtime_u2_sniper_animate_100,NULL},
+    {"U2 monastery sniper trace: kill-player (1.02)",0x90c790,u2_sniper_kill_102,sizeof(u2_sniper_kill_102),6,
+     runtime_u2_sniper_kill_player,NULL},
+    {"U2 monastery sniper trace: kill-player (1.00)",0x384380,u2_sniper_kill_100,sizeof(u2_sniper_kill_100),5,
+     runtime_u2_sniper_kill_player,NULL},
     {"U2 buddy zone: Siege #257 Tenzin (1.02)",0x30d4a3,u2_buddy_zone_102,sizeof(u2_buddy_zone_102),10,runtime_u2_buddy_zone_102,NULL},
     {"U2 buddy zone: Siege #257 Tenzin (1.00)",0x2c393,u2_buddy_zone_100,sizeof(u2_buddy_zone_100),7,runtime_u2_buddy_zone_100,NULL},
     {"U2 buddy move trace (diagnosis, 1.00)",0x11180,u2_buddy_move_100,sizeof(u2_buddy_move_100),6,runtime_u2_buddy_move_100,NULL},

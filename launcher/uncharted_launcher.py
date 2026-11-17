@@ -44,7 +44,7 @@ CONFIG_FILE = CONFIG_DIR / 'settings.json'
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.6.57'  # fork: upstream 0.3.6 + this fork's changes
+VERSION = '0.3.6.58'  # fork: upstream 0.3.6 + this fork's changes
 # Fork: updates come from this fork's own releases (the latest one; -pre tags are published as normal releases).
 RELEASES_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases/latest'
 RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
@@ -400,6 +400,15 @@ def shader_list(key):
     """The variant list shipped for one game (shaders/<game>_variants.txt) and its pipeline keys, or None."""
     ship = PORT_DIR / 'shaders' / f'{key}_variants.txt'
     return (ship, ship.with_name(f'{key}_keys.txt')) if ship.is_file() else None
+
+
+CLEARED_CACHE = 'cache.cleared-'  # user/cache renamed by Clear shader cache, waiting to be deleted
+
+
+def delete_cleared_caches():
+    """Deletes the caches set aside by Clear shader cache (also ones a closed launcher left half deleted)."""
+    for folder in (DATA_DIR / 'user').glob(f'{CLEARED_CACHE}*'):
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def shader_cache_dirs(s, key):
@@ -1111,6 +1120,7 @@ class Launcher:
         if self.app.get('notes_seen') != VERSION and not self.app.get('notes_hide_after_update'):
             root.after(900, self.show_new_notes)
         threading.Thread(target=self.find_vram, daemon=True).start()
+        threading.Thread(target=delete_cleared_caches, daemon=True).start()
         if UPDATES and self.app.get('check_updates', True):
             threading.Thread(target=self.check_update, daemon=True).start()
 
@@ -3277,9 +3287,18 @@ class Launcher:
         threading.Thread(target=work, daemon=True).start()
 
     def clear_cache(self):
+        """The cache folder is renamed at once (the next start finds none) and deleted on a thread. Deleting it here
+        held the window for as long as the deletion took: minutes with a large cache, and the launcher looked hung."""
         if self.process:
             return
-        shutil.rmtree(DATA_DIR / 'user' / 'cache', ignore_errors=True)
+        cache = DATA_DIR / 'user' / 'cache'
+        if cache.exists():
+            try:
+                cache.rename(cache.with_name(f'{CLEARED_CACHE}{time.time_ns()}'))
+            except OSError as error:
+                self.messagebox.showerror(NAME, str(error))
+                return
+            threading.Thread(target=delete_cleared_caches, daemon=True).start()
         self.messagebox.showinfo(NAME, _('Shader cache cleared. The next start stutters for a while as it is rebuilt.'))
 
     def shortcut(self):
