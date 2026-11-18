@@ -119,6 +119,11 @@ inline std::atomic<std::int64_t> hot_pages{0};
 inline std::atomic<std::uint64_t> images_registered{0};
 inline std::atomic<std::uint64_t> image_upload_bytes{0};
 inline std::atomic<std::uint64_t> buffer_upload_bytes{0};
+/// Sparse arena binds (BufferCache::SubmitPendingArenaBinds): submissions, ranges, bytes, ns in the call.
+inline std::atomic<std::uint64_t> sparse_binds{0}, sparse_bind_ranges{0}, sparse_bind_bytes{0},
+    sparse_bind_ns{0};
+/// Write faults (Rasterizer::OnWriteFault), of them on a page of a cached image (one page unwatched each).
+inline std::atomic<std::uint64_t> write_fault_count{0}, write_fault_image_pages{0}, write_fault_images_untracked{0};
 inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command thread
 /// perf11: one cache line each (stage B counts every draw and dispatch, stage A submissions).
 alignas(64) inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};

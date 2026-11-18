@@ -3869,8 +3869,20 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     }
     vk::Result submit_result;
     {
+        const auto bind_start = std::chrono::steady_clock::now();
         std::scoped_lock queue_lk{Vulkan::g_graphics_queue_mutex};
         submit_result = instance.GetSparseQueue().bindSparse(sparse_info);
+        BbStats::sparse_bind_ns.fetch_add(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                 bind_start).count(),
+            std::memory_order_relaxed);
+        BbStats::sparse_binds.fetch_add(1, std::memory_order_relaxed);
+        for (const auto& b : buffer_binds) {
+            BbStats::sparse_bind_ranges.fetch_add(b.bindCount, std::memory_order_relaxed);
+            for (u32 i = 0; i < b.bindCount; ++i) {
+                BbStats::sparse_bind_bytes.fetch_add(b.pBinds[i].size, std::memory_order_relaxed);
+            }
+        }
     }
     if (submit_result == vk::Result::eErrorDeviceLost) {
         char game_frame[96];

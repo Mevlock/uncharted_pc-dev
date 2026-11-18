@@ -360,7 +360,13 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size, bool before_write) 
                 stat.write_min = std::min(stat.write_min, offset);
                 stat.write_max = std::max(stat.write_max, offset + size);
             }
+            if (before_write) {
+                BbStats::write_fault_image_pages.fetch_add(1, std::memory_order_relaxed);
+            }
             if (!PunchWatchHole(image, addr)) {
+                if (before_write) {
+                    BbStats::write_fault_images_untracked.fetch_add(1, std::memory_order_relaxed);
+                }
                 UntrackImage(image_id);
             }
         } else if (pages_end < image_end) {
@@ -1932,6 +1938,12 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     scheduler.EndRendering();
+    // BB_GPU_BUSY diagnosis: texture uploads (detile + copy) as their own label (q14).
+    const bool segments = scheduler.SegmentsEnabled();
+    const u32 segment_before = segments ? scheduler.SegmentLabel() : 0;
+    if (segments) {
+        scheduler.MarkSegment(14);
+    }
 
     const auto [in_buffer, in_offset] =
         buffer_cache.ObtainBufferForImage(image.info.guest_address, image.info.guest_size);
@@ -1941,6 +1953,9 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    if (segments) {
+        scheduler.MarkSegment(segment_before);
+    }
     // antikmewzik's key and Xbox pictures where he has them; ours (button_prompts.cpp) for the Nintendo buttons and the
     // pictures his tables don't know.
     image.bb_key = 0;

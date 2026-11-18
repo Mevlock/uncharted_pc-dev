@@ -776,6 +776,11 @@ bool Scheduler::SegmentsEnabled() const {
     return busy && busy->owner == this;
 }
 
+u32 Scheduler::SegmentLabel() const {
+    auto* busy = GpuBusy::Get(instance);
+    return busy ? busy->last_label : 0;
+}
+
 void Scheduler::MarkSegment(u32 label) {
     auto* busy = GpuBusy::Get(instance);
     if (!busy || busy->owner != this) {

@@ -778,6 +778,8 @@ public:
     /// work changes to `label`; GPU time is reported per label.
     void MarkSegment(u32 label);
     [[nodiscard]] bool SegmentsEnabled() const;
+    /// BB_GPU_BUSY: the label of the open segment.
+    [[nodiscard]] u32 SegmentLabel() const;
 
     /// Records `func(vk::CommandBuffer)` in order with other commands. The closure must own
     /// everything it uses (capture by value): it may run later on the recording thread.

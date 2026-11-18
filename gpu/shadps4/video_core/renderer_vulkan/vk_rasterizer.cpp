@@ -9302,6 +9302,7 @@ bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks, bool 
 }
 
 bool Rasterizer::OnWriteFault(VAddr addr, bool assume_locks) {
+    BbStats::write_fault_count.fetch_add(1, std::memory_order_relaxed);
     DrainDrawPipe();
     if (!InvalidateMemory(addr, 8, assume_locks, true)) {
         return false;
