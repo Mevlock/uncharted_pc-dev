@@ -74,7 +74,7 @@ public:
 
     template <class Scan>
     Result Get(const Key& key, uint64_t frame, Scan&& scan) {
-        auto& entry = entries[key];
+        auto& entry = Find(key);
         entry.last_use = frame;
         if (entry.valid && frame - entry.verified < Revalidate) {
             ++stats.hits;
@@ -92,25 +92,68 @@ public:
         return entry.result;
     }
     void Trim(uint64_t frame) {
-        std::erase_if(entries, [frame](const auto& e) { return frame - e.second.last_use > Unused; });
+        Rebuild(slots.size(), [frame](const Entry& e) { return frame - e.last_use <= Unused; });
     }
-    size_t Size() const { return entries.size(); }
+    size_t Size() const { return used; }
 
 private:
+    // Open addressing (linear probing) in one array: the per-draw lookup of a node-based map
+    // missed the cache (~90 ns a draw on the GPU thread). Entries leave only by Trim/Grow, which
+    // rebuild the table.
     struct Entry {
+        Key key;
         Result result;
         uint64_t verified{}, last_use{};
         bool valid{};
+        bool occupied{};
     };
+    Entry& Find(const Key& key) {
+        if ((used + 1) * 2 > slots.size()) {
+            Rebuild(slots.size() * 2, [](const Entry&) { return true; });
+        }
+        const size_t mask = slots.size() - 1;
+        for (size_t i = KeyHash{}(key) & mask;; i = (i + 1) & mask) {
+            Entry& entry = slots[i];
+            if (!entry.occupied) {
+                entry = {};
+                entry.key = key;
+                entry.occupied = true;
+                ++used;
+                return entry;
+            }
+            if (entry.key == key) {
+                return entry;
+            }
+        }
+    }
+    template <class Keep>
+    void Rebuild(size_t size, Keep&& keep) {
+        std::vector<Entry> old(size);
+        old.swap(slots);
+        used = 0;
+        const size_t mask = slots.size() - 1;
+        for (const auto& entry : old) {
+            if (!entry.occupied || !keep(entry)) {
+                continue;
+            }
+            size_t i = KeyHash{}(entry.key) & mask;
+            while (slots[i].occupied) {
+                i = (i + 1) & mask;
+            }
+            slots[i] = entry;
+            ++used;
+        }
+    }
     struct KeyHash {
         size_t operator()(const Key& k) const {
             uint64_t h = k.address * 0x9e3779b97f4a7c15ULL;
             h ^= (uint64_t(k.count) << 32 | uint32_t(k.base_vertex)) + (h << 6) + (h >> 2);
             h ^= uint64_t(k.index_size << 1 | uint32_t(k.restart)) + (h << 6) + (h >> 2);
-            return size_t(h);
+            return size_t(h ^ (h >> 29));
         }
     };
-    std::unordered_map<Key, Entry, KeyHash> entries;
+    std::vector<Entry> slots = std::vector<Entry>(64);
+    size_t used = 0;
 };
 
 // Open-addressing map for the per-frame tables of History: entries are keyed per draw and
@@ -122,23 +165,33 @@ public:
     FlatMap() : slots(64) {}
 
     Value& operator[](const Key& key) {
-        return Insert(key).first->value;
+        return Insert(key, Hash{}(key)).first->value;
+    }
+    /// The same with the key's hash (Hash{}(key)) already known.
+    Value& At(const Key& key, size_t hash) {
+        return Insert(key, hash).first->value;
     }
     /// Inserts `value` when `key` is absent (like std::unordered_map::emplace).
     void emplace(const Key& key, const Value& value) {
-        const auto [slot, inserted] = Insert(key);
+        emplace(key, Hash{}(key), value);
+    }
+    void emplace(const Key& key, size_t hash, const Value& value) {
+        const auto [slot, inserted] = Insert(key, hash);
         if (inserted) {
             slot->value = value;
         }
     }
     const Value* find(const Key& key) const {
+        return find(key, Hash{}(key));
+    }
+    const Value* find(const Key& key, size_t hash) const {
         const size_t mask = slots.size() - 1;
-        for (size_t i = Start(key) & mask;; i = (i + 1) & mask) {
+        for (size_t i = Start(hash) & mask;; i = (i + 1) & mask) {
             const Slot& slot = slots[i];
             if (slot.generation != generation) {
                 return nullptr;
             }
-            if (slot.key == key) {
+            if (slot.hash == hash && slot.key == key) {
                 return &slot.value;
             }
         }
@@ -163,24 +216,25 @@ private:
         Key key{};
         Value value{};
         uint32_t generation = 0;
+        size_t hash = 0; ///< Hash{}(key): compared before the key
     };
-    static size_t Start(const Key& key) {
-        const uint64_t h = uint64_t(Hash{}(key)) * 0x9e3779b97f4a7c15ULL;
+    static size_t Start(size_t hash) {
+        const uint64_t h = uint64_t(hash) * 0x9e3779b97f4a7c15ULL;
         return size_t(h ^ (h >> 29));
     }
-    std::pair<Slot*, bool> Insert(const Key& key) {
+    std::pair<Slot*, bool> Insert(const Key& key, size_t hash) {
         if ((size + 1) * 2 > slots.size()) {
             Grow();
         }
         const size_t mask = slots.size() - 1;
-        for (size_t i = Start(key) & mask;; i = (i + 1) & mask) {
+        for (size_t i = Start(hash) & mask;; i = (i + 1) & mask) {
             Slot& slot = slots[i];
             if (slot.generation != generation) {
-                slot = {key, Value{}, generation};
+                slot = {key, Value{}, generation, hash};
                 ++size;
                 return {&slot, true};
             }
-            if (slot.key == key) {
+            if (slot.hash == hash && slot.key == key) {
                 return {&slot, false};
             }
         }
@@ -193,7 +247,7 @@ private:
         size = 0;
         for (const auto& slot : old) {
             if (slot.generation == live) {
-                *Insert(slot.key).first = {slot.key, slot.value, generation};
+                *Insert(slot.key, slot.hash).first = {slot.key, slot.value, generation, slot.hash};
             }
         }
     }
@@ -253,7 +307,6 @@ public:
     void NextFrame() {
         previous.swap(current);
         current.clear();
-        occurrences.clear();
         gate_previous.swap(gate_current);
         gate_current.clear();
         gate_occurrences.clear();
@@ -263,19 +316,24 @@ public:
 
     Allocation Prepare(const Draw& draw) {
         ++stats.draws;
+        // One hash of the draw (the occurrence is mixed in after it). The entry of a draw's first
+        // occurrence this frame also counts its occurrences: the k-th identical draw is k.
+        const size_t draw_hash = Hash::OfDraw(draw);
         Key key{draw, 0};
-        key.occurrence = occurrences[key]++;
+        Slot& head = current.At(key, Hash::WithOccurrence(draw_hash, 0));
+        key.occurrence = head.seen++;
+        const size_t key_hash = Hash::WithOccurrence(draw_hash, key.occurrence);
         const uint64_t count = uint64_t(draw.vertices.count) * draw.instances;
         if (!count || uint64_t(draw.vertices.first) + draw.vertices.count - 1 > INT32_MAX ||
             uint64_t(draw.first_instance) + draw.instances > UINT32_MAX) {
             ++stats.invalid;
             return {};
         }
-        const auto* prev = previous.find(key);
+        const auto* prev = previous.find(key, key_hash);
         Allocation result{0, 0, draw.vertices.count, draw.instances,
                           draw.vertices.first, draw.first_instance};
-        if (prev) {
-            result.load = *prev;
+        if (prev && prev->store) {
+            result.load = prev->store;
             ++stats.loaded;
         } else {
             ++stats.unmatched;
@@ -283,7 +341,8 @@ public:
         if (count <= capacity - used) {
             result.store = 1 + uint32_t(frame & 1) * capacity + used;
             used += uint32_t(count);
-            current.emplace(key, result.store);
+            // (head is still valid: nothing was inserted since. Another occurrence gets its own.)
+            (key.occurrence ? current.At(key, key_hash) : head).store = result.store;
             ++stats.stored;
         } else {
             ++stats.exhausted;
@@ -300,19 +359,28 @@ private:
         bool operator==(const Key&) const = default;
     };
     struct Hash {
-        size_t operator()(const Key& key) const {
+        static size_t OfDraw(const Draw& d) {
             uint64_t h = 0;
             const auto mix = [&](uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); };
-            const auto& d = key.draw;
             mix(d.shader); mix(d.geometry); mix(d.indices); mix(d.topology);
             mix(d.index_count); mix(d.instances); mix(d.first_instance);
-            mix(d.vertices.first); mix(d.vertices.count); mix(key.occurrence);
+            mix(d.vertices.first); mix(d.vertices.count);
             return size_t(h);
         }
+        static size_t WithOccurrence(size_t h, uint32_t occurrence) {
+            return h ^ (occurrence + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+        }
+        size_t operator()(const Key& key) const {
+            return WithOccurrence(OfDraw(key.draw), key.occurrence);
+        }
+    };
+    struct Slot {
+        uint32_t store{}; ///< first position of this frame's store (0: none)
+        uint32_t seen{};  ///< (first occurrence only) occurrences of the draw so far this frame
     };
     uint32_t capacity{}, used{};
     uint64_t frame{};
-    FlatMap<Key, uint32_t, Hash> previous, current, occurrences;
+    FlatMap<Key, Slot, Hash> previous, current;
     struct GateHash {
         size_t operator()(const GateKey& key) const {
             uint64_t h = 0;

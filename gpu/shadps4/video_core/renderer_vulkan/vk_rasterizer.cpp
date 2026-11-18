@@ -5108,16 +5108,28 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // well (U3 ch14's ship heaves in the world with the camera on it: under a camera-only
     // reprojection its deck, containers and fences got 64-220 px of motion while the picture
     // stood still).
+    // Its vertex range is the streams' whole length: a buffer-fetched draw's indices address its
+    // streams from their start, and an index past the longest stream fetches nothing, so the
+    // index list is not scanned (the cached scan cost ~70 ns a draw on the GPU thread, its page
+    // checks more). Constant buffers (stride 16) and raw buffers (stride 0) are not streams.
+    u32 stream_records = 0;
     if (motion_draw && Shader::MotionVectors::characters && !motion_geometry) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         u64 hash = 0x6a09e667f3bcc909ULL;
+        u32 records = 0;
         for (const auto& resource : vs.buffers) {
             if (resource.IsSpecial()) continue;
             const auto buffer = resource.GetSharp(vs);
             if (!buffer.Valid()) continue;
-            hash = XXH3_64bits_withSeed(&buffer.num_records, sizeof(buffer.num_records),
-                                        hash ^ buffer.GetStride());
+            // (A multiply-mix, not XXH3: once per buffer of every G-buffer draw.)
+            hash = (hash ^ (u64(buffer.num_records) << 32 | buffer.GetStride())) *
+                   0x9e3779b97f4a7c15ULL;
+            hash ^= hash >> 29;
+            if (buffer.GetStride() != 16 && buffer.GetStride() != 0) {
+                records = std::max<u32>(records, buffer.num_records);
+            }
         }
+        stream_records = records;
         motion_geometry = hash;
     }
     if (motion_draw && motion_geometry) {
@@ -5137,7 +5149,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }();
         bool gated = !all_motion && !Shader::MotionVectors::characters;
         u64 palette = 0;
-        for (const auto& resource : vs.buffers) {
+        // (Only a gated draw needs its palette: Uncharted's draws are never gated.)
+        const size_t palette_buffers = gated ? vs.buffers.size() : 0;
+        for (size_t i = 0; i < palette_buffers; ++i) {
+            const auto& resource = vs.buffers[i];
             if (resource.IsSpecial()) continue;
             const auto buffer = resource.GetSharp(vs);
             const u32 size = buffer.GetSize();
@@ -5165,7 +5180,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                                             palette)) {
             Motion::VertexRange range{base_vertex, regs.num_indices};
             u64 topology = 0;
-            if (is_indexed) {
+            if (is_indexed && stream_records) {
+                range = {0, stream_records}; // the streams' whole length (above)
+            } else if (is_indexed) {
                 range = {};
                 const u64 bytes = u64(regs.num_indices) * index_size;
                 if (index_address && memory->IsValidGpuMapping(index_address, 0) &&
