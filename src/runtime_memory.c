@@ -1057,6 +1057,106 @@ void *runtime_image_map(size_t size, int prot) {
     write_unlock();
     return p;
 }
+/* ---- Thunk memory near the image ----
+ * Hooks jump between the game's code and their thunks or stubs with rel32 jumps, and stubs reach
+ * their data RIP-relative, so all of it must lie within 2 GiB of the whole image. One pool is
+ * reserved right after the image is mapped, before the GPU starts, and every hook takes its
+ * pages from it. bbport: each hook used to look for its own 64 KiB block when it was installed,
+ * after the GPU had started; the Radeon driver takes the free space between the image and 2 GiB
+ * when it starts (how much differs from start to start), so on a Radeon 0 to all of the hooks
+ * were silently left out (AMD test PC 2026-11-17: callbacks, mouse look, job wait, shader
+ * bindings, movie). */
+#define NEAR_POOL_SIZE ((size_t)1 << 20)    /* the hooks take about 30 pages */
+#define NEAR_REACH UINT64_C(0x7ff00000)     /* rel32 reach with room to spare */
+static unsigned char *near_pool;
+static size_t near_pool_used;
+#ifdef _WIN32
+/* How the space below 2 GiB is used (diagnosis: what had taken the hooks' space when they looked for it
+ * after the GPU had started): free (and the largest free block), private, mapped and module memory. */
+static void near_space(const char *when) {
+    uint64_t free_bytes=0, largest=0, used[3]={0,0,0};
+    MEMORY_BASIC_INFORMATION mbi;
+    for (uintptr_t at=0x10000; at<UINT64_C(0x80000000) && VirtualQuery((void *)at,&mbi,sizeof(mbi))==sizeof(mbi);) {
+        uintptr_t end=(uintptr_t)mbi.BaseAddress+mbi.RegionSize;
+        if (end>UINT64_C(0x80000000)) end=UINT64_C(0x80000000);
+        if (end<=at) break;
+        const uint64_t n=end-at;
+        if (mbi.State==MEM_FREE) { free_bytes+=n; if (n>largest) largest=n; }
+        else used[mbi.Type==MEM_IMAGE ? 2 : mbi.Type==MEM_MAPPED ? 1 : 0]+=n;
+        at=end;
+    }
+    printf("Thunk memory: below 2 GiB %s: %" PRIu64 " MiB free (largest %" PRIu64 " MiB), %" PRIu64 " MiB private, %"
+           PRIu64 " MiB mapped, %" PRIu64 " MiB modules
+",when,free_bytes>>20,largest>>20,used[0]>>20,used[1]>>20,used[2]>>20);
+}
+#endif
+void runtime_near_image_reserve(const unsigned char *image, uint64_t size) {
+#ifdef _WIN32
+    if (near_pool) return;
+    const uintptr_t start=(uintptr_t)image, end=start+size;
+    MEMORY_BASIC_INFORMATION mbi;
+    uint64_t free_bytes=0, largest=0;
+    /* The nearest free block from 32 MiB above the image (where the hooks' blocks were before; the
+     * space right after the image stays for the stubs reserved after this), else the nearest below
+     * it: every free region in reach is looked at. */
+    for (uintptr_t at=(end+(UINT64_C(32)<<20)+0xffff)&~(uintptr_t)0xffff;
+         !near_pool && at+NEAR_POOL_SIZE-start<=NEAR_REACH && VirtualQuery((void *)at,&mbi,sizeof(mbi))==sizeof(mbi);) {
+        const uintptr_t region_end=(uintptr_t)mbi.BaseAddress+mbi.RegionSize;
+        if (mbi.State==MEM_FREE) {
+            free_bytes+=region_end-at; if (region_end-at>largest) largest=region_end-at;
+            if (region_end-at>=NEAR_POOL_SIZE)
+                near_pool=VirtualAlloc((void *)at,NEAR_POOL_SIZE,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+        }
+        if (region_end<=at) break;
+        at=(region_end+0xffff)&~(uintptr_t)0xffff;
+    }
+    if (!near_pool) {
+        uintptr_t best=0;
+        const uintptr_t low=end>NEAR_REACH+0x10000 ? ((end-NEAR_REACH+0xffff)&~(uintptr_t)0xffff) : 0x10000;
+        for (uintptr_t at=low; at+NEAR_POOL_SIZE<=start && VirtualQuery((void *)at,&mbi,sizeof(mbi))==sizeof(mbi);) {
+            uintptr_t region_end=(uintptr_t)mbi.BaseAddress+mbi.RegionSize;
+            if (region_end>start) region_end=start;
+            if (mbi.State==MEM_FREE && region_end>at) {
+                free_bytes+=region_end-at; if (region_end-at>largest) largest=region_end-at;
+                if (region_end-at>=NEAR_POOL_SIZE) best=(region_end-NEAR_POOL_SIZE)&~(uintptr_t)0xffff;
+            }
+            if (region_end<=at) break;
+            at=(region_end+0xffff)&~(uintptr_t)0xffff;
+        }
+        if (best)
+            near_pool=VirtualAlloc((void *)best,NEAR_POOL_SIZE,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
+    }
+    near_space("when the image was mapped");
+    if (near_pool) {
+        const int64_t offset=(int64_t)((uintptr_t)near_pool-start);
+        printf("Thunk memory: %zu KiB %s the image (%s%" PRId64 " MiB), reserved before the GPU started\n",
+               NEAR_POOL_SIZE>>10,offset<0 ? "below" : "above",offset<0 ? "-" : "+",(offset<0 ? -offset : offset)>>20);
+    } else {
+        printf("WARNING: no memory free within 2 GiB of the game's code (%" PRIu64 " MiB free in pieces, largest %"
+               PRIu64 " KiB): the port's hooks into the game (mouse look, job wait, shader bindings, movies and "
+               "more) are left out\n",free_bytes>>20,largest>>10);
+        fprintf(stderr,"WARNING: no memory free within 2 GiB of the game's code: the port's hooks are left out\n");
+    }
+#else
+    (void)image; (void)size;
+#endif
+}
+void *runtime_near_image_alloc(size_t size) {
+    size=size ? (size+4095)&~(size_t)4095 : 4096;   /* whole pages: a hook may change its page's protection */
+    size_t used=__atomic_load_n(&near_pool_used,__ATOMIC_RELAXED);
+#ifdef _WIN32
+    static int reported;
+    if (!__atomic_exchange_n(&reported,1,__ATOMIC_RELAXED)) near_space("at the first hook");
+#endif
+    do {
+        if (!near_pool || size>NEAR_POOL_SIZE-used) {
+            if (near_pool) printf("WARNING: thunk memory used up (%zu of %zu KiB; %zu KiB more wanted)\n",
+                                  used>>10,NEAR_POOL_SIZE>>10,size>>10);
+            return NULL;
+        }
+    } while (!__atomic_compare_exchange_n(&near_pool_used,&used,used+size,1,__ATOMIC_ACQ_REL,__ATOMIC_RELAXED));
+    return near_pool+used;
+}
 /* ---- GPU library interface (gpu/shim/bbgpu.cpp) ---- */
 /* Optimizations switched off at run time (diagnostics): the number in the file named by
  * BB_TOGGLE_FILE, re-read every 250 ms. Bits: 1 region cache, 2 fetch shader cache,

@@ -80,6 +80,11 @@ void runtime_set_guest_fpu(void);
 int32_t runtime_guest_errno(int host_errno);
 void *runtime_low_map(size_t size, int prot);
 void *runtime_image_map(size_t size, int prot);
+/* Windows: one pool of thunk memory within rel32 reach of the image, reserved right after the image
+ * is mapped (before the GPU driver takes the space near it); hooks take whole pages from it
+ * (zeroed, read/write/execute). NULL elsewhere or once it is used up. */
+void runtime_near_image_reserve(const unsigned char *image, uint64_t size);
+void *runtime_near_image_alloc(size_t size);
 /* The loaded game's image (guest offset 0), or 0 before it is mapped. */
 uintptr_t runtime_image_base(void);
 /* Its size in bytes (0 before it is mapped). */
