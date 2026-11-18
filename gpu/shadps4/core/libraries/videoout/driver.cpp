@@ -494,7 +494,6 @@ void VideoOutDriver::Flip(const Request& req) {
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr,
                   flip_arg = req.index >= 0 ? req.flip_arg : s64{-1}] {
         presenter->SetHDR(hdr);
-        Vulkan::LowLatency::HoldPresent(flip_arg); // bbport: even presents (to its target)
         presenter->Present(frame, false, true, flip_arg);
         if (flip_arg >= 0) {
             g_presented_flip_arg.store(flip_arg, std::memory_order_relaxed);
@@ -1065,6 +1064,10 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
         Vulkan::LowLatency::TraceFlip(Vulkan::LowLatency::FlipStage::GpuReached, flip_arg);
     }
     request_cv.notify_one();
+    if (index != -1) {
+        // bbport even presents: the next frame's GPU work waits for this one's post work
+        Vulkan::LowLatency::GateAfterFlip(flip_arg);
+    }
 }
 
 namespace {

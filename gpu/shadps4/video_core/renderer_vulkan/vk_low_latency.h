@@ -73,10 +73,22 @@ void TraceFlip(FlipStage stage, s64 flip_arg);
 /// game's frame start hook the present thread's slot hold keeps the cap).
 bool StartPacingRequested();
 
-/// Even presents (vk_low_latency.cpp Pace; BB_EVEN_PRESENT=0: off): the presenter holds the game's
-/// flip with this argument until its present target (its frame start's slot + the offset), so
-/// paced frames are shown one period apart.
-void HoldPresent(s64 flip_arg);
+/// Even presents (vk_low_latency.cpp Pace; BB_EVEN_PRESENT=0: off): the present target of the
+/// game's flip with this argument (its frame start's slot + the offset; 0: none).
+/// With VK_EXT_present_timing (SetTimedPresents(true), bbport_vrr.cpp): the present is made at
+/// once and carries its target; PresentQueued notes the ready time, PresentFlipped the flip the
+/// presentation engine reported (late ones raise the offset). Without it (build-1 path):
+/// PresentReadyAndWait before the present notes the ready time and holds it until the target.
+s64 PresentTarget(s64 flip_arg);
+void PresentReadyAndWait(s64 flip_arg);
+void SetTimedPresents(bool on);
+/// The GPU gate (vk_low_latency.cpp Pace::gate): the GPU thread after a game flip it queued
+/// (waits, with a deadline, until that frame's post work was submitted); the presenter once it
+/// has submitted it.
+void GateAfterFlip(s64 flip_arg);
+void GatePostSubmitted(s64 flip_arg);
+void PresentQueued(s64 flip_arg);
+void PresentFlipped(s64 flip_arg, s64 flip_ns);
 /// The frame thread, right after GameFrameStart: the time from now to that frame's present target
 /// (0: none), for the frame clock (the world steps = the intervals between the targets).
 s64 PresentLeadNs();
