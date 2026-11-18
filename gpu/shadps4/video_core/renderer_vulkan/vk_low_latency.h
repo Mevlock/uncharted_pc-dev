@@ -91,6 +91,11 @@ void SetTimedPresents(bool on);
 void GateAfterFlip(s64 flip_arg, u64 draw_tick);
 bool GateNeeded(u64 tick);
 void GateBeforeSubmit(u64 tick, bool recorder);
+/// A thread holding the scheduler's submit lock waits for the recording thread (SyncRecording):
+/// while it does, a flush held at the gate on the recording thread goes on (else both would wait
+/// for the presenter, which needs that lock: the gate's deadline).
+void GateYieldBegin();
+void GateYieldEnd();
 /// Even presents are on (the frame start paces and BB_EVEN_PRESENT is not 0).
 bool EvenPresents();
 /// How the presenter holds paced frames (vk_present_release.h): 0 on its thread, 1 on the GPU in the

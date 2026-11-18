@@ -626,14 +626,31 @@ void Scheduler::KickRecording(bool force) {
     }
 }
 
+/// bbport even presents: this thread holds submit_mutex (in SubmitExecution).
+static thread_local bool t_holds_submit_mutex = false;
+
 void Scheduler::SyncRecording() {
     if (!recording_threaded) {
         return;
     }
     KickRecording(true);
     BbStats::WaitTimer timer{BbStats::sync_recording_ns};
-    std::unique_lock lk{recorder_mutex};
-    recorder_idle_cv.wait(lk, [this] { return recorder_queue.empty() && !recorder_busy; });
+    // bbport even presents: the recording thread may be holding a flush at the GPU gate until the
+    // presenter has submitted the last frame's present work, and the presenter needs submit_mutex
+    // for that. A thread that waits here while holding submit_mutex (Rasterizer::OnSubmit's
+    // prefetch, UploadStreamed) makes the gate give way instead (that flush then goes before the
+    // present work, as without the gate), so nothing waits for the gate's deadline.
+    const bool yield = t_holds_submit_mutex;
+    if (yield) {
+        LowLatency::GateYieldBegin();
+    }
+    {
+        std::unique_lock lk{recorder_mutex};
+        recorder_idle_cv.wait(lk, [this] { return recorder_queue.empty() && !recorder_busy; });
+    }
+    if (yield) {
+        LowLatency::GateYieldEnd();
+    }
 }
 
 static thread_local bool t_on_recorder_thread = false;
@@ -865,6 +882,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     }();
     const auto lock_start = std::chrono::steady_clock::now();
     std::unique_lock lk{submit_mutex};
+    struct HeldFlag {
+        HeldFlag() { t_holds_submit_mutex = true; }
+        ~HeldFlag() { t_holds_submit_mutex = false; }
+    } held_flag;
     if (slow_lock_ms > 0) {
         const double waited =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lock_start).count();
@@ -967,8 +988,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         // bbport even presents: the gate (LowLatency::GateBeforeSubmit) without the submit lock,
         // which the presenter takes for the submission this one must follow.
         lk.unlock();
+        t_holds_submit_mutex = false;
         LowLatency::GateBeforeSubmit(signal_value, false);
         lk.lock();
+        t_holds_submit_mutex = true;
     } else if (on_submit) {
         LowLatency::GateBeforeSubmit(signal_value, false); // no wait: notes a frame's first submission
     }
