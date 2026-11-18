@@ -55,7 +55,7 @@ constexpr VkTimeDomainKHR HostDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR;
 
 PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} {
     if (!instance.IsPresentReleaseSupported()) {
-        std::puts("Even presents: the GPU hold needs VK_KHR_shader_clock (device clock) and calibrated "
+        std::puts("Even presents: the GPU hold needs VK_KHR_shader_clock (device clock), 64-bit timestamps and calibrated "
                   "timestamps; not available");
         return;
     }
