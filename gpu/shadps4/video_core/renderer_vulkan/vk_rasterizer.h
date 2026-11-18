@@ -146,6 +146,10 @@ public:
     bool HasPendingGpuWrite(VAddr address, u64 size) {
         return PendingWriteOverlaps(address, size);
     }
+    /// Stage A/B, before reading guest memory a pending GPU write may change: the draws handed
+    /// to the recording thread run first (drain), and a chained WriteData into it lands
+    /// (chained_writes.h), which a drain alone does not wait for.
+    void LandPendingWrite(VAddr address, u64 size);
     /// Submits the work recorded so far, in order with the draws handed to the recording thread
     /// (no drain: stage A goes on decoding).
     void FlushInOrder();

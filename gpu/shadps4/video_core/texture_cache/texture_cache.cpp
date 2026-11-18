@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "video_core/chained_writes.h"
 #include "bbport_trace.h"
 #include <algorithm>
 #include <array>
@@ -1818,6 +1819,10 @@ void TextureCache::RefreshImage(Image& image) {
         return;
     }
     BbStats::Timer timer{BbStats::t_refresh};
+    // A chained WriteData into this memory lands first (chained_writes.h).
+    if (ChainedWrites::MustWait(image.info.guest_address, image.info.guest_size)) {
+        scheduler.WaitDeferredSignals();
+    }
     BbTrace::Record(BbTrace::ImageUploadBegin, image.info.guest_size);
     BbTrace::Scope trace_end{BbTrace::ImageUploadEnd};
 

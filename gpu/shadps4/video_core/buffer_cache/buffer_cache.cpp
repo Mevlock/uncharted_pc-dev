@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_trace.h"
+#include "video_core/chained_writes.h"
 #include <chrono>
 #include <thread>
 #include <array>
@@ -3001,6 +3002,10 @@ extern "C" void BbEopTraceRead(u64 address, u64 size, const char* path);
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer,
                                                         u64 stream_limit) {
+    // A chained WriteData into this memory lands first (chained_writes.h).
+    if (ChainedWrites::MustWait(device_addr, size)) {
+        scheduler.WaitDeferredSignals();
+    }
     const bool stats = BufferStatsEnabled();
     if (stats) {
         PrintBufferStats();
@@ -3258,6 +3263,9 @@ void BufferCache::UploadStreamed(const std::function<bool(VAddr, u64)>& is_mappe
 }
 
 std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size) {
+    if (ChainedWrites::MustWait(device_addr, size)) {
+        scheduler.WaitDeferredSignals();
+    }
     // bbport: data already current in the arena (GPU-written, or uploaded ahead: UploadStreamed)
     // is read there, in video memory, instead of copied from guest memory into host staging.
     if (IsRegionGpuModified(device_addr, size) ||

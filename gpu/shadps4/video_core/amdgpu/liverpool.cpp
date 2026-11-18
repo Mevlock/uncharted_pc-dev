@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <boost/container/small_vector.hpp>
+#include "video_core/chained_writes.h"
 #include <chrono>
 #include <pthread.h>
 #ifndef _WIN32
@@ -275,6 +277,7 @@ static std::atomic<u32> g_asc_dumped{0};
 
 void Liverpool::Process(std::stop_token stoken) {
     Common::SetCurrentThreadName("shadPS4:GpuCommandProcessor");
+    VideoCore::ChainedWrites::AllowWait();
     BbThreads::MakeRenderThread();
     on_processor_thread = true;
 #ifndef _WIN32
@@ -822,10 +825,59 @@ void SignalFlip(Vulkan::Rasterizer& rasterizer, const u8*) {
     Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
 }
 
+// bbport (ngin's Linux fork, spacepepperoni's port: chained WriteData, its watched-page rule): on
+// the draw recording thread a WriteData goes behind the copies, fences and raycaster landings
+// deferred before it (SignalAfterHostCopies) instead of that thread waiting for them: the guest
+// sees the writes in the same order, and the thread goes on with the frame. In U3 one WriteData
+// a frame waited ~1.2 ms behind a landing that waits for the GPU, 5-6 ms in the frame that brings
+// a new area's textures (the desert ride's canyon entry). GPU work recorded before the write
+// lands that reads its memory waits for it first (chained_writes.h). Only a write within one
+// page the caches do not watch (CPU-modified, no GPU data): the write lands on another thread,
+// where a write fault would wait for the GPU command thread (a hang in their U2 convoy), and it
+// goes through the backing like the fences. BB_CHAIN_WRITEDATA=1: on. Off by default: the desert
+// ride's hitches were not shorter with it in clean rides (2026-11-18), and it changes when labels
+// become visible to the guest.
+static bool ChainWriteData() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_CHAIN_WRITEDATA");
+        return env && env[0] == '1';
+    }();
+    return enabled;
+}
+
 void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto* header = reinterpret_cast<const PM4Header*>(data);
     const auto* write_data = reinterpret_cast<const PM4CmdWriteData*>(data);
     rasterizer.GetBufferCache().ForgetStreamCopies();
+    {
+        const u64 address = write_data->Address<u64>();
+        const u64 size = (header->type3.count.Value() - 2) * sizeof(u32);
+        auto& buffer_cache = rasterizer.GetBufferCache();
+        if (ChainWriteData() && Vulkan::DrawPipe::OnStageB() &&
+            !BbToggle::Disabled(BbToggle::RecorderFences) && size != 0 &&
+            (address & ~u64(4095)) == ((address + size - 1) & ~u64(4095)) &&
+            buffer_cache.IsRegionCpuModified(address, size) &&
+            !buffer_cache.IsRegionGpuModified(address, size)) {
+            boost::container::small_vector<u32, 8> words(write_data->data,
+                                                         write_data->data + size / 4);
+            buffer_cache.CheckStableBindings();
+            rasterizer.CheckConstants();
+            auto landed = VideoCore::ChainedWrites::Add(address, size);
+            BbTrace::Record(BbTrace::PhaseBegin, 4);
+            rasterizer.SignalAfterHostCopies(
+                [address, size, words = std::move(words), landed = std::move(landed)] {
+                    BbWriteLog::Note(address, words.data(), size, BbWriteLog::WriteData);
+                    auto* memory = Core::Memory::Instance();
+                    if (!memory->TryWriteBacking(reinterpret_cast<void*>(address), words.data(),
+                                                 size)) {
+                        std::memcpy(reinterpret_cast<void*>(address), words.data(), size);
+                    }
+                    VideoCore::ChainedWrites::Landed(landed);
+                },
+                VideoCore::LandingGate::Pending());
+            return;
+        }
+    }
     // Copies deferred to the recording thread, and fences deferred to it (RecorderFences),
     // precede writes the guest sees.
     // BB_FRAME_TRACE diagnosis: each wait's phase (1 host copies, 2 deferred fences, 3 landings);
@@ -2236,6 +2288,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                                     (unsigned long long)n);
                     }
                     rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
+                    rasterizer->LandPendingWrite(reinterpret_cast<VAddr>(cond_exec->Address()), 4);
                 }
                 const u32 condition = *cond_exec->Address();
                 const auto skip = condition == 0;

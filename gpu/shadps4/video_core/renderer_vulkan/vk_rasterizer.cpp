@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "video_core/chained_writes.h"
 #include "bbport_causal.h"
 #include <map>
 #include <deque>
@@ -826,7 +827,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
                                 static_cast<unsigned long long>(address), static_cast<unsigned long long>(size),
                                 static_cast<unsigned long long>(n));
                 }
-                busy_check->DrainDrawPipe();
+                busy_check->LandPendingWrite(address, size);
             }
         };
     }
@@ -913,6 +914,14 @@ bool Rasterizer::SyncSrtReads(const Shader::SrtReadLog& log) {
     if (!written) {
         if (pending) {
             DrainDrawPipe();
+            for (u32 i = 0; i < count; ++i) {
+                // a chained WriteData into the tables lands too (chained_writes.h)
+                if (log.reads[i].address &&
+                    VideoCore::ChainedWrites::MustWait(log.reads[i].address, log.reads[i].bytes)) {
+                    scheduler.WaitDeferredSignals();
+                    break;
+                }
+            }
             for (u32 i = 0; i < count; ++i) {
                 const auto& read = log.reads[i];
                 if (read.address && buffer_cache.IsRangeGpuWritten(read.address, read.bytes)) {
@@ -1888,7 +1897,17 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     pending_max = std::max(pending_max, end);
 }
 
+void Rasterizer::LandPendingWrite(VAddr address, u64 size) {
+    DrainDrawPipe();
+    if (VideoCore::ChainedWrites::MustWait(address, size)) {
+        scheduler.WaitDeferredSignals();
+    }
+}
+
 bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
+    if (VideoCore::ChainedWrites::Overlaps(address, size)) {
+        return true; // written by a chained WriteData that has not landed (chained_writes.h)
+    }
     // Notes of the packet being prepared, not recorded yet (CommitHeldNotes).
     for (const auto& [held, held_size] : notes_held) {
         if (address < held + held_size && held < address + size) {
