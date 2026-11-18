@@ -282,7 +282,10 @@ void UpdateOffset(s64 period, u64 id) {
     const s64 extra = slack ? slack_ns : gpu_release.load(std::memory_order_relaxed) ? margin_ns : 0;
     if ((id & 15) == 0) {
         const u64 count = lag_count.load(std::memory_order_acquire);
-        const u32 n = static_cast<u32>(std::min<u64>(count - lag_base, Samples - 32));
+        // the last 4 s at most (512 samples were 8.5 s at a 60 cap: the menu's frames kept the
+        // offset ~7 ms high for ~10 s into gameplay, t60g)
+        const u64 window = std::max<s64>(64, 4'000'000'000 / std::max<s64>(period, 1'000'000));
+        const u32 n = static_cast<u32>(std::min<u64>({count - lag_base, Samples - 32, window}));
         if (n >= 32) {
             std::array<s64, Samples> copy;
             for (u32 i = 0; i < n; ++i) {
@@ -304,7 +307,9 @@ void UpdateOffset(s64 period, u64 id) {
     } else if (offset_goal > offset) {
         offset += std::min<s64>(offset_goal - offset, 100'000);
     } else if (offset_goal + 1'000'000 < offset) {
-        offset -= std::min<s64>(offset - offset_goal, 10'000);
+        // down by 1/32 of the excess a frame, 10-100 us (the world steps change by that: under
+        // 1% at 60, unseen; 10 us a frame took ~12 s to come down 7 ms at 60)
+        offset -= std::clamp<s64>((offset - offset_goal) / 32, 10'000, 100'000);
     }
     offset_ns.store(offset, std::memory_order_relaxed);
 }
