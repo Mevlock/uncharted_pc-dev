@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <memory>
 #include <vector>
 
@@ -50,9 +51,11 @@ public:
     void TickFrame();
 
 private:
+    using Clock = std::chrono::steady_clock;
     struct Block {
         std::unique_ptr<VideoCore::StreamBuffer> buffer;
         u64 last_used_frame;
+        Clock::time_point last_used{};
     };
 
     struct Ring {
@@ -65,6 +68,7 @@ private:
         u64 tick;
         u64 last_used_frame;
         bool held;
+        Clock::time_point last_used{};
     };
 
     static constexpr size_t NUM_TYPES = 3;
@@ -85,6 +89,7 @@ private:
     u64 keep_blocks = 0; ///< bbport: ring blocks never trimmed
     std::array<std::vector<LargeBuffer>, NUM_TYPES> large_caches;
     u64 frame = 0;
+    Clock::time_point now = Clock::now(); ///< bbport: at the last TickFrame (idle times are in seconds)
 };
 
 } // namespace Vulkan
