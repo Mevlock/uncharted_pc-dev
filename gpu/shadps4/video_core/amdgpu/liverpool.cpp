@@ -828,9 +828,23 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     rasterizer.GetBufferCache().ForgetStreamCopies();
     // Copies deferred to the recording thread, and fences deferred to it (RecorderFences),
     // precede writes the guest sees.
+    // BB_FRAME_TRACE diagnosis: each wait's phase (1 host copies, 2 deferred fences, 3 landings);
+    // arg of phase 1 also: address | bytes << 40 | CPU-modified << 56 | GPU-modified << 57.
+    {
+        const u64 address = write_data->Address<u64>();
+        const u64 bytes = (header->type3.count.Value() - 2) * sizeof(u32);
+        auto& cache = rasterizer.GetBufferCache();
+        BbTrace::Record(BbTrace::PhaseBegin,
+                        1 | ((address & 0xffffffffffull) << 4) | (std::min<u64>(bytes, 0xfff) << 44) |
+                            (u64(cache.IsRegionCpuModified(address, bytes)) << 56) |
+                            (u64(cache.IsRegionGpuModified(address, bytes)) << 57));
+    }
     rasterizer.WaitHostCopies();
+    BbTrace::Record(BbTrace::PhaseBegin, 2);
     rasterizer.WaitDeferredSignals();
+    BbTrace::Record(BbTrace::PhaseBegin, 3);
     VideoCore::LandingGate::Wait(VideoCore::LandingGate::Pending());
+    BbTrace::Record(BbTrace::PhaseEnd);
     rasterizer.GetBufferCache().CheckStableBindings();
     rasterizer.CheckConstants();
     BbWriteLog::Note(write_data->Address<u64>(), write_data->data,
@@ -2136,12 +2150,21 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (no_drain) {
                     break;
                 }
+                bool traced_wait = false;
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     if (rasterizer && !rasterizer->DrawPipeIdle()) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                         continue;
                     }
+                    if (!traced_wait) {
+                        traced_wait = true;
+                        BbTrace::Record(BbTrace::LabelWaitBegin,
+                                        wait_reg_mem->Address<u64>() & 0xffffffffffull);
+                    }
                     YIELD_GFX();
+                }
+                if (traced_wait) {
+                    BbTrace::Record(BbTrace::LabelWaitEnd, 0);
                 }
                 break;
             }
@@ -2646,8 +2669,18 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 FenceStats::NoteWait(wait_reg_mem->Address<u64>(), FenceStats::Now() - wait_start);
                 break;
             }
+            bool traced_wait = false;
             while (!wait_reg_mem->Test(regs.reg_array)) {
+                if (!traced_wait) {
+                    traced_wait = true;
+                    BbTrace::Record(BbTrace::LabelWaitBegin,
+                                    (wait_reg_mem->Address<u64>() & 0xffffffffffull) |
+                                        (u64(vqid + 1) << 48));
+                }
                 YIELD_ASC(vqid);
+            }
+            if (traced_wait) {
+                BbTrace::Record(BbTrace::LabelWaitEnd, u64(vqid + 1) << 48);
             }
             break;
         }

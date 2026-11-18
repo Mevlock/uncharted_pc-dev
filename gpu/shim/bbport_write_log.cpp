@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "bbport_trace.h"
 #include "bbport_write_log.h"
 
 #include <array>
@@ -108,6 +109,10 @@ static void Watch(std::uint64_t address, const void* data, std::uint64_t size, S
 }
 
 void Note(std::uint64_t address, const void* data, std::uint64_t size, Source source) {
+    // BB_FRAME_TRACE diagnosis: every guest-visible write the GPU emulation makes (fences, labels)
+    if (size <= 8) {
+        BbTrace::Record(BbTrace::LabelWrite, (address & 0xffffffffffull) | (std::uint64_t(source) << 48));
+    }
     Watch(address, data, size, source);
     if (Enabled()) {
         Record(address, data, size, source);

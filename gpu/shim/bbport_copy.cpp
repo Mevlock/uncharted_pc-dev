@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "bbport_trace.h"
 #include "bbport_copy.h"
 #include "bbport_threads.h"
 
@@ -205,7 +206,9 @@ private:
                 Task task = std::move(async_tasks.front());
                 async_tasks.pop_front();
                 lk.unlock();
+                BbTrace::Record(BbTrace::CopyBegin);
                 RunAsync(task);
+                BbTrace::Record(BbTrace::CopyEnd);
                 lk.lock();
                 continue;
             }

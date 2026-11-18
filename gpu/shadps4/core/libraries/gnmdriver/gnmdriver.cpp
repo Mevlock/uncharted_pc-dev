@@ -33,6 +33,8 @@ extern Frontend::WindowSDL* g_window;
 std::unique_ptr<Vulkan::Presenter> presenter;
 std::unique_ptr<AmdGpu::Liverpool> liverpool;
 
+void BbHitchMark(char code); // gpu/shim/bbport_sampler.cpp (BB_HITCH_TIMELINE)
+
 namespace Libraries::GnmDriver {
 
 using namespace AmdGpu;
@@ -111,6 +113,9 @@ static void WaitGpuIdle(int site = 0) {
         cv_lock.wait(lock, [] { return submission_lock == 0; });
     }
     BbTrace::Record(BbTrace::GuestIdleWaitEnd, site);
+    if (site == 1) {
+        BbHitchMark('E');
+    }
     BbStats::gpu_idle_waits[site].fetch_add(1, std::memory_order_relaxed);
     BbStats::gpu_idle_wait_ns[site].fetch_add(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
@@ -2399,6 +2404,8 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
         }
     }
 
+    BbHitchMark('U');
+    BbTrace::Record(BbTrace::GuestSubmit, count);
     std::scoped_lock lk{m_submit_lock};
     // BB_SUBMIT_NO_IDLE_WAIT=1 (experiment): a submission does not wait for the previous
     // frame to be done (5.2 ms a frame in U3's square); the PS4 does not wait here either.

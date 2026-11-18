@@ -33,10 +33,19 @@
 #include "bbport_threads.h"
 
 #include <chrono>
+#include <map>
 
 namespace Vulkan {
 
 namespace {
+static double FrameThreshold() {
+    static const double ms = [] {
+        const char* env = std::getenv("BB_GPU_BUSY_FRAMES");
+        return env ? std::atof(env) : 0.0;
+    }();
+    return ms;
+}
+
 /// bbport diagnosis: BB_GPU_BUSY=1 — a timestamp where each command buffer of the draw scheduler
 /// starts and ends; every 5 s: how busy the GPU was, its idle gaps, and how long submissions
 /// took from submit to done (how far the GPU runs behind).
@@ -64,7 +73,11 @@ struct GpuBusy {
         u32 slot;
         u64 tick;
         std::chrono::steady_clock::time_point submitted;
+        s64 frame = -1; ///< BB_GPU_BUSY_FRAMES: the game frame the command processor was on
     };
+    /// BB_GPU_BUSY_FRAMES=<ms>: GPU time per game frame (by the frame the GPU command thread was
+    /// on at submission) and label; frames over <ms> are printed.
+    std::map<s64, std::array<double, Labels>> frame_ns;
     std::vector<Pending> pending;
     std::vector<std::pair<u64, u64>> spans; // GPU [start, end) of finished command buffers
     double latency_ms = 0;
@@ -1068,7 +1081,8 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
 
     work_semaphore.Refresh();
     if (busy_timed) {
-        busy->pending.push_back({u32(busy->open), signal_value, std::chrono::steady_clock::now()});
+        busy->pending.push_back({u32(busy->open), signal_value, std::chrono::steady_clock::now(),
+                                 Libraries::VideoOut::CurrentGameFrames().submitted});
         busy->open = -1;
         const auto now = std::chrono::steady_clock::now();
         std::erase_if(busy->pending, [&](const GpuBusy::Pending& p) {
@@ -1099,12 +1113,42 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
                         label = block.labels[i];
                     }
                     busy->label_ns[label % GpuBusy::Labels] += (stamps[1] - previous) * busy->period_ns;
+                    if (FrameThreshold() > 0) {
+                        auto& f = busy->frame_ns[p.frame];
+                        u64 prev = stamps[0];
+                        u8 lab = block.initial;
+                        for (u32 i = 0; i < count; ++i) {
+                            const u64 at = std::clamp(marks[i], prev, stamps[1]);
+                            f[lab % GpuBusy::Labels] += (at - prev) * busy->period_ns;
+                            prev = at;
+                            lab = block.labels[i];
+                        }
+                        f[lab % GpuBusy::Labels] += (stamps[1] - prev) * busy->period_ns;
+                    }
                 }
             }
             busy->latency_ms += std::chrono::duration<double, std::milli>(now - p.submitted).count();
             ++busy->latency_count;
             return true;
         });
+        if (FrameThreshold() > 0) {
+            // frames the GPU command thread is 3 past are complete
+            const s64 current = Libraries::VideoOut::CurrentGameFrames().submitted;
+            while (!busy->frame_ns.empty() && busy->frame_ns.begin()->first + 3 < current) {
+                const auto& [frame, ns] = *busy->frame_ns.begin();
+                double total = 0;
+                for (double v : ns) total += v;
+                if (total / 1e6 > FrameThreshold()) {
+                    std::string line;
+                    for (u32 l = 0; l < GpuBusy::Labels; ++l) {
+                        if (ns[l] > 0) line += fmt::format(" q{} {:.2f}", l, ns[l] / 1e6);
+                    }
+                    std::printf("GPU frame: game frame %lld: %.2f ms GPU time by guest queue (ms):%s\n",
+                                static_cast<long long>(frame), total / 1e6, line.c_str());
+                }
+                busy->frame_ns.erase(busy->frame_ns.begin());
+            }
+        }
         if (now - busy->window >= std::chrono::seconds(5) && busy->spans.size() > 2) {
             auto& spans = busy->spans;
             std::ranges::sort(spans);

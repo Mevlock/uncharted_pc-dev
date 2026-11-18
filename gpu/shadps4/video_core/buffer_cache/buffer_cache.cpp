@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bbport_trace.h"
 #include <chrono>
 #include <thread>
 #include <array>
@@ -2455,12 +2456,16 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             const char* env = std::getenv("BB_ORDERED_FAULTS");
             return !(env && env[0] == '0');
         }();
+        // BB_FRAME_TRACE diagnosis: the fault's path (5 read back here, 6 ordered on the GPU side)
         if (assume_locks) {
             resolve();
-        } else if (ReadBackOnFaultThread(device_addr, size)) {
+        } else if (BbTrace::Record(BbTrace::PhaseBegin, 5), ReadBackOnFaultThread(device_addr, size)) {
             // read back on this thread (che2281337): nothing more to do
+            BbTrace::Record(BbTrace::PhaseEnd, 5);
         } else if (!async_side && ordered) {
+            BbTrace::Record(BbTrace::PhaseBegin, 6);
             liverpool->SendOrderedCommand(std::move(resolve));
+            BbTrace::Record(BbTrace::PhaseEnd, 6);
         } else if (!async_side) {
             liverpool->SendCommand<true>(std::move(resolve));
         } else {

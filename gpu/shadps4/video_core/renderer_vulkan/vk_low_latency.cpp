@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: low latency mode (vk_low_latency.h).
 
+#include "bbport_trace.h"
 #include "video_core/renderer_vulkan/vk_low_latency.h"
 
 #include <algorithm>
@@ -18,6 +19,8 @@
 #include "core/libraries/videoout/driver.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "../../../dlss_bridge/bbport_dlss_bridge.h"
+
+void BbHitchMark(char code); // gpu/shim/bbport_sampler.cpp (BB_HITCH_TIMELINE)
 
 namespace Vulkan::LowLatency {
 namespace {
@@ -779,6 +782,8 @@ void SetFrameSource(bool found) {
 }
 
 void GameFrameStart(u64 frame, u64 kicked) {
+    BbHitchMark('S');
+    BbTrace::Record(BbTrace::GameFrameStart, frame);
     if (!On()) {
         // the frame rate cap alone (the low latency mode off or not supported here)
         const u64 id = frame + 1;

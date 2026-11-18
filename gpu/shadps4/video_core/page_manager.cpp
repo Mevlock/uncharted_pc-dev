@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bbport_trace.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -52,6 +53,9 @@ extern "C" int runtime_thread_is_guest(void); // runtime_thread.c
 #endif
 
 namespace VideoCore {
+
+/// BB_FRAME_TRACE diagnosis: 1 while the texture cache changes watches (image pages).
+static thread_local u64 t_protect_origin = 0;
 
 constexpr size_t PM_PAGE_SIZE = 4_KB;
 constexpr size_t PM_PAGE_BITS = 12;
@@ -232,6 +236,8 @@ struct PageManager::Impl {
         }
         if (Common::IsWriteError(context)) {
             BbStats::Timer timer{BbStats::t_write_faults};
+            BbTrace::Record(BbTrace::FaultBegin, addr);
+            BbTrace::Scope trace_end{BbTrace::FaultEnd};
             return rasterizer->OnWriteFault(addr, is_gpu_thread);
         } else {
             BbStats::read_faults.fetch_add(1, std::memory_order_relaxed);
@@ -571,7 +577,7 @@ struct SignalImpl : public PageManager::Impl {
             return env && env[0] == '1';
         }();
         const u64 t0 = stats ? __rdtsc() : 0;
-        ProtectInner(address, size, perms);
+        ProtectTraced(address, size, perms);
         if (stats) {
             static std::atomic<u64> calls[2][2]{}, pages[2]{}, cycles[2]{};
             static std::atomic<u64> window{0};
@@ -604,7 +610,17 @@ struct SignalImpl : public PageManager::Impl {
         }
     }
 
-    void ProtectInner(VAddr address, size_t size, Core::MemoryPermission perms) {
+    static void ProtectTraced(VAddr address, size_t size, Core::MemoryPermission perms) {
+        // arg: first page (28 bits) | pages << 28 | write granted << 62
+        BbTrace::Record(BbTrace::ProtectBegin,
+                        ((address >> 12) & 0xfffffff) | ((((size + 4095) >> 12) & 0x3ffffffff) << 28) |
+                            (u64(True(perms & Core::MemoryPermission::Write)) << 62) |
+                            (t_protect_origin << 63));
+        ProtectInner(address, size, perms);
+        BbTrace::Record(BbTrace::ProtectEnd);
+    }
+
+    static void ProtectInner(VAddr address, size_t size, Core::MemoryPermission perms) {
         auto* memory = Core::Memory::Instance();
         auto& impl = memory->GetAddressSpace();
         // bbport: with read tracking (BB_READBACKS=2) a page both GPU- and CPU-modified (the
@@ -646,7 +662,9 @@ void PageManager::OnGpuUnmap(VAddr address, size_t size) {
 
 template <bool track>
 void PageManager::UpdatePageWatchers(VAddr addr, u64 size) const {
+    t_protect_origin = 1;
     impl->UpdatePageWatchers<track, false>(addr, size);
+    t_protect_origin = 0;
 }
 
 template <bool track, bool is_read>

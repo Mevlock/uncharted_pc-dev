@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bbport_trace.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -1817,6 +1818,8 @@ void TextureCache::RefreshImage(Image& image) {
         return;
     }
     BbStats::Timer timer{BbStats::t_refresh};
+    BbTrace::Record(BbTrace::ImageUploadBegin, image.info.guest_size);
+    BbTrace::Scope trace_end{BbTrace::ImageUploadEnd};
 
     RENDERER_TRACE;
     TRACE_HINT(fmt::format("{:x}:{:x}", image.info.guest_address, image.info.guest_size));
