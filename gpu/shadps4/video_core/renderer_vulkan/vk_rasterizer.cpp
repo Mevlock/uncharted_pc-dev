@@ -9555,6 +9555,8 @@ bool Rasterizer::TakeSceneFrame() noexcept {
 }
 
 void Rasterizer::OnGuestFlip() {
+    // Revokes still waiting for a copy (none should be) are applied once a frame at the latest.
+    VideoCore::FlushDeferredProtects();
     static u64 flips = 0;
     ++flips;
     g_flips.store(flips, std::memory_order_relaxed);
@@ -9759,6 +9761,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     }();
     const auto unmap = [this, addr, size] {
         DrainDrawPipe();
+        VideoCore::FlushDeferredProtects(); // revokes still waiting go before the range leaves
         if (v2) {
             scheduler.WaitHostCopies();
             buffer_cache.ForgetUnmapped(addr, size);

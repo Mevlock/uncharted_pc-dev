@@ -18,6 +18,14 @@ namespace VideoCore {
 struct UffdImpl;
 struct SignalImpl;
 
+/// bbport: set while the buffer tracker revokes writes to pages an upload clears (the copy that
+/// follows reads them through MemoryManager::CopySparseMemory): those revokes may wait for it.
+extern thread_local bool t_defer_revoke;
+/// Applies the waiting revokes (before guest memory is read for the GPU, or protection changes).
+void FlushDeferredProtects();
+/// The same when a waiting revoke covers [address, address + size) (a copy about to read it).
+void FlushDeferredProtects(VAddr address, u64 size);
+
 class PageManager {
     // PAGE_SIZE and PAGE_BITS conflicts with machine/param.h definitions on freebsd!
     // Use the same page size as the tracker.

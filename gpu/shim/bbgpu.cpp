@@ -86,6 +86,10 @@ std::vector<Symbol> g_symbols;
 u32 g_sdk_version;
 } // namespace
 
+namespace VideoCore {
+void FlushDeferredProtects(VAddr address, u64 size); // page_manager.cpp
+}
+
 namespace Core::Loader {
 void SymbolsResolver::AddSymbol(const char* nid, const char* library, const char* module, SymbolType,
                                 u64 address) {
@@ -155,6 +159,8 @@ static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
     }
 }
 void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
+    // bbport: revokes waiting for this copy (page_manager.cpp, deferred revokes) go first.
+    VideoCore::FlushDeferredProtects(source, size);
     // bbport: large uploads (streaming) are split across the copy threads.
     constexpr u64 Chunk = 512 * 1024;
     if (size < 4 * Chunk || !BbCopy::Enabled()) {
