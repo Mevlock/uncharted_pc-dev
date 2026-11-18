@@ -374,6 +374,13 @@ std::condition_variable gate_cv;
 s64 gate_posted = -1; ///< the last game flip whose post work was submitted
 std::atomic<u64> gate_waits{0}, gate_timeouts{0};
 std::atomic<s64> gate_wait_ns{0};
+/// The GPU idle time the gate put before each game frame's GPU work (by frame id): from the last
+/// frame's GPU done (or the gate's start, if later) to its post work's submit, i.e. its hold. The
+/// presenter takes it off that frame's ready time, so the offset learns the GPU's own time for the
+/// frame: with the gate's delay in, each frame's lag carried the last frame's target and the offset
+/// fed itself up to its clamp (16.7 ms at 120, m1_gate).
+std::array<std::atomic<u64>, Ring> ready_id{}, gate_before_id{};
+std::array<std::atomic<s64>, Ring> ready_at{}, gate_before_ns{};
 
 void GateWait(u64 id, s64 period) {
     const s64 target = Target(id);
@@ -389,8 +396,15 @@ void GateWait(u64 id, s64 period) {
     if (!gate_cv.wait_until(lk, deadline, [&] { return gate_posted >= flip; })) {
         gate_timeouts.fetch_add(1, std::memory_order_relaxed);
     }
+    const s64 end = Now();
     gate_waits.fetch_add(1, std::memory_order_relaxed);
-    gate_wait_ns.fetch_add(Now() - start, std::memory_order_relaxed);
+    gate_wait_ns.fetch_add(end - start, std::memory_order_relaxed);
+    const s64 idle_from = ready_id[id % Ring].load(std::memory_order_acquire) == id
+                              ? std::max(start, ready_at[id % Ring].load(std::memory_order_relaxed))
+                              : start;
+    gate_before_ns[(id + 1) % Ring].store(std::max<s64>(0, end - idle_from),
+                                          std::memory_order_relaxed);
+    gate_before_id[(id + 1) % Ring].store(id + 1, std::memory_order_release); // the next frame's work follows
 }
 
 void GatePost(s64 flip) {
@@ -422,8 +436,13 @@ void ReadyAndWait(u64 id) {
     const s64 slot = entry.slot.load(std::memory_order_relaxed);
     const s64 target = entry.target.load(std::memory_order_relaxed);
     const s64 now = Now();
+    ready_at[id % Ring].store(now, std::memory_order_relaxed);
+    ready_id[id % Ring].store(id, std::memory_order_release);
+    const s64 gated = gate_before_id[id % Ring].load(std::memory_order_acquire) == id
+                          ? gate_before_ns[id % Ring].load(std::memory_order_relaxed)
+                          : 0;
     const u64 n = lag_count.load(std::memory_order_relaxed);
-    lags[n % Samples].store(now - slot, std::memory_order_relaxed);
+    lags[n % Samples].store(now - slot - gated, std::memory_order_relaxed);
     lag_count.store(n + 1, std::memory_order_release);
     if (target > now) {
         if (target - now < 100'000'000) {
