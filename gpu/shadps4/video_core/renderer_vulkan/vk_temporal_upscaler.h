@@ -384,6 +384,9 @@ private:
     bool reset = true;
     u64 frame_id = 0;
     std::chrono::steady_clock::time_point last_frame{};
+    float last_frame_cpu_ms = 0.0f; ///< the GPU thread's time between the last two evaluations
+    /// The frame time for the upscalers (the frame's world step; see the definition).
+    float FrameMs();
 
     u32 width = 0, height = 0;             ///< render size
     u32 out_width = 0, out_height = 0;     ///< output size of the context

@@ -343,8 +343,27 @@ void SleepUntil(s64 wake) {
 }
 
 /// The frame `id` starts (frame thread, before the driver's sleep and the frame's input).
+/// The game frames' world steps (FrameStepNs): each frame's start, as the game's frame clock sees
+/// it (paced: its target, the world steps being the intervals between the targets; else when it
+/// started). Frame thread -> GPU thread.
+std::array<std::atomic<u64>, Ring> step_id{};
+std::array<std::atomic<s64>, Ring> step_at{};
+void NoteStep(u64 id, s64 at) {
+    step_id[id % Ring].store(0, std::memory_order_relaxed);
+    step_at[id % Ring].store(at, std::memory_order_relaxed);
+    step_id[id % Ring].store(id, std::memory_order_release);
+}
+s64 StepAt(u64 id) {
+    return step_id[id % Ring].load(std::memory_order_acquire) == id
+               ? step_at[id % Ring].load(std::memory_order_relaxed)
+               : 0;
+}
+/// The GPU thread's last game flip (its flip argument; -1: none yet).
+std::atomic<s64> gpu_flip_arg{-1};
+
 void BeforeFrame(u64 id) {
     if (!active.load(std::memory_order_relaxed)) {
+        NoteStep(id, Now());
         return;
     }
     const s64 period = Libraries::VideoOut::FrameCapPeriodNs();
@@ -356,6 +375,7 @@ void BeforeFrame(u64 id) {
     if (period <= 0 || queued_last.load(std::memory_order_relaxed) + 8 < id) {
         Stop();
         unpaced.fetch_add(1, std::memory_order_relaxed);
+        NoteStep(id, now);
         return;
     }
     // The frame's slot: one period after the last one's, at most one period in the past (as the
@@ -378,6 +398,7 @@ void BeforeFrame(u64 id) {
         current_target.store(slot + offset, std::memory_order_relaxed);
         last_target = slot + offset; // the trace's target: the present target
     }
+    NoteStep(id, even ? slot + offset : wake);
     Libraries::VideoOut::SetStartPaced(true);
     paced.fetch_add(1, std::memory_order_relaxed);
     if (wake > now) {
@@ -959,6 +980,9 @@ void PresentReadyAndWait(s64 flip_arg) {
 }
 
 void GateAfterFlip(s64 flip_arg) {
+    if (flip_arg >= 0) {
+        Pace::gpu_flip_arg.store(flip_arg, std::memory_order_relaxed);
+    }
     if (Pace::even && flip_arg >= 0) {
         Pace::GateWait(static_cast<u64>(flip_arg) + 1, Libraries::VideoOut::FrameCapPeriodNs());
     }
@@ -993,6 +1017,17 @@ void PresentFlipped(s64 flip_arg, s64 flip_ns) {
     } else if (target) {
         Pace::held.fetch_add(1, std::memory_order_relaxed);
     }
+}
+
+s64 FrameStepNs() {
+    // The frame being recorded is the one after the GPU thread's last game flip (ids: flip + 1).
+    const s64 flip = Pace::gpu_flip_arg.load(std::memory_order_relaxed);
+    if (flip < 0) {
+        return 0;
+    }
+    const u64 id = static_cast<u64>(flip) + 2;
+    const s64 now = Pace::StepAt(id), before = Pace::StepAt(id - 1);
+    return now && before && now > before ? now - before : 0;
 }
 
 s64 PresentLeadNs() {

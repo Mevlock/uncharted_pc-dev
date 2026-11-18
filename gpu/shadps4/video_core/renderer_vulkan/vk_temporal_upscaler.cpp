@@ -42,6 +42,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace Vulkan {
@@ -56,6 +57,33 @@ extern "C" int runtime_uncharted_game;            // runtime_ultrawide.c: 1, 2, 
 static int g_frames_since_cut = 100000; // bbport: frames since the last camera cut (dumps)
 void BbDrawLogNote(const char* text); // vk_rasterizer.cpp
 extern std::atomic<u64> g_flips;       // vk_rasterizer.cpp: flips so far
+
+/// bbport: the frame time the temporal upscalers get (DLSS's InFrameTimeDeltaInMsec, FSR's frame
+/// time): the frame's world step, i.e. the time between this picture and the last one on screen and
+/// in the game's frame clock (LowLatency::FrameStepNs). It was the time between the evaluations
+/// on the GPU thread, whose recording follows the GPU: at a 60 cap with the GPU holds on the
+/// game's queue (combo2) the recording ran into the holds' releases on a stretch of the U3 horse
+/// ride, and the times went 5-9 / 23-28 ms in turns while the pictures came every 16.7 ms (the
+/// user: Nate flickering there, at every start). Without a frame start hook (no world steps) the
+/// GPU thread's time is all there is. BB_UPSCALER_FRAME_TIME=cpu: that time always (A/B).
+float TemporalUpscaler::FrameMs() {
+    const auto now = std::chrono::steady_clock::now();
+    float cpu_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
+    last_frame = now;
+    if (cpu_ms <= 0.0f || cpu_ms > 200.0f) {
+        cpu_ms = 16.6f;
+    }
+    static const bool cpu_only = [] {
+        const char* env = std::getenv("BB_UPSCALER_FRAME_TIME");
+        const bool v = env && std::strcmp(env, "cpu") == 0;
+        std::printf("Upscaler: frame time = %s (BB_UPSCALER_FRAME_TIME)\n",
+                    v ? "the GPU thread's time between evaluations" : "the frame's world step");
+        return v;
+    }();
+    const s64 step = cpu_only ? 0 : LowLatency::FrameStepNs();
+    last_frame_cpu_ms = cpu_ms;
+    return step > 0 && step < 200'000'000 ? float(double(step) / 1e6) : cpu_ms;
+}
 
 namespace {
 
@@ -1606,12 +1634,7 @@ void TemporalUpscaler::Run() {
     }
     const bool has_reactive = mask_ready || RecordReactive(input_color_view);
 
-    const auto now = std::chrono::steady_clock::now();
-    float frame_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
-    if (frame_ms <= 0.0f || frame_ms > 200.0f) {
-        frame_ms = 16.6f;
-    }
-    last_frame = now;
+    const float frame_ms = FrameMs();
 
     bool dispatched = false;
     if (BbSettings::Get().upscaler == BbSettings::UpscalerTaa) {
@@ -2519,12 +2542,7 @@ bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::I
     const auto color_access = vk::AccessFlagBits2::eColorAttachmentRead |
                               vk::AccessFlagBits2::eColorAttachmentWrite;
     const auto rw = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
-    const auto now = std::chrono::steady_clock::now();
-    float frame_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
-    if (frame_ms <= 0.0f || frame_ms > 200.0f) {
-        frame_ms = 16.6f;
-    }
-    last_frame = now;
+    const float frame_ms = FrameMs();
 
     // bbport: FSR 4 writes its HDR-format output, copied into the output-size UI image.
     if (UseFsr4() || UseDlss() || UseXess() ||
