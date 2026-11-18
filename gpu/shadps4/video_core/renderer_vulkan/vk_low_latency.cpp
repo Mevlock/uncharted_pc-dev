@@ -486,8 +486,9 @@ struct GateEntry {
 };
 std::array<GateEntry, 16> gate_ring{};
 u32 gate_next = 0;
-std::atomic<u64> gate_waits{0}, gate_timeouts{0};
+std::atomic<u64> gate_waits{0}, gate_timeouts{0}, gate_yields{0};
 std::atomic<s64> gate_wait_ns{0};
+std::atomic<u32> gate_yield{0}; ///< threads holding the submit lock that wait for the recorder
 /// The GPU idle time the gate put before each game frame's GPU work (by frame id): from the last
 /// frame's GPU done (or the gate's start, if later) to its post work's submit, i.e. its hold. The
 /// presenter takes it off that frame's ready time, so the offset learns the GPU's own time for the
@@ -593,10 +594,15 @@ void GateBeforeSubmit(u64 tick, bool recorder) {
     }
     const auto deadline =
         std::chrono::steady_clock::time_point(std::chrono::nanoseconds(std::max(e.deadline, start)));
-    if (!gate_cv.wait_until(lk, deadline, [&] { return gate_posted >= e.flip; })) {
+    const auto open = [&] {
+        return gate_posted >= e.flip || (recorder && gate_yield.load(std::memory_order_acquire) > 0);
+    };
+    if (!gate_cv.wait_until(lk, deadline, open)) {
         gate_timeouts.fetch_add(1, std::memory_order_relaxed);
         gate_posted = std::max(gate_posted, e.flip); // given up: the later submissions go on too
         gate_posted_a.store(gate_posted, std::memory_order_release);
+    } else if (gate_posted < e.flip) {
+        gate_yields.fetch_add(1, std::memory_order_relaxed); // gave way (GateYieldBegin)
     }
     if (recorder) {
         g_async_gated_tick.store(0, std::memory_order_release);
@@ -613,6 +619,16 @@ void GateBeforeSubmit(u64 tick, bool recorder) {
     gate_before_ns[(id + 1) % Ring].store(std::max<s64>(0, end - idle_from),
                                           std::memory_order_relaxed);
     gate_before_id[(id + 1) % Ring].store(id + 1, std::memory_order_release); // the next frame's work follows
+}
+
+void GateYieldBegin() {
+    gate_yield.fetch_add(1, std::memory_order_acq_rel);
+    { std::scoped_lock lk{gate_mutex}; } // a gate wait checks the count under this lock
+    gate_cv.notify_all();
+}
+
+void GateYieldEnd() {
+    gate_yield.fetch_sub(1, std::memory_order_acq_rel);
 }
 
 void GatePost(s64 flip) {
@@ -1058,7 +1074,7 @@ void Print(u64 current) {
     if (Pace::even && at < sizeof(line)) {
         const u64 h = Pace::held.exchange(0), l = Pace::late.exchange(0);
         at += std::snprintf(line + at, sizeof(line) - at,
-                            " | even: offset %.2f, held %llu by %.2f, late %llu by %.2f, gate %llu waits %.2f, %llu timeouts",
+                            " | even: offset %.2f, held %llu by %.2f, late %llu by %.2f, gate %llu waits %.2f, %llu timeouts, %llu yields",
                             double(Pace::offset_ns.load()) / 1e6, static_cast<unsigned long long>(h),
                             double(Pace::held_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, h)),
                             static_cast<unsigned long long>(l),
@@ -1066,7 +1082,8 @@ void Print(u64 current) {
                             static_cast<unsigned long long>(Pace::gate_waits.load()),
                             double(Pace::gate_wait_ns.exchange(0)) / 1e6 /
                                 double(std::max<u64>(1, Pace::gate_waits.exchange(0))),
-                            static_cast<unsigned long long>(Pace::gate_timeouts.exchange(0)));
+                            static_cast<unsigned long long>(Pace::gate_timeouts.exchange(0)),
+                            static_cast<unsigned long long>(Pace::gate_yields.exchange(0)));
         if (Pace::gpu_release.load(std::memory_order_relaxed) && at < sizeof(line)) {
             const u64 r = Pace::release_n.exchange(0);
             at += std::snprintf(line + at, sizeof(line) - at,
@@ -1191,6 +1208,14 @@ void GateBeforeSubmit(u64 tick, bool recorder) {
     if (Pace::even) {
         Pace::GateBeforeSubmit(tick, recorder);
     }
+}
+
+void GateYieldBegin() {
+    Pace::GateYieldBegin();
+}
+
+void GateYieldEnd() {
+    Pace::GateYieldEnd();
 }
 
 void GatePostSubmitted(s64 flip_arg) {
