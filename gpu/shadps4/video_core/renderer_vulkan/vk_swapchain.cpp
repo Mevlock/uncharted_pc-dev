@@ -104,7 +104,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
                vk::to_string(swapchain_result));
     swapchain = chain;
     LowLatency::OnSwapchain(swapchain);
-    BbVrr::OnSwapchain(swapchain);
+    BbVrr::OnSwapchain(swapchain, present_mode);
     metadata_peak = 0.0f; // a new swapchain has no metadata yet
     UpdateHdrMetadata();
 

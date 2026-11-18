@@ -66,6 +66,9 @@ struct Monitor {
     u32 target = 0;      ///< the adapter-relative target id
     u32 source = 0;      ///< Windows' source id (the n-1 of \\.\DISPLAYn is not used: names move)
     double refresh = 0;  ///< Hz
+    POINTL position{};   ///< the source's place on the desktop (physical pixels, any DPI awareness)
+    u32 width = 0, height = 0; ///< the source's size (0: not known)
+    RECT rect{};         ///< the monitor's rectangle (GetMonitorInfo, in the caller's DPI context)
     std::string name;    ///< the monitor's own name (EDID), for the log
     bool valid = false;
 };
@@ -98,6 +101,14 @@ Monitor FindMonitor(HWND hwnd) {
         if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS ||
             std::wcscmp(source.viewGdiDeviceName, info.szDevice) != 0) {
             continue;
+        }
+        m.rect = info.rcMonitor;
+        const u32 mode = path.sourceInfo.modeInfoIdx;
+        if (mode != DISPLAYCONFIG_PATH_MODE_IDX_INVALID && mode < mode_count &&
+            modes[mode].infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE) {
+            m.position = modes[mode].sourceMode.position;
+            m.width = modes[mode].sourceMode.width;
+            m.height = modes[mode].sourceMode.height;
         }
         m.adapter = path.targetInfo.adapterId;
         m.target = path.targetInfo.id;
@@ -374,6 +385,340 @@ struct NvSource {
         }
     }
 };
+
+// ---- AMD: ADLX (amdadlx64.dll of Adrenalin) and ADL (atiadlxx.dll) ----------------------------
+// ADLX has no live VRR state like NVAPI's: IADLXDisplayFreeSync only tells whether FreeSync is
+// supported and switched on for a display (its change events say no more). So the state shown is
+// derived: FreeSync on for the window's display, the window in front and covering that display
+// (the port's fullscreen is borderless), and the frames on screen inside the display's FreeSync
+// range (ADL2_Display_FreeSync_Cap; the current refresh rate caps it). ADL also tells whether the
+// display mode in use and a borderless window can use FreeSync.
+// The interfaces are called through their vtables, at the slots of the C declarations in the
+// GPUOpen ADLX SDK headers (MIT; SDK/Include/ISystem.h, IDesktops.h, IDisplays.h,
+// IDisplaySettings.h, ADLX.h): no SDK header or library is needed to build.
+namespace Amd {
+
+using Result = int; // ADLX_RESULT: 0 ADLX_OK
+
+/// The method at `slot` of an ADLX interface (__stdcall, the ADLX_STD_CALL of the headers).
+template <typename R, typename... A>
+R Call(void* object, u32 slot, A... args) {
+    using Method = R(__stdcall*)(void*, A...);
+    const auto vtable = *static_cast<void* const* const*>(object);
+    return reinterpret_cast<Method>(vtable[slot])(object, args...);
+}
+
+// Slots (C vtables of the ADLX SDK 2.0 headers; IADLXInterface: Acquire 0, Release 1, QueryInterface 2).
+constexpr u32 Release = 1;
+constexpr u32 SystemGetDisplaysServices = 3, SystemGetDesktopsServices = 4; // IADLXSystem (no IADLXInterface)
+constexpr u32 DesktopServicesGetDesktops = 4;
+constexpr u32 ListSize = 3, ListAtTyped = 11; // IADLXDesktopList::At_DesktopList, IADLXDisplayList::At_DisplayList
+constexpr u32 DesktopSize = 4, DesktopTopLeft = 5, DesktopType = 6, DesktopGetDisplays = 8;
+constexpr u32 DisplayName = 6;
+constexpr u32 DisplayServicesGetFreeSync = 9;
+constexpr u32 FreeSyncIsSupported = 3, FreeSyncIsEnabled = 4;
+constexpr u32 MappingAdlIdsFromDisplay = 5, MappingAdlIdsFromDesktop = 7; // IADLMapping (no IADLXInterface)
+constexpr int DesktopSingle = 0; // ADLX_DESKTOP_TYPE DESKTOP_SINGLE
+
+struct Point { // ADLX_Point
+    int x, y;
+};
+
+using QueryFullVersion = Result(__cdecl*)(u64* version);
+using Initialize = Result(__cdecl*)(u64 version, void** system);
+using Initialize2 = Result(__cdecl*)(u64 version, void** system, void** mapping);
+
+void* adlx_system = nullptr; ///< IADLXSystem
+void* mapping = nullptr; ///< IADLMapping (ADLXInitialize2; nullptr with older ADLX: no FreeSync range)
+
+void ReleaseObject(void*& object) {
+    if (object) {
+        Call<long>(object, Release);
+        object = nullptr;
+    }
+}
+
+bool Load() {
+    static const bool ok = [] {
+        HMODULE dll = LoadLibraryW(L"amdadlx64.dll");
+        if (!dll) {
+            Log("VRR: ADLX not found (amdadlx64.dll)\n");
+            return false;
+        }
+        const auto full_version =
+            reinterpret_cast<QueryFullVersion>(GetProcAddress(dll, "ADLXQueryFullVersion"));
+        const auto init2 = reinterpret_cast<Initialize2>(GetProcAddress(dll, "ADLXInitialize2"));
+        const auto init = reinterpret_cast<Initialize>(GetProcAddress(dll, "ADLXInitialize"));
+        u64 version = 0;
+        if (!full_version || full_version(&version) != 0 || (!init2 && !init)) {
+            Log("VRR: ADLX without the functions needed\n");
+            return false;
+        }
+        // The interfaces used are in every ADLX release: the driver's own version is accepted.
+        const Result result = init2 ? init2(version, &adlx_system, &mapping) : init(version, &adlx_system);
+        if (result != 0 || !adlx_system) {
+            Log("VRR: ADLX did not start (%d)\n", result);
+            adlx_system = mapping = nullptr;
+            return false;
+        }
+        Log("VRR: ADLX %u.%u.%u.%u%s\n", u32(version >> 48), u32(version >> 32) & 0xffff,
+            u32(version >> 16) & 0xffff, u32(version) & 0xffff,
+            mapping ? "" : " (no ADL mapping: the FreeSync range is not known)");
+        return true;
+    }();
+    return ok;
+}
+
+// ADL: the display's FreeSync range and abilities.
+namespace Adl {
+struct FreeSyncCap { // ADLFreeSyncCap
+    int caps;
+    int min_uhz, max_uhz;
+    unsigned char label;
+    char reserved[3];
+    int reserved2[4];
+};
+static_assert(sizeof(FreeSyncCap) == 32);
+constexpr int CapSupported = 1 << 0, CapCurrentMode = 1 << 3, CapBorderless = 1 << 6;
+
+using Malloc = void*(__stdcall*)(int size);
+using Create = int(__cdecl*)(Malloc callback, int connected_only, void** context);
+using GetCap = int(__cdecl*)(void* context, int adapter, int display, FreeSyncCap* cap);
+
+void* context = nullptr;
+GetCap get_cap{};
+
+void* __stdcall Allocate(int size) {
+    return std::malloc(size_t(size));
+}
+
+bool Load() {
+    static const bool ok = [] {
+        HMODULE dll = LoadLibraryW(L"atiadlxx.dll");
+        if (!dll) {
+            return false;
+        }
+        const auto create = reinterpret_cast<Create>(GetProcAddress(dll, "ADL2_Main_Control_Create"));
+        get_cap = reinterpret_cast<GetCap>(GetProcAddress(dll, "ADL2_Display_FreeSync_Cap"));
+        return create && get_cap && create(Allocate, 1, &context) == 0 && context;
+    }();
+    return ok;
+}
+} // namespace Adl
+
+} // namespace Amd
+
+/// The AMD source: the ADLX display of the window's monitor (the single-display desktop at the
+/// monitor's place and size, and on its Windows source when ADLX maps it), found again when the
+/// window moves to another monitor or the display layout changes.
+struct AmdSource {
+    HMONITOR monitor = nullptr;
+    void* freesync = nullptr; ///< IADLXDisplayFreeSync of the display
+    Monitor mon;
+    Clock::time_point checked{};
+    std::string hidden; ///< why the display is not certain (freesync nullptr)
+    bool range_known = false;
+    double range_min = 0, range_max = 0; ///< Hz (ADL)
+    int adl_caps = -1;                   ///< ADL FreeSync abilities (-1: not known)
+    std::string logged;                  ///< the last display line logged
+
+    Raw Sample(HWND hwnd, bool front, double fps) {
+        const auto now = Clock::now();
+        const HMONITOR current = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        if (current != monitor || !freesync || now - checked > std::chrono::seconds(10)) {
+            Resolve(hwnd);
+            checked = now;
+        }
+        if (!freesync) {
+            return {-2, hidden};
+        }
+        bool supported = false, on = false;
+        const Amd::Result a = Amd::Call<Amd::Result>(freesync, Amd::FreeSyncIsSupported, &supported);
+        const Amd::Result b = Amd::Call<Amd::Result>(freesync, Amd::FreeSyncIsEnabled, &on);
+        if (a != 0 || b != 0) {
+            checked = {}; // the display may have changed: found again next time
+            return {-2, "ADLX FreeSync state not read (" + std::to_string(a) + ", " + std::to_string(b) + ")"};
+        }
+        std::string why = "ADLX " + mon.name;
+        if (!supported) {
+            return {0, why + ": FreeSync not supported by the display"};
+        }
+        if (!on) {
+            return {0, why + ": FreeSync off in AMD Software"};
+        }
+        if (adl_caps >= 0 && !(adl_caps & Amd::Adl::CapCurrentMode)) {
+            return {0, why + ": FreeSync on, not in the current display mode (ADL)"};
+        }
+        // The window: in front, not minimised, covering the whole monitor (borderless fullscreen).
+        RECT rect{};
+        if (IsIconic(hwnd) || !GetWindowRect(hwnd, &rect)) {
+            return {0, why + ": FreeSync on, the window is minimised"};
+        }
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (!GetMonitorInfoW(current, &info)) {
+            return {-2, "the window's monitor is not known"};
+        }
+        const RECT& m = info.rcMonitor;
+        if (rect.left != m.left || rect.top != m.top || rect.right != m.right || rect.bottom != m.bottom) {
+            return {0, why + ": FreeSync on, the game is in a window (not fullscreen)"};
+        }
+        if (adl_caps >= 0 && !(adl_caps & Amd::Adl::CapBorderless)) {
+            return {0, why + ": FreeSync on, not in a borderless fullscreen window (ADL)"};
+        }
+        if (!front) {
+            return {0, why + ": FreeSync on, the game not in front"};
+        }
+        // The frames on screen inside the range (the current refresh rate caps it).
+        if (fps <= 0.0) {
+            return {-1, why + ": no frame rate yet"};
+        }
+        const double top = mon.refresh > 0 && (!range_known || mon.refresh < range_max) ? mon.refresh : range_max;
+        char text[160];
+        if (range_known) {
+            std::snprintf(text, sizeof(text), ": FreeSync on, %.0f FPS, range %.0f-%.0f Hz", fps, range_min, top);
+        } else {
+            std::snprintf(text, sizeof(text), ": FreeSync on, %.0f FPS, up to %.0f Hz (lower end not known)", fps,
+                          top);
+        }
+        why += text;
+        if (top > 0 && fps > top * 1.015) {
+            return {0, why + ", above the range"};
+        }
+        if (range_known && fps < range_min * 0.985) {
+            return {0, why + ", below the range"};
+        }
+        return {1, why};
+    }
+
+    void Resolve(HWND hwnd) {
+        monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        Amd::ReleaseObject(freesync);
+        range_known = false;
+        adl_caps = -1;
+        mon = FindMonitor(hwnd);
+        if (!mon.valid || mon.width == 0 || mon.height == 0) {
+            hidden = "the window's monitor is not in Windows' display paths";
+            return;
+        }
+        void* desktops_service = nullptr;
+        void* desktops = nullptr;
+        if (Amd::Call<Amd::Result>(Amd::adlx_system, Amd::SystemGetDesktopsServices, &desktops_service) != 0 ||
+            !desktops_service ||
+            Amd::Call<Amd::Result>(desktops_service, Amd::DesktopServicesGetDesktops, &desktops) != 0 || !desktops) {
+            Amd::ReleaseObject(desktops_service);
+            hidden = "ADLX desktops not read";
+            return;
+        }
+        // The desktop at the monitor's place and size: one only, a single display, on the
+        // monitor's Windows source when ADLX maps it.
+        void* found = nullptr; // IADLXDesktop
+        u32 matches = 0;
+        bool single = false, source_ok = true;
+        int mapped_source = -1;
+        const u32 count = Amd::Call<u32>(desktops, Amd::ListSize);
+        for (u32 i = 0; i < count && i < 64; ++i) {
+            void* desktop = nullptr;
+            if (Amd::Call<Amd::Result>(desktops, Amd::ListAtTyped, i, &desktop) != 0 || !desktop) {
+                continue;
+            }
+            int w = 0, h = 0, type = -1;
+            Amd::Point top_left{};
+            if (Amd::Call<Amd::Result>(desktop, Amd::DesktopSize, &w, &h) == 0 &&
+                Amd::Call<Amd::Result>(desktop, Amd::DesktopTopLeft, &top_left) == 0 &&
+                top_left.x == mon.position.x && top_left.y == mon.position.y && u32(w) == mon.width &&
+                u32(h) == mon.height) {
+                ++matches;
+                Amd::ReleaseObject(found);
+                found = desktop;
+                single = Amd::Call<Amd::Result>(desktop, Amd::DesktopType, &type) == 0 && type == Amd::DesktopSingle;
+                if (Amd::mapping) {
+                    int adapter = 0, source = 0, bus = 0, dev = 0, fn = 0;
+                    if (Amd::Call<Amd::Result>(Amd::mapping, Amd::MappingAdlIdsFromDesktop, desktop, &adapter,
+                                               &source, &bus, &dev, &fn) == 0) {
+                        mapped_source = source;
+                        source_ok = u32(source) == mon.source;
+                    }
+                }
+                continue;
+            }
+            Amd::ReleaseObject(desktop);
+        }
+        Amd::ReleaseObject(desktops);
+        Amd::ReleaseObject(desktops_service);
+        char where[96];
+        std::snprintf(where, sizeof(where), "%s (%ld,%ld %ux%u, Windows source %u)", mon.name.c_str(),
+                      mon.position.x, mon.position.y, mon.width, mon.height, mon.source);
+        if (matches != 1) {
+            Amd::ReleaseObject(found);
+            hidden = matches == 0 ? std::string("no AMD desktop matches ") + where
+                                  : std::string("more than one AMD desktop matches ") + where;
+            return;
+        }
+        if (!single) {
+            Amd::ReleaseObject(found);
+            hidden = std::string("the AMD desktop of ") + where + " is not a single display (duplicate or Eyefinity)";
+            return;
+        }
+        if (!source_ok) {
+            Amd::ReleaseObject(found);
+            hidden = std::string("ADLX places the desktop of ") + where + " on source " +
+                     std::to_string(mapped_source);
+            return;
+        }
+        void* displays = nullptr;
+        void* display = nullptr;
+        const bool listed = Amd::Call<Amd::Result>(found, Amd::DesktopGetDisplays, &displays) == 0 && displays &&
+                            Amd::Call<u32>(displays, Amd::ListSize) == 1 &&
+                            Amd::Call<Amd::Result>(displays, Amd::ListAtTyped, 0u, &display) == 0 && display;
+        Amd::ReleaseObject(displays);
+        Amd::ReleaseObject(found);
+        void* services = nullptr;
+        if (!listed || Amd::Call<Amd::Result>(Amd::adlx_system, Amd::SystemGetDisplaysServices, &services) != 0 ||
+            !services ||
+            Amd::Call<Amd::Result>(services, Amd::DisplayServicesGetFreeSync, display, &freesync) != 0) {
+            freesync = nullptr;
+            Amd::ReleaseObject(services);
+            Amd::ReleaseObject(display);
+            hidden = std::string("ADLX FreeSync of ") + where + " not found";
+            return;
+        }
+        Amd::ReleaseObject(services);
+        const char* adlx_name = nullptr;
+        Amd::Call<Amd::Result>(display, Amd::DisplayName, &adlx_name);
+        std::string range = "range not known (no ADL)";
+        int adapter = -1, index = -1, bus = 0, dev = 0, fn = 0;
+        if (Amd::mapping &&
+            Amd::Call<Amd::Result>(Amd::mapping, Amd::MappingAdlIdsFromDisplay, display, &adapter, &index, &bus,
+                                   &dev, &fn) == 0 &&
+            Amd::Adl::Load()) {
+            Amd::Adl::FreeSyncCap cap{};
+            const int status = Amd::Adl::get_cap(Amd::Adl::context, adapter, index, &cap);
+            if (status == 0) {
+                adl_caps = cap.caps;
+                if ((cap.caps & Amd::Adl::CapSupported) && cap.min_uhz > 0 && cap.max_uhz > cap.min_uhz) {
+                    range_known = true;
+                    range_min = cap.min_uhz / 1e6;
+                    range_max = cap.max_uhz / 1e6;
+                }
+                char text[128];
+                std::snprintf(text, sizeof(text), "ADL range %.1f-%.1f Hz, abilities 0x%x", cap.min_uhz / 1e6,
+                              cap.max_uhz / 1e6, cap.caps);
+                range = text;
+            } else {
+                range = "ADL2_Display_FreeSync_Cap failed (" + std::to_string(status) + ")";
+            }
+        }
+        Amd::ReleaseObject(display);
+        char line[320];
+        std::snprintf(line, sizeof(line), "VRR: ADLX %s: display \"%s\", ADL %d/%d, %.2f Hz, %s\n", where,
+                      adlx_name ? adlx_name : "", adapter, index, mon.refresh, range.c_str());
+        if (line != logged) {
+            Log("%s", line);
+            logged = line;
+        }
+    }
+};
 #endif // _WIN32
 
 // ---- Vendor-neutral: VK_EXT_present_timing -----------------------------------------------------
@@ -514,6 +859,23 @@ bool shown_active = false;
 const char* label = nullptr;
 std::atomic<bool> poll_started{false};
 std::atomic<int64_t> last_wanted_ms{0};
+std::atomic<float> screen_fps{0.0f}; ///< the frames on screen per second (the FPS counter)
+std::atomic<int> present_mode{-1};   ///< the swapchain's VkPresentModeKHR (-1: none yet)
+
+const char* PresentModeName(int mode) {
+    switch (mode) {
+    case VK_PRESENT_MODE_IMMEDIATE_KHR:
+        return "Immediate";
+    case VK_PRESENT_MODE_MAILBOX_KHR:
+        return "Mailbox";
+    case VK_PRESENT_MODE_FIFO_KHR:
+        return "FIFO";
+    case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+        return "FIFO Relaxed";
+    default:
+        return "other";
+    }
+}
 
 int64_t NowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
@@ -523,16 +885,31 @@ void PollThread() {
 #ifdef _WIN32
     NvSource nv;
     const bool use_nv = vendor == 0x10de && Nv::Load();
+    // AMD: ADLX where the live present timing is not offered (bbport_vrr.h).
+    AmdSource amd;
+    const bool use_amd = vendor == 0x1002 && !Timing::swapchain_on && Amd::Load();
+    if (use_amd) {
+        // Window and monitor rectangles in physical pixels, whatever the process' DPI awareness.
+        using SetContext = void*(WINAPI*)(void*);
+        if (const auto set = reinterpret_cast<SetContext>(
+                GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext"))) {
+            set(reinterpret_cast<void*>(intptr_t(-4))); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+        }
+    }
 #else
     const bool use_nv = false;
+    const bool use_amd = false;
 #endif
-    if (!use_nv && !Timing::swapchain_on && !Timing::device_on) {
-        Log("VRR indicator hidden: no source on this GPU/driver (NVAPI or VK_EXT_present_timing)\n");
+    if (!use_nv && !use_amd && !Timing::swapchain_on && !Timing::device_on) {
+        Log("VRR indicator hidden: no source on this GPU/driver (NVAPI, ADLX or VK_EXT_present_timing)\n");
         std::scoped_lock lk{shown_mutex};
         label = nullptr;
         return;
     }
-    Log("VRR: indicator source %s%s\n", use_nv ? "NVAPI" : "present timing",
+    Log("VRR: indicator source %s%s\n",
+        use_nv    ? "NVAPI"
+        : use_amd ? "ADLX (FreeSync on for the display, fullscreen, in front, frames in its range)"
+                  : "present timing",
         use_nv && Timing::device_on ? " (present timing logged beside it)" : "");
     int candidate = -2;
     Clock::time_point candidate_since{};
@@ -560,6 +937,12 @@ void PollThread() {
         void* hwnd = window.load();
         if (use_nv) {
             raw = hwnd ? nv.Sample(static_cast<HWND>(hwnd)) : Raw{-1, "no window yet"};
+        } else if (use_amd && !Timing::swapchain_on) {
+            raw = hwnd ? amd.Sample(static_cast<HWND>(hwnd), front, screen_fps.load(std::memory_order_relaxed))
+                       : Raw{-1, "no window yet"};
+            if (raw.state >= 0) {
+                raw.why += std::string(", ") + PresentModeName(present_mode.load(std::memory_order_relaxed));
+            }
         } else
 #endif
         {
@@ -703,7 +1086,8 @@ vk::SwapchainCreateFlagsKHR SwapchainFlags(vk::PhysicalDevice physical, vk::Surf
     return vk::SwapchainCreateFlagBitsKHR::ePresentTimingEXT | vk::SwapchainCreateFlagBitsKHR::ePresentId2;
 }
 
-void OnSwapchain(vk::SwapchainKHR chain) {
+void OnSwapchain(vk::SwapchainKHR chain, vk::PresentModeKHR mode) {
+    present_mode = int(mode);
     if (!Timing::swapchain_on) {
         return;
     }
@@ -749,10 +1133,11 @@ const void* PresentNext(const void* next) {
     return &Timing::id2_info;
 }
 
-Shown Get() {
+Shown Get(float fps) {
     if (!enabled) {
         return {};
     }
+    screen_fps.store(fps, std::memory_order_relaxed);
     last_wanted_ms.store(NowMs(), std::memory_order_relaxed);
     if (!poll_started.exchange(true)) {
         std::thread(PollThread).detach();
@@ -761,7 +1146,11 @@ Shown Get() {
     if (!label || !shown_known) {
         return {};
     }
-    return {label, shown_active};
+    Shown out{label, shown_active};
+    if (vendor == 0x1002) {
+        out.lit[0] = 0.95f, out.lit[1] = 0.25f, out.lit[2] = 0.22f; // AMD red, readable over the game
+    }
+    return out;
 }
 
 } // namespace BbVrr

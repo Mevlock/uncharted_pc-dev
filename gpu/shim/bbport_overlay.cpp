@@ -1455,12 +1455,12 @@ void FpsCounter() {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.35f, 1.0f, 0.35f, 1.0f), " DEV MODE");
     }
-    // "G-SYNC" (NVIDIA), "FreeSync" (AMD) or "VRR": lit while the display refreshes with the game's frames, dimmed
+    // "G-SYNC" (NVIDIA, green), "FreeSync" (AMD, red) or "VRR": lit while the display refreshes with the game's frames, dimmed
     // with "off" while it does not (the game not in front, composed by the desktop, a fixed refresh); bbport_vrr.h.
-    if (const BbVrr::Shown vrr = BbVrr::Get(); vrr.label) {
+    if (const BbVrr::Shown vrr = BbVrr::Get(frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f); vrr.label) {
         ImGui::SameLine();
         if (vrr.active) {
-            ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.25f, 1.0f), " %s", vrr.label);
+            ImGui::TextColored(ImVec4(vrr.lit[0], vrr.lit[1], vrr.lit[2], 1.0f), " %s", vrr.label);
         } else {
             ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 0.8f), " %s off", vrr.label);
         }
