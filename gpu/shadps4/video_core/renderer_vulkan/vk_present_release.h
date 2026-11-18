@@ -76,6 +76,11 @@ public:
     /// (its times go to Poll; -1: none). False: not submitted (nothing signals `released`).
     bool Submit(s32 slot, vk::Semaphore blit_done, vk::Semaphore released, s64 flip_arg, s64 until_ns,
                 s64 limit_ns);
+    /// The present submission that carries the slots recorded since the last call (RecordHold,
+    /// RecordLate, RecordReady + Submit) signals `tick` on `timeline`: Poll reads a slot's queries
+    /// only once that is reached (they are reset in that command buffer; before it runs they still
+    /// hold the slot's run 16 holds earlier).
+    void Submitted(vk::Semaphore timeline, u64 tick);
     /// The holds that have run: `done(flip_arg, ready_ns, release_ns)` for each, in order.
     void Poll(const std::function<void(s64, s64, s64)>& done);
 
@@ -94,6 +99,9 @@ private:
         bool pending = false;
         s64 flip_arg = -1;
         s64 until_ns = 0;
+        bool submitted = false; ///< its command buffer is submitted, signalling `tick`
+        u64 tick = 0;
+        bool fenced = false; ///< also a release-queue submission (its fence)
     };
     static constexpr u32 Slots = 16;
 
@@ -116,6 +124,7 @@ private:
     u64* stamps = nullptr; ///< mapped: each slot's shader clock at its start
     u64 address = 0;
     std::array<Slot, Slots> slots{};
+    vk::Semaphore submitted_timeline{};
     u32 next = 0;   ///< the slot RecordHold uses next
     u32 oldest = 0; ///< the oldest pending slot
     double tick_ns = 1.0;

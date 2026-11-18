@@ -1544,6 +1544,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
                                 : ~u64{0};
     info.async_up_to = async_up_to;
     scheduler.Flush(info);
+    const u64 present_tick = scheduler.CurrentTick() - 1; // what this submission signals
     if (release && PresentRelease::Probing()) {
         // BB_HOLD_PROBE: when this submission (a held one: its hold and blit) really ends
         release->ProbeNote(scheduler.GetWorkSemaphore()->Handle(), scheduler.CurrentTick() - 1,
@@ -1561,6 +1562,10 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
         released = release->Submit(hold_slot, swapchain.GetPresentReadySemaphore(),
                                    swapchain.GetPresentReleaseSemaphore(), hold_flip, hold_until,
                                    std::clamp<s64>(hold_until - now + period, 0, 100'000'000));
+    }
+    if (release) {
+        // the hold slots recorded into this submission: their times are read once it has run
+        release->Submitted(scheduler.GetWorkSemaphore()->Handle(), present_tick);
     }
 
     // bbport (hitch diagnosis, BB_HITCH_MS): a present slower than the hitch threshold prints where its time went.

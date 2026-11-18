@@ -376,7 +376,7 @@ bool PresentRelease::Submit(s32 slot_index, vk::Semaphore blit_done, vk::Semapho
     (void)cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
     Spin(cmdbuf, index, until_ns, limit_ns);
     (void)cmdbuf.end();
-    slot = {.pending = true, .flip_arg = flip_arg, .until_ns = until_ns};
+    slot = {.pending = true, .flip_arg = flip_arg, .until_ns = until_ns, .fenced = true};
     // The hold starts once the frame's blit is done on the graphics queue (GPU to GPU), and its
     // end lets the present go (GPU to the presentation engine): no wait the host releases.
     const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eAllCommands;
@@ -399,13 +399,44 @@ bool PresentRelease::Submit(s32 slot_index, vk::Semaphore blit_done, vk::Semapho
 }
 
 
+void PresentRelease::Submitted(vk::Semaphore timeline, u64 tick) {
+    submitted_timeline = timeline;
+    for (Slot& slot : slots) {
+        if (slot.pending && !slot.submitted) {
+            slot.submitted = true;
+            slot.tick = tick;
+        }
+    }
+}
+
 void PresentRelease::Poll(const std::function<void(s64, s64, s64)>& done) {
     if (!made) {
         return;
     }
     const vk::Device device = instance.GetDevice();
+    u64 reached = 0;
+    bool reached_read = false;
     while (slots[oldest].pending) {
         Slot& slot = slots[oldest];
+        // Only once its command buffer has run: until then its queries still hold the slot's last
+        // use (16 holds earlier: frames behind the GPU fed old times to the offset and the GPU-bound
+        // check), or were never written (its first use).
+        if (!slot.submitted || !submitted_timeline) {
+            return;
+        }
+        if (!reached_read) {
+            u64 value = 0;
+            if (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetSemaphoreCounterValue(device, submitted_timeline, &value) !=
+                VK_SUCCESS) {
+                return;
+            }
+            reached = value;
+            reached_read = true;
+        }
+        if (reached < slot.tick ||
+            (slot.fenced && fences[oldest] && device.getFenceStatus(*fences[oldest]) != vk::Result::eSuccess)) {
+            return; // not run yet: the later ones neither
+        }
         std::array<u64, 6> data{}; // value, availability: ready (graphics), hold start, release
         const vk::Result result = device.getQueryPoolResults(
             *pool, oldest * 3, 3, sizeof(data), data.data(), 2 * sizeof(u64),
