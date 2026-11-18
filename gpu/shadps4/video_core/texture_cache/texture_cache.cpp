@@ -32,6 +32,7 @@
 #include "video_core/texture_cache/button_prompts.h"
 #include "bbport_keyicons.h"
 #include "video_core/texture_cache/host_compatibility.h"
+#include "core/libraries/videoout/game_frame.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
@@ -2025,6 +2026,18 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
 void TextureCache::RegisterImage(ImageId image_id) {
     BbStats::images_registered.fetch_add(1, std::memory_order_relaxed);
     Image& image = slot_images[image_id];
+    // bbport diagnosis (BB_READ_LOG=1): images of 64 KiB or more as they are registered (first use)
+    static const bool log_images = [] {
+        const char* env = std::getenv("BB_READ_LOG");
+        return env && env[0] == '1';
+    }();
+    if (log_images && image.info.guest_size >= 65536) {
+        char game_frame[96];
+        std::printf("Image registered: %#llx +%#llx (%s)\n",
+                    static_cast<unsigned long long>(image.info.guest_address),
+                    static_cast<unsigned long long>(image.info.guest_size),
+                    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame)));
+    }
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;

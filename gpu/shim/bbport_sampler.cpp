@@ -366,7 +366,7 @@ void BbSamplerStart() {
     }
     std::vector<std::string> prefixes;
     if (!sampling) {   // the hitch catcher alone: the threads a frame waits on
-        prefixes = {"bb:GuestMain", "Frame Submis", "NdJobWorker", "shadPS4:GpuCommandProcessor",
+        prefixes = {"bb:GuestMain", "g:Frame Submis", "g:NdJobWorker", "g:DCLoader", "g:SceFios", "g:snd_", "shadPS4:GpuCommandProcessor",
                     "bb:DrawRec", "bb:VkRecorder", "bb:Present", "shadPS4:PresentThread"};
         std::printf("Hitch catcher: frames over %.0f ms are reported (BB_HITCH_MS)\n", hitch_ms);
     } else if (env[0] == '1' && !env[1]) {
