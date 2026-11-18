@@ -54,6 +54,29 @@ int main() {
     changed.vertices.first++;
     assert(!history.Prepare(changed).load);
 
+    // Out of order (culling): a draw found through the index, identical draws paired k-th with k-th.
+    {
+        History order(1024);
+        Draw a = draw, b = draw, c = draw;
+        b.shader = 11;
+        c.shader = 12;
+        order.NextFrame();
+        const auto a1 = order.Prepare(a), b1 = order.Prepare(b), c1 = order.Prepare(c), a2 = order.Prepare(a);
+        order.NextFrame();
+        assert(order.Prepare(c).load == c1.store); // out of order: the index
+        assert(order.Prepare(a).load == a1.store); // the first a, not the second behind c
+        assert(order.Prepare(b).load == b1.store);
+        assert(order.Prepare(a).load == a2.store);
+        assert(!order.Prepare(a).load); // a third a: none left
+        order.NextFrame();
+        const auto c2 = order.Prepare(c);
+        assert(c2.load);
+        Draw d = draw;
+        d.shader = 13;
+        assert(!order.Prepare(d).load); // new: unmatched, the walk goes on
+        assert(order.Prepare(a).load && order.Prepare(b).load && order.Prepare(a).load);
+    }
+
     History overflow(32);
     draw.vertices.first = 0;
     draw.vertices.count = INT32_MAX;

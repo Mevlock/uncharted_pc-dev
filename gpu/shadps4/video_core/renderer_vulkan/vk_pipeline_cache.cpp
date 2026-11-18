@@ -926,13 +926,65 @@ bool PipelineCache::PrepareGraphicsPipeline(PipelineSelection& worker_sel) {
     }
     auto& worker = *worker_sel.worker;
     worker.compile = worker_compile;
+    worker_sel.twin_build = false;
+    worker_sel.no_motion = false;
     if (!RefreshGraphicsKey(worker_sel) || worker.failed) {
         return false;
+    }
+    // bbport (object motion twins): a twin whose stages are there but which is not built yet is built after the
+    // draw is handed over too (BuildMotionTwin): the draw goes out with its ordinary pipeline now.
+    if (worker_sel.graphics_key.motion_vectors && Shader::MotionVectors::characters) {
+        bool built = false;
+        {
+            std::shared_lock lock{pipelines_mutex};
+            const auto it = graphics_pipelines.find(worker_sel.graphics_key);
+            built = it != graphics_pipelines.end() && it->second;
+        }
+        if (!built) {
+            worker.stages.clear();
+            worker_sel.no_motion = true;
+            const bool ok = RefreshGraphicsKey(worker_sel);
+            worker_sel.no_motion = false;
+            if (!ok || worker.failed) {
+                return false;
+            }
+            worker_sel.twin_wanted = true;
+        }
+    }
+    if (worker_sel.twin_wanted) {
+        g_twin_fallback_worker.fetch_add(1, std::memory_order_relaxed);
     }
     if (worker.compile) {
         EnsureWorkerPipeline(worker_sel);
     }
     return true;
+}
+
+void PipelineCache::BuildMotionTwin(PipelineSelection& worker_sel) {
+    auto& worker = *worker_sel.worker;
+    if (!worker_sel.twin_wanted || !worker.compile || !IsWarm()) {
+        return;
+    }
+    worker_sel.twin_wanted = false;
+    // The prepared draw has its copy of the stages: these are only for the construction.
+    worker.stages.clear();
+    worker.failed = false;
+    worker_sel.twin_build = true;
+    const bool ok = RefreshGraphicsKey(worker_sel);
+    worker_sel.twin_build = false;
+    if (ok && !worker.failed && worker_sel.graphics_key.motion_vectors) {
+        bool there = false;
+        {
+            std::shared_lock lock{pipelines_mutex};
+            there = graphics_pipelines.contains(worker_sel.graphics_key);
+        }
+        if (!there) {
+            EnsureWorkerPipeline(worker_sel);
+            g_twins_built_in_play.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    worker.stages.clear();
+    worker.failed = false;
 }
 
 /// bbport: a draw-preparation worker builds the pipeline of the draw it prepares when it does
@@ -1093,7 +1145,27 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (!RefreshGraphicsKey(sel)) {
         return nullptr;
     }
+    if (sel.twin_wanted) {
+        g_twin_fallback_gpu.fetch_add(1, std::memory_order_relaxed);
+    }
     {
+        std::shared_lock lock{pipelines_mutex};
+        const auto it = graphics_pipelines.find(sel.graphics_key);
+        // (A twin the driver refused is a null entry: the ordinary pipeline then.)
+        if (it != graphics_pipelines.end() && (it->second || !sel.graphics_key.motion_vectors)) {
+            return it->second.get();
+        }
+    }
+    if (sel.graphics_key.motion_vectors && Shader::MotionVectors::characters) {
+        // bbport (object motion twins): its stages are there but not the twin itself: never built here, nor waited
+        // for. The ordinary pipeline draws until a worker has built it (BuildMotionTwin).
+        sel.no_motion = true;
+        const bool ok = RefreshGraphicsKey(sel);
+        sel.no_motion = false;
+        g_twin_fallback_gpu.fetch_add(1, std::memory_order_relaxed);
+        if (!ok) {
+            return nullptr;
+        }
         std::shared_lock lock{pipelines_mutex};
         const auto it = graphics_pipelines.find(sel.graphics_key);
         if (it != graphics_pipelines.end()) {
@@ -1362,6 +1434,20 @@ void PipelineCache::PrepareComputePipeline(PipelineSelection& worker_sel) {
     ReleaseClaim(claim_id);
 }
 
+void AddMotionAttachment(GraphicsPipelineKey& key) {
+    constexpr u32 mv = Shader::MotionVectors::Output;
+    key.motion_vectors = 1;
+    key.mrt_mask |= 1u << mv;
+    key.num_color_attachments = mv + 1;
+    auto& color_buffer = key.color_buffers[mv];
+    color_buffer.data_format = AmdGpu::DataFormat::Format32_32_32_32;
+    color_buffer.num_format = AmdGpu::NumberFormat::Float;
+    color_buffer.swizzle = AmdGpu::IdentityMapping;
+    key.write_masks[mv] = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+                          vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
+    key.color_samples[mv] = 1;
+}
+
 bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     std::memset(&sel.graphics_key, 0, sizeof(GraphicsPipelineKey));
     const auto& regs = (*sel.regs);
@@ -1414,8 +1500,17 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     // its stages are refreshed once, as the twin. (Refreshing the ordinary stages first and then
     // the twin's doubled the stage work of every G-buffer draw on the draw-preparation workers:
     // ~1.2 us a draw, 0.7-1.5 ms a frame at U3's market.)
-    const bool motion_first = motion_possible && Shader::MotionVectors::characters;
-    sel.motion = motion_first;
+    // The twin's stages are only looked up here: while one is not translated yet (or, below, while its pipeline is
+    // not built) the draw takes its ordinary pipeline, and a draw-preparation worker builds the twin after handing
+    // the draw over (BuildMotionTwin). The GPU thread never translates or builds a twin, nor waits for one (the
+    // shader preparation makes the twins of the shipped keys, vk_pipeline_serialization.cpp; one it did not make
+    // was compiled in play, on this thread). The draw then has the camera's motion only for those frames (the
+    // object motion pass ignores pixels whose stored depth is not the scene's).
+    const bool want_twin = motion_possible && Shader::MotionVectors::characters && !sel.no_motion;
+    const bool force_twin = want_twin && sel.twin_build; // BuildMotionTwin (a worker): translate the twin now
+    sel.twin_wanted = false;
+    bool motion_first = want_twin;
+    sel.motion = want_twin;
     sel.ui_squeeze = false;
 
     // First pass to fill render target information needed by shader recompiler
@@ -1444,12 +1539,32 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     }
 
     // Compile and bind shader stages
-    if (!RefreshGraphicsStages(sel)) {
+    const auto refresh_stages = [&] {
+        const size_t stages_mark = sel.worker ? sel.worker->stages.size() : 0;
+        sel.twin_lookup = sel.motion && want_twin && !force_twin;
+        sel.twin_missing = false;
+        bool ok = RefreshGraphicsStages(sel);
+        sel.twin_lookup = false;
+        if (sel.twin_missing) {
+            // The ordinary stages instead (the twin's lookup may have refreshed some of them: the worker's list
+            // of stages for its prepared draw goes back to before it).
+            sel.twin_missing = false;
+            sel.twin_wanted = true;
+            sel.motion = false;
+            motion_first = false;
+            if (sel.worker) {
+                sel.worker->stages.resize(stages_mark);
+            }
+            ok = RefreshGraphicsStages(sel);
+        }
+        return ok;
+    };
+    if (!refresh_stages()) {
         return false;
     }
     if (motion_possible) {
         const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
-        if (motion_first) {
+        if (Shader::MotionVectors::characters) {
             // Uncharted: the twin already (the rasterizer gives each draw its history).
         } else if (vs) {
             // Shaders with a bone palette (motion_history.h). Small skeletons (weapons,
@@ -1492,7 +1607,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
             const char* value = std::getenv("BB_OBJECT_MOTION_ALL");
             return value && value[0] == '1';
         }();
-        if (all_motion) {
+        if (all_motion && !Shader::MotionVectors::characters) {
             sel.motion = true;
         }
         if (sel.motion && !motion_first && !RefreshGraphicsStages(sel)) {
@@ -1501,7 +1616,10 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     }
     if (UiSqueezeDraw(regs, sel)) {
         sel.ui_squeeze = true;
-        if (!RefreshGraphicsStages(sel)) {
+        if (sel.worker) {
+            sel.worker->stages.clear(); // the squeezed stages replace those just selected
+        }
+        if (!refresh_stages()) {
             return false;
         }
         key.ui_squeeze = 1;
@@ -1538,17 +1656,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     }
 
     if (sel.motion) {
-        constexpr u32 mv = Shader::MotionVectors::Output;
-        key.motion_vectors = 1;
-        key.mrt_mask |= 1u << mv;
-        key.num_color_attachments = mv + 1;
-        auto& color_buffer = key.color_buffers[mv];
-        color_buffer.data_format = AmdGpu::DataFormat::Format32_32_32_32;
-        color_buffer.num_format = AmdGpu::NumberFormat::Float;
-        color_buffer.swizzle = AmdGpu::IdentityMapping;
-        key.write_masks[mv] = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
-                              vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
-        key.color_samples[mv] = 1;
+        AddMotionAttachment(key);
     }
 
     // Force all color samples to match depth samples to avoid unsupported MSAA configuration
@@ -2168,6 +2276,10 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                     program = found_program->second.get();
                 }
             }
+            if (!program && sel.twin_lookup) {
+                sel.twin_missing = true; // the ordinary selection follows (RefreshGraphicsKey)
+                return {};
+            }
             if (!program) {
                 if (!worker.compile || !WorkerTranslate(worker, hw_stage, sw_stage, params,
                                                         runtime_info, binding, nullptr)) {
@@ -2210,6 +2322,10 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                     fetch_shader = it->spec.fetch_shader_data;
                 }
             }
+            if (!found && sel.twin_lookup) {
+                sel.twin_missing = true;
+                return {};
+            }
             if (!found) {
                 if (!worker.compile || !WorkerTranslate(worker, hw_stage, sw_stage, params,
                                                         runtime_info, binding, &spec)) {
@@ -2229,6 +2345,11 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     }
 
     Program* program = FindProgram(params.hash);
+    if (!program && sel.twin_lookup) {
+        // bbport (object motion twins): the GPU thread never translates a twin's stage nor waits for one.
+        sel.twin_missing = true;
+        return {};
+    }
     if (!program) {
         AcquireClaim(params.hash);
         program = FindProgram(params.hash);
@@ -2271,6 +2392,10 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             module = it->module;
             fetch_shader = it->spec.fetch_shader_data;
         }
+    }
+    if (!found && sel.twin_lookup) {
+        sel.twin_missing = true;
+        return {};
     }
     if (!found) {
         AcquireClaim(params.hash);

@@ -307,6 +307,8 @@ public:
     void NextFrame() {
         previous.swap(current);
         current.clear();
+        cursor = 0;
+        index_built = false;
         gate_previous.swap(gate_current);
         gate_current.clear();
         gate_occurrences.clear();
@@ -314,24 +316,41 @@ public:
         used = 0;
     }
 
+    // A draw is paired with the first draw of the previous frame that is the same and not paired yet: the k-th of
+    // identical draws with the k-th. Draws come in nearly the same order every frame, so the previous frame's draws
+    // are walked in order (one compare a draw); a draw out of that order (the camera culled or uncovered some) is
+    // found through an index of the previous frame, built at the first such draw of a frame, and the walk goes on
+    // behind it. (Two hash-table lookups a draw were ~70 ns of the GPU thread's ~110 ns on a motion draw.)
     Allocation Prepare(const Draw& draw) {
         ++stats.draws;
-        // One hash of the draw (the occurrence is mixed in after it). The entry of a draw's first
-        // occurrence this frame also counts its occurrences: the k-th identical draw is k.
-        const size_t draw_hash = Hash::OfDraw(draw);
-        Key key{draw, 0};
-        Slot& head = current.At(key, Hash::WithOccurrence(draw_hash, 0));
-        key.occurrence = head.seen++;
-        const size_t key_hash = Hash::WithOccurrence(draw_hash, key.occurrence);
         const uint64_t count = uint64_t(draw.vertices.count) * draw.instances;
         if (!count || uint64_t(draw.vertices.first) + draw.vertices.count - 1 > INT32_MAX ||
             uint64_t(draw.first_instance) + draw.instances > UINT32_MAX) {
             ++stats.invalid;
             return {};
         }
-        const auto* prev = previous.find(key, key_hash);
+        const uint64_t hash = OfDraw(draw);
+        Entry* prev = nullptr;
+        if (cursor < previous.size() && previous[cursor].hash == hash && !previous[cursor].paired &&
+            previous[cursor].draw == draw) {
+            prev = &previous[cursor++];
+            // Behind a draw found out of order, an earlier one of identical draws may still be unpaired: the
+            // earliest goes first.
+            if (index_built) {
+                for (uint32_t e = prev->prev_same; e != NoEntry; e = previous[e].prev_same) {
+                    if (!previous[e].paired && previous[e].draw == draw) {
+                        prev = &previous[e];
+                    }
+                }
+            }
+        } else {
+            prev = Find(hash, draw);
+        }
         Allocation result{0, 0, draw.vertices.count, draw.instances,
                           draw.vertices.first, draw.first_instance};
+        if (prev) {
+            prev->paired = true;
+        }
         if (prev && prev->store) {
             result.load = prev->store;
             ++stats.loaded;
@@ -341,46 +360,113 @@ public:
         if (count <= capacity - used) {
             result.store = 1 + uint32_t(frame & 1) * capacity + used;
             used += uint32_t(count);
-            // (head is still valid: nothing was inserted since. Another occurrence gets its own.)
-            (key.occurrence ? current.At(key, key_hash) : head).store = result.store;
             ++stats.stored;
         } else {
             ++stats.exhausted;
         }
+        current.push_back({draw, hash, result.store, NoEntry, NoEntry, false});
         return result;
     }
 
     uint32_t Used() const { return used; }
 
 private:
-    struct Key {
+    static constexpr uint32_t NoEntry = UINT32_MAX;
+    struct Entry {
         Draw draw;
-        uint32_t occurrence;
-        bool operator==(const Key&) const = default;
+        uint64_t hash;
+        uint32_t store;     ///< first position of its store (0: none)
+        uint32_t next_same; ///< the next entry with the same hash (the index)
+        uint32_t prev_same; ///< the one before it
+        bool paired;
     };
-    struct Hash {
-        static size_t OfDraw(const Draw& d) {
-            uint64_t h = 0;
-            const auto mix = [&](uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); };
-            mix(d.shader); mix(d.geometry); mix(d.indices); mix(d.topology);
-            mix(d.index_count); mix(d.instances); mix(d.first_instance);
-            mix(d.vertices.first); mix(d.vertices.count);
-            return size_t(h);
-        }
-        static size_t WithOccurrence(size_t h, uint32_t occurrence) {
-            return h ^ (occurrence + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
-        }
-        size_t operator()(const Key& key) const {
-            return WithOccurrence(OfDraw(key.draw), key.occurrence);
-        }
+    static uint64_t OfDraw(const Draw& d) {
+        uint64_t h = 0;
+        const auto mix = [&](uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); };
+        mix(d.shader); mix(d.geometry); mix(d.indices); mix(d.topology);
+        mix(d.index_count); mix(d.instances); mix(d.first_instance);
+        mix(d.vertices.first); mix(d.vertices.count);
+        return h ^ (h >> 29);
+    }
+    struct IndexSlot {
+        uint64_t hash;
+        uint32_t head; ///< first entry with this hash not known to be paired
+        uint32_t generation;
     };
-    struct Slot {
-        uint32_t store{}; ///< first position of this frame's store (0: none)
-        uint32_t seen{};  ///< (first occurrence only) occurrences of the draw so far this frame
-    };
+    Entry* Find(uint64_t hash, const Draw& draw) {
+        if (previous.empty()) {
+            return nullptr;
+        }
+        if (!index_built) {
+            BuildIndex();
+        }
+        const size_t mask = index.size() - 1;
+        for (size_t i = (hash * 0x9e3779b97f4a7c15ULL >> 32) & mask;; i = (i + 1) & mask) {
+            IndexSlot& slot = index[i];
+            if (slot.generation != generation) {
+                return nullptr;
+            }
+            if (slot.hash != hash) {
+                continue;
+            }
+            // Paired entries at the front of the chain are skipped for good.
+            while (slot.head != NoEntry && previous[slot.head].paired) {
+                slot.head = previous[slot.head].next_same;
+            }
+            for (uint32_t e = slot.head; e != NoEntry; e = previous[e].next_same) {
+                if (!previous[e].paired && previous[e].draw == draw) {
+                    cursor = size_t(e) + 1;
+                    return &previous[e];
+                }
+            }
+            return nullptr;
+        }
+    }
+    void BuildIndex() {
+        index_built = true;
+        size_t size = 64;
+        while (size < previous.size() * 2) {
+            size *= 2;
+        }
+        if (index.size() < size) {
+            index.assign(size, IndexSlot{0, NoEntry, 0});
+            generation = 0;
+        }
+        if (++generation == 0) {
+            for (auto& slot : index) {
+                slot.generation = 0;
+            }
+            generation = 1;
+        }
+        const size_t mask = index.size() - 1;
+        // Backwards: each chain starts at its earliest entry.
+        for (size_t e = previous.size(); e-- > 0;) {
+            Entry& entry = previous[e];
+            for (size_t i = (entry.hash * 0x9e3779b97f4a7c15ULL >> 32) & mask;; i = (i + 1) & mask) {
+                IndexSlot& slot = index[i];
+                if (slot.generation != generation) {
+                    slot = {entry.hash, uint32_t(e), generation};
+                    entry.next_same = NoEntry;
+                    entry.prev_same = NoEntry;
+                    break;
+                }
+                if (slot.hash == entry.hash) {
+                    entry.next_same = slot.head;
+                    entry.prev_same = NoEntry;
+                    previous[slot.head].prev_same = uint32_t(e);
+                    slot.head = uint32_t(e);
+                    break;
+                }
+            }
+        }
+    }
     uint32_t capacity{}, used{};
     uint64_t frame{};
-    FlatMap<Key, Slot, Hash> previous, current;
+    std::vector<Entry> previous, current;
+    size_t cursor = 0;
+    bool index_built = false;
+    std::vector<IndexSlot> index;
+    uint32_t generation = 0;
     struct GateHash {
         size_t operator()(const GateKey& key) const {
             uint64_t h = 0;

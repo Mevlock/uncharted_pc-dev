@@ -7,10 +7,14 @@
 
 #pragma once
 
+#include <chrono>
+
+#include <algorithm>
 #include <array>
 #include "video_core/renderer_vulkan/motion_history.h"
 
 #include "common/types.h"
+#include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image.h"
 
@@ -18,6 +22,27 @@ namespace Vulkan {
 
 class Instance;
 class Scheduler;
+
+/// bbport (from BilalReloaded's Uncharted port, #84): a buffer-fetched G-buffer draw's identity across frames for
+/// the object motion history: its vertex shader's buffers' sizes and strides, not their addresses (skinned vertices
+/// can move between frames); `records`: its longest vertex stream (constant buffers, stride 16, and raw buffers,
+/// stride 0, are not streams). The rasterizer computes it, or takes the draw-preparation worker's (PreparedDraw).
+inline u64 MotionDrawIdentity(const Shader::Info& vs, u32& records) {
+    u64 hash = 0x6a09e667f3bcc909ULL;
+    records = 0;
+    for (const auto& resource : vs.buffers) {
+        if (resource.IsSpecial()) continue;
+        const auto buffer = resource.GetSharp(vs);
+        if (!buffer.Valid()) continue;
+        // (A multiply-mix, not XXH3: once per buffer of every G-buffer draw.)
+        hash = (hash ^ (u64(buffer.num_records) << 32 | buffer.GetStride())) * 0x9e3779b97f4a7c15ULL;
+        hash ^= hash >> 29;
+        if (buffer.GetStride() != 16 && buffer.GetStride() != 0) {
+            records = std::max<u32>(records, buffer.num_records);
+        }
+    }
+    return hash;
+}
 struct RenderState;
 
 class ObjectMotion {
@@ -47,6 +72,12 @@ public:
 
     /// Start of a frame (display pass).
     void OnFrameStart();
+    /// BB_FRAME_STATS: cycles the GPU thread spent on a motion draw's history (and its parts), for the stats line.
+    void AddCycles(u64 total, u64 identity) {
+        cycles_total += total;
+        cycles_identity += identity;
+        ++cycles_draws;
+    }
     void InvalidateHistory() { history.NextFrame(); history.NextFrame(); }
 
     /// The motion image for the compose pass (layout General after this call) and whether it
@@ -63,6 +94,9 @@ public:
 
 private:
     void EnsureImage(u32 width, u32 height);
+    u64 cycles_total = 0, cycles_identity = 0, cycles_draws = 0;
+    u64 cycles_tsc0 = 0;
+    std::chrono::steady_clock::time_point cycles_t0{};
 
     const Instance& instance;
     Scheduler& scheduler;
