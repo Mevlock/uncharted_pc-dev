@@ -47,6 +47,10 @@ void NoteAtlasDraw();
 uint32_t MenuGeneration();
 /// The key bindings changed (input.ini): the atlas is painted again with the new keys.
 void ForceRepaint();
+/// What the painted pictures depend on now (device, menu keys, jetski, bindings, the menu fade's step): the texture cache keeps
+/// each painted texture under it and uploads it again without painting while it stays the same. 0 for a picture that must be
+/// painted each time (the blinking halo of the keyboard's key, `pulse_mask`).
+uint64_t PaintState(bool pulse_mask);
 /// While a menu is open the pictures of the pastilles alternate (keys, then mouse): called by the draws, it flips the phase every ~1.4 s.
 void TickMenuPhase();
 
