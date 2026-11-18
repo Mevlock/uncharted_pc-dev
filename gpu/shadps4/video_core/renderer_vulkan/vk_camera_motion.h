@@ -168,6 +168,10 @@ private:
     std::array<float, 2> given_jitter{};      ///< the jitter last given to the upscaler, and its frame
     s64 given_frame = -1;
     u32 given_without_pass = 0;               ///< frames given the game side's value (no velocity pass)
+    /// The clip rows (c24..c39) of the last frame's velocity pass and of the one before, with their frames: the
+    /// previous clip of the next frame (OnVelocityConstants).
+    std::array<float, 16> own_clip{}, own_previous_clip{};
+    s64 own_clip_frame = -1, own_previous_clip_frame = -1;
     std::array<float, 2> planes{}; ///< the last velocity pass's depth constants (z = y / (depth - x))
     bool planes_known = false;
     std::array<float, 16> still_reference{}; ///< last frame's view-to-world rows and view-from-uv
