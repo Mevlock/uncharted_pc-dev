@@ -457,7 +457,52 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         return;
     }
     auto& camera = velocity_camera;
-    const float* rows[3] = {c + 40, c + 44, c + 52};
+    // The previous clip (c40..c55) is the game's own value, and the game does not always give last frame's
+    // camera there: in U3's horse ride (and other stretches: whole 600-frame windows at 60-144 FPS, 0.3.6.58
+    // too) its velocity pass carries this frame's clip rows as the previous ones, so the camera's motion read
+    // from it is zero while the camera moves (the upscaler was told the picture stood still: flicker on the
+    // sand around the rider, smeared history). The previous clip is therefore taken from last frame's own
+    // pass: frame F's c24..c39 (its jittered clip rows, the ones it was drawn with) are frame F+1's previous
+    // clip whenever the passes are of consecutive frames (by the flip argument); where the game's value is
+    // last frame's camera the two are equal bit for bit. Without last frame's pass (the first frame after a
+    // gap) the game's value is all there is. BB_GAME_PREVIOUS_CLIP=1 (diagnosis): the game's value always.
+    const s64 pass_frame = DrawnFrame();
+    if (pass_frame != own_clip_frame) {
+        own_previous_clip = own_clip;
+        own_previous_clip_frame = own_clip_frame;
+    }
+    std::copy(c + 24, c + 40, own_clip.begin());
+    own_clip_frame = pass_frame;
+    static const bool game_previous = [] {
+        const char* env = std::getenv("BB_GAME_PREVIOUS_CLIP");
+        const bool v = env && env[0] == '1';
+        std::printf("Camera motion: previous clip from %s (BB_GAME_PREVIOUS_CLIP)\n",
+                    v ? "the game's velocity pass" : "last frame's own velocity pass (the game's without one)");
+        return v;
+    }();
+    const bool own_previous = !game_previous && pass_frame >= 1 && own_previous_clip_frame == pass_frame - 1;
+    // c40..c55: last frame's own clip rows, or the game's
+    const float* previous = own_previous ? own_previous_clip.data() : c + 40;
+    {
+        // The count: frames whose game previous clip was not last frame's clip rows (held: this frame's own).
+        static u32 frames = 0, held = 0, other = 0, lines = 0;
+        if (own_previous) {
+            ++frames;
+            const bool same_as_last = std::equal(c + 40, c + 56, own_previous_clip.begin());
+            const bool same_as_now = std::equal(c + 40, c + 56, c + 24);
+            held += !same_as_last && same_as_now;
+            other += !same_as_last && !same_as_now;
+            if (frames % 600 == 0) {
+                if (lines < 20 && (held || other || lines < 3)) {
+                    ++lines;
+                    std::printf("Camera motion: the game's previous clip was this frame's own in %u of 600 frames, "
+                                "another than last frame's in %u (last frame's own used)\n", held, other);
+                }
+                held = other = 0;
+            }
+        }
+    }
+    const float* rows[3] = {previous, previous + 4, previous + 12};
     for (int r = 0; r < 3; ++r) {
         for (int col = 0; col < 4; ++col) {
             float v = col == 3 ? rows[r][3] : 0.0f;
@@ -503,7 +548,7 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
             }
             return j;
         };
-        const std::array<float, 2> last = jitter_of(c + 40, c + 44, c + 52);
+        const std::array<float, 2> last = jitter_of(previous, previous + 4, previous + 12);
         const std::array<float, 2> now = jitter_of(c + 24, c + 28, c + 36);
         // The check: the jitter the upscaler was given for the frame before (GiveProjectionJitter, the frame by the
         // flip argument) against what this frame's pass says that frame was drawn with: one line every 600 frames (20
