@@ -4,6 +4,7 @@
 #include "video_core/renderer_vulkan/vk_low_latency.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -211,6 +212,61 @@ s64 last_target = 0; ///< frame thread: the last frame's wake time (BB_LATENCY_T
 std::atomic<u64> paced{0}, unpaced{0}; ///< counts for BB_LATENCY_TRACE
 std::atomic<s64> slept_ns{0};
 
+/// Even presents (BB_EVEN_PRESENT=0: off). Shown as soon as it is done, a frame's present interval
+/// was the period plus the change in its render time (the frame start's slot plus its own time):
+/// under G-SYNC each refresh lasts that interval (QD-OLED: brightness flicker, U3 at 120 on a
+/// 165 Hz panel), and the paced frame clock stepped the world by the start intervals while the
+/// frames were shown by their end times (Nate on the horse stepped against the display). Each
+/// paced frame now gets a present target = its slot + an offset L, and its world step is the
+/// interval between successive targets (the frame clock reads the target's TSC, probe.c): slots
+/// are one period apart, so targets are too, presents are held to them, and world steps equal
+/// present intervals. L = about the 98th percentile of (arrival at the presenter - slot) over the
+/// last ~2 s plus a margin: raised at once, lowered by 20 us a frame (no visible step). A frame
+/// later than its target is shown when it comes (as before).
+const bool even = [] {
+    const char* env = std::getenv("BB_EVEN_PRESENT");
+    return !(env && env[0] == '0');
+}();
+constexpr u32 Ring = 256;
+struct FrameSlot {
+    std::atomic<u64> id{0};
+    std::atomic<s64> slot{0}, target{0};
+};
+std::array<FrameSlot, Ring> frames{};
+/// presenter (swap thread) -> frame thread: arrival - slot of the last frames
+constexpr u32 Samples = 256;
+std::array<std::atomic<s64>, Samples> lags{};
+std::atomic<u64> lag_count{0};
+s64 offset = 0;      ///< frame thread: L
+s64 offset_goal = 0; ///< frame thread: L from the samples
+std::atomic<s64> current_target{0}; ///< frame thread -> probe.c: this frame's present target (0: none)
+std::atomic<s64> offset_ns{0};      ///< for the log
+std::atomic<u64> held{0}, late{0};
+std::atomic<s64> held_ns{0}, late_ns{0};
+
+void UpdateOffset(s64 period, u64 id) {
+    if ((id & 15) == 0) {
+        const u64 count = lag_count.load(std::memory_order_acquire);
+        const u32 n = static_cast<u32>(std::min<u64>(count, Samples - 16));
+        if (n >= 32) {
+            std::array<s64, Samples> copy;
+            for (u32 i = 0; i < n; ++i) {
+                copy[i] = lags[(count - 1 - i) % Samples].load(std::memory_order_relaxed);
+            }
+            const u32 k = n * 98 / 100;
+            std::nth_element(copy.begin(), copy.begin() + k, copy.begin() + n);
+            constexpr s64 margin = 400'000; // the present thread's take, the timer's spin
+            offset_goal = std::clamp<s64>(copy[k] + margin, 0, 2 * period);
+        }
+    }
+    if (offset_goal > offset) {
+        offset = offset_goal;
+    } else if (offset_goal + 250'000 < offset) {
+        offset -= std::min<s64>(offset - offset_goal, 20'000);
+    }
+    offset_ns.store(offset, std::memory_order_relaxed);
+}
+
 s64 Now() {
     return std::chrono::steady_clock::now().time_since_epoch().count();
 }
@@ -221,6 +277,7 @@ void Queued(u64 id) {
 
 void Stop() {
     last_wake = 0;
+    current_target.store(0, std::memory_order_relaxed);
     Libraries::VideoOut::SetStartPaced(false);
 }
 
@@ -262,11 +319,43 @@ void BeforeFrame(u64 id) {
     const s64 wake = std::max(now, slot);
     last_wake = slot;
     last_target = wake;
+    if (even) {
+        UpdateOffset(period, id);
+        FrameSlot& entry = frames[id % Ring];
+        entry.id.store(0, std::memory_order_relaxed);
+        entry.slot.store(slot, std::memory_order_relaxed);
+        entry.target.store(slot + offset, std::memory_order_relaxed);
+        entry.id.store(id, std::memory_order_release);
+        current_target.store(slot + offset, std::memory_order_relaxed);
+    }
     Libraries::VideoOut::SetStartPaced(true);
     paced.fetch_add(1, std::memory_order_relaxed);
     if (wake > now) {
         slept_ns.fetch_add(wake - now, std::memory_order_relaxed);
         SleepUntil(wake);
+    }
+}
+/// The presenter, before the present of game frame `id`: holds it until its target.
+void Hold(u64 id) {
+    FrameSlot& entry = frames[id % Ring];
+    if (entry.id.load(std::memory_order_acquire) != id) {
+        return;
+    }
+    const s64 slot = entry.slot.load(std::memory_order_relaxed);
+    const s64 target = entry.target.load(std::memory_order_relaxed);
+    const s64 now = Now();
+    const u64 n = lag_count.load(std::memory_order_relaxed);
+    lags[n % Samples].store(now - slot, std::memory_order_relaxed);
+    lag_count.store(n + 1, std::memory_order_release);
+    if (target > now) {
+        if (target - now < 100'000'000) {
+            held.fetch_add(1, std::memory_order_relaxed);
+            held_ns.fetch_add(target - now, std::memory_order_relaxed);
+            SleepUntil(target);
+        }
+    } else {
+        late.fetch_add(1, std::memory_order_relaxed);
+        late_ns.fetch_add(now - target, std::memory_order_relaxed);
     }
 }
 } // namespace Pace
@@ -565,11 +654,20 @@ void Print(u64 current) {
     }
     if (at < sizeof(line)) {
         const u64 n = Pace::paced.exchange(0);
-        std::snprintf(line + at, sizeof(line) - at,
+        at += std::snprintf(line + at, sizeof(line) - at,
                       " | paced: %llu frames, slept %.2f per frame, %llu not paced",
                       static_cast<unsigned long long>(n),
                       double(Pace::slept_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, n)),
                       static_cast<unsigned long long>(Pace::unpaced.exchange(0)));
+    }
+    if (Pace::even && at < sizeof(line)) {
+        const u64 h = Pace::held.exchange(0), l = Pace::late.exchange(0);
+        at += std::snprintf(line + at, sizeof(line) - at,
+                            " | even: offset %.2f, held %llu by %.2f, late %llu by %.2f",
+                            double(Pace::offset_ns.load()) / 1e6, static_cast<unsigned long long>(h),
+                            double(Pace::held_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, h)),
+                            static_cast<unsigned long long>(l),
+                            double(Pace::late_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, l)));
     }
     std::printf("%s (ms)\n", line);
     if (frames_csv) {
@@ -605,6 +703,17 @@ void Print(u64 current) {
 
 bool StartPacingRequested() {
     return Pace::enabled;
+}
+
+void HoldPresent(s64 flip_arg) {
+    if (Pace::even && flip_arg >= 0) {
+        Pace::Hold(static_cast<u64>(flip_arg) + 1);
+    }
+}
+
+s64 PresentLeadNs() {
+    const s64 target = Pace::current_target.load(std::memory_order_relaxed);
+    return target ? target - Pace::Now() : 0;
 }
 
 void TraceFlip(FlipStage stage, s64 flip_arg) {

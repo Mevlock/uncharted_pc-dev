@@ -600,6 +600,10 @@ extern "C" void bbgpu_game_frame_start(uint64_t frame, uint64_t kicked) {
     Vulkan::LowLatency::GameFrameStart(frame, kicked);
 }
 
+extern "C" int64_t bbgpu_present_lead_ns(void) {
+    return Vulkan::LowLatency::PresentLeadNs();
+}
+
 extern "C" const char* bbgpu_game_frame_text(char* out, size_t size, int full) {
     return Libraries::VideoOut::GameFrameText(out, size, full != 0);
 }

@@ -68,6 +68,9 @@ void bbgpu_input_sample(void);
  * until the GPU is ready for the next frame. */
 void bbgpu_game_frame_source(int found);
 void bbgpu_game_frame_start(uint64_t frame, uint64_t kicked);
+/* Right after bbgpu_game_frame_start: ns from now to that frame's present target (0: none; even presents), for the
+ * paced frame clock. */
+int64_t bbgpu_present_lead_ns(void);
 /* The game frame for a report line (core/libraries/videoout/game_frame.h): "game frame N" or, full, "game frame N
  * started, S submitted, P presented" ("game frame unknown" without the number). Writes into out, returns it. Only
  * loads; safe in the fault handler. */
