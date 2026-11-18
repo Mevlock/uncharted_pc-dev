@@ -1271,8 +1271,12 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
         LowLatency::PresentReadyAndWait(flip_arg);
     }
     u32 generated = is_reusing_frame ? 0 : frame->generated_count;
-    // A held frame's times are its target's (the CPU's are only when it was queued).
-    const auto start = gpu_hold ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(even_target))
+    // A held frame's times are its hold's end (its target, or the next frame's slot when that is
+    // sooner; LowLatency::PresentHoldEnd), the CPU's are only when it was queued. 0: not held while
+    // the GPU does not fit its frames in a period: its present work only takes its ready time.
+    const s64 hold_end = gpu_hold ? LowLatency::PresentHoldEnd(flip_arg) : 0;
+    const auto start = gpu_hold ? std::chrono::steady_clock::time_point(
+                                      std::chrono::nanoseconds(hold_end ? hold_end : even_target))
                                 : std::chrono::steady_clock::now();
     if (!is_reusing_frame && is_game_frame) {
         const double ms =
@@ -1308,8 +1312,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
     };
     // GPU holds: each image is held to its own time on the GPU (the first, which carries the
     // frame's times, to the target), none on this thread.
+    // (1: a time long passed, so PresentImage takes the ready time only and holds nothing)
     const auto hold_at = [&](u32 index) -> s64 {
-        return gpu_hold ? (start + step * index).time_since_epoch().count() : 0;
+        return !gpu_hold ? 0 : hold_end ? (start + step * index).time_since_epoch().count() : 1;
     };
     u32 shown = 0;
     for (; shown < generated; ++shown) {

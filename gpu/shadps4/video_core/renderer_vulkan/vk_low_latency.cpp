@@ -407,6 +407,48 @@ s64 Target(u64 id) {
 
 std::atomic<bool> timed{false}; ///< the presents carry their target (VK_EXT_present_timing)
 
+/// GPU holds on the game's queue (mode 1) end at the target, but never after the next frame's slot
+/// (BB_EVEN_HOLD_CAP=0: off). A hold that ended later blocked the next frame's GPU work, and every
+/// GPU wait the game makes inside that frame, while the next frame was already running (AMD 7800 XT,
+/// U3 ride at 60: the frames take 17-20 ms from slot to GPU done, the offset 21-33 ms, 1-3 game
+/// frames of 25-37 ms a run that rc059 never had). Capped at the next slot, the held frames are
+/// still shown one slot apart (the slots are), and a frame not done by then is shown when done.
+const bool hold_cap = [] {
+    const char* env = std::getenv("BB_EVEN_HOLD_CAP");
+    return !(env && env[0] == '0');
+}();
+/// The hold's end for game frame `id` (0: none).
+s64 HoldEnd(u64 id) {
+    const FrameSlot& entry = frames[id % Ring];
+    if (entry.id.load(std::memory_order_acquire) != id) {
+        return 0;
+    }
+    const s64 target = entry.target.load(std::memory_order_relaxed);
+    if (!hold_cap || release_queue.load(std::memory_order_relaxed)) {
+        return target;
+    }
+    const s64 period = Libraries::VideoOut::FrameCapPeriodNs();
+    return period > 0 ? std::min(target, entry.slot.load(std::memory_order_relaxed) + period) : target;
+}
+
+/// GPU-bound (BB_EVEN_GPU_BOUND=0: off): when the GPU's own time per frame does not fit in a period,
+/// no frame can be shown on its target and every hold only delays the next frame's GPU work (AMD,
+/// U3 ride at 120: 8100 of ~9200 frames late, the ~1000 held ones cost 3.5% fps against rc059).
+/// Then paced frames are not held and not gated (shown when done, as without even presents) until
+/// the GPU fits again. The GPU's own time of frame N: its ready time minus the later of the last
+/// frame's release and the moment its own last work was queued (its flip): GPU-bound, the work is
+/// all queued before the GPU is free, so this is its GPU time; CPU-bound, only the tail after the
+/// last submission. On at a median over ~4 s of 0.9 x the period, off again under 0.8 x.
+const bool gpu_bound_check = [] {
+    const char* env = std::getenv("BB_EVEN_GPU_BOUND");
+    return !(env && env[0] == '0');
+}();
+std::atomic<bool> gpu_bound{false};
+std::array<s64, 512> gpu_own{};
+u64 gpu_own_count = 0; ///< presenter thread
+std::atomic<u64> gpu_bound_changes{0};
+std::atomic<s64> gpu_own_median{0}; ///< for the log
+
 /// The GPU gate (BB_EVEN_GATE=0: off): a paced frame's present work (upscaling / post-processing,
 /// the hold, the blit) must be queued before the next frame's GPU work, so that it runs on an idle
 /// GPU at its target. The GPU thread only notes each flipped frame that can still be early (its
@@ -478,8 +520,8 @@ void GateNote(u64 id, s64 period, u64 draw_tick) {
         release_queue.load(std::memory_order_relaxed)) {
         return; // with the release queue nothing on the GPU queue waits for a hold
     }
-    if (now >= target) {
-        return; // its GPU work is still being queued: done after its target, nothing is held
+    if (now >= HoldEnd(id) || gpu_bound.load(std::memory_order_relaxed)) {
+        return; // done after its hold's end (its GPU work is still being queued), or not held
     }
     const s64 flip = s64(id) - 1;
     std::scoped_lock lk{gate_mutex};
@@ -592,7 +634,7 @@ void GpuTimes(u64 id, s64 ready, s64 release) {
         return;
     }
     const s64 slot = entry.slot.load(std::memory_order_relaxed);
-    const s64 target = entry.target.load(std::memory_order_relaxed);
+    const s64 target = HoldEnd(id); // where its hold ends (the target, or the next slot)
     const s64 hold = std::max<s64>(0, release - ready);
     // The delay the last frame's hold put on this frame's GPU work (it waited behind that hold on
     // the game's queue, from when its first work was submitted, or the last frame was done, to the
@@ -607,6 +649,29 @@ void GpuTimes(u64 id, s64 ready, s64 release) {
         const s64 could_start =
             std::max(first_submit_at[id % Ring].load(std::memory_order_relaxed), last_ready);
         own_delay = std::clamp<s64>(last_release - could_start, 0, std::max<s64>(0, last_release - last_ready));
+    }
+    if (gpu_bound_check && !release_queue.load(std::memory_order_relaxed) &&
+        times_id[(id - 1) % Ring] == id - 1 && flip_id[id % Ring].load(std::memory_order_acquire) == id) {
+        const s64 from = std::max(times_release[(id - 1) % Ring], flip_at[id % Ring].load(std::memory_order_relaxed));
+        gpu_own[gpu_own_count++ % gpu_own.size()] = ready - from;
+        const s64 period = Libraries::VideoOut::FrameCapPeriodNs();
+        if (period > 0 && (gpu_own_count & 15) == 0) {
+            const u64 window = std::clamp<s64>(4'000'000'000 / period, 32, s64(gpu_own.size()));
+            const u32 n = u32(std::min<u64>(gpu_own_count, window));
+            std::array<s64, 512> copy;
+            for (u32 i = 0; i < n; ++i) {
+                copy[i] = gpu_own[(gpu_own_count - 1 - i) % gpu_own.size()];
+            }
+            std::nth_element(copy.begin(), copy.begin() + n / 2, copy.begin() + n);
+            const s64 median = copy[n / 2];
+            gpu_own_median.store(median, std::memory_order_relaxed);
+            const bool was = gpu_bound.load(std::memory_order_relaxed);
+            const bool now_bound = was ? median * 10 >= period * 8 : median * 10 >= period * 9;
+            if (now_bound != was) {
+                gpu_bound.store(now_bound, std::memory_order_relaxed);
+                gpu_bound_changes.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
     }
     times_id[id % Ring] = id;
     times_ready[id % Ring] = ready;
@@ -991,10 +1056,13 @@ void Print(u64 current) {
         if (Pace::gpu_release.load(std::memory_order_relaxed) && at < sizeof(line)) {
             const u64 r = Pace::release_n.exchange(0);
             at += std::snprintf(line + at, sizeof(line) - at,
-                                " | GPU hold: %llu, hold %.2f, own delay %.2f, off target %.3f (max %.3f, %llu over 0.2)",
+                                " | GPU hold: %llu, hold %.2f, own delay %.2f, GPU own %.2f%s (%llu changes), off target %.3f (max %.3f, %llu over 0.2)",
                                 static_cast<unsigned long long>(r),
                                 double(Pace::release_hold_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, r)),
                                 double(Pace::own_delay_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, r)),
+                                double(Pace::gpu_own_median.load()) / 1e6,
+                                Pace::gpu_bound.load() ? " GPU-BOUND: not held" : "",
+                                static_cast<unsigned long long>(Pace::gpu_bound_changes.exchange(0)),
                                 double(Pace::release_err_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, h)),
                                 double(Pace::release_err_max.exchange(0)) / 1e6,
                                 static_cast<unsigned long long>(Pace::release_late.exchange(0)));
@@ -1042,6 +1110,13 @@ s64 PresentTarget(s64 flip_arg) {
 
 bool EvenPresents() {
     return Pace::even && Pace::enabled;
+}
+
+s64 PresentHoldEnd(s64 flip_arg) {
+    if (!Pace::even || flip_arg < 0 || Pace::gpu_bound.load(std::memory_order_relaxed)) {
+        return 0;
+    }
+    return Pace::HoldEnd(static_cast<u64>(flip_arg) + 1);
 }
 
 void MarkOutOfBandPresentQueue(vk::Queue queue) {
