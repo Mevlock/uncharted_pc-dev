@@ -11,7 +11,9 @@
 #include <filesystem>
 #include <csetjmp>
 #include <fstream>
+#include <memory>
 #include <mutex>
+#include <new>
 #include <shared_mutex>
 #include <ranges>
 #include <string>
@@ -545,7 +547,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     if (const char* env = std::getenv("BB_PREP_COMPILE")) {
         worker_compile = env[0] != '0';
     }
-    std::vector<char> initial_data;
+    std::unique_ptr<char[]> initial_data;
+    size_t initial_size = 0;
     if (EmulatorSettings.IsPipelineCacheEnabled()) {
         auto& db = Storage::DataBase::Instance();
         db.Open();
@@ -556,23 +559,28 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
             std::error_code ec;
             const auto size = std::filesystem::file_size(driver_cache_path, ec);
             if (!ec && size > 0 && size < (u64(1) << 30)) {
-                std::ifstream file{driver_cache_path, std::ios::binary};
-                initial_data.resize(size);
-                if (!file.read(initial_data.data(), std::streamsize(size))) {
-                    initial_data.clear();
+                // bbport: allocated without throwing, as in SaveDriverCache: with no memory for it, the driver
+                // starts with an empty cache instead of the game ending.
+                initial_data.reset(new (std::nothrow) char[size]);
+                if (!initial_data) {
+                    std::printf("Pipeline cache: no memory to load the driver's cache data (%llu KiB): the driver "
+                                "starts with an empty cache\n", static_cast<unsigned long long>(size / 1024));
+                } else if (std::ifstream file{driver_cache_path, std::ios::binary};
+                           file.read(initial_data.get(), std::streamsize(size))) {
+                    initial_size = size;
                 }
             }
         }
     }
     vk::PipelineCacheCreateInfo cache_info{
-        .initialDataSize = initial_data.size(),
-        .pInitialData = initial_data.empty() ? nullptr : initial_data.data(),
+        .initialDataSize = initial_size,
+        .pInitialData = initial_size != 0 ? initial_data.get() : nullptr,
     };
     auto created = instance.GetDevice().createPipelineCacheUnique(cache_info);
-    if (created.result != vk::Result::eSuccess && !initial_data.empty()) {
-        initial_data.clear();
+    if (created.result != vk::Result::eSuccess && initial_size != 0) {
         created = instance.GetDevice().createPipelineCacheUnique({});
     }
+    initial_data.reset();
     ASSERT_MSG(created.result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(created.result));
     pipeline_cache = std::move(created.value);
@@ -690,35 +698,78 @@ size_t PipelineCache::DriverCacheSize() {
 }
 
 /// Writes the driver's pipeline cache beside the shader blobs (temp file, then rename).
+/// bbport: the data goes into a buffer allocated without throwing. The cache is large (165 MiB on NVIDIA after a U3
+/// preload), and vulkan-hpp's getPipelineCacheData grew a std::vector for it: when Windows had no commit left for that
+/// one allocation (a scripted run: the system at 57.7 of its 57.9 GB commit limit), the vector threw std::bad_alloc on
+/// this thread and the game ended. Now that save is skipped and made at the next round (or at the exit). The buffer is
+/// also allocated before pipeline creation is held, and not zeroed (the vector zeroed its 165 MiB while holding it).
 void PipelineCache::SaveDriverCache() {
     if (driver_cache_path.empty() || !pipeline_cache) {
         return;
     }
     std::scoped_lock lock{driver_cache_mutex};
-    driver_cache_dirty.store(0);
-    const auto wait_start = std::chrono::steady_clock::now();
-    std::unique_lock use{PipelineCacheUse()}; // no pipeline creation while the data is read (PipelineCacheUse)
-    const auto read_start = std::chrono::steady_clock::now();
-    auto [result, data] = instance.GetDevice().getPipelineCacheData(*pipeline_cache);
-    use.unlock();
+    const u32 dirty = driver_cache_dirty.exchange(0);
+    const auto device = instance.GetDevice();
+    std::unique_ptr<char[]> data;
+    size_t capacity = 0;
+    size_t size = 0;
+    vk::Result result = vk::Result::eIncomplete;
+    std::chrono::steady_clock::time_point wait_start, read_start;
+    // A save not made: the pipelines created since the last one are still to be saved (next round, or the exit).
+    const auto keep_dirty = [&] { driver_cache_dirty.fetch_add(std::max(dirty, 1u)); };
+    // Pipelines created between the size query and the read can grow the cache past the buffer: the read then
+    // returns eIncomplete and the size is asked again (the slack makes that rare).
+    for (int attempt = 0; attempt < 4 && result == vk::Result::eIncomplete; ++attempt) {
+        {
+            std::unique_lock use{PipelineCacheUse()};
+            if (device.getPipelineCacheData(*pipeline_cache, &size, nullptr) != vk::Result::eSuccess) {
+                keep_dirty();
+                return;
+            }
+        }
+        if (size == 0) {
+            return;
+        }
+        if (size > capacity) {
+            data.reset();
+            capacity = size + size / 16 + (size_t(1) << 20);
+            data.reset(new (std::nothrow) char[capacity]);
+            if (!data) {
+                keep_dirty();
+                static int noted = 0;
+                if (noted < 3) {
+                    ++noted;
+                    std::printf("Pipeline cache: no memory for the driver's cache data (%zu KiB): not saved now, "
+                                "saved at the next round\n", capacity / 1024);
+                }
+                return;
+            }
+        }
+        size = capacity;
+        wait_start = std::chrono::steady_clock::now();
+        std::unique_lock use{PipelineCacheUse()}; // no pipeline creation while the data is read (PipelineCacheUse)
+        read_start = std::chrono::steady_clock::now();
+        result = device.getPipelineCacheData(*pipeline_cache, &size, data.get());
+    }
     // The first saves: how long the creations were held (and how long the save waited for them).
     static int timed = 0;
     if (timed < 3) {
         ++timed;
         const auto done = std::chrono::steady_clock::now();
         std::printf("Pipeline cache: the driver's cache data (%zu KiB) read in %.1f ms with pipeline creation held "
-                    "(%.1f ms waiting for the creations under way)\n", data.size() / 1024,
+                    "(%.1f ms waiting for the creations under way)\n", size / 1024,
                     std::chrono::duration<double, std::milli>(done - read_start).count(),
                     std::chrono::duration<double, std::milli>(read_start - wait_start).count());
     }
-    if (result != vk::Result::eSuccess || data.empty()) {
+    if (result != vk::Result::eSuccess) {
+        keep_dirty();
         return;
     }
     auto temp = driver_cache_path;
     temp += ".tmp";
     {
         std::ofstream file{temp, std::ios::binary | std::ios::trunc};
-        if (!file.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()))) {
+        if (!file.write(data.get(), std::streamsize(size))) {
             return;
         }
     }
