@@ -8,6 +8,7 @@
 #include "common/singleton.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/libraries/videoout/driver.h"
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
@@ -228,6 +229,14 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 
     frame_generator = std::make_unique<FrameGenerator>(instance, draw_scheduler);
     rasterizer->GetUpscaler().SetFrameGenerator(frame_generator.get());
+
+    // bbport even presents: paced frames held to their targets on the release queue
+    // (vk_present_release.h; the swapchain presents there). Without it (BB_EVEN_RELEASE=0, A/B
+    // only, or a device without such a queue) the presenter thread holds them, as before.
+    if (swapchain.UsesReleaseQueue()) {
+        release = std::make_unique<PresentRelease>(instance);
+        LowLatency::SetGpuRelease(release->Ready());
+    }
 }
 
 Presenter::~Presenter() {
@@ -241,6 +250,7 @@ Presenter::~Presenter() {
     Check(flip_scheduler.CommandBuffer().reset());
 
     const vk::Device device = instance.GetDevice();
+    release.reset(); // waits for the release queue
     if (overlay_image) {
         device.destroyImageView(overlay_view);
         vmaDestroyImage(instance.GetAllocator(), overlay_image, overlay_allocation);
@@ -1241,9 +1251,18 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
     // bbport even presents (vk_low_latency.h): a paced game frame waits until the GPU has drawn it
     // (its ready time, which the offset learns from) and then until its target; its upscaling /
     // post-processing and present follow at once, on a GPU the gate keeps idle meanwhile.
-    const bool even_frame = !is_reusing_frame && is_game_frame &&
-                            LowLatency::PresentTarget(flip_arg) != 0;
-    if (even_frame) {
+    // With GPU holds (vk_present_release.h) nothing waits here: the present work is queued at once
+    // behind a hold to the target, and the times the GPU took come back a frame or two later.
+    const s64 even_target =
+        !is_reusing_frame && is_game_frame ? LowLatency::PresentTarget(flip_arg) : 0;
+    const bool even_frame = even_target != 0;
+    const bool gpu_hold = even_frame && release && release->Ready();
+    if (release) {
+        release->Poll([](s64 flip, s64 ready, s64 released) {
+            LowLatency::PresentGpuTimes(flip, ready, released);
+        });
+    }
+    if (even_frame && !gpu_hold) {
         const vk::SemaphoreWaitInfo ready{.semaphoreCount = 1,
                                           .pSemaphores = &frame->ready_semaphore,
                                           .pValues = &frame->ready_tick};
@@ -1251,7 +1270,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
         LowLatency::PresentReadyAndWait(flip_arg);
     }
     u32 generated = is_reusing_frame ? 0 : frame->generated_count;
-    const auto start = std::chrono::steady_clock::now();
+    // A held frame's times are its target's (the CPU's are only when it was queued).
+    const auto start = gpu_hold ? std::chrono::steady_clock::time_point(std::chrono::nanoseconds(even_target))
+                                : std::chrono::steady_clock::now();
     if (!is_reusing_frame && is_game_frame) {
         const double ms =
             std::chrono::duration<double, std::milli>(start - last_game_present).count();
@@ -1284,17 +1305,25 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
             std::this_thread::yield();
         }
     };
+    // GPU holds: each image is held to its own time on the GPU (the first, which carries the
+    // frame's times, to the target), none on this thread.
+    const auto hold_at = [&](u32 index) -> s64 {
+        return gpu_hold ? (start + step * index).time_since_epoch().count() : 0;
+    };
     u32 shown = 0;
     for (; shown < generated; ++shown) {
         if (shown > 0) {
             if (behind()) {
                 break;
             }
-            wait_until(start + step * shown);
+            if (!gpu_hold) {
+                wait_until(start + step * shown);
+            }
         }
-        PresentImage(frame, frame->generated[shown].image, false);
+        PresentImage(frame, frame->generated[shown].image, false, 0, hold_at(shown),
+                     shown == 0 ? flip_arg : -1);
     }
-    if (shown && !behind()) {
+    if (shown && !behind() && !gpu_hold) {
         wait_until(start + step * shown);
     }
     // bbport: low latency mode: the game's own frame carries its frame id, from the game's frame
@@ -1303,7 +1332,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
     const u64 latency_id = game_frame ? LowLatency::PresentId(flip_arg) : 0;
     thumbnail_game_frame = game_frame;
     even_flip = game_frame ? flip_arg : -1;
-    const bool presented = PresentImage(frame, frame->image, true, latency_id);
+    const bool presented = PresentImage(frame, frame->image, true, latency_id, hold_at(shown),
+                                        shown == 0 ? flip_arg : -1);
     even_flip = -1;
     thumbnail_game_frame = false;
     if (game_frame) {
@@ -1320,7 +1350,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
     }
 }
 
-bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 latency_id) {
+bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 latency_id,
+                             s64 hold_until, s64 hold_flip) {
     if (!swapchain.AcquireNextImage()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
         if (!swapchain.AcquireNextImage()) {
@@ -1350,6 +1381,11 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
             .pLabelName = "Present",
         });
     }
+    // bbport even presents: this image's present waits for a hold to its time on the release
+    // queue (vk_present_release.h), after its blit here; nothing here waits for it.
+    // With the release queue every present goes there; a paced one after its hold.
+    const bool via_release = release && release->Ready();
+    const bool held = via_release && hold_until != 0;
 
     {
         const vk::Extent2D extent = swapchain.GetExtent();
@@ -1459,6 +1495,9 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
                                    vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
         }
     }
+    // The frame's ready time for the hold's offset: when this blit is done, on this queue (the
+    // release queue runs its holds in order, so its own start follows the last hold).
+    const s32 hold_slot = held ? release->RecordReady(cmdbuf) : -1;
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
     }
@@ -1476,6 +1515,16 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     scheduler.Flush(info);
     if (last && even_flip >= 0) {
         LowLatency::GatePostSubmitted(even_flip); // the gate opens: this frame's post work is queued
+    }
+    bool released = false;
+    if (held) {
+        // The hold on the release queue (it ends by itself at the latest one cap period after its
+        // time); the present waits for it.
+        const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+        const s64 period = std::max<s64>(Libraries::VideoOut::FrameCapPeriodNs(), 1'000'000);
+        released = release->Submit(hold_slot, swapchain.GetPresentReadySemaphore(),
+                                   swapchain.GetPresentReleaseSemaphore(), hold_flip, hold_until,
+                                   std::clamp<s64>(hold_until - now + period, 0, 100'000'000));
     }
 
     // bbport (hitch diagnosis, BB_HITCH_MS): a present slower than the hitch threshold prints where its time went.
@@ -1505,7 +1554,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
         const auto t2 = Clock::now();
-        presented = swapchain.Present(latency_id);
+        presented = swapchain.Present(latency_id, released);
         const auto t3 = Clock::now();
         if (slow_ms > 0 && ms(t0, t3) > slow_ms) {
             char gpu_done[32] = "(not waited)";

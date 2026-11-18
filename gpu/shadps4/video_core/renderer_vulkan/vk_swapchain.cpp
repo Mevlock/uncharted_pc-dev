@@ -17,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/renderer_vulkan/vk_present_release.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
 namespace Vulkan {
@@ -28,6 +29,17 @@ static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
 
 Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_)
     : instance{instance_}, window{window_}, surface{CreateSurface(instance.GetInstance(), window)} {
+    // bbport even presents (vk_present_release.h): the release queue must present to this surface.
+    if (PresentRelease::Wanted(instance)) {
+        const auto [result, supported] = instance.GetPhysicalDevice().getSurfaceSupportKHR(
+            instance.GetReleaseQueueFamilyIndex(), surface);
+        use_release = result == vk::Result::eSuccess && supported;
+        if (!use_release) {
+            std::printf("Even presents: the release queue (family %u) cannot present to the window; "
+                        "the GPU holds are off\n",
+                        instance.GetReleaseQueueFamilyIndex());
+        }
+    }
     FindPresentFormat();
     FindPresentMode();
 
@@ -52,9 +64,11 @@ void Swapchain::Create(u32 width_, u32 height_) {
 
     SetSurfaceProperties();
 
+    // bbport even presents: the release queue's family presents the images (and may hold them).
     const std::array queue_family_indices = {
         instance.GetGraphicsQueueFamilyIndex(),
-        instance.GetPresentQueueFamilyIndex(),
+        use_release && !instance.GetReleasePresentQueue() ? instance.GetReleaseQueueFamilyIndex()
+                                                          : instance.GetPresentQueueFamilyIndex(),
     };
 
     const bool exclusive = queue_family_indices[0] == queue_family_indices[1];
@@ -171,7 +185,7 @@ bool Swapchain::AcquireNextImage() {
     return !needs_recreation;
 }
 
-bool Swapchain::Present(u64 latency_id) {
+bool Swapchain::Present(u64 latency_id, bool released) {
     UpdateHdrMetadata();
     // bbport: low latency mode (vk_low_latency.h): the game's frame carries its frame id.
     const vk::PresentIdKHR present_id{
@@ -181,7 +195,7 @@ bool Swapchain::Present(u64 latency_id) {
     const vk::PresentInfoKHR present_info = {
         .pNext = LowLatency::UsesPresentId() ? &present_id : nullptr,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &present_ready[image_index],
+        .pWaitSemaphores = released && use_release ? &present_release[image_index] : &present_ready[image_index],
         .swapchainCount = 1,
         .pSwapchains = &swapchain,
         .pImageIndices = &image_index,
@@ -197,9 +211,15 @@ bool Swapchain::Present(u64 latency_id) {
     LowLatency::PresentStart(latency_id); // bbport: low latency mode (vk_low_latency.h)
     vk::Result result;
     {
-        std::scoped_lock queue_lk{g_graphics_queue_mutex};
+        // bbport even presents: on the release queue (vk_present_release.h), its own lock.
+        std::scoped_lock queue_lk{use_release ? g_release_queue_mutex : g_graphics_queue_mutex};
         const auto t2 = Clock::now();
-        result = instance.GetPresentQueue().presentKHR(present_info);
+        // the graphics family's present-only queue when there is one (the hold signals from the
+        // release queue), else the release queue itself
+        const vk::Queue queue = !use_release                         ? instance.GetPresentQueue()
+                                : instance.GetReleasePresentQueue() ? instance.GetReleasePresentQueue()
+                                                                    : instance.GetReleaseQueue();
+        result = queue.presentKHR(present_info);
         const auto t3 = Clock::now();
         last_async_ms = ms(t0, t1);
         last_queue_lock_ms = ms(t1, t2);
@@ -343,8 +363,11 @@ void Swapchain::SetSurfaceProperties() {
 
     // Select number of images in swap chain, we prefer one buffer in the background to work on
     // (bbport: two with frame generation, which presents several images per game frame).
+    // bbport even presents: five more for the presents that wait for their targets (the slack:
+    // up to about three frames at 144) while the next frames are drawn.
     image_count = capabilities.minImageCount +
-                  (BbSettings::Get().frame_gen != BbSettings::FrameGenOff ? 2 : 1);
+                  (BbSettings::Get().frame_gen != BbSettings::FrameGenOff ? 2 : 1) +
+                  (use_release ? 5 : 0); // capped by maxImageCount (8 on NVIDIA)
     if (capabilities.maxImageCount > 0) {
         image_count = std::min(image_count, capabilities.maxImageCount);
     }
@@ -391,9 +414,13 @@ void Swapchain::Destroy() {
     for (const auto& sem : present_ready) {
         device.destroySemaphore(sem);
     }
+    for (const auto& sem : present_release) {
+        device.destroySemaphore(sem);
+    }
 
     image_acquired.clear();
     present_ready.clear();
+    present_release.clear();
 }
 
 void Swapchain::RefreshSemaphores() {
@@ -413,6 +440,15 @@ void Swapchain::RefreshSemaphores() {
         ASSERT_MSG(semaphore_result == vk::Result::eSuccess,
                    "Failed to create present ready semaphore: {}", vk::to_string(semaphore_result));
         semaphore = sem;
+    }
+    if (use_release) {
+        present_release.resize(image_count);
+        for (vk::Semaphore& semaphore : present_release) {
+            auto [semaphore_result, sem] = device.createSemaphore({});
+            ASSERT_MSG(semaphore_result == vk::Result::eSuccess,
+                       "Failed to create present release semaphore: {}", vk::to_string(semaphore_result));
+            semaphore = sem;
+        }
     }
 
     for (u32 i = 0; i < image_count; ++i) {
