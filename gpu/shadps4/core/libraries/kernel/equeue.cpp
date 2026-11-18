@@ -499,7 +499,24 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev,
                                      OrbisKernelUseconds* timo) {
     const double t0 = runtime_wait_begin();
     const int r = WaitEqueueImpl(eq, ev, num, out, timo);
-    runtime_wait_end("equeue", t0);
+    if (t0 != 0.0) {
+        // bbport: BB_LATENCY_TRACE sums the waits by the event that ended them
+        const char* what = "equeue";
+        if (r == ORBIS_OK && out && *out > 0 && ev) {
+            switch (ev[0].filter) {
+            case OrbisKernelEvent::Filter::VideoOut:
+                what = (ev[0].ident == 0x6 || ev[0].ident == 0) ? "equeue flip" : (ev[0].ident == 0x7 || ev[0].ident == 1) ? "equeue vblank" : "equeue videoout";
+                break;
+            case OrbisKernelEvent::Filter::GraphicsCore: what = "equeue gpu"; break;
+            case OrbisKernelEvent::Filter::User: what = "equeue user"; break;
+            case OrbisKernelEvent::Filter::Timer: what = "equeue timer"; break;
+            default: break;
+            }
+        } else if (r != ORBIS_OK) {
+            what = "equeue timeout";
+        }
+        runtime_wait_end(what, t0);
+    }
     return r;
 }
 static int WaitEqueueImpl(OrbisKernelEqueue eq, OrbisKernelEvent* ev, int num, int* out,

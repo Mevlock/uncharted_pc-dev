@@ -9465,11 +9465,12 @@ bool Rasterizer::TakeSceneFrame() noexcept {
     } else if (++run >= (gameplay ? exit_frames : after_movie_window ? 1u : 3u)) {
         gameplay = raw;
         run = 0;
-        if (runtime_ultrawide_fill) {
-            std::printf("Ultrawide: %s (last frame: %u scene draws, %u menu backdrop draws)\n",
-                        gameplay ? "gameplay, wide" : "menu or loading, 16:9", scene_draws,
-                        menu_draws);
-        }
+        // Logged at every window shape: test tools take "Ultrawide: gameplay" as the start of play (a 16:9
+        // screen has nothing to widen, but the line still marks it).
+        std::printf("Ultrawide: %s (last frame: %u scene draws, %u menu backdrop draws)\n",
+                    gameplay ? (runtime_ultrawide_fill ? "gameplay, wide" : "gameplay, 16:9 window")
+                             : "menu or loading, 16:9",
+                    scene_draws, menu_draws);
     }
     // BB_ULTRAWIDE_MOVIE_LOG=1 (diagnosis): a line per frame from the first movie picture decoded
     // until 120 frames after the last read or decode, with the mode the draw count alone gave (before the

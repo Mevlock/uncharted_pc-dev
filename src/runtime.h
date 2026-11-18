@@ -30,6 +30,9 @@ int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
  * code (TerminateProcess; ExitProcess could hang in libsrt's detach, and exit()'s destructors
  * waited for the GPU). Every exit of the game and every STOP go through it. */
 __attribute__((noreturn)) void runtime_quit(int code);
+/* Windows: waits (at most 2 s) until the console output written so far has reached its destination
+ * (probe.c's output writer thread); call before ending the process without runtime_quit. */
+void runtime_output_flush(void);
 /* Fault handler: a fault inside a partial remap in progress waits for it; returns 1 to retry. */
 int runtime_memory_wait_carve(uintptr_t address);
 const char *runtime_import_name(const char *name);
@@ -214,6 +217,8 @@ float *runtime_callback_xmm(const uint64_t *regs, int x);
 /* BB_PAD_TIMING=1 (diagnosis): blocking waits noted per thread (name, start, duration); the pad
  * read prints the ones since the last read. runtime_wait_begin returns 0 when off. */
 double runtime_wait_begin(void);
+/* BB_LATENCY_TRACE=1: this thread's waits by kind since the last call (seconds), taken and reset; returns the count. */
+int runtime_frame_waits_take(const char **what, double *seconds, int max);
 void runtime_wait_end(const char *what, double start);
 /* Shader preparation page (on by default; BB_PREP_FREEZE=0: off, the game runs behind the page): while it shows, the game's threads stop at their next wait,
  * lock, yield or sound output (runtime_freeze_point; cooperative: never inside a host lock) and all go on together

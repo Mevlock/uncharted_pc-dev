@@ -168,4 +168,12 @@ private:
 /// with the real clock). Called from the guest's flip submissions only, never the GPU thread.
 void PaceGuestFlip();
 
+/// bbport latency pacing (vk_low_latency.cpp): the period of the frame rate cap the frame start
+/// keeps (the frame limit, or the Frame rate with the pacing on); 0: none now (no cap, or a movie,
+/// the boot's fast vblank, the game frozen, a flip rate).
+s64 FrameCapPeriodNs();
+/// The frame start keeps the cap (one limiter): the present thread's slot hold stands aside; it
+/// holds again as soon as this goes false.
+void SetStartPaced(bool paced);
+
 } // namespace Libraries::VideoOut

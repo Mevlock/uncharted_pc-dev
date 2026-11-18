@@ -27,6 +27,8 @@ uint64_t runtime_guest_tsc(void);
 #ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
+#include <io.h>
+#include <fcntl.h>
 #else
 #include <sys/mman.h>
 #include <malloc.h>
@@ -158,6 +160,7 @@ void runtime_quit(int code) {
     if (!__atomic_exchange_n(&quitting,1,__ATOMIC_ACQ_REL) && gpu_enabled) bbgpu_prepare_exit();
     fflush(NULL);
 #ifdef _WIN32
+    runtime_output_flush();
     TerminateProcess(GetCurrentProcess(),(UINT)code);
 #endif
     _exit(code);
@@ -472,6 +475,7 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     fflush(NULL);
     write_crash_dump(info);
     fflush(NULL);
+    runtime_output_flush();
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -1316,6 +1320,7 @@ static size_t rdtsc_count;
 uint64_t runtime_guest_tsc(void);
 int runtime_time_scaled(void);
 static int rdtsc_patched;
+static int64_t paced_clock_site=-1; /* the frame clock read (find_frame_clock): not one of the time scale ud2 sites */
 void runtime_patch_ultrawide(unsigned char *code, uint64_t size, uint64_t image_end);
 extern int runtime_ultrawide_fill;
 void runtime_patch_resolution(unsigned char *code, uint64_t size, uint64_t image_end);
@@ -1337,6 +1342,7 @@ static void patch_rdtsc(uint64_t image_size) {
         size_t i=0;
         while (i<lists[l].count) {
             const uint32_t at=lists[l].sites[i];
+            if ((int64_t)at==paced_clock_site) { ++i; continue; } /* the frame clock: the frame start's TSC */
             if (at+2>image_size || image[at]!=0x0f || image[at+1]!=0x31) break;
             ++i;
         }
@@ -1346,7 +1352,8 @@ static void patch_rdtsc(uint64_t image_size) {
         printf("Time scale: this game's rdtsc sites are not known, its own TSC reads stay unscaled\n");
         return;
     }
-    for (size_t i=0;i<rdtsc_count;++i) image[rdtsc_sites[i]+1]=0x0b; /* 0f 31 rdtsc -> 0f 0b ud2 */
+    for (size_t i=0;i<rdtsc_count;++i)
+        if ((int64_t)rdtsc_sites[i]!=paced_clock_site) image[rdtsc_sites[i]+1]=0x0b; /* 0f 31 rdtsc -> 0f 0b ud2 */
     rdtsc_patched=1;
     printf("Time scale: %zu rdtsc instructions in the game scaled\n",rdtsc_count);
 }
@@ -1372,14 +1379,94 @@ static int64_t find_masked(const char *hex, uint64_t size);
  * found always (one search at boot, nothing per frame), hooked only with the low latency mode on. */
 extern const volatile uint64_t *runtime_game_frame_count; /* runtime_ultrawide.c: g_frameState.m_frameCount */
 extern const volatile uint64_t *runtime_draw_frame_number; /* runtime_ultrawide.c: KickJob's lastFrameNumber */
+/* The games' frame clock (U1, U2, U3, 1.00 and 1.02): the frame function reads the TSC once per frame, after it waited
+ * for the frame's render job (find_frame_clock; U1 1.02 0x9d419), and the next frame's clock update steps the world
+ * by the difference to the last read (U1: step = min(1 / minimum frame rate, dt * time scale)). The render
+ * job's end moves with the GPU: the guest's submits wait for the GPU inside it (gnmdriver WaitGpuIdle), by a
+ * different amount every frame when the GPU is the limit. The frames are shown at the pace of their starts (the low
+ * latency sleep or the frame rate cap at the frame start), so the world stepped by the job's end times while the
+ * frames were shown evenly: U1 at 4K, 130-144 FPS, present intervals sd 0.5 ms, world steps sd 1.9 ms, 26% of the
+ * steps more than 2 ms off their frame's present interval (the U1 4K judder; 1.7% with a 120 cap the GPU keeps). That read now gives the TSC of the
+ * frame's own start, taken right after the frame start's sleep: the steps are the frames' start intervals (the
+ * same total time, each start counted once), the game's own scaling and step cap unchanged. BB_PACED_CLOCK=0: the
+ * game's own read. */
+static volatile uint64_t *paced_clock;   /* near the image (rip-relative load at the read): the last frame start */
+static uint64_t paced_clock_frame=UINT64_MAX;
+static int frame_start_sleeps;           /* the low latency mode or the cap at the frame start */
+/* BB_FRAME_CLOCK_LOG=<file> (diagnosis): per frame start, after the sleep: the game's frame number, the TSC and the
+ * game's last frame time read ([now]: the previous frame's read, so its steps are the differences), and the host ms
+ * (CLOCK_MONOTONIC, PresentMon's QPC clock); with BB_LATENCY_FRAMES joined by the frame number (its id - 1). */
+static FILE *frame_clock_log;
+static const volatile uint64_t *frame_clock_now;
+static uint64_t frame_clock_logged=UINT64_MAX;
 static void __attribute__((ms_abi)) game_frame_start(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
     (void)rdi; (void)rsi; (void)base; (void)r14;
-    const volatile uint64_t *kicked=runtime_draw_frame_number;
-    bbgpu_game_frame_start(*runtime_game_frame_count, kicked ? *kicked : UINT64_MAX);
+    const uint64_t frame=*runtime_game_frame_count;
+    if (frame_start_sleeps) {
+        const volatile uint64_t *kicked=runtime_draw_frame_number;
+        bbgpu_game_frame_start(frame, kicked ? *kicked : UINT64_MAX);
+    }
+    /* the frame function is also entered again within a frame (it is in a table of named functions): one stamp */
+    if (paced_clock && frame!=paced_clock_frame) {
+        paced_clock_frame=frame;
+        /* the time scale's TSC when the game's own reads are scaled (patch_rdtsc), as theirs */
+        *paced_clock=rdtsc_patched ? runtime_guest_tsc() : __rdtsc();
+    }
+    if (frame_clock_log && frame!=frame_clock_logged) {
+        frame_clock_logged=frame;
+        struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+        fprintf(frame_clock_log,"%llu %llu %llu %.3f\n",(unsigned long long)frame,(unsigned long long)__rdtsc(),
+                (unsigned long long)*frame_clock_now,(double)ts.tv_sec*1000.0+ts.tv_nsec/1e6);
+        if (!(frame&63)) fflush(frame_clock_log);
+    }
+}
+/* find_masked within [from, to): the offset, -1 (none) or -2 (not unique). */
+static int64_t find_masked_in(const char *hex, uint64_t from, uint64_t to) {
+    unsigned char bytes[64], mask[64];
+    int n=0;
+    for (const char *p=hex; *p && n<64;) {
+        if (*p==' ') { ++p; continue; }
+        if (p[0]=='?') { bytes[n]=0; mask[n++]=0; p+=2; continue; }
+        unsigned v; sscanf(p,"%2x",&v); bytes[n]=(unsigned char)v; mask[n++]=1; p+=2;
+    }
+    int64_t found=-1;
+    for (uint64_t i=from; i+n<=to; ++i) {
+        int k=0;
+        while (k<n && (!mask[k] || image[i+k]==bytes[k])) ++k;
+        if (k<n) continue;
+        if (found>=0) return -2;
+        found=(int64_t)i;
+    }
+    return found;
+}
+/* The frame clock read inside the frame function at `frame` (the rdtsc's offset), or -1. Two forms, each unique in
+ * the frame function's first 0x1000 bytes, after the render job's wait:
+ *   U1 1.00 + 1.02, U2 1.00, U3 1.00: lea rsi,[now]; mov rax,[rsi]; lea rdi,[last]; mov [rdi],rax; rdtsc;
+ *     mov rcx,rdx; shl rcx,32; or rcx,rax; mov [rsi],rcx; sub rcx,[rdi] (U1 1.02 +0xe55, 1.00 +0xd9f; U2 1.00 +0x485,
+ *     U3 1.00 +0x521)
+ *   U2 1.02, U3 1.02: mov rsi,[now]; mov [last],rsi; rdtsc; mov rcx,rdx; shl rcx,32; or rcx,rax; mov [now],rcx;
+ *     sub rcx,rsi (U2 +0xbb2, U3 +0xaf9), both [now] the same variable
+ * After it rax and rdx are set again before any use (mov rax,rcx / xor edx,edx; div). */
+static int64_t find_frame_clock(int64_t frame, uint64_t image_size, int64_t *now) {
+    if (frame<0 || (uint64_t)frame+0x1000+64>image_size) return -1;
+    const uint64_t from=(uint64_t)frame, to=(uint64_t)frame+0x1000;
+    int64_t at=find_masked_in("488d35???????? 488b06 488d3d???????? 488907 0f31 4889d1 48c1e120 4809c1 48890e 482b0f",from,to);
+    int32_t r1, r2;
+    if (at>=0) { memcpy(&r1,image+at+3,4); *now=at+7+r1; return at+20; }
+    if (at==-2) return -1;
+    at=find_masked_in("488b35???????? 488935???????? 0f31 4889d1 48c1e120 4809c1 48890d???????? 4829f1",from,to);
+    if (at<0) return -1;
+    memcpy(&r1,image+at+3,4); memcpy(&r2,image+at+29,4);
+    if (at+7+r1!=at+33+r2) return -1; /* the value read before is the one written after */
+    *now=at+7+r1;
+    return at+14;
 }
 static void install_game_frame_start(uint64_t image_size) {
     const char *env=getenv("BB_LOW_LATENCY");
-    const int low_latency=env && env[0] && env[0]!='0';
+    const char *pace=getenv("BB_LATENCY_PACING");
+    /* the frame start is hooked for the low latency mode and for the frame rate cap at the frame start
+     * (vk_low_latency.cpp Pace; on unless BB_LATENCY_PACING=0) */
+    const int low_latency=(env && env[0] && env[0]!='0') || !(pace && pace[0]=='0');
     /* U1 1.00 + 1.02, U2 1.00, U3 1.00: lea r14, [frame]; lea rbx; lea r12, [g_frameState]; nop; the job call
      * (rdi = r14, esi 0, edx 5, r8d 0, rcx = r9 = rbx); inc qword [r12 + d8]; call yield; cmp byte [r15], 0 */
     int64_t frame=-1, count=-1;
@@ -1410,19 +1497,57 @@ static void install_game_frame_start(uint64_t image_size) {
     runtime_game_frame_count=(const volatile uint64_t *)(image+count);
     printf("Game frame: the game's frame number at %#" PRIx64 " (main loop at %#" PRIx64 "): named in the frame stats, "
            "hitch, stall, fault and device-lost lines\n",(uint64_t)count,(uint64_t)(a>=0 ? a : b));
-    if (!low_latency) return;
+    /* The frame clock follows the frame starts whenever something sleeps there: the frame rate cap at the frame
+     * start (on by default) or the low latency mode's sleep (Reflex, Anti-Lag 2). With neither, the game keeps its
+     * own read (nothing then holds a frame's start apart from its previous frame's end). */
+    int64_t now=-1;
+    const int64_t found=find_frame_clock(frame,image_size,&now);
+    const char *paced_env=getenv("BB_PACED_CLOCK"), *log_env=getenv("BB_FRAME_CLOCK_LOG");
+    /* BB_LOW_LATENCY=m: markers only, no sleep */
+    const int sleeps=(env && (env[0]=='1' || env[0]=='2')) || !(pace && pace[0]=='0');
+    const int64_t clock=!sleeps || (paced_env && paced_env[0]=='0') ? -1 : found;
+    if (found>=0 && now>=0 && (uint64_t)now+8<=image_size && log_env && *log_env) {
+        frame_clock_log=fopen(log_env,"w");
+        frame_clock_now=(const volatile uint64_t *)(image+now);
+    }
+    if (!low_latency && clock<0 && !frame_clock_log) return;
+    frame_start_sleeps=low_latency;
     if (frame<0 || (uint64_t)frame+16>image_size || memcmp(image+frame,entry,sizeof(entry))) {
         printf("Low latency: the game's frame start was not found (unexpected frame function)\n");
-        bbgpu_game_frame_source(0);
+        if (low_latency) bbgpu_game_frame_source(0);
         return;
+    }
+    /* the clock's variable before the hook: the hook stamps it from its first call */
+    unsigned char *variable=clock>=0 ? near_image_memory(64) : NULL;
+    if (variable) {
+        paced_clock=(volatile uint64_t *)variable;
+        *paced_clock=__rdtsc(); /* the first frame start overwrites it before the read runs */
     }
     if (!callback_thunk(image+frame,sizeof(entry),(const void *)game_frame_start)) {
-        bbgpu_game_frame_source(0);
+        paced_clock=NULL;
+        if (low_latency) bbgpu_game_frame_source(0);
         return;
     }
-    printf("Low latency: the game's frame start at %#" PRIx64 " (main loop at %#" PRIx64 ", frame number at %#" PRIx64 ")\n",
-           (uint64_t)frame,(uint64_t)(a>=0 ? a : b),(uint64_t)count);
-    bbgpu_game_frame_source(1);
+    if (low_latency) {
+        printf("Low latency: the game's frame start at %#" PRIx64 " (main loop at %#" PRIx64 ", frame number at %#" PRIx64 ")\n",
+               (uint64_t)frame,(uint64_t)(a>=0 ? a : b),(uint64_t)count);
+        bbgpu_game_frame_source(1);
+    }
+    if (variable && image[clock]==0x0f && image[clock+1]==0x31) {
+        /* rdtsc; mov rcx,rdx; shl rcx,32; or rcx,rax (12 bytes, the TSC in rcx; rax and rdx are set again before
+         * their next use) -> mov rcx,[rip+rel32] (the frame start's TSC); nop5 */
+        unsigned char *p=image+clock;
+        const int32_t rel=(int32_t)((int64_t)(uintptr_t)variable-(int64_t)(uintptr_t)(p+7));
+        static const unsigned char load[]={0x48,0x8b,0x0d}, nop5[]={0x0f,0x1f,0x44,0x00,0x00};
+        memcpy(p,load,3); memcpy(p+3,&rel,4); memcpy(p+7,nop5,5);
+        paced_clock_site=clock;
+        printf("Frame clock: the game's frame time read at %#" PRIx64 " takes the frame start's TSC (after the frame "
+               "start's sleep), so the world steps follow the frame starts (BB_PACED_CLOCK=0: the game's own read)\n",
+               (uint64_t)clock);
+    } else if (clock>=0) {
+        paced_clock=NULL;
+        printf("Frame clock: %s, the game's own frame time read kept\n",variable ? "unexpected bytes at the read" : "no memory near the image");
+    }
 }
 static void patch_collection_skip(uint64_t image_size) {
     const char *skip=getenv("BB_SKIP_COLLECTION_MENU");
@@ -2400,6 +2525,7 @@ void runtime_restart(void) {
     }
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
     /* The new launch waits for this process's GPU device to go away (run.py --after). */
+    runtime_output_flush();
     TerminateProcess(GetCurrentProcess(),0);
 #else
     puts("Runtime: restarting through run.sh");
@@ -2416,9 +2542,87 @@ static DWORD WINAPI isa_stats_thread(void *unused) {
     (void)unused;
     for (;;) { Sleep(30000); if (isa_table) isa_rewrite_report(isa_table, stdout); }
 }
+
+/* The port's console output (stdout and stderr) goes into a pipe of its own with a large buffer,
+ * which a writer thread copies to where the output went before (the launcher's pipe, a log file or
+ * a console). A thread that prints never waits for that destination: the launcher's pipe holds
+ * about 4 KB and its reader is a Python thread, so a full pipe held the printing thread (the
+ * present thread's 5-second frame stats, the GPU thread's draw preparation line, the frame thread's
+ * trace) until the launcher read it, and with frames shown as soon as they are done that was a
+ * visible late frame every 5 seconds. One pipe for both streams keeps the lines in order;
+ * runtime_output_flush() lets the writer finish before the process ends (every exit and crash
+ * path). BB_DIRECT_OUTPUT=1: write straight through as before. */
+static HANDLE output_read = NULL, output_target = NULL;
+static HANDLE output_thread = NULL;
+static DWORD WINAPI output_writer(void *unused) {
+    (void)unused;
+    static char buffer[1 << 16];
+    int target_ok = 1;
+    for (;;) {
+        DWORD got = 0;
+        if (!ReadFile(output_read, buffer, sizeof(buffer), &got, NULL) || !got) return 0;
+        for (DWORD at = 0; target_ok && at < got;) {
+            DWORD put = 0;
+            if (!WriteFile(output_target, buffer + at, got - at, &put, NULL)) target_ok = 0; /* gone: drop */
+            at += put;
+        }
+    }
+}
+/* The process is about to end: the console streams are closed, so the writer reads what is left, then the end of
+ * the pipe, and stops; waited for at most 2 s. (42299e98 asked the pipe how much was left, PeekNamedPipe, which
+ * waited behind the writer's own pending ReadFile on that handle (synchronous I/O on one file object runs one call
+ * at a time) for good: every exit through it hung, the launcher's 'bb-probe --controller-info' included.) */
+void runtime_output_flush(void) {
+    if (!output_thread) return; /* not redirected (BB_DIRECT_OUTPUT=1, or the start failed) */
+    static volatile LONG closed;
+    if (!InterlockedExchange(&closed, 1)) {
+        fflush(NULL);
+        _close(1);
+        _close(2);
+    }
+    if (output_thread) WaitForSingleObject(output_thread, 2000);
+}
+static void output_start(void) {
+    const char *direct = getenv("BB_DIRECT_OUTPUT");
+    if (direct && direct[0] == '1') return;
+    /* The CRT's own handles behind fd 1 and fd 2. Run by the launcher (stderr=STDOUT) both can be the same
+     * handle, which _dup2 would close twice (the second time possibly a reused value): the originals are kept
+     * from being closed while the descriptors move; the writer thread then owns stdout's original. */
+    const HANDLE out = (HANDLE)_get_osfhandle(1), err = (HANDLE)_get_osfhandle(2);
+    if (!out || out == INVALID_HANDLE_VALUE) return;
+    HANDLE write_end = NULL;
+    if (!CreatePipe(&output_read, &write_end, NULL, 16u << 20)) { output_read = NULL; return; }
+    output_target = out;
+    output_thread = CreateThread(NULL, 0, output_writer, NULL, 0, NULL);
+    if (!output_thread) { CloseHandle(output_read); CloseHandle(write_end); output_read = NULL; return; }
+    fflush(NULL);
+    /* the same text/binary mode as the streams had (text: LF -> CRLF, as before) */
+    const int mode = _setmode(1, _O_BINARY);
+    _setmode(1, mode);
+    const int fd = _open_osfhandle((intptr_t)write_end, mode == -1 ? _O_TEXT : mode);
+    if (fd < 0) { /* the writer gets the pipe's end at once and stops; the streams stay as they were */
+        CloseHandle(write_end); CloseHandle(output_thread); output_thread = NULL; return;
+    }
+    SetHandleInformation(out, HANDLE_FLAG_PROTECT_FROM_CLOSE, HANDLE_FLAG_PROTECT_FROM_CLOSE);
+    const int err_separate = err && err != INVALID_HANDLE_VALUE && err != out;
+    if (err_separate) SetHandleInformation(err, HANDLE_FLAG_PROTECT_FROM_CLOSE, HANDLE_FLAG_PROTECT_FROM_CLOSE);
+    _dup2(fd, 1);
+    _dup2(fd, 2);
+    _close(fd);
+    SetHandleInformation(out, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0);
+    if (err_separate) { SetHandleInformation(err, HANDLE_FLAG_PROTECT_FROM_CLOSE, 0); CloseHandle(err); }
+    SetStdHandle(STD_OUTPUT_HANDLE, (HANDLE)_get_osfhandle(1));
+    SetStdHandle(STD_ERROR_HANDLE, (HANDLE)_get_osfhandle(2));
+    atexit(runtime_output_flush);
+}
 #endif
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+#ifdef _WIN32
+    output_start();
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+#endif
 #ifndef _WIN32
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */

@@ -63,6 +63,16 @@ void PresentEnd(u64 id);
 /// VkPresentIdKHR is chained to the presents.
 bool UsesPresentId();
 
+/// BB_LATENCY_TRACE=1 (diagnosis): the video driver's stages of the game's flip with this argument:
+/// the GPU reached it (its commands are done in order before it) and the present thread took it.
+enum class FlipStage { GpuReached, Taken };
+void TraceFlip(FlipStage stage, s64 flip_arg);
+
+/// Frame pacing asked for (BB_LATENCY_PACING not 0, the default): the video driver then keeps the
+/// Frame rate as a cap at the game's frame start and shows frames as they come (without the
+/// game's frame start hook the present thread's slot hold keeps the cap).
+bool StartPacingRequested();
+
 /// "Reflex", "Anti-Lag 2" while active, else nullptr (FPS counter).
 const char* Name();
 
