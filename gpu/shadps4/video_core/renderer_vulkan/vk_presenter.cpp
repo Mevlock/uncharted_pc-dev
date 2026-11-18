@@ -1235,6 +1235,18 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
     // bbport: frame generation: the generated frames first, then the game's own, evenly
     // spaced over the interval between the game's frames (the generated ones belong to the
     // time before this frame). A frame shown again has none.
+    // bbport even presents (vk_low_latency.h): a paced game frame waits until the GPU has drawn it
+    // (its ready time, which the offset learns from) and then until its target; its upscaling /
+    // post-processing and present follow at once, on a GPU the gate keeps idle meanwhile.
+    const bool even_frame = !is_reusing_frame && is_game_frame &&
+                            LowLatency::PresentTarget(flip_arg) != 0;
+    if (even_frame) {
+        const vk::SemaphoreWaitInfo ready{.semaphoreCount = 1,
+                                          .pSemaphores = &frame->ready_semaphore,
+                                          .pValues = &frame->ready_tick};
+        (void)instance.GetDevice().waitSemaphores(ready, 100'000'000);
+        LowLatency::PresentReadyAndWait(flip_arg);
+    }
     u32 generated = is_reusing_frame ? 0 : frame->generated_count;
     const auto start = std::chrono::steady_clock::now();
     if (!is_reusing_frame && is_game_frame) {
@@ -1287,8 +1299,13 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
     const bool game_frame = !is_reusing_frame && is_game_frame;
     const u64 latency_id = game_frame ? LowLatency::PresentId(flip_arg) : 0;
     thumbnail_game_frame = game_frame;
+    even_flip = game_frame ? flip_arg : -1;
     const bool presented = PresentImage(frame, frame->image, true, latency_id);
+    even_flip = -1;
     thumbnail_game_frame = false;
+    if (game_frame) {
+        LowLatency::GatePostSubmitted(flip_arg); // also when PresentImage gave up early
+    }
     if (!presented) {
         free_frame();
         return;
@@ -1454,6 +1471,9 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
         info.AddSignal(frame->present_done);
     }
     scheduler.Flush(info);
+    if (last && even_flip >= 0) {
+        LowLatency::GatePostSubmitted(even_flip); // the gate opens: this frame's post work is queued
+    }
 
     // bbport (hitch diagnosis, BB_HITCH_MS): a present slower than the hitch threshold prints where its time went.
     // BB_PRESENT_GPU_WAIT=1 (experiment): wait for the GPU to finish this frame before taking the submit lock, which
