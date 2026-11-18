@@ -407,15 +407,16 @@ s64 Target(u64 id) {
 
 std::atomic<bool> timed{false}; ///< the presents carry their target (VK_EXT_present_timing)
 
-/// GPU holds on the game's queue (mode 1) end at the target, but never after the next frame's slot
-/// (BB_EVEN_HOLD_CAP=0: off). A hold that ended later blocked the next frame's GPU work, and every
-/// GPU wait the game makes inside that frame, while the next frame was already running (AMD 7800 XT,
-/// U3 ride at 60: the frames take 17-20 ms from slot to GPU done, the offset 21-33 ms, 1-3 game
-/// frames of 25-37 ms a run that rc059 never had). Capped at the next slot, the held frames are
-/// still shown one slot apart (the slots are), and a frame not done by then is shown when done.
+/// BB_EVEN_HOLD_CAP=1 (experiment, OFF by default): GPU holds on the game's queue (mode 1) end at
+/// the target, but never after the next frame's slot. Aim: a later end blocks the next frame's GPU
+/// work and every GPU wait the game makes inside that frame (AMD 7800 XT, U3 ride at 60: frames
+/// 17-20 ms from slot to GPU done, offset 21-33 ms, 1-3 game frames of 25-37 ms a run). Off by
+/// default because a frame latency above one period is normal elsewhere: NVIDIA, U3 ride at 120,
+/// offset 12.6 ms against 8.33, the cap ended ~93% of the holds before their frames were done, they
+/// went unheld and the display spread rose 0.24-0.30 -> 0.79-0.85 ms (11-18, g120_F3a/b vs c0a).
 const bool hold_cap = [] {
     const char* env = std::getenv("BB_EVEN_HOLD_CAP");
-    return !(env && env[0] == '0');
+    return env && env[0] == '1';
 }();
 /// The hold's end for game frame `id` (0: none).
 s64 HoldEnd(u64 id) {
