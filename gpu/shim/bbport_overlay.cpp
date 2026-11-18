@@ -32,6 +32,7 @@
 #include "bbport_i18n.h"
 #include "bbport_saves.h"
 #include "bbport_settings.h"
+#include "bbport_vrr.h"
 #include <miniz.h>
 #include "imgui.h"
 
@@ -1453,6 +1454,16 @@ void FpsCounter() {
     if (runtime_dev_text_shown() == 0) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.35f, 1.0f, 0.35f, 1.0f), " DEV MODE");
+    }
+    // "G-SYNC" (NVIDIA), "FreeSync" (AMD) or "VRR": lit while the display refreshes with the game's frames, dimmed
+    // with "off" while it does not (the game not in front, composed by the desktop, a fixed refresh); bbport_vrr.h.
+    if (const BbVrr::Shown vrr = BbVrr::Get(); vrr.label) {
+        ImGui::SameLine();
+        if (vrr.active) {
+            ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.25f, 1.0f), " %s", vrr.label);
+        } else {
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 0.8f), " %s off", vrr.label);
+        }
     }
     // "DLSS 2288x960 Q  FG 2x 120": anti-aliasing, render size (Quality, Balanced,
     // Performance), and with frame generation adding frames (none in menus and movies) the

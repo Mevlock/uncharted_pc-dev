@@ -9,6 +9,7 @@
 #include <cstdio>
 #include "bbport_hdr.h"
 #include "bbport_settings.h"
+#include "bbport_vrr.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -64,6 +65,8 @@ void Swapchain::Create(u32 width_, u32 height_) {
     const auto format = needs_hdr ? hdr_format : surface_format;
     const vk::SwapchainCreateInfoKHR swapchain_info = {
         .pNext = LowLatency::SwapchainNext(),
+        // bbport: the VRR indicator's present timing source (bbport_vrr.h), where it measures.
+        .flags = BbVrr::SwapchainFlags(instance.GetPhysicalDevice(), surface),
         .surface = surface,
         .minImageCount = image_count,
         .imageFormat = format.format,
@@ -87,6 +90,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
                vk::to_string(swapchain_result));
     swapchain = chain;
     LowLatency::OnSwapchain(swapchain);
+    BbVrr::OnSwapchain(swapchain);
     metadata_peak = 0.0f; // a new swapchain has no metadata yet
     UpdateHdrMetadata();
 
@@ -179,7 +183,8 @@ bool Swapchain::Present(u64 latency_id) {
         .pPresentIds = &latency_id,
     };
     const vk::PresentInfoKHR present_info = {
-        .pNext = LowLatency::UsesPresentId() ? &present_id : nullptr,
+        // bbport: the VRR indicator's present timing (bbport_vrr.h), while it shows.
+        .pNext = BbVrr::PresentNext(LowLatency::UsesPresentId() ? &present_id : nullptr),
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],
         .swapchainCount = 1,
@@ -208,6 +213,10 @@ bool Swapchain::Present(u64 latency_id) {
     LowLatency::PresentEnd(latency_id);
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
+    } else if (result == static_cast<vk::Result>(VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT)) {
+        // bbport: the VRR indicator's timing reports (bbport_vrr.h) are collected before every
+        // present, so this should not happen; it costs one frame, not the game.
+        LOG_WARNING(Render_Vulkan, "Present timing queue full");
     } else {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                    vk::to_string(result));
@@ -364,6 +373,7 @@ void Swapchain::SetSurfaceProperties() {
 
 void Swapchain::Destroy() {
     LowLatency::OnSwapchainDestroy();
+    BbVrr::OnSwapchainDestroy();
     vk::Device device = instance.GetDevice();
     // bbport: vkDeviceWaitIdle needs the queues externally synchronized: the GPU command thread
     // submits under submit_mutex while the presenter recreates the swapchain (a window resize, a
