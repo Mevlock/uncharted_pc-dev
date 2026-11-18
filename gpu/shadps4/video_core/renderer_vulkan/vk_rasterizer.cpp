@@ -4687,20 +4687,14 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
         camera_motion->SetJitter(upscaler->Jitter());
         // bbport: once per shown frame. Uncharted draws into the display buffer several times a frame
-        // (the composite, its copies, the HUD): every one of them passed here and started a new object
-        // motion frame, so the positions stored during the scene were two or more "frames" old by the
-        // next scene and never matched: 0 draws with history, no character motion vectors at all
-        // (BB_FRAME_STATS: "Object motion: N draws, N stored, 0 with history"). Off until it has been
-        // looked at (it turns the character vectors on for the first time): BB_OBJECT_MOTION_FRAME=1
-        // turns it on, otherwise as before (every display draw).
+        // (the composite, its copies, the HUD): when every one of them started a new object motion
+        // frame, the positions stored during the scene were two or more "frames" old by the next
+        // scene and never matched (BB_FRAME_STATS: "Object motion: N draws, N stored, 0 with
+        // history": no object vectors at all).
         {
-            static const bool per_flip = [] {
-                const char* env = std::getenv("BB_OBJECT_MOTION_FRAME");
-                return env && env[0] == '1';
-            }();
             static u64 motion_flip = ~0ull;
             const u64 flip = g_flips.load(std::memory_order_relaxed);
-            if (!per_flip || flip != motion_flip) {
+            if (flip != motion_flip) {
                 motion_flip = flip;
                 object_motion->OnFrameStart();
             }
@@ -5137,33 +5131,39 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             }
         }
     }
-    // bbport (from BilalReloaded's Uncharted port, #84): the animated draws of Uncharted's
-    // G-buffer passes are the skinned ones, whose vertex buffers the GPU wrote this session (the
-    // skinning compute; the level's vertices stay as loaded). Its shaders read vertices from
-    // buffers (no vertex inputs): the draw's identity across frames comes from those buffers'
-    // sizes and strides, not their addresses (skinned vertices can move between frames). (The
-    // stencil's character bit differs between the games: Uncharted 2 sets it on the whole level.)
-    bool character_draw = false;
-    if (motion_draw && Shader::MotionVectors::characters) {
+    // bbport (from BilalReloaded's Uncharted port, #84): Uncharted's G-buffer shaders read their
+    // vertices from buffers (no vertex inputs): the draw's identity across frames comes from those
+    // buffers' sizes and strides, not their addresses (skinned vertices can move between frames).
+    // Every draw of the motion pipelines keeps its vertices' history, the level's too: #84 took
+    // only the skinned ones (vertex buffers the GPU wrote this session), but the level moves as
+    // well (U3 ch14's ship heaves in the world with the camera on it: under a camera-only
+    // reprojection its deck, containers and fences got 64-220 px of motion while the picture
+    // stood still).
+    // Its vertex range is the streams' whole length: a buffer-fetched draw's indices address its
+    // streams from their start, and an index past the longest stream fetches nothing, so the
+    // index list is not scanned (the cached scan cost ~70 ns a draw on the GPU thread, its page
+    // checks more). Constant buffers (stride 16) and raw buffers (stride 0) are not streams.
+    u32 stream_records = 0;
+    if (motion_draw && Shader::MotionVectors::characters && !motion_geometry) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         u64 hash = 0x6a09e667f3bcc909ULL;
+        u32 records = 0;
         for (const auto& resource : vs.buffers) {
             if (resource.IsSpecial()) continue;
             const auto buffer = resource.GetSharp(vs);
             if (!buffer.Valid()) continue;
-            hash = XXH3_64bits_withSeed(&buffer.num_records, sizeof(buffer.num_records),
-                                        hash ^ buffer.GetStride());
-            // Constant buffers (stride 16) are not vertices.
-            character_draw |= buffer.GetStride() != 16 &&
-                              buffer_cache.IsRangeGpuWritten(buffer.base_address,
-                                                             buffer.GetSize());
+            // (A multiply-mix, not XXH3: once per buffer of every G-buffer draw.)
+            hash = (hash ^ (u64(buffer.num_records) << 32 | buffer.GetStride())) *
+                   0x9e3779b97f4a7c15ULL;
+            hash ^= hash >> 29;
+            if (buffer.GetStride() != 16 && buffer.GetStride() != 0) {
+                records = std::max<u32>(records, buffer.num_records);
+            }
         }
-        if (character_draw && !motion_geometry) {
-            motion_geometry = hash;
-        }
+        stream_records = records;
+        motion_geometry = hash;
     }
-    if (motion_draw && motion_geometry &&
-        (!Shader::MotionVectors::characters || character_draw)) {
+    if (motion_draw && motion_geometry) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         const auto [base_vertex, first_instance] =
             GetDrawOffsets(regs, vs, pipeline->GetFetchShader());
@@ -5178,9 +5178,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             const char* value = std::getenv("BB_OBJECT_MOTION_ALL");
             return value && value[0] == '1';
         }();
-        bool gated = !all_motion && !character_draw;
+        bool gated = !all_motion && !Shader::MotionVectors::characters;
         u64 palette = 0;
-        for (const auto& resource : vs.buffers) {
+        // (Only a gated draw needs its palette: Uncharted's draws are never gated.)
+        const size_t palette_buffers = gated ? vs.buffers.size() : 0;
+        for (size_t i = 0; i < palette_buffers; ++i) {
+            const auto& resource = vs.buffers[i];
             if (resource.IsSpecial()) continue;
             const auto buffer = resource.GetSharp(vs);
             const u32 size = buffer.GetSize();
@@ -5208,7 +5211,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                                             palette)) {
             Motion::VertexRange range{base_vertex, regs.num_indices};
             u64 topology = 0;
-            if (is_indexed) {
+            if (is_indexed && stream_records) {
+                range = {0, stream_records}; // the streams' whole length (above)
+            } else if (is_indexed) {
                 range = {};
                 const u64 bytes = u64(regs.num_indices) * index_size;
                 if (index_address && memory->IsValidGpuMapping(index_address, 0) &&

@@ -15,6 +15,9 @@ layout(binding = 3, std430) writeonly buffer NextFrame { uint next_frame[]; };
 layout(binding = 1, rg16f) uniform writeonly image2D motion_img; // pixels, previous - current
 // Object motion from the G-buffer: rg pixels, b = valid, a = written depth.
 layout(binding = 2) uniform texture2D object_tex;
+// The scene's stencil (Uncharted's velocity pass: bits 0xc0 mark what moves with the camera's
+// platform, e.g. the rider and the horse), or a 1x1 zero image.
+layout(binding = 3) uniform utexture2D stencil_tex;
 #endif
 
 layout(push_constant) uniform Constants {
@@ -28,6 +31,10 @@ layout(push_constant) uniform Constants {
                        // pass camera, 3 = none (zero), 4 = 2 with the object motion
                        // (characters); debug: 0 motion, 1 raw depth,
                        // 2 view z / 50, 3 reprojected previous frame, 4 |difference|
+                       // Bits 8/9 (modes 2 and 4): stencil_offset applies to the pixels with
+                       // stencil bits 0xc0 (8) or without them (9).
+    vec4 stencil_offset; // xyz: previous clip x, y, w offset (the velocity pass's c56..c58 world
+                         // offset through the previous clip rows); w: stencil pixels per pixel
 };
 
 void main() {
@@ -86,7 +93,8 @@ void main() {
     imageStore(color_img, pixel, vec4(mix(current.rgb, mv_color, 0.75), current.a));
 #else
     vec2 result = motion;
-    if (mode == 2 || mode == 4) {
+    const uint base_mode = mode & 0xffu;
+    if (base_mode == 2 || base_mode == 4) {
         // Uncharted's camera velocity pass (CameraMotion::OnVelocityConstants): reproject holds
         // the view to previous clip x, y, w rows; proj the view from uv; prev_proj.xy the view
         // z from depth.
@@ -104,8 +112,22 @@ void main() {
         const float view_z = prev_proj.y / (depth - prev_proj.x);
         const vec4 view_pos = vec4(view_z * (proj.x * base_uv.x + proj.z),
                                    view_z * (proj.y * base_uv.y + proj.w), view_z, 1.0);
-        const vec3 clip = vec3(dot(reproject[0], view_pos), dot(reproject[1], view_pos),
-                               dot(reproject[2], view_pos));
+        vec3 clip = vec3(dot(reproject[0], view_pos), dot(reproject[1], view_pos),
+                         dot(reproject[2], view_pos));
+        // The velocity pass (its pixel shader): pixels without stencil bits 0xc0 add a world
+        // offset (c56..c58) before the previous clip. With the game's previous clip on a
+        // platform (U3's horse, vehicles: this frame's own), that offset is the world's motion
+        // relative to the marked pixels; with the real previous camera here, the marked pixels
+        // (the rider) carry it instead, the other way round (CameraMotion::OnVelocityConstants).
+        if ((mode & 0x300u) != 0u) {
+            const ivec2 stencil_size = textureSize(stencil_tex, 0);
+            const ivec2 stencil_pixel =
+                clamp(ivec2(vec2(pixel) * stencil_offset.w), ivec2(0), stencil_size - 1);
+            const bool marked = (texelFetch(stencil_tex, stencil_pixel, 0).r & 0xc0u) != 0u;
+            if (marked ? (mode & 0x100u) != 0u : (mode & 0x200u) != 0u) {
+                clip += stencil_offset.xyz;
+            }
+        }
         const vec2 previous_uv = vec2(0.5 * clip.x / clip.z + 0.5, 0.5 - 0.5 * clip.y / clip.z);
         result = (previous_uv - base_uv) * size + camera_fix;
         if (still_camera || any(isnan(result)) || any(isinf(result))) {
@@ -115,7 +137,7 @@ void main() {
         // vertices (previous minus current clip position, pixels, b = valid, a = the depth it was
         // drawn at). A later draw over the pixel leaves another depth: then the camera's motion
         // of that surface stays.
-        if (mode == 4 && depth < 1.0 && all(lessThan(pixel, textureSize(object_tex, 0)))) {
+        if (base_mode == 4 && depth < 1.0 && all(lessThan(pixel, textureSize(object_tex, 0)))) {
             const vec4 object_motion = texelFetch(object_tex, pixel, 0);
             const float object_z = prev_proj.y / (object_motion.a - prev_proj.x);
             if (object_motion.b > 0.99 && !any(isnan(object_motion.rg)) &&
@@ -131,9 +153,9 @@ void main() {
         if (all(lessThan(abs(result), vec2(prev_proj.z)))) {
             result = vec2(0.0);
         }
-    } else if (mode == 3) {
+    } else if (base_mode == 3) {
         result = vec2(0.0); // no camera this frame
-    } else if (mode == 1) {
+    } else if (base_mode == 1) {
         const vec4 object_motion = texelFetch(object_tex, pixel, 0);
         // A later ordinary draw may have covered this pixel without touching the motion
         // target. Its final depth then differs from the depth stored with the vector.
