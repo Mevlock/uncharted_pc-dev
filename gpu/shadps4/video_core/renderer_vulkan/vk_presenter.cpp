@@ -1223,6 +1223,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
     // bbport: a minimized window has no pixels on Windows (0x0); keep the swapchain and skip
     // presenting until the window is restored.
     if (window.GetWidth() == 0 || window.GetHeight() == 0) {
+        if (!is_reusing_frame && is_game_frame) {
+            LowLatency::GatePostSubmitted(flip_arg); // nothing is shown: the gate opens
+        }
         free_frame();
         return;
     }
