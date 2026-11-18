@@ -13,6 +13,7 @@
 #include <xxhash.h>
 
 #include "bbport_toggles.h"
+#include "common/thread.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -1627,20 +1628,41 @@ bool TextureCache::PatchKeyIcons(Image& image) {
     if (data_size == 0) {
         return true;
     }
-    const u64 state = BbKeyIcons::PaintState(!atlas && BbKeyIcons::IsPulseMask(hash));
+    const bool pulse_mask = !atlas && BbKeyIcons::IsPulseMask(hash);
+    const u64 state = BbKeyIcons::PaintState(pulse_mask);
     std::vector<u8> data;
-    bool painted = false;
     {
         std::scoped_lock lock{key_icon_mutex};
-        if (const auto it = key_icon_painted.find({raw_hash, state}); state && it != key_icon_painted.end()) {
-            if (!it->second.changed) {
+        if (const auto it = key_icon_painted.find({raw_hash, state}); it != key_icon_painted.end()) {
+            if (it->second.changed) {
+                data = it->second.data;
+            }
+            if (!state) {
+                key_icon_painted.erase(it); // (the blinking halo: painted for one beat)
+            }
+            if (data.empty()) {
+                key_icon_last.erase(raw_hash);
                 return true; // the game's own picture is right for this state
             }
-            data = it->second.data;
-            painted = true;
+            key_icon_last[raw_hash] = data;
         } else if (const auto orig = key_icon_originals.find(raw_hash);
                    orig != key_icon_originals.end() && orig->second.size() == data_size) {
-            data = orig->second;
+            // Painted on the key icon thread (a paint takes 10-30 ms: never on the frame); the texture is uploaded again
+            // when it is done. Meanwhile it shows what it showed last (the previous device's icons), else the game's.
+            if (std::ranges::none_of(key_icon_jobs, [&](const KeyIconJob& j) { return j.hash == raw_hash && j.state == state; })) {
+                const bool u3_atlas = atlas && (hash == BbKeyIcons::U3AtlasHash || hash == BbKeyIcons::U3AtlasShapesHash);
+                key_icon_jobs.push_back({raw_hash, hash, state, pulse_mask, u8(u3_atlas ? 2 : atlas ? 1 : 0), info.size.width,
+                                         info.size.height, levels, orig->second, info.guest_address, u32(info.guest_size)});
+                key_icon_cv.notify_one();
+                if (!key_icon_thread.joinable()) {
+                    key_icon_thread = std::jthread([this](std::stop_token stop) { KeyIconWorker(stop); });
+                }
+            }
+            const auto last = key_icon_last.find(raw_hash);
+            if (last == key_icon_last.end() || last->second.size() != data_size) {
+                return true;
+            }
+            data = last->second;
         } else {
             // Seen for the first time: read back without waiting; the GPU's copy lands in key_icon_originals and the
             // texture is uploaded again then (the game's picture shows meanwhile, a frame or two).
@@ -1658,22 +1680,6 @@ bool TextureCache::PatchKeyIcons(Image& image) {
             return true;
         }
     }
-    if (!painted) {
-        const bool u3_atlas = atlas && (hash == BbKeyIcons::U3AtlasHash || hash == BbKeyIcons::U3AtlasShapesHash);
-        const bool changed = u3_atlas ? BbKeyIcons::PatchU3Atlas(hash, data.data(), info.size.width, info.size.height)
-                             : atlas  ? BbKeyIcons::PatchU1Atlas(data.data(), info.size.width, info.size.height)
-                                      : BbKeyIcons::PatchU1Texture(hash, data.data(), data.size(), levels);
-        if (state) {
-            std::scoped_lock lock{key_icon_mutex};
-            if (key_icon_painted.size() >= 96) {
-                key_icon_painted.clear(); // (a few dozen textures and states at most; a bound for the long session)
-            }
-            key_icon_painted[{raw_hash, state}] = KeyIconPainted{changed, changed ? data : std::vector<u8>{}};
-        }
-        if (!changed) {
-            return true;
-        }
-    }
     const auto upload = runtime.GetStagingPool().Request(data_size, MemoryType::HostUncached, 16);
     std::memcpy(upload.mapped, data.data(), data_size);
     upload.Flush();
@@ -1682,6 +1688,40 @@ bool TextureCache::PatchKeyIcons(Image& image) {
     }
     runtime.UploadImage(&image, upload.buffer, copies);
     return true;
+}
+
+/// bbport: the key icon thread: paints the jobs PatchKeyIcons queues (from the game's picture), one at a time; the paint
+/// functions keep their own caches and are only ever called here.
+void TextureCache::KeyIconWorker(std::stop_token stop) {
+    Common::SetCurrentThreadName("bb:KeyIcons");
+    std::unique_lock lock{key_icon_mutex};
+    while (!stop.stop_requested()) {
+        key_icon_cv.wait(lock, stop, [&] { return !key_icon_jobs.empty(); });
+        if (stop.stop_requested()) {
+            break;
+        }
+        KeyIconJob job = std::move(key_icon_jobs.front());
+        key_icon_jobs.pop_front();
+        key_icon_busy = true;
+        lock.unlock();
+        bool keep = BbKeyIcons::PaintState(job.pulse_mask) == job.state; // (not when the device changed since)
+        bool changed = false;
+        if (keep) {
+            changed = job.atlas == 2   ? BbKeyIcons::PatchU3Atlas(job.canonical, job.data.data(), job.width, job.height)
+                      : job.atlas == 1 ? BbKeyIcons::PatchU1Atlas(job.data.data(), job.width, job.height)
+                                       : BbKeyIcons::PatchU1Texture(job.canonical, job.data.data(), job.data.size(), job.levels);
+            keep = BbKeyIcons::PaintState(job.pulse_mask) == job.state;
+        }
+        lock.lock();
+        key_icon_busy = false;
+        if (keep) {
+            if (key_icon_painted.size() >= 96) {
+                key_icon_painted.clear(); // (a few dozen textures and states at most; a bound for the long session)
+            }
+            key_icon_painted[{job.hash, job.state}] = KeyIconPainted{changed, changed ? std::move(job.data) : std::vector<u8>{}};
+            key_icon_landed.emplace_back(job.address, job.guest_size);
+        }
+    }
 }
 
 void TextureCache::UpdateButtonPrompts() {
@@ -1706,6 +1746,15 @@ void TextureCache::UpdateButtonPrompts() {
                 }
                 return true;
             });
+        }
+        {
+            // Painted pictures: their textures are uploaded again once every queued paint is done (U3's atlas and its shapes
+            // change in the same frame).
+            std::scoped_lock lock{key_icon_mutex};
+            if (key_icon_jobs.empty() && !key_icon_busy) {
+                landed.insert(landed.end(), key_icon_landed.begin(), key_icon_landed.end());
+                key_icon_landed.clear();
+            }
         }
         for (const auto& [address, size] : landed) {
             InvalidateMemory(address, size);

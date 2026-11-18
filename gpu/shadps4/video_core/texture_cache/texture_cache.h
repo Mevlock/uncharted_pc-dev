@@ -12,6 +12,7 @@
 #include "bbport_toggles.h"
 
 #include <condition_variable>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <unordered_map>
@@ -644,6 +645,27 @@ private:
     std::vector<KeyIconPending> key_icon_pending;
     std::unordered_map<u64, std::vector<u8>> key_icon_originals;
     std::map<std::pair<u64, u64>, KeyIconPainted> key_icon_painted;
+    /// What each of those textures showed last (painted), shown while its next picture is painted.
+    std::unordered_map<u64, std::vector<u8>> key_icon_last;
+    /// The paints waiting for the key icon thread (KeyIconWorker), the guest ranges of the done ones (uploaded again by
+    /// UpdateButtonPrompts when no paint is left), and the thread. key_icon_mutex.
+    struct KeyIconJob {
+        u64 hash;      ///< of the guest bytes
+        u64 canonical; ///< the tables' hash (1.00 data mapped)
+        u64 state;
+        bool pulse_mask;
+        u8 atlas; ///< 0 a HUD texture, 1 U1/U2 atlas, 2 U3 atlas or its shapes
+        u32 width, height, levels;
+        std::vector<u8> data;
+        VAddr address;
+        u32 guest_size;
+    };
+    std::deque<KeyIconJob> key_icon_jobs;
+    std::vector<std::pair<VAddr, u32>> key_icon_landed;
+    bool key_icon_busy = false;
+    std::condition_variable_any key_icon_cv;
+    std::jthread key_icon_thread; // (last of these: stopped and joined before they go)
+    void KeyIconWorker(std::stop_token stop);
     std::mutex samplers_mutex;
     /// perf11: raised whenever the GC destroys a sampler (GetSampler's memo; starts at 1, an
     /// empty memo entry has 0).
