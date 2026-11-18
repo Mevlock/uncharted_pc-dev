@@ -1245,12 +1245,6 @@ const volatile uint64_t *runtime_draw_frame_number;
  * flip argument); NULL: not found. Set by probe.c (install_game_frame_start) before the game runs; read by the low
  * latency mode and by the reports that name the game frame (bbgpu_game_frame_text). */
 const volatile uint64_t *runtime_game_frame_count;
-/* The game's own frame time per frame number: the step its frame clock gives the world in that frame (the difference
- * of its frame-time reads, its time scale in), in seconds; slot = frame & 63, valid while runtime_frame_step_frame[slot]
- * is that frame. Written by probe.c (game_frame_start), read by the motion vectors (vk_camera_motion.cpp: the game's
- * platform offset is a 1/60 s motion). */
-volatile double runtime_frame_step_seconds[64];
-volatile uint64_t runtime_frame_step_frame[64];
 
 typedef struct {
     const char *name;

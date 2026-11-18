@@ -16,8 +16,6 @@ extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c, or nul
 extern "C" const volatile uint32_t* runtime_projection_jitter_frame;
 extern "C" float* runtime_projection_jitter_table;
 // The game's frame time (world step) per frame number (runtime_ultrawide.c, written by probe.c's frame start hook).
-extern "C" volatile double runtime_frame_step_seconds[64];
-extern "C" volatile uint64_t runtime_frame_step_frame[64];
 extern "C" volatile uint32_t* runtime_projection_jitter_phases;
 namespace Libraries::VideoOut {
 extern std::atomic<s64> g_gpu_flip_arg;
@@ -490,8 +488,10 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     if (pass_frame != own_clip_frame) {
         own_previous_clip = own_clip;
         own_previous_clip_frame = own_clip_frame;
+        own_previous_camera = own_camera;
     }
     std::copy(c + 24, c + 40, own_clip.begin());
+    own_camera = {c[15], c[19], c[23]};
     own_clip_frame = pass_frame;
     static const bool game_previous = [] {
         const char* env = std::getenv("BB_GAME_PREVIOUS_CLIP");
@@ -534,17 +534,24 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     }
     // The velocity pass's stencil term (its pixel shader): pixels WITHOUT stencil bits 0xc0 add the
     // world offset c56..c58 before the previous clip; the marked ones (what moves with the camera's
-    // platform: U3's rider and horse, the vehicles) do not. On a platform the game gives this
-    // frame's own clip rows as the previous ones: its motion is then taken in the platform's frame,
-    // the marked pixels standing still and the world moving by the offset. Here the previous clip
-    // is last frame's real one (above), under which the world stands still: the marked pixels then
-    // moved by the offset in the world, so they were at p - offset (the same relative motion; the
-    // camera's turn and the world's motion, the parts the game's own value leaves out, both kept).
+    // platform: U3's rider and horse, U1's jeep, U2's convoy truck) do not. On a platform the game
+    // gives this frame's own clip rows as the previous ones: its motion is then taken in the
+    // platform's frame, the marked pixels standing still and the world moving by the offset. Here
+    // the previous clip is last frame's real one (above), under which the world stands still: the
+    // marked pixels moved with the platform, so they were at p - (the platform's step this frame).
     // Without that, the rider got the world's motion past him while he stays on screen: DLSS took
     // his history from the wrong place (flicker on Nate and a band around him on U3's horse ride,
     // from 12eacdd0 on). With the game's own previous clip (not held, or no last frame's pass) the
     // game's form exactly: the unmarked pixels add the offset. BB_STENCIL_MOTION=0 (diagnosis):
     // the term left out (the build before).
+    // The platform's step is the camera's own step between the two passes (c15, c19, c23: the
+    // view-to-world translation), not the game's offset: that offset points the same way (cosine
+    // 0.999-1.000 on U3's horse, U1's jeep, U2's convoy) but is a motion-blur length, not a step:
+    // at 120 FPS it alternates 1.66 / 2.49 times the step frame by frame, about the step in a long
+    // frame, so scaling it by the frame time left Nate's vectors jumping a few pixels every other
+    // frame and 30-60 px off around a long frame (the frame times run a frame apart from the
+    // passes). The camera's step comes with the two clips that are used, so it is the step of
+    // exactly this frame pair.
     {
         static const bool stencil_motion = [] {
             const char* env = std::getenv("BB_STENCIL_MOTION");
@@ -555,60 +562,37 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         }();
         const bool held = std::equal(c + 40, c + 56, c + 24);
         const bool carried = own_previous && held;
-        // The game's offset is the platform's motion over max(frame time, 1/60 s) (its motion blur's interval: at 60 FPS
-        // and below one frame's motion, at 120 FPS two frames' - U3's horse ride: 1.92 times the camera's step at 120,
-        // 1.0 at 60 and in a long frame; the rider's vectors came out the world's motion turned round, +29 px without
-        // the term, -30 px with it whole, against a real 0-5 px). The marked pixels move by this frame's share:
-        // min(1, 60 dt), dt the game's own frame time for this frame (its frame clock: probe.c), or the frame before's.
-        float share = 1.0f;
-        if (carried) {
-            double dt = -1.0;
-            for (const s64 f : {pass_frame, pass_frame - 1}) {
-                const u32 slot = u32(u64(f) & 63);
-                if (f >= 0 && runtime_frame_step_frame[slot] == u64(f)) {
-                    const double seconds = runtime_frame_step_seconds[slot];
-                    if (runtime_frame_step_frame[slot] == u64(f)) { // not rewritten meanwhile
-                        dt = seconds;
-                        break;
-                    }
-                }
-            }
-            static bool noted = false;
-            if (dt > 0.0 && std::isfinite(dt)) {
-                share = float(std::min(1.0, dt * 60.0));
-            } else if (!noted) {
-                noted = true;
-                std::printf("Camera motion: the game's frame time is not known: the platform offset taken whole\n");
-            }
-        }
-        const float sign = carried ? -share : 1.0f;
-        const float offset[3] = {sign * c[56], sign * c[57], sign * c[58]};
+        const std::array<float, 3> step{own_camera[0] - own_previous_camera[0],
+                                         own_camera[1] - own_previous_camera[1],
+                                         own_camera[2] - own_previous_camera[2]};
+        const float offset[3] = {carried ? -step[0] : c[56], carried ? -step[1] : c[57],
+                                 carried ? -step[2] : c[58]};
+        // the platform offset in use (the game's form) or a held clip (ours): the term applies
+        const bool platform = c[56] != 0.0f || c[57] != 0.0f || c[58] != 0.0f;
         camera.stencil_select = 0;
         camera.stencil_clip_offset = {};
-        if (stencil_motion && std::isfinite(offset[0]) && std::isfinite(offset[1]) &&
-            std::isfinite(offset[2]) && (offset[0] != 0.0f || offset[1] != 0.0f || offset[2] != 0.0f)) {
+        if (stencil_motion && platform && std::isfinite(offset[0]) && std::isfinite(offset[1]) &&
+            std::isfinite(offset[2])) {
             for (int r = 0; r < 3; ++r) {
                 camera.stencil_clip_offset[r] =
                     rows[r][0] * offset[0] + rows[r][1] * offset[1] + rows[r][2] * offset[2];
             }
             camera.stencil_select = carried ? 0x100u : 0x200u;
         }
-        // BB_STENCIL_MOTION_LOG=1: every 60 frames the offset against the camera's own move.
+        // BB_STENCIL_MOTION_LOG=1: every 60 frames the offset against the camera's step; 2: every frame.
         static const char* log_env = std::getenv("BB_STENCIL_MOTION_LOG");
         if (static const bool log = log_env != nullptr; log) {
-            const bool every = log_env[0] == '2'; // BB_STENCIL_MOTION_LOG=2: every frame
+            const bool every = log_env[0] == '2';
             static u32 frames = 0, lines = 0;
-            static std::array<float, 3> last_camera{};
-            const std::array<float, 3> camera_now{c[15], c[19], c[23]};
             if ((++frames % 60 == 0 || every) && lines < 8000) {
                 ++lines;
-                std::printf("Stencil motion: frame %lld held %d own %d share %.3f offset %g %g %g camera moved %g %g %g "
+                std::printf("Stencil motion: frame %lld held %d own %d offset %g %g %g camera step %g %g %g "
                             "(marked pixels %s)\n", static_cast<long long>(pass_frame), int(held),
-                            int(own_previous), share, c[56], c[57], c[58], camera_now[0] - last_camera[0],
-                            camera_now[1] - last_camera[1], camera_now[2] - last_camera[2],
-                            camera.stencil_select == 0x100u ? "carry it" : camera.stencil_select ? "not" : "-");
+                            int(own_previous), c[56], c[57], c[58], step[0], step[1], step[2],
+                            camera.stencil_select == 0x100u ? "carry the camera's step"
+                            : camera.stencil_select       ? "still, the others add the offset"
+                                                          : "-");
             }
-            last_camera = camera_now;
         }
     }
     camera.uv_to_view = {c[0], c[1], c[2], c[3]};
@@ -928,8 +912,8 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     static bool reported = false;
     if (!reported && camera.stencil_select == 0x100u) {
         reported = true;
-        std::printf("Camera motion: the velocity pass's platform offset (%g, %g, %g) carried by the "
-                    "stencil-marked pixels (the game's previous clip is this frame's)\n", c[56], c[57], c[58]);
+        std::printf("Camera motion: on a platform (offset %g, %g, %g; the game's previous clip is this "
+                    "frame's): the stencil-marked pixels move with the camera's step\n", c[56], c[57], c[58]);
     }
     // bbport (DLSS rework 11): with BB_STENCIL_MOTION_LOG=1, every 2 s: frames whose velocity pass
     // moved stencil-marked pixels, and the largest such offset (vehicles, platforms? train,

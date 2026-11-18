@@ -2611,6 +2611,14 @@ bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::I
                 DumpImages(instance, scheduler, cmdbuf, dump,
                            {{depth_image, source_width, source_height, 4, "depth", "f32",
                              vk::ImageAspectFlagBits::eDepth}});
+                // The stencil the motion vectors read (the scene's own depth target: scaled
+                // sessions, BeforeDisplayPass).
+                if (depth_image == depth.GetImage() &&
+                    (depth.aspect_mask & vk::ImageAspectFlagBits::eStencil)) {
+                    DumpImages(instance, scheduler, cmdbuf, dump,
+                               {{depth_image, source_width, source_height, 1, "stencil", "u8",
+                                 vk::ImageAspectFlagBits::eStencil}});
+                }
                 if (BbSettings::Get().upscaler == BbSettings::UpscalerTaa &&
                     std::getenv("BB_TAA_DIAGNOSTICS")) {
                     DumpImages(instance, scheduler, cmdbuf, dump,

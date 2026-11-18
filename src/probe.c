@@ -1401,21 +1401,6 @@ static int frame_start_sleeps;           /* the low latency mode or the cap at t
 static FILE *frame_clock_log;
 static const volatile uint64_t *frame_clock_now;
 static uint64_t frame_clock_logged=UINT64_MAX;
-/* The game's frame times (runtime_ultrawide.c): frame `frame` read its clock at `tsc`; its step is the difference to the
- * read of the frame before. */
-extern volatile double runtime_frame_step_seconds[64];
-extern volatile uint64_t runtime_frame_step_frame[64];
-static void note_frame_clock_read(uint64_t frame, uint64_t tsc) {
-    static uint64_t last_frame=UINT64_MAX, last_tsc;
-    if (frame==last_frame) return;
-    if (last_frame!=UINT64_MAX && frame==last_frame+1 && tsc>=last_tsc) {
-        const uint64_t slot=frame&63;
-        runtime_frame_step_frame[slot]=UINT64_MAX;
-        runtime_frame_step_seconds[slot]=(double)(tsc-last_tsc)/(double)runtime_tsc_frequency();
-        runtime_frame_step_frame[slot]=frame;
-    }
-    last_frame=frame; last_tsc=tsc;
-}
 static void __attribute__((ms_abi)) game_frame_start(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
     (void)rdi; (void)rsi; (void)base; (void)r14;
     const uint64_t frame=*runtime_game_frame_count;
@@ -1434,11 +1419,6 @@ static void __attribute__((ms_abi)) game_frame_start(uint64_t rdi, uint64_t rsi,
         double ticks=(double)lead*(double)runtime_tsc_frequency()/1e9;
         if (rdtsc_patched) ticks*=runtime_time_scale_now();
         *paced_clock=(rdtsc_patched ? runtime_guest_tsc() : __rdtsc())+(uint64_t)(int64_t)ticks;
-        note_frame_clock_read(frame,*paced_clock); /* the read this frame's world step comes from */
-    } else if (frame_clock_now && frame!=paced_clock_frame) {
-        /* the game's own read: the last one is the frame before's (this frame's step is known one frame later) */
-        paced_clock_frame=frame;
-        if (frame) note_frame_clock_read(frame-1,*frame_clock_now);
     }
     if (frame_clock_log && frame!=frame_clock_logged) {
         frame_clock_logged=frame;
@@ -1534,10 +1514,9 @@ static void install_game_frame_start(uint64_t image_size) {
     /* BB_LOW_LATENCY=m: markers only, no sleep */
     const int sleeps=(env && (env[0]=='1' || env[0]=='2')) || !(pace && pace[0]=='0');
     const int64_t clock=!sleeps || (paced_env && paced_env[0]=='0') ? -1 : found;
-    if (found>=0 && now>=0 && (uint64_t)now+8<=image_size) {
-        /* the game's last frame-time read: its frame times for the motion vectors (note_frame_clock_read) */
+    if (found>=0 && now>=0 && (uint64_t)now+8<=image_size && log_env && *log_env) {
+        frame_clock_log=fopen(log_env,"w");
         frame_clock_now=(const volatile uint64_t *)(image+now);
-        if (log_env && *log_env) frame_clock_log=fopen(log_env,"w");
     }
     if (!low_latency && clock<0 && !frame_clock_log) return;
     frame_start_sleeps=low_latency;

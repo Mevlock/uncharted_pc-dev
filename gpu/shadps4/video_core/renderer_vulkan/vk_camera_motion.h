@@ -185,6 +185,8 @@ private:
     /// previous clip of the next frame (OnVelocityConstants).
     std::array<float, 16> own_clip{}, own_previous_clip{};
     s64 own_clip_frame = -1, own_previous_clip_frame = -1;
+    /// The camera's world position (the pass's view-to-world translation c15, c19, c23) with each of those clips.
+    std::array<float, 3> own_camera{}, own_previous_camera{};
     std::array<float, 2> planes{}; ///< the last velocity pass's depth constants (z = y / (depth - x))
     bool planes_known = false;
     std::array<float, 16> still_reference{}; ///< last frame's view-to-world rows and view-from-uv
