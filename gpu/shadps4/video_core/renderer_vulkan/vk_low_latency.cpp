@@ -461,9 +461,26 @@ std::array<std::atomic<u64>, Ring> flip_id{};
 std::array<std::atomic<s64>, Ring> flip_at{};
 std::atomic<u64> release_n{0}, release_late{0};
 std::atomic<s64> release_err_ns{0}, release_err_max{0}, release_hold_ns{0};
+/// A held frame's hold also delays the next frame's GPU work (it waits behind the held blit, on the
+/// game's queue). The offset's samples must not carry that delay: with it in, frame N's sample
+/// (ready - slot) was at least the offset minus a period plus its GPU time, so the offset fed
+/// itself and stayed deep (AMD, U3 ride at 60: 21-33 ms for the whole ride against ~10 ms of the
+/// frames' own time, after one late burst at the ride start; the game's own GPU waits inside a
+/// frame then waited for the last frame's hold: 25-28 ms game frames that rc059 never had; GPU-bound
+/// at 144 it ran to its clamp). So each frame's first draw submission is noted (the time its GPU
+/// work could start without the hold), with the last frame's ready and release times.
+std::atomic<u64> first_pending_id{0}, first_pending_tick{0};
+std::array<std::atomic<u64>, Ring> first_submit_id{};
+std::array<std::atomic<s64>, Ring> first_submit_at{};
+std::array<u64, Ring> times_id{};      ///< presenter: GpuTimes' frames
+std::array<s64, Ring> times_ready{}, times_release{};
+std::atomic<s64> own_delay_ns{0};      ///< for the log: the delay taken off the samples
 
 void GateNote(u64 id, s64 period, u64 draw_tick) {
     const s64 now = Now();
+    // the next frame's first draw submission (the first one signalling more than this frame's work)
+    first_pending_tick.store(draw_tick, std::memory_order_relaxed);
+    first_pending_id.store(id + 1, std::memory_order_release);
     flip_at[id % Ring].store(now, std::memory_order_relaxed);
     flip_id[id % Ring].store(id, std::memory_order_release);
     const s64 target = Target(id);
@@ -505,13 +522,25 @@ bool GateNeeded(u64 tick) {
     return GateFor(tick) != nullptr;
 }
 
+void NoteFirstSubmit(u64 tick) {
+    u64 id = first_pending_id.load(std::memory_order_acquire);
+    if (id != 0 && tick > first_pending_tick.load(std::memory_order_relaxed) &&
+        first_pending_id.compare_exchange_strong(id, 0, std::memory_order_acq_rel)) {
+        first_submit_at[id % Ring].store(Now(), std::memory_order_relaxed);
+        first_submit_id[id % Ring].store(id, std::memory_order_release);
+    }
+}
+
 void GateBeforeSubmit(u64 tick, bool recorder) {
     if (gate_noted_a.load(std::memory_order_acquire) <= gate_posted_a.load(std::memory_order_acquire)) {
+        NoteFirstSubmit(tick);
         return;
     }
     std::unique_lock lk{gate_mutex};
     const GateEntry* entry = GateFor(tick);
     if (!entry) {
+        lk.unlock();
+        NoteFirstSubmit(tick);
         return;
     }
     const GateEntry e = *entry;
@@ -529,6 +558,8 @@ void GateBeforeSubmit(u64 tick, bool recorder) {
     if (recorder) {
         g_async_gated_tick.store(0, std::memory_order_release);
     }
+    lk.unlock();
+    NoteFirstSubmit(tick); // submitted now: after the wait
     const s64 end = Now();
     gate_waits.fetch_add(1, std::memory_order_relaxed);
     gate_wait_ns.fetch_add(end - start, std::memory_order_relaxed);
@@ -562,8 +593,9 @@ void Sample(u64 id, s64 ready) {
 }
 
 /// A GPU hold has run (presenter, a frame or two later): game frame `id`'s blit was done on the
-/// GPU at `ready`, its present released at `release`. The offset's sample is ready - slot (the
-/// holds are beside the game's GPU work: they delay nothing of it).
+/// GPU at `ready`, its present released at `release`. The offset's sample is ready - slot less the
+/// delay the last frame's hold put on this frame's GPU work (on the game's queue the next frame's
+/// work waits behind a hold; on the release queue nothing does).
 void GpuTimes(u64 id, s64 ready, s64 release) {
     const FrameSlot& entry = frames[id % Ring];
     if (entry.id.load(std::memory_order_acquire) != id) {
@@ -572,8 +604,26 @@ void GpuTimes(u64 id, s64 ready, s64 release) {
     const s64 slot = entry.slot.load(std::memory_order_relaxed);
     const s64 target = entry.target.load(std::memory_order_relaxed);
     const s64 hold = std::max<s64>(0, release - ready);
+    // The delay the last frame's hold put on this frame's GPU work (it waited behind that hold on
+    // the game's queue, from when its first work was submitted, or the last frame was done, to the
+    // hold's release; never more than the hold): off the sample, so the offset learns the frames'
+    // own time. An estimate that is too large only lowers the offset (frames then come late and are
+    // not held, so the next samples are exact): it cannot feed itself.
+    s64 own_delay = 0;
+    if (!release_queue.load(std::memory_order_relaxed) && times_id[(id - 1) % Ring] == id - 1 &&
+        first_submit_id[id % Ring].load(std::memory_order_acquire) == id) {
+        const s64 last_ready = times_ready[(id - 1) % Ring];
+        const s64 last_release = times_release[(id - 1) % Ring];
+        const s64 could_start =
+            std::max(first_submit_at[id % Ring].load(std::memory_order_relaxed), last_ready);
+        own_delay = std::clamp<s64>(last_release - could_start, 0, std::max<s64>(0, last_release - last_ready));
+    }
+    times_id[id % Ring] = id;
+    times_ready[id % Ring] = ready;
+    times_release[id % Ring] = release;
+    own_delay_ns.fetch_add(own_delay, std::memory_order_relaxed);
     const u64 n = lag_count.load(std::memory_order_relaxed);
-    lags[n % Samples].store(ready - slot, std::memory_order_relaxed);
+    lags[n % Samples].store(ready - slot - own_delay, std::memory_order_relaxed);
     lag_count.store(n + 1, std::memory_order_release);
     release_n.fetch_add(1, std::memory_order_relaxed);
     release_hold_ns.fetch_add(hold, std::memory_order_relaxed);
@@ -954,9 +1004,10 @@ void Print(u64 current) {
         if (Pace::gpu_release.load(std::memory_order_relaxed) && at < sizeof(line)) {
             const u64 r = Pace::release_n.exchange(0);
             at += std::snprintf(line + at, sizeof(line) - at,
-                                " | GPU hold: %llu, hold %.2f, off target %.3f (max %.3f, %llu over 0.2)",
+                                " | GPU hold: %llu, hold %.2f, own delay %.2f, off target %.3f (max %.3f, %llu over 0.2)",
                                 static_cast<unsigned long long>(r),
                                 double(Pace::release_hold_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, r)),
+                                double(Pace::own_delay_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, r)),
                                 double(Pace::release_err_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, h)),
                                 double(Pace::release_err_max.exchange(0)) / 1e6,
                                 static_cast<unsigned long long>(Pace::release_late.exchange(0)));
