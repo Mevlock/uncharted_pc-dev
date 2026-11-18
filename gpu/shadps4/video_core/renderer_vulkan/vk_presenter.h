@@ -208,6 +208,7 @@ private:
         bool failed = false; ///< not supported or not created: no pictures
     } thumbnail;
     bool thumbnail_game_frame = false; ///< the image PresentImage shows is the game's own new frame
+    s64 even_flip = -1; ///< bbport even presents: the game flip PresentImage shows (-1: none)
     void CaptureThumbnail(vk::CommandBuffer cmdbuf, const Frame* frame);
     void ReadThumbnail();
 };
