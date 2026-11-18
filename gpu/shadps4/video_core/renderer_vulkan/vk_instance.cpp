@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_toggles.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -889,6 +892,21 @@ void VKAPI_PTR CountAllocate(VmaAllocator, uint32_t type, VkDeviceMemory, VkDevi
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
     BbStats::vma_allocs[local].fetch_add(1, std::memory_order_relaxed);
     BbStats::vma_alloc_bytes[local].fetch_add(size, std::memory_order_relaxed);
+    static const bool log_allocs = std::getenv("BB_STALL_MS") != nullptr;
+    if (log_allocs && size >= (16ull << 20)) {
+        // diagnosis: where large device memory comes from (exe offsets for llvm-symbolizer)
+        std::printf("VMA allocation: %.1f MB %s memory (type %u) from", double(size) / 1e6, local ? "video" : "system",
+                    type);
+#ifdef _WIN32
+        void* frames[14]{};
+        const USHORT n = RtlCaptureStackBackTrace(1, 14, frames, nullptr);
+        const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+        for (USHORT i = 0; i < n; ++i) {
+            std::printf(" %#llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(frames[i]) - base));
+        }
+#endif
+        std::printf("\n");
+    }
     BbStats::vma_last_alloc_ns.store(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
             .count(),
