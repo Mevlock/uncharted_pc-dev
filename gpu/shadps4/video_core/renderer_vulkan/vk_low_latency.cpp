@@ -278,6 +278,27 @@ const s64 slack_ns = [] {
     return env && env[0] ? s64(std::atof(env) * 1e6) : s64{16'000'000};
 }();
 
+/// GPU-bound (BB_EVEN_GPU_BOUND=0: off): when the GPU's own time per frame does not fit in a period,
+/// no frame can be shown on its target and every hold only delays the next frame's GPU work (AMD,
+/// U3 ride at 120: 8100 of ~9200 frames late, the ~1000 held ones cost 3.5% fps against rc059).
+/// Then paced frames are not held and not gated (shown when done, as without even presents) until
+/// the GPU fits again. The GPU's own time of frame N: its ready time minus the later of the last
+/// frame's release and the moment its own last work was queued (its flip): GPU-bound, the work is
+/// all queued before the GPU is free, so this is its GPU time; CPU-bound, only the tail after the
+/// last submission. On at a median over ~4 s of 0.9 x the period, off again under 0.8 x.
+const bool gpu_bound_check = [] {
+    const char* env = std::getenv("BB_EVEN_GPU_BOUND");
+    return !(env && env[0] == '0');
+}();
+std::atomic<bool> gpu_bound{false};
+std::array<s64, 512> gpu_own{};
+u64 gpu_own_count = 0; ///< presenter thread
+/// Stop (pacing ends: loads, menus) starts the GPU-bound check afresh: frame thread -> presenter.
+std::atomic<u64> gpu_own_epoch{0};
+u64 gpu_own_epoch_seen = 0; ///< presenter thread
+std::atomic<u64> gpu_bound_changes{0};
+std::atomic<s64> gpu_own_median{0}; ///< for the log
+
 void UpdateOffset(s64 period, u64 id) {
     const bool slack = release_queue.load(std::memory_order_relaxed);
     const s64 extra = slack ? slack_ns : gpu_release.load(std::memory_order_relaxed) ? margin_ns : 0;
@@ -325,6 +346,8 @@ void Queued(u64 id) {
 
 void Stop() {
     last_wake = 0;
+    gpu_bound.store(false, std::memory_order_relaxed);
+    gpu_own_epoch.fetch_add(1, std::memory_order_release);
     current_target.store(0, std::memory_order_relaxed);
     offset = offset_goal = 0;
     lag_base = lag_count.load(std::memory_order_acquire);
@@ -442,23 +465,6 @@ s64 HoldEnd(u64 id) {
     return period > 0 ? std::min(target, entry.slot.load(std::memory_order_relaxed) + period) : target;
 }
 
-/// GPU-bound (BB_EVEN_GPU_BOUND=0: off): when the GPU's own time per frame does not fit in a period,
-/// no frame can be shown on its target and every hold only delays the next frame's GPU work (AMD,
-/// U3 ride at 120: 8100 of ~9200 frames late, the ~1000 held ones cost 3.5% fps against rc059).
-/// Then paced frames are not held and not gated (shown when done, as without even presents) until
-/// the GPU fits again. The GPU's own time of frame N: its ready time minus the later of the last
-/// frame's release and the moment its own last work was queued (its flip): GPU-bound, the work is
-/// all queued before the GPU is free, so this is its GPU time; CPU-bound, only the tail after the
-/// last submission. On at a median over ~4 s of 0.9 x the period, off again under 0.8 x.
-const bool gpu_bound_check = [] {
-    const char* env = std::getenv("BB_EVEN_GPU_BOUND");
-    return !(env && env[0] == '0');
-}();
-std::atomic<bool> gpu_bound{false};
-std::array<s64, 512> gpu_own{};
-u64 gpu_own_count = 0; ///< presenter thread
-std::atomic<u64> gpu_bound_changes{0};
-std::atomic<s64> gpu_own_median{0}; ///< for the log
 
 /// The GPU gate (BB_EVEN_GATE=0: off): a paced frame's present work (upscaling / post-processing,
 /// the hold, the blit) must be queued before the next frame's GPU work, so that it runs on an idle
@@ -676,6 +682,10 @@ void GpuTimes(u64 id, s64 ready, s64 release) {
         const s64 could_start =
             std::max(first_submit_at[id % Ring].load(std::memory_order_relaxed), last_ready);
         own_delay = std::clamp<s64>(last_release - could_start, 0, std::max<s64>(0, last_release - last_ready));
+    }
+    if (const u64 epoch = gpu_own_epoch.load(std::memory_order_acquire); epoch != gpu_own_epoch_seen) {
+        gpu_own_epoch_seen = epoch; // a new paced stretch: its own history
+        gpu_own_count = 0;
     }
     if (gpu_bound_check && !release_queue.load(std::memory_order_relaxed) &&
         times_id[(id - 1) % Ring] == id - 1 && flip_id[id % Ring].load(std::memory_order_acquire) == id) {
