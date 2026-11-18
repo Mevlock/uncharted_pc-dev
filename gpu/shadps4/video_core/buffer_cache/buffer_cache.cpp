@@ -166,11 +166,38 @@ struct BufferCache::PrefetchBatch {
         boost::container::small_vector<std::pair<VAddr, VAddr>, 4> parts; ///< GPU bytes copied
         u64 offset; ///< of the first part in staging; the others follow, 16-byte aligned
     };
+    /// The batch's tick as written by the GPU after its copies (Landed): the last 16 bytes of the
+    /// staging; the copies stay below MarkSpace.
+    static constexpr u64 MarkOffset = StagingSize - 16;
+    static constexpr u64 MarkSpace = StagingSize - 256;
+
     Buffer staging;
     std::vector<Entry> entries;
     u64 tick = 0; ///< the command buffer that copies them (0: unused)
+    bool landed = false;      ///< its mark was seen: the copies are in host memory
     bool invalidated = false;
 };
+
+/// bbport: a prefetch batch's copies are in host memory (prefetch_mutex held). Its tick counting
+/// as done on the GPU is not enough: on the U3 horse ride at a 60 cap with combo2's GPU holds (~10 ms
+/// between frames) 12% of the copies served were not there yet although their tick was done (the
+/// staging still held the batch's previous use, 60 submissions older; the copy landed ~15 ms
+/// later, 2026-11-18, BB_PREFETCH_VERIFY diagnosis): the guest got the last frame but one's GPU
+/// bytes of its skinning ring, and single frames had the game's motion blur bursting around Nate.
+/// The GPU writes the batch's tick after its copies; it counts as landed once that is there.
+bool BufferCache::PrefetchLanded(PrefetchBatch& batch) {
+    if (batch.landed) {
+        return true;
+    }
+    if (batch.tick == 0 || !scheduler.IsFree(batch.tick)) {
+        return false;
+    }
+    batch.staging.Invalidate(PrefetchBatch::MarkOffset, 16);
+    u32 mark;
+    std::memcpy(&mark, batch.staging.mapped_data.data() + PrefetchBatch::MarkOffset, sizeof(mark));
+    batch.landed = mark == u32(batch.tick);
+    return batch.landed;
+}
 
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                          Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
@@ -752,7 +779,7 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
         for (const auto& candidate : pages) {
             const auto it = prefetch_latest.find(candidate.at);
             if (it == prefetch_latest.end() || it->second.batch->tick < candidate.tick ||
-                !scheduler.IsFree(it->second.batch->tick)) {
+                !PrefetchLanded(*it->second.batch)) {
                 prefetched.clear();
                 break;
             }
@@ -1225,7 +1252,7 @@ void BufferCache::PrefetchRecurringPages() {
     // The oldest batch whose copies the GPU has run (only the GPU thread reads them).
     PrefetchBatch* batch = nullptr;
     for (auto& candidate : prefetch_batches) {
-        if ((candidate->tick == 0 || scheduler.IsFree(candidate->tick)) &&
+        if ((candidate->tick == 0 || PrefetchLanded(*candidate)) &&
             (!batch || candidate->tick < batch->tick)) {
             batch = candidate.get();
         }
@@ -1241,6 +1268,7 @@ void BufferCache::PrefetchRecurringPages() {
     }
     batch->entries.clear();
     batch->tick = 0;
+    batch->landed = false;
     batch->invalidated = false;
 
     struct ArenaCopies {
@@ -1268,7 +1296,7 @@ void BufferCache::PrefetchRecurringPages() {
                                                entry.parts.emplace_back(start, end);
                                                size += Common::AlignUp(end - start, 16);
                                            });
-        if (entry.parts.empty() || total + size > PrefetchBatch::StagingSize) {
+        if (entry.parts.empty() || total + size > PrefetchBatch::MarkSpace) {
             continue;
         }
         const u64 block = page >> block_shift;
@@ -1311,6 +1339,15 @@ void BufferCache::PrefetchRecurringPages() {
     for (const auto& [arena, copies] : by_arena) {
         cmdbuf.copyBuffer(arena->Handle(), batch->staging.Handle(), copies);
     }
+    // The batch's tick after its copies: the copies are in host memory once it is (Landed).
+    const vk::MemoryBarrier2 copied = {
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &copied});
+    cmdbuf.fillBuffer(batch->staging.Handle(), PrefetchBatch::MarkOffset, 4, u32(tick));
     const vk::MemoryBarrier2 to_host = {
         .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
         .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
@@ -1344,7 +1381,7 @@ bool BufferCache::TryPrefetched(VAddr page, u64 length) {
         }
         PrefetchBatch* batch = it->second.batch;
         if (memory_tracker->LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE) > batch->tick ||
-            !scheduler.IsFree(batch->tick)) {
+            !PrefetchLanded(*batch)) {
             prefetch_missed.fetch_add(1, std::memory_order_relaxed);
             return false;
         }

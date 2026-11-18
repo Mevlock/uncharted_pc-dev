@@ -486,6 +486,8 @@ private:
     std::deque<StreamedRange> streamed;
     std::chrono::steady_clock::time_point prefetch_decay_at{};
     bool TryPrefetched(VAddr page, u64 length);
+    /// The batch's copies are in host memory (its GPU-written tick mark is there).
+    bool PrefetchLanded(PrefetchBatch& batch);
     void NotePrefetchCandidate(VAddr page, u64 length);
 
     /// bbport: deferred raycaster copies (DeferGuestCopy).
