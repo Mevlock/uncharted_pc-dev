@@ -81,7 +81,7 @@ bool StartPacingRequested();
 /// PresentReadyAndWait before the present notes the ready time and holds it until the target.
 s64 PresentTarget(s64 flip_arg);
 /// Where a GPU hold of that frame ends: its target, but not after the next frame's slot
-/// (BB_EVEN_HOLD_CAP); 0: not held (BB_EVEN_GPU_BOUND: the GPU does not fit its frames in a period).
+/// (BB_EVEN_HOLD_CAP=1 only); 0: not held (BB_EVEN_GPU_BOUND: the GPU does not fit its frames in a period).
 s64 PresentHoldEnd(s64 flip_arg);
 void PresentReadyAndWait(s64 flip_arg);
 void SetTimedPresents(bool on);
