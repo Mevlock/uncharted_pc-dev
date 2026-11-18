@@ -100,6 +100,11 @@ void PresentFlipped(s64 flip_arg, s64 flip_ns);
 /// The frame thread, right after GameFrameStart: the time from now to that frame's present target
 /// (0: none), for the frame clock (the world steps = the intervals between the targets).
 s64 PresentLeadNs();
+/// GPU thread, while it records a game frame (before its flip): that frame's world step, the time
+/// from the last frame's start to its own as the game's frame clock has them (paced: the interval
+/// between their present targets, i.e. between their pictures on screen; else between their
+/// starts). 0: not known (no frame start hook, the first frame). For the upscalers' frame time.
+s64 FrameStepNs();
 
 /// "Reflex", "Anti-Lag 2" while active, else nullptr (FPS counter).
 const char* Name();
