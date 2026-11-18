@@ -599,6 +599,28 @@ void VideoOutDriver::Flip(const Request& req) {
                         static_cast<unsigned long long>(rc - last_rc),
                         static_cast<unsigned long long>(rp - last_rp));
         }
+        static u64 last_va[2], last_vb[2], last_vf[2], last_vfb[2];
+        u64 va[2], vb[2], vf[2], vfb[2];
+        for (int h = 0; h < 2; ++h) {
+            va[h] = BbStats::vma_allocs[h].load();
+            vb[h] = BbStats::vma_alloc_bytes[h].load();
+            vf[h] = BbStats::vma_frees[h].load();
+            vfb[h] = BbStats::vma_free_bytes[h].load();
+        }
+        if (frame_ms > stall_ms && stall_primed) {
+            std::printf("       device memory: video %llu allocated (%.1f MB), %llu freed (%.1f MB); system %llu "
+                        "allocated (%.1f MB), %llu freed (%.1f MB)\n",
+                        static_cast<unsigned long long>(va[1] - last_va[1]), (vb[1] - last_vb[1]) / 1e6,
+                        static_cast<unsigned long long>(vf[1] - last_vf[1]), (vfb[1] - last_vfb[1]) / 1e6,
+                        static_cast<unsigned long long>(va[0] - last_va[0]), (vb[0] - last_vb[0]) / 1e6,
+                        static_cast<unsigned long long>(vf[0] - last_vf[0]), (vfb[0] - last_vfb[0]) / 1e6);
+        }
+        for (int h = 0; h < 2; ++h) {
+            last_va[h] = va[h];
+            last_vb[h] = vb[h];
+            last_vf[h] = vf[h];
+            last_vfb[h] = vfb[h];
+        }
         static u64 last_wfc, last_wfi, last_wfu;
         const u64 wfc = BbStats::write_fault_count.load(), wfi = BbStats::write_fault_image_pages.load(),
                   wfu = BbStats::write_fault_images_untracked.load();

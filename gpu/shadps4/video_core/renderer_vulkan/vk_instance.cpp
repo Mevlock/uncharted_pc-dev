@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bbport_toggles.h"
 #include <cstdio>
 #include <cstdlib>
 #include <boost/container/static_vector.hpp>
@@ -880,7 +881,27 @@ bool Instance::CreateDevice() {
     return true;
 }
 
+namespace {
+// bbport diagnosis (stall lines, BB_STALL_MS): device memory VMA allocates and frees, by heap kind.
+void VKAPI_PTR CountAllocate(VmaAllocator, uint32_t type, VkDeviceMemory, VkDeviceSize size, void* user) {
+    const bool local = (static_cast<const VkPhysicalDeviceMemoryProperties*>(user)->memoryTypes[type].propertyFlags &
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+    BbStats::vma_allocs[local].fetch_add(1, std::memory_order_relaxed);
+    BbStats::vma_alloc_bytes[local].fetch_add(size, std::memory_order_relaxed);
+}
+void VKAPI_PTR CountFree(VmaAllocator, uint32_t type, VkDeviceMemory, VkDeviceSize size, void* user) {
+    const bool local = (static_cast<const VkPhysicalDeviceMemoryProperties*>(user)->memoryTypes[type].propertyFlags &
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+    BbStats::vma_frees[local].fetch_add(1, std::memory_order_relaxed);
+    BbStats::vma_free_bytes[local].fetch_add(size, std::memory_order_relaxed);
+}
+VkPhysicalDeviceMemoryProperties g_count_memory_properties{};
+VmaDeviceMemoryCallbacks g_count_callbacks{};
+} // namespace
+
 void Instance::CreateAllocator() {
+    g_count_memory_properties = memory_properties;
+    g_count_callbacks = {.pfnAllocate = CountAllocate, .pfnFree = CountFree, .pUserData = &g_count_memory_properties};
     const VmaVulkanFunctions functions = {
         .vkGetInstanceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr,
         .vkGetDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
@@ -907,7 +928,14 @@ void Instance::CreateAllocator() {
                  (supports_memory_budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0u),
         .physicalDevice = physical_device,
         .device = *device,
-        .preferredLargeHeapBlockSize = small_card ? 64_MB : 0,
+        .preferredLargeHeapBlockSize = [&]() -> VkDeviceSize {
+            // BB_VMA_BLOCK_MB=<n> (test): VMA's block size on big heaps (default 256 MiB; 64 on small cards)
+            if (const char* env = std::getenv("BB_VMA_BLOCK_MB")) {
+                return VkDeviceSize(std::strtoull(env, nullptr, 10)) << 20;
+            }
+            return small_card ? 64_MB : 0;
+        }(),
+        .pDeviceMemoryCallbacks = &g_count_callbacks,
         .pVulkanFunctions = &functions,
         .instance = *instance,
         .vulkanApiVersion = TargetVulkanApiVersion,
