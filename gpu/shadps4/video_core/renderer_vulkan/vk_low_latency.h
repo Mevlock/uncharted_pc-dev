@@ -86,6 +86,16 @@ void SetTimedPresents(bool on);
 /// (waits, with a deadline, until that frame's post work was submitted); the presenter once it
 /// has submitted it.
 void GateAfterFlip(s64 flip_arg);
+/// Even presents are on (the frame start paces and BB_EVEN_PRESENT is not 0).
+bool EvenPresents();
+/// The presenter holds paced frames on the GPU (vk_present_release.h) instead of on its thread.
+void SetGpuRelease(bool on);
+/// Reflex: the release queue presents beside the game's queue (out of band, not its frames' work).
+void MarkOutOfBandPresentQueue(vk::Queue queue);
+bool GpuRelease();
+/// A GPU hold of the game's flip with this argument has run: the frame was ready on the GPU at
+/// `ready_ns`, its present work released at `release_ns` (steady clock).
+void PresentGpuTimes(s64 flip_arg, s64 ready_ns, s64 release_ns);
 void GatePostSubmitted(s64 flip_arg);
 void PresentQueued(s64 flip_arg);
 void PresentFlipped(s64 flip_arg, s64 flip_ns);

@@ -254,7 +254,22 @@ std::atomic<s64> offset_ns{0};      ///< for the log
 std::atomic<u64> held{0}, late{0};
 std::atomic<s64> held_ns{0}, late_ns{0};
 
+/// GPU holds on the release queue (vk_present_release.h; set by the presenter when it has them):
+/// the present work is queued at once, held to its target beside the game's GPU work, and the
+/// game's GPU queue never waits for a hold.
+std::atomic<bool> gpu_release{false};
+/// With them, the offset carries a fixed slack over the frames' usual time (the 95th percentile of
+/// GPU done - slot): a frame up to that much later than usual is still shown on its target, so the
+/// game's own spikes (an area change on the U3 ride at 120: the game's submit 14.6 ms after its
+/// frame start instead of 5.5, the frame done 12.8 ms after its target with 2.5 ms of slack) do
+/// not show. Latency instead: about the slack more. BB_EVEN_SLACK_MS (default 16).
+const s64 slack_ns = [] {
+    const char* env = std::getenv("BB_EVEN_SLACK_MS");
+    return env && env[0] ? s64(std::atof(env) * 1e6) : s64{16'000'000};
+}();
+
 void UpdateOffset(s64 period, u64 id) {
+    const bool slack = gpu_release.load(std::memory_order_relaxed);
     if ((id & 15) == 0) {
         const u64 count = lag_count.load(std::memory_order_acquire);
         const u32 n = static_cast<u32>(std::min<u64>(count - lag_base, Samples - 32));
@@ -263,14 +278,20 @@ void UpdateOffset(s64 period, u64 id) {
             for (u32 i = 0; i < n; ++i) {
                 copy[i] = lags[(count - 1 - i) % Samples].load(std::memory_order_relaxed);
             }
-            const u32 k = n - 1 - std::min<u32>(n / 200, 2); // the third largest: ~p99.6
+            // the third largest (~p99.6); with the slack the 95th percentile: the spikes are what
+            // the slack is for, the offset must not chase them
+            const u32 k = slack ? n * 95 / 100 : n - 1 - std::min<u32>(n / 200, 2);
             std::nth_element(copy.begin(), copy.begin() + k, copy.begin() + n);
             constexpr s64 margin = 500'000;
-            offset_goal = std::clamp<s64>(copy[k] + margin, 0, 2 * period);
+            const s64 extra = slack ? slack_ns : 0;
+            offset_goal = std::clamp<s64>(copy[k] + margin + extra, 0, 2 * period + extra);
         }
     }
     if (offset == 0) {
-        offset = offset_goal; // the first: nothing shown at a target yet
+        // the first: nothing shown at a target yet. With the slack, from the frames' own time,
+        // the slack added at the rate below (a jump to the full depth at once left U3's pipeline
+        // deep: its submit waits for its GPU frame two back, s3)
+        offset = slack ? std::max<s64>(offset_goal - slack_ns, 1) : offset_goal;
     } else if (offset_goal > offset) {
         offset += std::min<s64>(offset_goal - offset, 100'000);
     } else if (offset_goal + 1'000'000 < offset) {
@@ -382,10 +403,22 @@ std::atomic<s64> gate_wait_ns{0};
 std::array<std::atomic<u64>, Ring> ready_id{}, gate_before_id{};
 std::array<std::atomic<s64>, Ring> ready_at{}, gate_before_ns{};
 
+/// GPU holds (vk_present_release.h; set by the presenter when it has them): the presenter queues
+/// the present work at once and the GPU holds it to the target; the gate only keeps the next
+/// frame's GPU work behind it (the presenter's submit follows the flip at once).
+/// The GPU thread's flip of each game frame (by frame id): its last GPU work is queued then.
+std::array<std::atomic<u64>, Ring> flip_id{};
+std::array<std::atomic<s64>, Ring> flip_at{};
+std::atomic<u64> release_n{0}, release_late{0};
+std::atomic<s64> release_err_ns{0}, release_err_max{0}, release_hold_ns{0};
+
 void GateWait(u64 id, s64 period) {
+    flip_at[id % Ring].store(Now(), std::memory_order_relaxed);
+    flip_id[id % Ring].store(id, std::memory_order_release);
     const s64 target = Target(id);
-    if (!gate || !target || timed.load(std::memory_order_relaxed)) {
-        return;
+    if (!gate || !target || timed.load(std::memory_order_relaxed) ||
+        gpu_release.load(std::memory_order_relaxed)) {
+        return; // with the release queue nothing on the GPU queue waits for a hold
     }
     const s64 flip = s64(id) - 1;
     const s64 start = Now();
@@ -424,6 +457,39 @@ void Sample(u64 id, s64 ready) {
     lags[n % Samples].store(ready - entry.slot.load(std::memory_order_relaxed),
                             std::memory_order_relaxed);
     lag_count.store(n + 1, std::memory_order_release);
+}
+
+/// A GPU hold has run (presenter, a frame or two later): game frame `id`'s blit was done on the
+/// GPU at `ready`, its present released at `release`. The offset's sample is ready - slot (the
+/// holds are beside the game's GPU work: they delay nothing of it).
+void GpuTimes(u64 id, s64 ready, s64 release) {
+    const FrameSlot& entry = frames[id % Ring];
+    if (entry.id.load(std::memory_order_acquire) != id) {
+        return;
+    }
+    const s64 slot = entry.slot.load(std::memory_order_relaxed);
+    const s64 target = entry.target.load(std::memory_order_relaxed);
+    const s64 hold = std::max<s64>(0, release - ready);
+    const u64 n = lag_count.load(std::memory_order_relaxed);
+    lags[n % Samples].store(ready - slot, std::memory_order_relaxed);
+    lag_count.store(n + 1, std::memory_order_release);
+    release_n.fetch_add(1, std::memory_order_relaxed);
+    release_hold_ns.fetch_add(hold, std::memory_order_relaxed);
+    if (ready > target) {
+        late.fetch_add(1, std::memory_order_relaxed);
+        late_ns.fetch_add(ready - target, std::memory_order_relaxed);
+    } else {
+        held.fetch_add(1, std::memory_order_relaxed);
+        held_ns.fetch_add(hold, std::memory_order_relaxed);
+        const s64 err = release - target; // the hold's own precision
+        release_err_ns.fetch_add(std::abs(err), std::memory_order_relaxed);
+        if (std::abs(err) > release_err_max.load(std::memory_order_relaxed)) {
+            release_err_max.store(std::abs(err), std::memory_order_relaxed);
+        }
+        if (err > 200'000) {
+            release_late.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 /// Without timed presents (build-1 path): the presenter, before game frame `id`'s present: notes
@@ -575,7 +641,12 @@ const bool on = [] {
     const char* env = std::getenv("BB_LATENCY_TRACE");
     return env && env[0] == '1';
 }();
-enum Stage : u32 { Enter, Awake, Submit, Gpu, Take, PresentStart, PresentEnd, Target, Paced, Stages };
+enum Stage : u32 {
+    Enter, Awake, Submit, Gpu, Take, PresentStart, PresentEnd, Target, Paced,
+    Ready,   ///< GPU holds: the frame's work done on the GPU
+    Release, ///< GPU holds: its present work let go
+    Stages
+};
 constexpr u64 Ring = 256;
 struct Slot {
     std::atomic<u64> id{0};
@@ -606,6 +677,13 @@ void Stamp(u64 id, Stage stage) {
     }
     slot.t[stage].store(Now(), std::memory_order_relaxed);
 }
+/// A stage's time taken elsewhere (the GPU's, for GPU holds).
+void StampAt(u64 id, Stage stage, s64 t) {
+    Slot& slot = ring[id % Ring];
+    if (slot.id.load(std::memory_order_acquire) == id) {
+        slot.t[stage].store(t, std::memory_order_relaxed);
+    }
+}
 /// The frame's intended wake (the pacer's slot) and the time the pacer let it go.
 void StampPace(u64 id) {
     Slot& slot = ring[id % Ring];
@@ -621,7 +699,8 @@ FILE* frames_csv = [] {
     const char* path = std::getenv("BB_LATENCY_FRAMES");
     FILE* f = path && path[0] ? std::fopen(path, "w") : nullptr;
     if (f) {
-        std::fprintf(f, "id,enter_us,target,paced,awake,submit,gpu,take,pstart,pend,period_us\n");
+        std::fprintf(f, "id,enter_us,target,paced,awake,submit,gpu,take,pstart,pend,period_us,ready,"
+                        "release\n");
     }
     return f;
 }();
@@ -684,7 +763,7 @@ void Print(u64 current) {
         if (frames_csv && t[Enter]) {
             static const s64 base = t[Enter];
             const auto rel = [&](u32 i) { return t[i] ? (t[i] - t[Enter]) / 1000 : s64{-1}; };
-            std::fprintf(frames_csv, "%llu,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld\n",
+            std::fprintf(frames_csv, "%llu,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld\n",
                          static_cast<unsigned long long>(id),
                          static_cast<long long>((t[Enter] - base) / 1000),
                          static_cast<long long>(rel(Target)), static_cast<long long>(rel(Paced)),
@@ -692,7 +771,8 @@ void Print(u64 current) {
                          static_cast<long long>(rel(Gpu)), static_cast<long long>(rel(Take)),
                          static_cast<long long>(rel(PresentStart)),
                          static_cast<long long>(rel(PresentEnd)),
-                         static_cast<long long>(Libraries::VideoOut::FrameCapPeriodNs() / 1000));
+                         static_cast<long long>(Libraries::VideoOut::FrameCapPeriodNs() / 1000),
+                         static_cast<long long>(rel(Ready)), static_cast<long long>(rel(Release)));
         }
         // presented: the present marker, else (the low latency mode off) the present thread taking it
         const s64 end = t[PresentEnd] ? t[PresentEnd] : t[Take];
@@ -769,6 +849,16 @@ void Print(u64 current) {
                             double(Pace::gate_wait_ns.exchange(0)) / 1e6 /
                                 double(std::max<u64>(1, Pace::gate_waits.exchange(0))),
                             static_cast<unsigned long long>(Pace::gate_timeouts.exchange(0)));
+        if (Pace::gpu_release.load(std::memory_order_relaxed) && at < sizeof(line)) {
+            const u64 r = Pace::release_n.exchange(0);
+            at += std::snprintf(line + at, sizeof(line) - at,
+                                " | GPU hold: %llu, hold %.2f, off target %.3f (max %.3f, %llu over 0.2)",
+                                static_cast<unsigned long long>(r),
+                                double(Pace::release_hold_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, r)),
+                                double(Pace::release_err_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, h)),
+                                double(Pace::release_err_max.exchange(0)) / 1e6,
+                                static_cast<unsigned long long>(Pace::release_late.exchange(0)));
+        }
     }
     std::printf("%s (ms)\n", line);
     if (frames_csv) {
@@ -808,6 +898,41 @@ bool StartPacingRequested() {
 
 s64 PresentTarget(s64 flip_arg) {
     return Pace::even && flip_arg >= 0 ? Pace::Target(static_cast<u64>(flip_arg) + 1) : 0;
+}
+
+bool EvenPresents() {
+    return Pace::even && Pace::enabled;
+}
+
+void MarkOutOfBandPresentQueue(vk::Queue queue) {
+    if (kind != Kind::Reflex || !device || !queue) {
+        return;
+    }
+    const auto notify = reinterpret_cast<PFN_vkQueueNotifyOutOfBandNV>(
+        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr(device, "vkQueueNotifyOutOfBandNV"));
+    if (notify) {
+        const VkOutOfBandQueueTypeInfoNV info{.sType = VK_STRUCTURE_TYPE_OUT_OF_BAND_QUEUE_TYPE_INFO_NV,
+                                              .queueType = VK_OUT_OF_BAND_QUEUE_TYPE_PRESENT_NV};
+        notify(static_cast<VkQueue>(queue), &info);
+    }
+}
+
+void SetGpuRelease(bool on) {
+    Pace::gpu_release.store(on, std::memory_order_relaxed);
+}
+
+bool GpuRelease() {
+    return Pace::gpu_release.load(std::memory_order_relaxed);
+}
+
+void PresentGpuTimes(s64 flip_arg, s64 ready_ns, s64 release_ns) {
+    if (Pace::even && flip_arg >= 0) {
+        Pace::GpuTimes(static_cast<u64>(flip_arg) + 1, ready_ns, release_ns);
+        if (Trace::on) {
+            Trace::StampAt(static_cast<u64>(flip_arg) + 1, Trace::Ready, ready_ns);
+            Trace::StampAt(static_cast<u64>(flip_arg) + 1, Trace::Release, release_ns);
+        }
+    }
 }
 
 void PresentReadyAndWait(s64 flip_arg) {

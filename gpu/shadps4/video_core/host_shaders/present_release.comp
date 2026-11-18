@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport even presents (vk_present_release.h): one invocation that keeps the queue until the device
+// clock reaches `until`, and at the latest `limit` ticks after it started (it always ends by
+// itself: nothing on the host has to release it). It writes the clock it started at, which the
+// host pairs with the timestamp taken just before it (the shader clock against the timestamps).
+#version 450
+#extension GL_EXT_shader_realtime_clock : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+
+layout(local_size_x = 1) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 8) buffer Stamps {
+    uvec2 started;
+};
+
+layout(push_constant) uniform Release {
+    uvec2 until;  // device clock (low, high)
+    uvec2 limit;  // ticks (low, high)
+    uvec2 stamps; // the address this run writes its start to
+} pc;
+
+bool Before(uvec2 a, uvec2 b) {
+    return a.y < b.y || (a.y == b.y && a.x < b.x);
+}
+
+uvec2 Add(uvec2 a, uvec2 b) {
+    uint carry;
+    const uint low = uaddCarry(a.x, b.x, carry);
+    return uvec2(low, a.y + b.y + carry);
+}
+
+void main() {
+    const uvec2 start = clockRealtime2x32EXT();
+    const uvec2 cap = Add(start, pc.limit);
+    const uvec2 end = Before(cap, pc.until) ? cap : pc.until;
+    while (Before(clockRealtime2x32EXT(), end)) {
+    }
+    Stamps(pc.stamps).started = start;
+}

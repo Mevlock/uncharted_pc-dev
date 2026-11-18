@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <algorithm>
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
+#include "core/libraries/videoout/game_frame.h"
 
 #include <atomic>
 #include <chrono>
@@ -904,9 +905,13 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     }
     static const bool camera_log = std::getenv("BB_CAMERA_LOG") != nullptr;
     if (camera_log) {
-        std::printf("Camera: t=%.4f yaw=%.3f pitch=%.3f\n", t,
+        // pos: the camera's position (the velocity pass's view, c[15], c[19], c[23]); frame: the game frame
+        // the GPU thread is at (submitted), for joining with the frame clock log.
+        std::printf("Camera: t=%.4f yaw=%.3f pitch=%.3f pos=%.4f %.4f %.4f frame=%lld\n", t,
                     std::atan2(fx, fz) * 57.29578f,
-                    std::asin(std::clamp(fy / std::sqrt(fx * fx + fy * fy + fz * fz), -1.0f, 1.0f)) * 57.29578f);
+                    std::asin(std::clamp(fy / std::sqrt(fx * fx + fy * fy + fz * fz), -1.0f, 1.0f)) * 57.29578f,
+                    c[15], c[19], c[23],
+                    static_cast<long long>(Libraries::VideoOut::CurrentGameFrames().submitted));
     }
     // The stencil term on a platform: said once.
     static bool reported = false;

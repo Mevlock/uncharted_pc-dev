@@ -128,6 +128,20 @@ public:
         return present_queue;
     }
 
+    /// bbport even presents (vk_present_release.h): a compute-only queue that can present (null:
+    /// none) and its family.
+    vk::Queue GetReleaseQueue() const {
+        return release_queue;
+    }
+    u32 GetReleaseQueueFamilyIndex() const {
+        return release_queue_family_index;
+    }
+    /// bbport even presents: a graphics-family queue that only presents (null: none; then the
+    /// release queue presents).
+    vk::Queue GetReleasePresentQueue() const {
+        return release_present_queue;
+    }
+
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
     }
@@ -359,6 +373,18 @@ public:
     /// VK_KHR_shader_clock is supported.
     bool IsShaderSubgroupClockSupported() const {
         return shader_clock && shader_clock_features.shaderSubgroupClock;
+    }
+
+    /// bbport: even presents (vk_present_release.h): the shader can read the device clock and the
+    /// device's timestamps can be read together with the CPU's QueryPerformanceCounter.
+    bool IsPresentReleaseSupported() const {
+        return shader_clock && shader_clock_features.shaderDeviceClock &&
+               (calibrated_khr || calibrated_ext) && properties.limits.timestampPeriod > 0.0f &&
+               properties.limits.timestampComputeAndGraphics;
+    }
+    /// VK_KHR_calibrated_timestamps (else the EXT form) is on.
+    bool IsCalibratedTimestampsKhr() const {
+        return calibrated_khr;
     }
 
     /// Returns the vendor ID of the physical device
@@ -633,6 +659,10 @@ private:
     std::string vendor_name;
     VmaAllocator allocator{};
     vk::Queue present_queue;
+    vk::Queue release_queue;                   ///< bbport even presents
+    u32 release_queue_family_index{UINT32_MAX}; ///< bbport even presents
+    vk::Queue release_present_queue;            ///< bbport even presents
+    u32 release_present_index{UINT32_MAX};      ///< its index in the graphics family
     vk::Queue side_queue;
     u32 side_queue_family_index{};
     vk::Queue graphics_queue;
@@ -670,6 +700,8 @@ private:
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool shader_clock{};
+    bool calibrated_khr{}; ///< bbport: VK_KHR_calibrated_timestamps
+    bool calibrated_ext{}; ///< bbport: VK_EXT_calibrated_timestamps (without the KHR form)
     bool compute_shader_derivatives{};
     bool mixed_float_dot_product{}; // bbport: VK_VALVE_shader_mixed_float_dot_product (FSR 4.1.1)
     bool supports_memory_budget{};

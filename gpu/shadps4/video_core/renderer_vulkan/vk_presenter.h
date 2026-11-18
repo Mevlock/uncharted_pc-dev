@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_frame_generation.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_present_release.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
@@ -143,7 +144,10 @@ private:
     /// bbport: blits `image` (General layout) into a swapchain image with the overlay and
     /// presents it. `last`: the game frame itself, which also signals the frame's fence.
     /// False when the swapchain could not give an image.
-    bool PresentImage(Frame* frame, vk::Image image, bool last, u64 latency_id = 0);
+    /// `hold_until` (steady clock ns; 0: none): the GPU holds the image's blit to that time
+    /// (vk_present_release.h); `hold_flip`: the game flip whose times that hold reports (-1: none).
+    bool PresentImage(Frame* frame, vk::Image image, bool last, u64 latency_id = 0,
+                      s64 hold_until = 0, s64 hold_flip = -1);
 
     void SetExpectedGameSize(s32 width, s32 height);
 
@@ -209,6 +213,7 @@ private:
     } thumbnail;
     bool thumbnail_game_frame = false; ///< the image PresentImage shows is the game's own new frame
     s64 even_flip = -1; ///< bbport even presents: the game flip PresentImage shows (-1: none)
+    std::unique_ptr<PresentRelease> release; ///< bbport even presents: GPU holds (null: not used)
     void CaptureThumbnail(vk::CommandBuffer cmdbuf, const Frame* frame);
     void ReadThumbnail();
 };
