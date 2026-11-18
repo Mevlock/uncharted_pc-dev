@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_toggles.h"
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <boost/container/static_vector.hpp>
@@ -888,6 +889,10 @@ void VKAPI_PTR CountAllocate(VmaAllocator, uint32_t type, VkDeviceMemory, VkDevi
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
     BbStats::vma_allocs[local].fetch_add(1, std::memory_order_relaxed);
     BbStats::vma_alloc_bytes[local].fetch_add(size, std::memory_order_relaxed);
+    BbStats::vma_last_alloc_ns.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count(),
+        std::memory_order_relaxed);
 }
 void VKAPI_PTR CountFree(VmaAllocator, uint32_t type, VkDeviceMemory, VkDeviceSize size, void* user) {
     const bool local = (static_cast<const VkPhysicalDeviceMemoryProperties*>(user)->memoryTypes[type].propertyFlags &

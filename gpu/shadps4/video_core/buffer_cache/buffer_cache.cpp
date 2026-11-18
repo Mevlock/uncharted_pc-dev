@@ -3877,6 +3877,17 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
                                                                  bind_start).count(),
             std::memory_order_relaxed);
         BbStats::sparse_binds.fetch_add(1, std::memory_order_relaxed);
+        if (const auto took = std::chrono::steady_clock::now() - bind_start;
+            took > std::chrono::milliseconds(4) && std::getenv("BB_STALL_MS")) {
+            const u64 last_alloc = BbStats::vma_last_alloc_ns.load(std::memory_order_relaxed);
+            const double since =
+                last_alloc ? (double(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch()).count()) -
+                              double(last_alloc)) / 1e6
+                           : -1.0;
+            std::printf("Slow sparse bind: %.1f ms, %zu arenas; VMA's last allocation %.0f ms before\n",
+                        std::chrono::duration<double, std::milli>(took).count(), buffer_binds.size(), since);
+        }
         for (const auto& b : buffer_binds) {
             BbStats::sparse_bind_ranges.fetch_add(b.bindCount, std::memory_order_relaxed);
             for (u32 i = 0; i < b.bindCount; ++i) {

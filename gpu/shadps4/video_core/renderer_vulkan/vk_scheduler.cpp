@@ -854,9 +854,36 @@ void Scheduler::SubmitOnRecorder(u64 signal_value) {
         g_recent[g_recent_count++ % g_recent.size()] = {this, timeline, signal_value, 0, {}, {}};
     }
     vk::Result submit_result;
+    // bbport diagnosis (BB_STALL_MS): a submit call slower than 4 ms prints how long, how far the
+    // GPU was behind when it started and how long ago VMA last allocated device memory.
+    static const bool time_submits = std::getenv("BB_STALL_MS") != nullptr;
+    u64 gpu_reached = 0;
+    std::chrono::steady_clock::time_point call_start{};
+    if (time_submits) {
+        gpu_reached = instance.GetDevice().getSemaphoreCounterValue(timeline).value;
+        call_start = std::chrono::steady_clock::now();
+    }
     {
         std::scoped_lock queue_lk{g_graphics_queue_mutex};
         submit_result = instance.GetGraphicsQueue().submit(submit_info, nullptr);
+    }
+    if (time_submits) {
+        const auto end = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(end - call_start).count();
+        if (ms > 4.0) {
+            const u64 last_alloc = BbStats::vma_last_alloc_ns.load(std::memory_order_relaxed);
+            const double since =
+                last_alloc ? (double(std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch())
+                                         .count()) - double(last_alloc)) / 1e6
+                           : -1.0;
+            char game_frame[96];
+            std::printf("Slow submit: vkQueueSubmit %.1f ms (%s); GPU at %llu, this signals %llu (%llu behind); "
+                        "VMA's last allocation %.0f ms before\n",
+                        ms, Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame)),
+                        static_cast<unsigned long long>(gpu_reached),
+                        static_cast<unsigned long long>(signal_value),
+                        static_cast<unsigned long long>(signal_value - gpu_reached), since);
+        }
     }
     if (submit_result == vk::Result::eErrorDeviceLost) {
         char game_frame[96];

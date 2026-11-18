@@ -621,6 +621,17 @@ void VideoOutDriver::Flip(const Request& req) {
             last_vf[h] = vf[h];
             last_vfb[h] = vfb[h];
         }
+        // ordered faults: the window block below exchanges these every 5 s, so per frame they are
+        // read as they are (a frame's share is its value minus the last frame's, or all since the reset)
+        static u64 last_of, last_op, last_ob, last_or;
+        const u64 of = BbStats::ordered_faults.load(), op = BbStats::ordered_pickup_ns.load(),
+                  ob = BbStats::ordered_behind_ns.load(), orun = BbStats::ordered_run_ns.load();
+        if (frame_ms > stall_ms && stall_primed && of >= last_of) {
+            const u64 n = of - last_of;
+            std::printf("       ordered faults %llu: until taken %.1f ms, behind draws %.1f ms, running %.1f ms\n",
+                        static_cast<unsigned long long>(n), (op - last_op) / 1e6, (ob - last_ob) / 1e6,
+                        (orun - last_or) / 1e6);
+        }
         static u64 last_wfc, last_wfi, last_wfu;
         const u64 wfc = BbStats::write_fault_count.load(), wfi = BbStats::write_fault_image_pages.load(),
                   wfu = BbStats::write_fault_images_untracked.load();
@@ -630,6 +641,10 @@ void VideoOutDriver::Flip(const Request& req) {
                         static_cast<unsigned long long>(wfi - last_wfi),
                         static_cast<unsigned long long>(wfu - last_wfu));
         }
+        last_of = BbStats::ordered_faults.load();
+        last_op = BbStats::ordered_pickup_ns.load();
+        last_ob = BbStats::ordered_behind_ns.load();
+        last_or = BbStats::ordered_run_ns.load();
         last_wfc = wfc;
         last_wfi = wfi;
         last_wfu = wfu;

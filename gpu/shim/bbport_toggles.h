@@ -124,6 +124,7 @@ inline std::atomic<std::uint64_t> sparse_binds{0}, sparse_bind_ranges{0}, sparse
     sparse_bind_ns{0};
 /// Write faults (Rasterizer::OnWriteFault), of them on a page of a cached image (one page unwatched each).
 /// Device memory VMA allocated / freed: [0] other heaps, [1] device-local.
+inline std::atomic<std::uint64_t> vma_last_alloc_ns{0}; ///< steady clock ns of VMA's last device memory allocation
 inline std::atomic<std::uint64_t> vma_allocs[2]{}, vma_alloc_bytes[2]{}, vma_frees[2]{}, vma_free_bytes[2]{};
 inline std::atomic<std::uint64_t> write_fault_count{0}, write_fault_image_pages{0}, write_fault_images_untracked{0};
 inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command thread
