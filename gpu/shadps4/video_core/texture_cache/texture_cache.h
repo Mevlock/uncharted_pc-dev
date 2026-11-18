@@ -12,7 +12,9 @@
 #include "bbport_toggles.h"
 
 #include <condition_variable>
+#include <map>
 #include <mutex>
+#include <unordered_map>
 #include <thread>
 #include <unordered_set>
 #include <boost/container/small_vector.hpp>
@@ -28,6 +30,7 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/sampler.h"
 #include "video_core/texture_cache/tile_manager.h"
+#include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -622,6 +625,25 @@ private:
     std::vector<KeyIconRange> key_icon_ranges;
     u32 key_icon_mode_generation = 0, key_icon_menu_generation = 0;
     std::chrono::steady_clock::time_point key_icon_pulse{};
+    /// bbport: the game's own pictures of those textures (all their mip levels back to back, by the hash of their guest
+    /// bytes), read back once without waiting (key_icon_pending, done in UpdateButtonPrompts), and the painted ones by
+    /// BbKeyIcons::PaintState: a texture uploaded again (evicted, rewritten, a device switch) is painted from these copies
+    /// or not painted at all, never with a wait for the GPU on the frame. key_icon_mutex.
+    struct KeyIconPending {
+        u64 hash;
+        Vulkan::StagingBufferRef download;
+        u32 size;
+        u64 tick;
+        VAddr address;
+        u32 guest_size;
+    };
+    struct KeyIconPainted {
+        bool changed;
+        std::vector<u8> data;
+    };
+    std::vector<KeyIconPending> key_icon_pending;
+    std::unordered_map<u64, std::vector<u8>> key_icon_originals;
+    std::map<std::pair<u64, u64>, KeyIconPainted> key_icon_painted;
     std::mutex samplers_mutex;
     /// perf11: raised whenever the GC destroys a sampler (GetSampler's memo; starts at 1, an
     /// empty memo entry has 0).
