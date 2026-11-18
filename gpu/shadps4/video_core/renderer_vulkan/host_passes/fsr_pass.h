@@ -22,6 +22,14 @@ public:
     vk::ImageView Render(vk::CommandBuffer cmdbuf, vk::ImageView input, vk::Extent2D input_size,
                          vk::Extent2D output_size, Settings settings, bool hdr);
 
+    /// bbport: keep the images of the previous output size for a switch back (the presenter's
+    /// two frame sizes: 16:9 and filling the window) instead of making them again.
+    void SetKeepSizes(bool keep) {
+        keep_sizes = keep;
+    }
+    /// bbport: makes the images of `size` ahead of the first frame of that size (kept aside).
+    void Prewarm(vk::Extent2D size);
+
 private:
     struct Img {
         u8 id{};
@@ -35,7 +43,12 @@ private:
     };
 
     void ResizeAndInvalidate(u32 width, u32 height);
-    void CreateImages(Img& img) const;
+    void CreateImages(Img& img) const {
+        CreateImages(img, cur_size);
+    }
+    void CreateImages(Img& img, vk::Extent2D size) const;
+    std::vector<Img> NewImageSet() const;
+    void KeepSet(vk::Extent2D size, std::vector<Img>&& imgs);
 
     vk::Device device{};
     u32 num_images{};
@@ -51,6 +64,10 @@ private:
     vk::Extent2D cur_size{};
     u32 cur_image{};
     std::vector<Img> available_imgs;
+    VmaAllocator allocator{};
+    bool keep_sizes{};
+    /// bbport: image sets of other output sizes kept for a switch back (at most two).
+    std::vector<std::pair<vk::Extent2D, std::vector<Img>>> kept_sets;
 };
 
 } // namespace Vulkan::HostPasses

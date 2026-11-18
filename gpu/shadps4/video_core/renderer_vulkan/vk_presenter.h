@@ -54,6 +54,16 @@ struct Frame {
     };
     std::array<Generated, FrameGenerator::MaxGenerated> generated{};
     u32 generated_count{};
+    /// bbport: the image of the presenter's other frame size (16:9 / filling the window), kept
+    /// for a switch back and made ahead (Presenter::RecreateFrame, GetRenderFrame).
+    struct Other {
+        u32 width{};
+        u32 height{};
+        bool is_hdr{};
+        VmaAllocation allocation{};
+        vk::Image image{};
+        vk::ImageView image_view{};
+    } other{};
 };
 
 enum SchedulerType {
@@ -124,6 +134,9 @@ private:
     Frame* GetRenderFrame(bool fill = false);
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
+    /// bbport: makes the other frame size's image of `frame` ahead (kept aside).
+    void PrewarmFrame(Frame* frame, u32 width, u32 height);
+    [[nodiscard]] bool KeepFrameSizes() const;
     /// bbport: the images frame generation writes for `frame` (its size, made once).
     void EnsureGenerated(Frame* frame);
     void DestroyGenerated(Frame* frame);

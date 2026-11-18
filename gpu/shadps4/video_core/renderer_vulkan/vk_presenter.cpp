@@ -250,6 +250,10 @@ Presenter::~Presenter() {
         DestroyGenerated(&frame);
         vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
         device.destroyImageView(frame.image_view);
+        if (frame.other.image) {
+            device.destroyImageView(frame.other.image_view);
+            vmaDestroyImage(instance.GetAllocator(), frame.other.image, frame.other.allocation);
+        }
         device.destroyFence(frame.present_done);
     }
     if (hudless_frame.image) {
@@ -389,15 +393,57 @@ bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const
     return std::ranges::find(vo_buffers_addr, color_buffer.Address()) != vo_buffers_addr.cend();
 }
 
+bool Presenter::KeepFrameSizes() const {
+    // bbport: both frame sizes stay allocated (about 75 MiB a frame more at 3440x1440 with the
+    // FSR pass) unless video memory is tight (a card or budget under 5 GB, as the staging pool's
+    // and the arena's own rules).
+    static const bool keep = [this] {
+        const char* env = std::getenv("BB_KEEP_FRAME_SIZES");
+        if (env) {
+            return env[0] != '0';
+        }
+        return instance.GetTotalMemoryBudget() >= 5_GB;
+    }();
+    return keep;
+}
+
 void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     const vk::Device device = instance.GetDevice();
+    DestroyGenerated(frame); // made again at the new size when needed
+    // bbport: the presenter switches between two frame sizes (16:9 menus and scenes, gameplay
+    // filling an ultrawide window). Making the frames (and the FSR pass images) again at each
+    // switch put ~316 MiB of new video memory in one frame at U3's gameplay start, and the
+    // kernel then blocked a queue submission for 18-24 ms ~0.5 s later (the horse ride's worst
+    // hitch, 25-32 ms, in 10 of 11 runs before; none in 6 runs with this). The
+    // other size's image is kept and swapped in; it is made ahead (PrewarmFrame).
+    const bool hdr = swapchain.GetHDR();
+    if (KeepFrameSizes() && frame->image && frame != &hudless_frame) {
+        if (frame->other.image && frame->other.width == width && frame->other.height == height &&
+            frame->other.is_hdr == hdr) {
+            std::swap(frame->image, frame->other.image);
+            std::swap(frame->image_view, frame->other.image_view);
+            std::swap(frame->allocation, frame->other.allocation);
+            std::swap(frame->width, frame->other.width);
+            std::swap(frame->height, frame->other.height);
+            std::swap(frame->is_hdr, frame->other.is_hdr);
+            return;
+        }
+        if (frame->other.image) {
+            device.destroyImageView(frame->other.image_view);
+            vmaDestroyImage(instance.GetAllocator(), frame->other.image, frame->other.allocation);
+        }
+        frame->other = {frame->width, frame->height, frame->is_hdr, frame->allocation, frame->image,
+                        frame->image_view};
+        frame->image = vk::Image{};
+        frame->image_view = vk::ImageView{};
+        frame->allocation = nullptr;
+    }
     if (frame->image_view) {
         device.destroyImageView(frame->image_view);
     }
     if (frame->image) {
         vmaDestroyImage(instance.GetAllocator(), frame->image, frame->allocation);
     }
-    DestroyGenerated(frame); // made again at the new size when needed
 
     const vk::Format format = FrameGenerator::ColorFormat;
     const vk::ImageCreateInfo image_info = {
@@ -452,6 +498,20 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     frame->height = height;
 
     frame->is_hdr = swapchain.GetHDR();
+}
+
+void Presenter::PrewarmFrame(Frame* frame, u32 width, u32 height) {
+    // The other size's image, made now (before it is needed) through RecreateFrame: the current
+    // image goes aside, the new one is made, then they swap back.
+    if (!KeepFrameSizes() || frame->width == 0 || width == 0 || height == 0 ||
+        (frame->width == width && frame->height == height) ||
+        (frame->other.image && frame->other.width == width && frame->other.height == height &&
+         frame->other.is_hdr == swapchain.GetHDR())) {
+        return;
+    }
+    const u32 keep_width = frame->width, keep_height = frame->height;
+    RecreateFrame(frame, width, height);           // current aside, the other size made
+    RecreateFrame(frame, keep_width, keep_height); // swapped back
 }
 
 Frame* Presenter::PrepareLastFrame() {
@@ -1542,6 +1602,18 @@ Frame* Presenter::GetRenderFrame(bool fill) {
     if (frame->width != want_width || frame->height != want_height ||
         frame->is_hdr != swapchain.GetHDR()) {
         RecreateFrame(frame, want_width, want_height);
+    }
+    // bbport: the other frame size made ahead (at the title, not when gameplay starts).
+    if (window_frame_width != expected_frame_width || window_frame_height != expected_frame_height) {
+        const bool other_fill = !fill;
+        const u32 other_width = other_fill ? window_frame_width : expected_frame_width;
+        const u32 other_height = other_fill ? window_frame_height : expected_frame_height;
+        PrewarmFrame(frame, other_width, other_height);
+        if (KeepFrameSizes() && fsr_settings.enable) {
+            // the FSR pass's images at the gameplay size (filling the window); it may not run at 16:9
+            fsr_pass.SetKeepSizes(true);
+            fsr_pass.Prewarm({window_frame_width, window_frame_height});
+        }
     }
     frame->fill = fill;
 
