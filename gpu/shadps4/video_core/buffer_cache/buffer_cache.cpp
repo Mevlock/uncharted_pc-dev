@@ -3208,7 +3208,14 @@ void BufferCache::NoteStreamed(VAddr addr, u64 size) {
 }
 
 void BufferCache::UploadStreamed(const std::function<bool(VAddr, u64)>& is_mapped) {
-    if (!StreamUploadEnabled()) {
+    // Video memory for data that may never be drawn: not on cards or budgets under 5 GB (as the
+    // arena's and the staging pool's own rules); there the queue is dropped.
+    static const bool roomy = instance.GetTotalMemoryBudget() >= 5_GB;
+    if (!StreamUploadEnabled() || !roomy) {
+        if (!roomy) {
+            std::scoped_lock lock{streamed_mutex};
+            streamed.clear();
+        }
         return;
     }
     // Ranges at least 8 frames old (the loader's own passes over fresh data, e.g. pointer fixups,
