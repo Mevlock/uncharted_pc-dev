@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -213,9 +214,14 @@ std::atomic<s64> slept_ns{0};
 /// paced frame now gets a present target = its slot + an offset L, and its world step is the
 /// interval between successive targets (the frame clock reads the target's TSC, probe.c): slots
 /// are one period apart, so targets are too, presents are held to them, and world steps equal
-/// present intervals. L = about the 98th percentile of (arrival at the presenter - slot) over the
-/// last ~2 s plus a margin: raised at once, lowered by 20 us a frame (no visible step). A frame
-/// later than its target is shown when it comes (as before).
+/// present intervals. The flip itself is released at the target by the GPU (Swapchain::Present:
+/// the present is queued at once on a queue of its own, behind a semaphore relay that the
+/// presenter lets go at the target): a present call made late on the CPU was flipped 0.2-3 ms
+/// after it at random, a flip that follows a GPU signal is on time. L = about the 99.6th
+/// percentile of (GPU done - slot) over the last ~4 s plus 0.5 ms: smoothness before latency.
+/// L changes are world steps too, so it moves by at most 0.1 ms per frame up and 10 us per frame
+/// down (only when 1 ms too high); it is learnt again whenever pacing stops (loads, the boot). A
+/// frame later than its target is shown when it is done.
 const bool even = [] {
     const char* env = std::getenv("BB_EVEN_PRESENT");
     return !(env && env[0] == '0');
@@ -226,10 +232,11 @@ struct FrameSlot {
     std::atomic<s64> slot{0}, target{0};
 };
 std::array<FrameSlot, Ring> frames{};
-/// presenter (swap thread) -> frame thread: arrival - slot of the last frames
-constexpr u32 Samples = 256;
+/// presenter (swap thread) -> frame thread: GPU done - slot of the last frames
+constexpr u32 Samples = 512;
 std::array<std::atomic<s64>, Samples> lags{};
 std::atomic<u64> lag_count{0};
+u64 lag_base = 0; ///< frame thread: the samples before it are from before the last Stop
 s64 offset = 0;      ///< frame thread: L
 s64 offset_goal = 0; ///< frame thread: L from the samples
 std::atomic<s64> current_target{0}; ///< frame thread -> probe.c: this frame's present target (0: none)
@@ -240,22 +247,24 @@ std::atomic<s64> held_ns{0}, late_ns{0};
 void UpdateOffset(s64 period, u64 id) {
     if ((id & 15) == 0) {
         const u64 count = lag_count.load(std::memory_order_acquire);
-        const u32 n = static_cast<u32>(std::min<u64>(count, Samples - 16));
+        const u32 n = static_cast<u32>(std::min<u64>(count - lag_base, Samples - 32));
         if (n >= 32) {
             std::array<s64, Samples> copy;
             for (u32 i = 0; i < n; ++i) {
                 copy[i] = lags[(count - 1 - i) % Samples].load(std::memory_order_relaxed);
             }
-            const u32 k = n * 98 / 100;
+            const u32 k = n - 1 - std::min<u32>(n / 200, 2); // the third largest: ~p99.6
             std::nth_element(copy.begin(), copy.begin() + k, copy.begin() + n);
-            constexpr s64 margin = 400'000; // the present thread's take, the timer's spin
+            constexpr s64 margin = 500'000;
             offset_goal = std::clamp<s64>(copy[k] + margin, 0, 2 * period);
         }
     }
-    if (offset_goal > offset) {
-        offset = offset_goal;
-    } else if (offset_goal + 250'000 < offset) {
-        offset -= std::min<s64>(offset - offset_goal, 20'000);
+    if (offset == 0) {
+        offset = offset_goal; // the first: nothing shown at a target yet
+    } else if (offset_goal > offset) {
+        offset += std::min<s64>(offset_goal - offset, 100'000);
+    } else if (offset_goal + 1'000'000 < offset) {
+        offset -= std::min<s64>(offset - offset_goal, 10'000);
     }
     offset_ns.store(offset, std::memory_order_relaxed);
 }
@@ -271,6 +280,8 @@ void Queued(u64 id) {
 void Stop() {
     last_wake = 0;
     current_target.store(0, std::memory_order_relaxed);
+    offset = offset_goal = 0;
+    lag_base = lag_count.load(std::memory_order_acquire);
     Libraries::VideoOut::SetStartPaced(false);
 }
 
@@ -320,6 +331,7 @@ void BeforeFrame(u64 id) {
         entry.target.store(slot + offset, std::memory_order_relaxed);
         entry.id.store(id, std::memory_order_release);
         current_target.store(slot + offset, std::memory_order_relaxed);
+        last_target = slot + offset; // the trace's target: the present target
     }
     Libraries::VideoOut::SetStartPaced(true);
     paced.fetch_add(1, std::memory_order_relaxed);
@@ -328,8 +340,71 @@ void BeforeFrame(u64 id) {
         SleepUntil(wake);
     }
 }
-/// The presenter, before the present of game frame `id`: holds it until its target.
-void Hold(u64 id) {
+/// Game frame `id`'s present target (0: none).
+s64 Target(u64 id) {
+    const FrameSlot& entry = frames[id % Ring];
+    return entry.id.load(std::memory_order_acquire) == id
+               ? entry.target.load(std::memory_order_relaxed)
+               : 0;
+}
+
+std::atomic<bool> timed{false}; ///< the presents carry their target (VK_EXT_present_timing)
+
+/// The GPU gate (BB_EVEN_GATE=0: off): after a paced frame's flip, the GPU thread waits until that
+/// frame's upscaling / post-processing has been submitted at its target, so that work runs on an
+/// idle GPU and takes the same time every frame: the flip follows its GPU signal at the target
+/// plus a constant (as frames taken on a vblank tick). A CPU wait with a deadline: never a GPU
+/// wait that only the host releases.
+const bool gate = [] {
+    const char* env = std::getenv("BB_EVEN_GATE");
+    return !(env && env[0] == '0');
+}();
+std::mutex gate_mutex;
+std::condition_variable gate_cv;
+s64 gate_posted = -1; ///< the last game flip whose post work was submitted
+std::atomic<u64> gate_waits{0}, gate_timeouts{0};
+std::atomic<s64> gate_wait_ns{0};
+
+void GateWait(u64 id, s64 period) {
+    const s64 target = Target(id);
+    if (!gate || !target || timed.load(std::memory_order_relaxed)) {
+        return;
+    }
+    const s64 flip = s64(id) - 1;
+    const s64 start = Now();
+    // deadline: one period after the target (a frame that never comes to the presenter)
+    const auto deadline = std::chrono::steady_clock::time_point(
+        std::chrono::nanoseconds(std::max(target, start) + std::max<s64>(period, 1'000'000)));
+    std::unique_lock lk{gate_mutex};
+    if (!gate_cv.wait_until(lk, deadline, [&] { return gate_posted >= flip; })) {
+        gate_timeouts.fetch_add(1, std::memory_order_relaxed);
+    }
+    gate_waits.fetch_add(1, std::memory_order_relaxed);
+    gate_wait_ns.fetch_add(Now() - start, std::memory_order_relaxed);
+}
+
+void GatePost(s64 flip) {
+    {
+        std::scoped_lock lk{gate_mutex};
+        gate_posted = std::max(gate_posted, flip);
+    }
+    gate_cv.notify_all();
+}
+
+void Sample(u64 id, s64 ready) {
+    const FrameSlot& entry = frames[id % Ring];
+    if (entry.id.load(std::memory_order_acquire) != id) {
+        return;
+    }
+    const u64 n = lag_count.load(std::memory_order_relaxed);
+    lags[n % Samples].store(ready - entry.slot.load(std::memory_order_relaxed),
+                            std::memory_order_relaxed);
+    lag_count.store(n + 1, std::memory_order_release);
+}
+
+/// Without timed presents (build-1 path): the presenter, before game frame `id`'s present: notes
+/// its ready time and holds it until its target.
+void ReadyAndWait(u64 id) {
     FrameSlot& entry = frames[id % Ring];
     if (entry.id.load(std::memory_order_acquire) != id) {
         return;
@@ -653,11 +728,15 @@ void Print(u64 current) {
     if (Pace::even && at < sizeof(line)) {
         const u64 h = Pace::held.exchange(0), l = Pace::late.exchange(0);
         at += std::snprintf(line + at, sizeof(line) - at,
-                            " | even: offset %.2f, held %llu by %.2f, late %llu by %.2f",
+                            " | even: offset %.2f, held %llu by %.2f, late %llu by %.2f, gate %llu waits %.2f, %llu timeouts",
                             double(Pace::offset_ns.load()) / 1e6, static_cast<unsigned long long>(h),
                             double(Pace::held_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, h)),
                             static_cast<unsigned long long>(l),
-                            double(Pace::late_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, l)));
+                            double(Pace::late_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, l)),
+                            static_cast<unsigned long long>(Pace::gate_waits.load()),
+                            double(Pace::gate_wait_ns.exchange(0)) / 1e6 /
+                                double(std::max<u64>(1, Pace::gate_waits.exchange(0))),
+                            static_cast<unsigned long long>(Pace::gate_timeouts.exchange(0)));
     }
     std::printf("%s (ms)\n", line);
     if (frames_csv) {
@@ -695,9 +774,50 @@ bool StartPacingRequested() {
     return Pace::enabled;
 }
 
-void HoldPresent(s64 flip_arg) {
+s64 PresentTarget(s64 flip_arg) {
+    return Pace::even && flip_arg >= 0 ? Pace::Target(static_cast<u64>(flip_arg) + 1) : 0;
+}
+
+void PresentReadyAndWait(s64 flip_arg) {
+    if (Pace::even && flip_arg >= 0 && !Pace::timed.load(std::memory_order_relaxed)) {
+        Pace::ReadyAndWait(static_cast<u64>(flip_arg) + 1);
+    }
+}
+
+void GateAfterFlip(s64 flip_arg) {
     if (Pace::even && flip_arg >= 0) {
-        Pace::Hold(static_cast<u64>(flip_arg) + 1);
+        Pace::GateWait(static_cast<u64>(flip_arg) + 1, Libraries::VideoOut::FrameCapPeriodNs());
+    }
+}
+
+void GatePostSubmitted(s64 flip_arg) {
+    if (Pace::even && flip_arg >= 0) {
+        Pace::GatePost(flip_arg);
+    }
+}
+
+void SetTimedPresents(bool on) {
+    Pace::timed.store(on, std::memory_order_relaxed);
+}
+
+void PresentQueued(s64 flip_arg) {
+    if (Pace::even && flip_arg >= 0 && Pace::timed.load(std::memory_order_relaxed)) {
+        Pace::Sample(static_cast<u64>(flip_arg) + 1, Pace::Now());
+    }
+}
+
+void PresentFlipped(s64 flip_arg, s64 flip_ns) {
+    if (!Pace::even || flip_arg < 0) {
+        return;
+    }
+    const u64 id = static_cast<u64>(flip_arg) + 1;
+    const s64 target = Pace::Target(id);
+    if (target && flip_ns > target + 200'000) {
+        Pace::Sample(id, flip_ns); // late: the offset learns the real ready time
+        Pace::late.fetch_add(1, std::memory_order_relaxed);
+        Pace::late_ns.fetch_add(flip_ns - target, std::memory_order_relaxed);
+    } else if (target) {
+        Pace::held.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
