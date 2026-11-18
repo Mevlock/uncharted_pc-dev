@@ -479,7 +479,10 @@ struct FreeSyncCap { // ADLFreeSyncCap
     int reserved2[4];
 };
 static_assert(sizeof(FreeSyncCap) == 32);
-constexpr int CapSupported = 1 << 0, CapCurrentMode = 1 << 3, CapBorderless = 1 << 6;
+// ADL's ability flags are logged only: on an RX 7800 XT (Adrenalin 26.11.1) ADL never set "borderless
+// window" (0x40) although FreeSync ran in the port's borderless fullscreen (PresentMon: display
+// intervals spread continuously), so they decide nothing.
+constexpr int CapSupported = 1 << 0;
 
 using Malloc = void*(__stdcall*)(int size);
 using Create = int(__cdecl*)(Malloc callback, int connected_only, void** context);
@@ -519,7 +522,6 @@ struct AmdSource {
     std::string hidden; ///< why the display is not certain (freesync nullptr)
     bool range_known = false;
     double range_min = 0, range_max = 0; ///< Hz (ADL)
-    int adl_caps = -1;                   ///< ADL FreeSync abilities (-1: not known)
     std::string logged;                  ///< the last display line logged
 
     Raw Sample(HWND hwnd, bool front, double fps) {
@@ -546,9 +548,6 @@ struct AmdSource {
         if (!on) {
             return {0, why + ": FreeSync off in AMD Software"};
         }
-        if (adl_caps >= 0 && !(adl_caps & Amd::Adl::CapCurrentMode)) {
-            return {0, why + ": FreeSync on, not in the current display mode (ADL)"};
-        }
         // The window: in front, not minimised, covering the whole monitor (borderless fullscreen).
         RECT rect{};
         if (IsIconic(hwnd) || !GetWindowRect(hwnd, &rect)) {
@@ -562,9 +561,6 @@ struct AmdSource {
         const RECT& m = info.rcMonitor;
         if (rect.left != m.left || rect.top != m.top || rect.right != m.right || rect.bottom != m.bottom) {
             return {0, why + ": FreeSync on, the game is in a window (not fullscreen)"};
-        }
-        if (adl_caps >= 0 && !(adl_caps & Amd::Adl::CapBorderless)) {
-            return {0, why + ": FreeSync on, not in a borderless fullscreen window (ADL)"};
         }
         if (!front) {
             return {0, why + ": FreeSync on, the game not in front"};
@@ -595,7 +591,6 @@ struct AmdSource {
         monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         Amd::ReleaseObject(freesync);
         range_known = false;
-        adl_caps = -1;
         mon = FindMonitor(hwnd);
         if (!mon.valid || mon.width == 0 || mon.height == 0) {
             hidden = "the window's monitor is not in Windows' display paths";
@@ -695,7 +690,6 @@ struct AmdSource {
             Amd::Adl::FreeSyncCap cap{};
             const int status = Amd::Adl::get_cap(Amd::Adl::context, adapter, index, &cap);
             if (status == 0) {
-                adl_caps = cap.caps;
                 if ((cap.caps & Amd::Adl::CapSupported) && cap.min_uhz > 0 && cap.max_uhz > cap.min_uhz) {
                     range_known = true;
                     range_min = cap.min_uhz / 1e6;
@@ -913,7 +907,8 @@ void PollThread() {
         use_nv && Timing::device_on ? " (present timing logged beside it)" : "");
     int candidate = -2;
     Clock::time_point candidate_since{};
-    std::string last_raw;
+    int last_raw_state = -3;
+    Clock::time_point last_raw_time{};
     std::string hidden_logged;
     int shown = -2;
     for (;;) {
@@ -971,9 +966,12 @@ void PollThread() {
             if (use_nv && Timing::device_on) {
                 line += " | " + timing.why;
             }
-            if (line != last_raw) {
+            // Each change of the raw state, and every 5 seconds.
+            const auto at = Clock::now();
+            if (raw.state != last_raw_state || at - last_raw_time >= std::chrono::seconds(5)) {
                 Log("VRR raw: %s\n", line.c_str());
-                last_raw = line;
+                last_raw_state = raw.state;
+                last_raw_time = at;
             }
         }
         const auto now = Clock::now();

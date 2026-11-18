@@ -10,15 +10,15 @@
 // - AMD without present timing: ADLX (amdadlx64.dll of Adrenalin), which has no live state: lit
 //   only while FreeSync is on for the window's display (IADLXDisplayFreeSync; the display is the
 //   single-display desktop at the monitor's place and size, on its Windows source), the window is
-//   in front and covers that display, ADL allows the current mode and a borderless window, and
-//   the frames on screen are inside the display's FreeSync range (ADL2_Display_FreeSync_Cap, capped
-//   by the current refresh rate); dimmed otherwise; hidden when the display is not certain.
+//   in front and covers that display, and the frames on screen are inside the display's FreeSync
+//   range (ADL2_Display_FreeSync_Cap, capped by the current refresh rate; ADL's ability flags are
+//   only logged); dimmed otherwise; hidden when the display is not certain.
 // - Others (or BB_VRR_TIMING=1 beside NVAPI, for comparison): the swapchain's own report through
 //   VK_EXT_present_timing: the presentation engine's VRR/fixed-refresh mode
 //   (VkSwapchainTimingPropertiesEXT) and whether the frames reach the screen on the refresh grid
 //   (composed) or when they are ready (flipped directly).
 // A change shows after it held for half a second; each change is logged ("VRR: on -> off (...)").
-// BB_VRR=0: no indicator, nothing queried. BB_VRR_LOG=1: every raw sample in the log.
+// BB_VRR=0: no indicator, nothing queried. BB_VRR_LOG=1: the raw sample in the log at each change and every 5 s.
 #pragma once
 
 #include <string>
