@@ -1359,7 +1359,12 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
                           regs.depth_buffer.NumSamples() == 1 && !regs.IsClipDisabled() &&
                           regs.stage_enable.raw == AmdGpu::ShaderStageEnable::VgtStages::Vs;
     }
-    sel.motion = false;
+    // Uncharted: every G-buffer draw takes the motion twin, which the registers alone decide, so
+    // its stages are refreshed once, as the twin. (Refreshing the ordinary stages first and then
+    // the twin's doubled the stage work of every G-buffer draw on the draw-preparation workers:
+    // ~1.2 us a draw, 0.7-1.5 ms a frame at U3's market.)
+    const bool motion_first = motion_possible && Shader::MotionVectors::characters;
+    sel.motion = motion_first;
     sel.ui_squeeze = false;
 
     // First pass to fill render target information needed by shader recompiler
@@ -1393,8 +1398,8 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     }
     if (motion_possible) {
         const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
-        if (vs && Shader::MotionVectors::characters) {
-            sel.motion = true; // Uncharted: chosen per draw (GPU-written vertices)
+        if (motion_first) {
+            // Uncharted: the twin already (the rasterizer gives each draw its history).
         } else if (vs) {
             // Shaders with a bone palette (motion_history.h). Small skeletons (weapons,
             // props) also include static world pieces: the rasterizer gives those
@@ -1439,7 +1444,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         if (all_motion) {
             sel.motion = true;
         }
-        if (sel.motion && !RefreshGraphicsStages(sel)) {
+        if (sel.motion && !motion_first && !RefreshGraphicsStages(sel)) {
             return false;
         }
     }
