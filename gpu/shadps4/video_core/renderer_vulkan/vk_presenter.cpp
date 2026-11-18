@@ -1587,6 +1587,11 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
         info.AddSignal(frame->present_done);
     }
     scheduler.Flush(info);
+    if (release && PresentRelease::Probing()) {
+        // BB_HOLD_PROBE: when this submission (a held one: its hold and blit) really ends
+        release->ProbeNote(scheduler.GetWorkSemaphore()->Handle(), scheduler.CurrentTick() - 1,
+                           hold_flip, held ? hold_until : 0);
+    }
     if (last && even_flip >= 0) {
         LowLatency::GatePostSubmitted(even_flip); // the gate opens: this frame's post work is queued
     }

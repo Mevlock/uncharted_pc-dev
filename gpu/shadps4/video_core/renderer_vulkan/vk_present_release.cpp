@@ -6,6 +6,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
+#include <string>
+#include <thread>
 
 #include "video_core/host_shaders/present_release_comp.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -198,6 +201,7 @@ void PresentRelease::Calibrate() {
     std::array<u64, 2> values{};
     u64 deviation = 0;
     const VkDevice device = instance.GetDevice();
+    const s64 call_start = SteadyNs();
     const VkResult result =
         instance.IsCalibratedTimestampsKhr()
             ? VULKAN_HPP_DEFAULT_DISPATCHER.vkGetCalibratedTimestampsKHR(device, 2, infos.data(),
@@ -209,6 +213,35 @@ void PresentRelease::Calibrate() {
     }
     cal_ticks = values[0];
     cal_ns = QpcToNs(values[1]) + steady_minus_qpc;
+    if (Probing()) {
+        NoteCalibration(deviation, SteadyNs() - call_start);
+    }
+}
+
+void PresentRelease::NoteCalibration(u64 deviation, s64 call_ns) {
+    // the host time of timestamp 0 by this calibration: steady if the two clocks agree
+    const double offset = double(cal_ns) - double(cal_ticks) * tick_ns;
+    CalStats& c = cal_stats;
+    if (c.count == 0) {
+        c.offset_min = c.offset_max = offset;
+        c.since = cal_ns;
+    }
+    ++c.count;
+    c.call_ns_sum += call_ns;
+    c.call_ns_max = std::max(c.call_ns_max, call_ns);
+    c.deviation_max = std::max(c.deviation_max, deviation);
+    c.offset_min = std::min(c.offset_min, offset);
+    c.offset_max = std::max(c.offset_max, offset);
+    if (cal_ns - c.since >= 1'000'000'000) {
+        std::printf("Hold probe: calibration over 1 s: %u calls (CPU %.1f us avg, %.1f max), deviation max %.1f us, host time of "
+                    "timestamp 0 spread %.1f us (%.3f ms); hold start - timestamp %u pairs, spread "
+                    "%.2f us (%.2f..%.2f)\n",
+                    c.count, double(c.call_ns_sum) / 1e3 / c.count, double(c.call_ns_max) / 1e3,
+                    double(c.deviation_max) / 1e3, (c.offset_max - c.offset_min) / 1e3,
+                    c.offset_min / 1e6, c.pair_count, (c.pair_max - c.pair_min) * tick_ns / 1e3,
+                    c.pair_min * tick_ns / 1e3, c.pair_max * tick_ns / 1e3);
+        c = {};
+    }
 }
 
 s64 PresentRelease::TicksToNs(u64 ticks) const {
@@ -264,14 +297,24 @@ void PresentRelease::Spin(vk::CommandBuffer cmdbuf, u32 index, s64 until_ns, s64
         .srcAccessMask = vk::AccessFlagBits::eShaderWrite,
         .dstAccessMask = vk::AccessFlagBits::eHostRead,
     };
-    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-                           vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
-                           {}, after, {}, {});
+    if (Part("nohost")) {
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                               vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, {});
+    } else {
+        cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+                               vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
+                               {}, after, {}, {});
+    }
     cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, index * 3 + 2);
 }
 
 void PresentRelease::RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns, s64 limit_ns) {
-    Calibrate();
+    if (Part("skip")) {
+        return;
+    }
+    if (!Part("cal1s") || SteadyNs() - cal_ns > 1'000'000'000) {
+        Calibrate();
+    }
     const u32 index = TakeSlot();
     cmdbuf.resetQueryPool(*pool, index * 3, 3);
     // everything before it on the queue done (the frame), then its ready time
@@ -287,6 +330,9 @@ void PresentRelease::RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 unti
 }
 
 void PresentRelease::RecordFence(vk::CommandBuffer cmdbuf) {
+    if (Part("nofence") || Part("skip")) {
+        return;
+    }
     cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
                            vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, {});
 }
@@ -363,6 +409,14 @@ void PresentRelease::Poll(const std::function<void(s64, s64, s64)>& done) {
                 first_clock = started;
             }
             ++pairs;
+            if (Probing() && fitted) {
+                // the dispatch's start against the fit from the earlier pairs (ticks)
+                const double d = (double(started) - fit_b) / fit_a - double(entry);
+                CalStats& c = cal_stats;
+                c.pair_min = c.pair_count ? std::min(c.pair_min, d) : d;
+                c.pair_max = c.pair_count ? std::max(c.pair_max, d) : d;
+                ++c.pair_count;
+            }
             // Holds start once the span is 200 ms (the rate known to 1e-5 or better).
             const double span = double(s64(entry - first_ticks));
             if (span * tick_ns > 200'000'000.0) {
@@ -376,6 +430,103 @@ void PresentRelease::Poll(const std::function<void(s64, s64, s64)>& done) {
             }
         }
         done(slot.flip_arg, TicksToNs(ready), TicksToNs(exit));
+    }
+}
+
+bool PresentRelease::Part(const char* name) {
+    static const std::string parts = [] {
+        const char* env = std::getenv("BB_HOLD_PART");
+        if (env && env[0]) {
+            std::printf("Even presents: BB_HOLD_PART=%s (diagnosis)\n", env);
+        }
+        return std::string(",") + (env ? env : "") + ",";
+    }();
+    return parts.find(std::string(",") + name + ",") != std::string::npos;
+}
+
+bool PresentRelease::Probing() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_HOLD_PROBE");
+        return env && env[0];
+    }();
+    return on;
+}
+
+namespace {
+struct ProbeEntry {
+    VkSemaphore timeline;
+    u64 tick;
+    s64 flip;
+    s64 until_ns;
+    u64 call_qpc;
+};
+std::mutex probe_mutex;
+std::deque<ProbeEntry> probe_queue;
+
+u64 Qpc() {
+#ifdef _WIN32
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    return u64(q.QuadPart);
+#else
+    return u64(SteadyNs());
+#endif
+}
+double QpcMs(u64 qpc) {
+    return double(QpcToNs(qpc)) / 1e6;
+}
+} // namespace
+
+void PresentRelease::ProbeNote(vk::Semaphore timeline, u64 tick, s64 flip_arg, s64 until_ns) {
+    if (!Probing()) {
+        return;
+    }
+    static std::once_flag started;
+    std::call_once(started, [this] {
+        const VkDevice device = instance.GetDevice();
+        const s64 steady_qpc = steady_minus_qpc;
+        std::thread([device, steady_qpc] {
+            FILE* out = std::fopen(std::getenv("BB_HOLD_PROBE"), "w");
+            if (!out) {
+                std::printf("Hold probe: cannot write %s\n", std::getenv("BB_HOLD_PROBE"));
+                return;
+            }
+            std::fputs("flip,target_qpc_ms,call_qpc_ms,done_qpc_ms,done_minus_target_ms\n", out);
+            u32 lines = 0;
+            for (;;) {
+                ProbeEntry e{};
+                {
+                    std::scoped_lock lk{probe_mutex};
+                    if (!probe_queue.empty()) {
+                        e = probe_queue.front();
+                        probe_queue.pop_front();
+                    }
+                }
+                if (!e.timeline) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(200));
+                    continue;
+                }
+                // spins (yielding) until the submission is done: ~10 us resolution
+                u64 value = 0;
+                const s64 limit = SteadyNs() + 500'000'000;
+                while (VULKAN_HPP_DEFAULT_DISPATCHER.vkGetSemaphoreCounterValue(device, e.timeline,
+                                                                                 &value) == VK_SUCCESS &&
+                       value < e.tick && SteadyNs() < limit) {
+                    std::this_thread::yield();
+                }
+                const u64 done = Qpc();
+                const double target_ms = double(e.until_ns - steady_qpc) / 1e6;
+                std::fprintf(out, "%lld,%.4f,%.4f,%.4f,%.4f\n", static_cast<long long>(e.flip),
+                             target_ms, QpcMs(e.call_qpc), QpcMs(done), QpcMs(done) - target_ms);
+                if (++lines % 256 == 0) {
+                    std::fflush(out);
+                }
+            }
+        }).detach();
+    });
+    std::scoped_lock lk{probe_mutex};
+    if (probe_queue.size() < 4096) {
+        probe_queue.push_back({timeline, tick, flip_arg, until_ns, Qpc()});
     }
 }
 

@@ -75,6 +75,16 @@ public:
     /// The holds that have run: `done(flip_arg, ready_ns, release_ns)` for each, in order.
     void Poll(const std::function<void(s64, s64, s64)>& done);
 
+    /// BB_HOLD_PROBE=<csv> (diagnosis): the real time each held present's submission ended, taken
+    /// on the CPU (a thread polls `timeline` for `tick`; QueryPerformanceCounter), so without the
+    /// device clock or the calibration; joinable to PresentMon by its QPC times.
+    static bool Probing();
+    /// BB_HOLD_PART=<a,b,...> (diagnosis, the hold's cost by part): skip (no hold commands at all),
+    /// nofence (no execution barrier after the blit), nohost (no host-domain barrier after the
+    /// dispatch), cal1s (calibrated timestamps once a second, not every frame).
+    static bool Part(const char* name);
+    void ProbeNote(vk::Semaphore timeline, u64 tick, s64 flip_arg, s64 until_ns);
+
 private:
     struct Slot {
         bool pending = false;
@@ -115,6 +125,17 @@ private:
     double fit_a = 1.0, fit_b = 0.0;
     u64 first_ticks = 0, first_clock = 0;
     u32 pairs = 0;
+    // BB_HOLD_PROBE: the calibration's spread per second (deviation, offset drift, pair offset).
+    struct CalStats {
+        s64 since = 0;
+        u32 count = 0;
+        u64 deviation_max = 0;
+        double offset_min = 0, offset_max = 0;
+        double pair_min = 0, pair_max = 0;
+        u32 pair_count = 0;
+        s64 call_ns_sum = 0, call_ns_max = 0;
+    } cal_stats;
+    void NoteCalibration(u64 deviation, s64 call_ns);
 };
 
 } // namespace Vulkan
