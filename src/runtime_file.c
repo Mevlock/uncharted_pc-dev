@@ -587,9 +587,12 @@ static void log_read(const void *buffer,uint64_t size,ssize_t n) {
            (long long)n,f ? (unsigned long long)*f : 0ull);
 }
 static ssize_t read_full_inner(int h,void *buffer,uint64_t size,int64_t offset);
+void bbgpu_note_streamed(uint64_t addr,uint64_t size); /* gpu/shim/bbgpu.cpp: upload ahead to the GPU */
 static ssize_t read_full(int h,void *buffer,uint64_t size,int64_t offset) {
     const ssize_t n=read_full_inner(h,buffer,size,offset);
     log_read(buffer,size,n);
+    /* bulk file data (asset streaming) the GPU may read later: its upload can start now */
+    if (n>=65536) bbgpu_note_streamed((uint64_t)(uintptr_t)buffer,(uint64_t)n);
     return n;
 }
 static ssize_t read_full_inner(int h,void *buffer,uint64_t size,int64_t offset) {

@@ -3184,8 +3184,72 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     return {arena, arena->Offset(device_addr)};
 }
 
+namespace {
+/// bbport: BB_STREAM_UPLOAD=0: streamed file data is not uploaded ahead (textures are copied from
+/// guest memory when first used, as before).
+bool StreamUploadEnabled() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_STREAM_UPLOAD");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+} // namespace
+
+void BufferCache::NoteStreamed(VAddr addr, u64 size) {
+    if (!StreamUploadEnabled()) {
+        return;
+    }
+    std::scoped_lock lock{streamed_mutex};
+    if (streamed.size() >= 4096) {
+        return; // far behind (a level load): the rest uploads on first use, as before
+    }
+    streamed.push_back({addr, size, BbStats::gpu_frames.load(std::memory_order_relaxed)});
+}
+
+void BufferCache::UploadStreamed(const std::function<bool(VAddr, u64)>& is_mapped) {
+    if (!StreamUploadEnabled()) {
+        return;
+    }
+    // Ranges at least 8 frames old (the loader's own passes over fresh data, e.g. pointer fixups,
+    // are done by then: writes after the upload fault and are uploaded again), up to 8 MiB per
+    // submission (~3 per frame: ~3 GB/s at 120 FPS).
+    constexpr u64 MinAgeFrames = 8;
+    constexpr u64 BudgetBytes = 8_MB;
+    const u64 now = BbStats::gpu_frames.load(std::memory_order_relaxed);
+    u64 budget = BudgetBytes;
+    while (budget > 0) {
+        StreamedRange range;
+        {
+            std::scoped_lock lock{streamed_mutex};
+            if (streamed.empty() || streamed.front().frame + MinAgeFrames > now) {
+                return;
+            }
+            range = streamed.front();
+            const u64 take = std::min(range.size, budget);
+            if (take == range.size) {
+                streamed.pop_front();
+            } else {
+                streamed.front().addr += take;
+                streamed.front().size -= take;
+            }
+            range.size = take;
+        }
+        budget -= range.size;
+        if (!is_mapped(range.addr, range.size) ||
+            !memory_tracker->IsRegionCpuModified(range.addr, range.size)) {
+            continue; // not GPU memory, or already current in the arena
+        }
+        (void)ObtainBuffer(range.addr, static_cast<u32>(range.size), false);
+        BbStats::stream_upload_bytes.fetch_add(range.size, std::memory_order_relaxed);
+    }
+}
+
 std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size) {
-    if (IsRegionGpuModified(device_addr, size)) {
+    // bbport: data already current in the arena (GPU-written, or uploaded ahead: UploadStreamed)
+    // is read there, in video memory, instead of copied from guest memory into host staging.
+    if (IsRegionGpuModified(device_addr, size) ||
+        (StreamUploadEnabled() && !memory_tracker->IsRegionCpuModified(device_addr, size))) {
         return ObtainBuffer(device_addr, size, false);
     }
     const auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostUncached,

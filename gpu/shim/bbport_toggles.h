@@ -119,6 +119,8 @@ inline std::atomic<std::int64_t> hot_pages{0};
 inline std::atomic<std::uint64_t> images_registered{0};
 inline std::atomic<std::uint64_t> image_upload_bytes{0};
 inline std::atomic<std::uint64_t> buffer_upload_bytes{0};
+/// Streamed file data uploaded ahead into the buffer arena (BufferCache::UploadStreamed).
+inline std::atomic<std::uint64_t> stream_upload_bytes{0};
 /// Sparse arena binds (BufferCache::SubmitPendingArenaBinds): submissions, ranges, bytes, ns in the call.
 inline std::atomic<std::uint64_t> sparse_binds{0}, sparse_bind_ranges{0}, sparse_bind_bytes{0},
     sparse_bind_ns{0};

@@ -592,6 +592,15 @@ extern "C" void bbgpu_input_sample(void) {
     Vulkan::LowLatency::InputSample();
 }
 
+/// bbport: the game read `size` bytes from a file into guest memory at `addr` (runtime_file.c):
+/// the GPU side may upload them ahead (BufferCache::UploadStreamed).
+void (*g_bb_note_streamed)(uint64_t addr, uint64_t size) = nullptr;
+extern "C" void bbgpu_note_streamed(uint64_t addr, uint64_t size) {
+    if (auto* note = g_bb_note_streamed) {
+        note(addr, size);
+    }
+}
+
 extern "C" void bbgpu_game_frame_source(int found) {
     Vulkan::LowLatency::SetFrameSource(found != 0);
 }

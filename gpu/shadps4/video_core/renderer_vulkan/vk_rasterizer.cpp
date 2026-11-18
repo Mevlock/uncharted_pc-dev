@@ -691,6 +691,11 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     return push_data;
 }
 
+} // namespace Vulkan
+extern void (*g_bb_note_streamed)(uint64_t addr, uint64_t size); // bbgpu.cpp
+namespace Vulkan {
+static Rasterizer* g_stream_rasterizer = nullptr;
+
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime& runtime_,
                        AmdGpu::Liverpool* liverpool_)
     : instance{instance_}, scheduler{scheduler_}, runtime{runtime_}, page_manager{this},
@@ -730,6 +735,13 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     memory->SetRasterizer(this);
 
     GpuProfiler::Init(instance, scheduler);
+    // bbport: the game's file reads into GPU memory, uploaded ahead (BufferCache::UploadStreamed).
+    g_stream_rasterizer = this;
+    g_bb_note_streamed = [](u64 addr, u64 size) {
+        if (auto* self = g_stream_rasterizer; self && self->IsMapped(addr, size)) {
+            self->GetBufferCache().NoteStreamed(addr, size);
+        }
+    };
     if (g_gpu_checkpoints) {
         checkpoint_ring = std::make_unique<CheckpointRecord[]>(CheckpointRingSize);
         g_gpu_checkpoint_report = &ReportCheckpoints;
@@ -6356,6 +6368,7 @@ void Rasterizer::OnSubmit() {
         buffer_cache.ProcessFaultBuffer();
     }
     buffer_cache.PrefetchRecurringPages();
+    buffer_cache.UploadStreamed([this](VAddr addr, u64 size) { return IsMapped(addr, size); });
     texture_cache.ProcessDownloadImages();
     texture_cache.UpdateButtonPrompts();
     texture_cache.RunGarbageCollector();

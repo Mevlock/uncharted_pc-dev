@@ -196,6 +196,13 @@ public:
     /// buffer about to be submitted (Rasterizer::OnSubmit; see PrefetchBatch).
     void PrefetchRecurringPages();
 
+    /// bbport: any thread: `size` bytes the game read from a file into guest memory at `addr`.
+    void NoteStreamed(VAddr addr, u64 size);
+    /// bbport: stage A at a submission (the draw pipe drained): uploads streamed ranges a few
+    /// frames old into the buffer arena (video memory), a few MiB per call, so a texture first
+    /// used later is read from there instead of copied over PCIe in that frame.
+    void UploadStreamed(const std::function<bool(VAddr, u64)>& is_mapped);
+
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
 
@@ -470,6 +477,13 @@ private:
     std::unordered_map<VAddr, u8> prefetch_hits;          ///< page -> recent side read-backs
     std::unordered_map<VAddr, PrefetchRef> prefetch_latest; ///< page -> its newest copy
     std::mutex prefetch_mutex;
+    struct StreamedRange {
+        VAddr addr;
+        u64 size;
+        u64 frame; ///< BbStats::gpu_frames when it was read
+    };
+    std::mutex streamed_mutex;
+    std::deque<StreamedRange> streamed;
     std::chrono::steady_clock::time_point prefetch_decay_at{};
     bool TryPrefetched(VAddr page, u64 length);
     void NotePrefetchCandidate(VAddr page, u64 length);
