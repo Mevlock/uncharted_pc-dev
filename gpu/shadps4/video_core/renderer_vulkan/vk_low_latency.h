@@ -82,10 +82,15 @@ bool StartPacingRequested();
 s64 PresentTarget(s64 flip_arg);
 void PresentReadyAndWait(s64 flip_arg);
 void SetTimedPresents(bool on);
-/// The GPU gate (vk_low_latency.cpp Pace::gate): the GPU thread after a game flip it queued
-/// (waits, with a deadline, until that frame's post work was submitted); the presenter once it
-/// has submitted it.
-void GateAfterFlip(s64 flip_arg);
+/// The GPU gate (vk_low_latency.cpp Pace::gate): the GPU thread after a game flip it queued, with
+/// the draw scheduler value of that frame's last work (`draw_tick`): notes the gate, nothing waits
+/// there. The draw scheduler before a submission that signals `tick`: GateNeeded says whether it
+/// follows a gated frame whose post work is not submitted yet, GateBeforeSubmit waits for that
+/// (with a deadline; `recorder`: on the recording thread, which WaitAsyncSubmits then passes).
+/// The presenter (GatePostSubmitted) once it has submitted that post work.
+void GateAfterFlip(s64 flip_arg, u64 draw_tick);
+bool GateNeeded(u64 tick);
+void GateBeforeSubmit(u64 tick, bool recorder);
 /// Even presents are on (the frame start paces and BB_EVEN_PRESENT is not 0).
 bool EvenPresents();
 /// How the presenter holds paced frames (vk_present_release.h): 0 on its thread, 1 on the GPU in the

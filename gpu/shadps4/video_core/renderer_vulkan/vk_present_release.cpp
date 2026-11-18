@@ -329,6 +329,23 @@ void PresentRelease::RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 unti
     slots[index] = {.pending = true, .flip_arg = flip_arg, .until_ns = until_ns};
 }
 
+void PresentRelease::RecordLate(vk::CommandBuffer cmdbuf, s64 flip_arg) {
+    if (Part("skip")) {
+        return;
+    }
+    if (SteadyNs() - cal_ns > 100'000'000) {
+        Calibrate(); // the samples' times only: kept fresh, not every frame
+    }
+    const u32 index = TakeSlot();
+    cmdbuf.resetQueryPool(*pool, index * 3, 3);
+    // A timestamp is written once every earlier command on the queue has completed (the frame):
+    // its ready time, with no barrier; no hold, so its release is the same time.
+    for (u32 q = 0; q < 3; ++q) {
+        cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, index * 3 + q);
+    }
+    slots[index] = {.pending = true, .flip_arg = flip_arg, .until_ns = 0};
+}
+
 void PresentRelease::RecordFence(vk::CommandBuffer cmdbuf) {
     if (Part("nofence") || Part("skip")) {
         return;

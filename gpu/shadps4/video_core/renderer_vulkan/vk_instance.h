@@ -30,11 +30,21 @@ namespace Vulkan {
 inline std::mutex g_graphics_queue_mutex;
 /// BB_ASYNC_SUBMIT=1: draw scheduler flushes handed to its recording thread, and those submitted.
 inline std::atomic<u64> g_async_submits_queued{0}, g_async_submits_done{0};
+/// bbport even presents: the draw scheduler flush (its timeline value) the recording thread holds
+/// back at the GPU gate (LowLatency::GateBeforeSubmit; 0: none). The thread submits in order, so
+/// every flush before it is submitted.
+inline std::atomic<u64> g_async_gated_tick{0};
 /// Waits until the recording thread has submitted every flush handed to it so far, so a
-/// submission or present made elsewhere keeps its place in the queue order.
-inline void WaitAsyncSubmits() {
+/// submission or present made elsewhere keeps its place in the queue order. `up_to_tick`: only the
+/// flushes up to that draw scheduler value are needed (the presenter: its frame's), so a later
+/// flush the gate holds back for this very submission is not waited for.
+inline void WaitAsyncSubmits(u64 up_to_tick = ~u64{0}) {
     const u64 queued = g_async_submits_queued.load(std::memory_order_acquire);
     while (g_async_submits_done.load(std::memory_order_acquire) < queued) {
+        const u64 gated = g_async_gated_tick.load(std::memory_order_acquire);
+        if (gated != 0 && gated > up_to_tick) {
+            return;
+        }
         std::this_thread::yield();
     }
 }

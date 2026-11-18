@@ -189,7 +189,7 @@ bool Swapchain::AcquireNextImage() {
     return !needs_recreation;
 }
 
-bool Swapchain::Present(u64 latency_id, bool released) {
+bool Swapchain::Present(u64 latency_id, bool released, u64 async_up_to) {
     UpdateHdrMetadata();
     // bbport: low latency mode (vk_low_latency.h): the game's frame carries its frame id.
     const vk::PresentIdKHR present_id{
@@ -211,7 +211,7 @@ bool Swapchain::Present(u64 latency_id, bool released) {
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
     const auto t0 = Clock::now();
-    WaitAsyncSubmits();
+    WaitAsyncSubmits(async_up_to);
     const auto t1 = Clock::now();
     LowLatency::PresentStart(latency_id); // bbport: low latency mode (vk_low_latency.h)
     vk::Result result;

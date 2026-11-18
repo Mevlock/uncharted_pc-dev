@@ -20,6 +20,7 @@
 #include "core/emulator_settings.h"
 #include "core/libraries/videoout/driver.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
+#include "video_core/renderer_vulkan/vk_instance.h"
 #include "../../../dlss_bridge/bbport_dlss_bridge.h"
 
 void BbHitchMark(char code); // gpu/shim/bbport_sampler.cpp (BB_HITCH_TIMELINE)
@@ -416,11 +417,15 @@ s64 Target(u64 id) {
 
 std::atomic<bool> timed{false}; ///< the presents carry their target (VK_EXT_present_timing)
 
-/// The GPU gate (BB_EVEN_GATE=0: off): after a paced frame's flip, the GPU thread waits until that
-/// frame's upscaling / post-processing has been submitted at its target, so that work runs on an
-/// idle GPU and takes the same time every frame: the flip follows its GPU signal at the target
-/// plus a constant (as frames taken on a vblank tick). A CPU wait with a deadline: never a GPU
-/// wait that only the host releases.
+/// The GPU gate (BB_EVEN_GATE=0: off): a paced frame's present work (upscaling / post-processing,
+/// the hold, the blit) must be queued before the next frame's GPU work, so that it runs on an idle
+/// GPU at its target. The GPU thread only notes each flipped frame that can still be early (its
+/// target not passed: a later one has no hold, so there is nothing to keep in order); the draw
+/// scheduler's first submission after it then waits, on the thread that submits it, until the
+/// presenter has submitted that frame's present work. The GPU thread itself goes on recording:
+/// waiting there for the presenter (~0.15 ms a frame) cost 2-4% fps wherever the GPU thread sets
+/// the frame rate (U3 market uncapped, 11-18: 165.4 with that wait, 168.1 without it). A CPU wait
+/// with a deadline: never a GPU wait that only the host releases.
 const bool gate = [] {
     const char* env = std::getenv("BB_EVEN_GATE");
     return !(env && env[0] == '0');
@@ -428,6 +433,16 @@ const bool gate = [] {
 std::mutex gate_mutex;
 std::condition_variable gate_cv;
 s64 gate_posted = -1; ///< the last game flip whose post work was submitted
+std::atomic<s64> gate_posted_a{-1}, gate_noted_a{-1}; ///< lock-free copies: posted, last noted flip
+/// The noted frames (gate_mutex): flip, the draw scheduler value of its last work, its deadline.
+struct GateEntry {
+    u64 id = 0;
+    s64 flip = -1;
+    u64 tick = 0;
+    s64 deadline = 0;
+};
+std::array<GateEntry, 16> gate_ring{};
+u32 gate_next = 0;
 std::atomic<u64> gate_waits{0}, gate_timeouts{0};
 std::atomic<s64> gate_wait_ns{0};
 /// The GPU idle time the gate put before each game frame's GPU work (by frame id): from the last
@@ -447,26 +462,77 @@ std::array<std::atomic<s64>, Ring> flip_at{};
 std::atomic<u64> release_n{0}, release_late{0};
 std::atomic<s64> release_err_ns{0}, release_err_max{0}, release_hold_ns{0};
 
-void GateWait(u64 id, s64 period) {
-    flip_at[id % Ring].store(Now(), std::memory_order_relaxed);
+void GateNote(u64 id, s64 period, u64 draw_tick) {
+    const s64 now = Now();
+    flip_at[id % Ring].store(now, std::memory_order_relaxed);
     flip_id[id % Ring].store(id, std::memory_order_release);
     const s64 target = Target(id);
     if (!gate || !target || timed.load(std::memory_order_relaxed) ||
         release_queue.load(std::memory_order_relaxed)) {
         return; // with the release queue nothing on the GPU queue waits for a hold
     }
+    if (now >= target) {
+        return; // its GPU work is still being queued: done after its target, nothing is held
+    }
     const s64 flip = s64(id) - 1;
-    const s64 start = Now();
+    std::scoped_lock lk{gate_mutex};
     // deadline: one period after the target (a frame that never comes to the presenter)
-    const auto deadline = std::chrono::steady_clock::time_point(
-        std::chrono::nanoseconds(std::max(target, start) + std::max<s64>(period, 1'000'000)));
+    gate_ring[gate_next] = {.id = id,
+                            .flip = flip,
+                            .tick = draw_tick,
+                            .deadline = target + std::max<s64>(period, 1'000'000)};
+    gate_next = (gate_next + 1) % gate_ring.size();
+    gate_noted_a.store(flip, std::memory_order_release);
+}
+
+/// The newest noted frame a submission signalling `tick` must follow whose post work is not
+/// submitted yet (gate_mutex held); null: none.
+const GateEntry* GateFor(u64 tick) {
+    const GateEntry* found = nullptr;
+    for (const GateEntry& e : gate_ring) {
+        if (e.flip > gate_posted && e.tick < tick && (!found || e.flip > found->flip)) {
+            found = &e;
+        }
+    }
+    return found;
+}
+
+bool GateNeeded(u64 tick) {
+    if (gate_noted_a.load(std::memory_order_acquire) <= gate_posted_a.load(std::memory_order_acquire)) {
+        return false;
+    }
+    std::scoped_lock lk{gate_mutex};
+    return GateFor(tick) != nullptr;
+}
+
+void GateBeforeSubmit(u64 tick, bool recorder) {
+    if (gate_noted_a.load(std::memory_order_acquire) <= gate_posted_a.load(std::memory_order_acquire)) {
+        return;
+    }
     std::unique_lock lk{gate_mutex};
-    if (!gate_cv.wait_until(lk, deadline, [&] { return gate_posted >= flip; })) {
+    const GateEntry* entry = GateFor(tick);
+    if (!entry) {
+        return;
+    }
+    const GateEntry e = *entry;
+    const s64 start = Now();
+    if (recorder) {
+        g_async_gated_tick.store(tick, std::memory_order_release); // WaitAsyncSubmits passes it
+    }
+    const auto deadline =
+        std::chrono::steady_clock::time_point(std::chrono::nanoseconds(std::max(e.deadline, start)));
+    if (!gate_cv.wait_until(lk, deadline, [&] { return gate_posted >= e.flip; })) {
         gate_timeouts.fetch_add(1, std::memory_order_relaxed);
+        gate_posted = std::max(gate_posted, e.flip); // given up: the later submissions go on too
+        gate_posted_a.store(gate_posted, std::memory_order_release);
+    }
+    if (recorder) {
+        g_async_gated_tick.store(0, std::memory_order_release);
     }
     const s64 end = Now();
     gate_waits.fetch_add(1, std::memory_order_relaxed);
     gate_wait_ns.fetch_add(end - start, std::memory_order_relaxed);
+    const u64 id = e.id;
     const s64 idle_from = ready_id[id % Ring].load(std::memory_order_acquire) == id
                               ? std::max(start, ready_at[id % Ring].load(std::memory_order_relaxed))
                               : start;
@@ -479,6 +545,7 @@ void GatePost(s64 flip) {
     {
         std::scoped_lock lk{gate_mutex};
         gate_posted = std::max(gate_posted, flip);
+        gate_posted_a.store(gate_posted, std::memory_order_release);
     }
     gate_cv.notify_all();
 }
@@ -979,12 +1046,23 @@ void PresentReadyAndWait(s64 flip_arg) {
     }
 }
 
-void GateAfterFlip(s64 flip_arg) {
+void GateAfterFlip(s64 flip_arg, u64 draw_tick) {
     if (flip_arg >= 0) {
         Pace::gpu_flip_arg.store(flip_arg, std::memory_order_relaxed);
     }
     if (Pace::even && flip_arg >= 0) {
-        Pace::GateWait(static_cast<u64>(flip_arg) + 1, Libraries::VideoOut::FrameCapPeriodNs());
+        Pace::GateNote(static_cast<u64>(flip_arg) + 1, Libraries::VideoOut::FrameCapPeriodNs(),
+                       draw_tick);
+    }
+}
+
+bool GateNeeded(u64 tick) {
+    return Pace::even && Pace::GateNeeded(tick);
+}
+
+void GateBeforeSubmit(u64 tick, bool recorder) {
+    if (Pace::even) {
+        Pace::GateBeforeSubmit(tick, recorder);
     }
 }
 

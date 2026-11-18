@@ -28,6 +28,7 @@
 #include "core/libraries/videoout/game_frame.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "bbport_threads.h"
@@ -866,6 +867,9 @@ void Scheduler::SubmitOnRecorder(u64 signal_value) {
         std::scoped_lock lk{g_recent_mutex};
         g_recent[g_recent_count++ % g_recent.size()] = {this, timeline, signal_value, 0, {}, {}};
     }
+    // bbport even presents: a flush of the next game frame waits here (on this thread, not the GPU
+    // thread) until the flipped frame's present work is submitted, so it keeps its place before it.
+    LowLatency::GateBeforeSubmit(signal_value, true);
     vk::Result submit_result;
     // bbport diagnosis (BB_STALL_MS): a submit call slower than 4 ms prints how long, how far the
     // GPU was behind when it started and how long ago VMA last allocated device memory.
@@ -917,7 +921,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         return env ? std::atof(env) : 0.0;
     }();
     const auto lock_start = std::chrono::steady_clock::now();
-    std::scoped_lock lk{submit_mutex};
+    std::unique_lock lk{submit_mutex};
     if (slow_lock_ms > 0) {
         const double waited =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lock_start).count();
@@ -1016,6 +1020,13 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         PopPendingOperations();
         return;
     }
+    if (on_submit && LowLatency::GateNeeded(signal_value)) {
+        // bbport even presents: the gate (LowLatency::GateBeforeSubmit) without the submit lock,
+        // which the presenter takes for the submission this one must follow.
+        lk.unlock();
+        LowLatency::GateBeforeSubmit(signal_value, false);
+        lk.lock();
+    }
     SyncRecording();
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
@@ -1066,7 +1077,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         }
     }
     ImGui::Core::TextureManager::Submit();
-    WaitAsyncSubmits();
+    WaitAsyncSubmits(info.async_up_to);
     vk::Result submit_result;
     {
         std::scoped_lock queue_lk{g_graphics_queue_mutex};
