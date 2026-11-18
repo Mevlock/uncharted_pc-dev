@@ -233,9 +233,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     // bbport even presents: paced frames held to their targets on the release queue
     // (vk_present_release.h; the swapchain presents there). Without it (BB_EVEN_RELEASE=0, A/B
     // only, or a device without such a queue) the presenter thread holds them, as before.
-    if (swapchain.UsesReleaseQueue()) {
+    if (swapchain.UsesReleaseQueue() ||
+        (PresentRelease::Mode() >= 1 && PresentRelease::Supported(instance))) {
         release = std::make_unique<PresentRelease>(instance);
-        LowLatency::SetGpuRelease(release->Ready());
+        LowLatency::SetGpuHolds(release->Ready() ? (swapchain.UsesReleaseQueue() ? 2 : 1) : 0);
     }
 }
 
@@ -1383,9 +1384,17 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     }
     // bbport even presents: this image's present waits for a hold to its time on the release
     // queue (vk_present_release.h), after its blit here; nothing here waits for it.
-    // With the release queue every present goes there; a paced one after its hold.
-    const bool via_release = release && release->Ready();
-    const bool held = via_release && hold_until != 0;
+    // With the release queue every present goes there, a paced one after its hold there; else a
+    // paced frame's blit is held on this queue (the hold first, the next frame's work after it).
+    const bool gpu_holds = release && release->Ready();
+    const bool via_release = gpu_holds && swapchain.UsesReleaseQueue();
+    const bool held = gpu_holds && hold_until != 0;
+    if (held && !via_release) {
+        const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
+        const s64 period = std::max<s64>(Libraries::VideoOut::FrameCapPeriodNs(), 1'000'000);
+        release->RecordHold(cmdbuf, hold_flip, hold_until,
+                            std::clamp<s64>(hold_until - now + period, 0, 100'000'000));
+    }
 
     {
         const vk::Extent2D extent = swapchain.GetExtent();
@@ -1497,7 +1506,10 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     }
     // The frame's ready time for the hold's offset: when this blit is done, on this queue (the
     // release queue runs its holds in order, so its own start follows the last hold).
-    const s32 hold_slot = held ? release->RecordReady(cmdbuf) : -1;
+    const s32 hold_slot = held && via_release ? release->RecordReady(cmdbuf) : -1;
+    if (held && !via_release) {
+        PresentRelease::RecordFence(cmdbuf); // the next frame's GPU work waits for this blit
+    }
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
     }
@@ -1517,7 +1529,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
         LowLatency::GatePostSubmitted(even_flip); // the gate opens: this frame's post work is queued
     }
     bool released = false;
-    if (held) {
+    if (held && via_release) {
         // The hold on the release queue (it ends by itself at the latest one cap period after its
         // time); the present waits for it.
         const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();

@@ -248,6 +248,15 @@ std::atomic<s64> held_ns{0}, late_ns{0};
 /// the present work is queued at once, held to its target beside the game's GPU work, and the
 /// game's GPU queue never waits for a hold.
 std::atomic<bool> gpu_release{false};
+/// The holds are on the release queue (else on the game's queue: they delay its next frame's GPU
+/// work, so the gate keeps that work behind the present work, and no slack is possible there).
+std::atomic<bool> release_queue{false};
+/// On the game's queue: an extra margin over the frames' own time (BB_EVEN_MARGIN_MS, default 0;
+/// the game needs its GPU frame three back done when it starts a frame).
+const s64 margin_ns = [] {
+    const char* env = std::getenv("BB_EVEN_MARGIN_MS");
+    return env && env[0] ? s64(std::atof(env) * 1e6) : s64{0};
+}();
 /// With them, the offset carries a fixed slack over the frames' usual time (the 95th percentile of
 /// GPU done - slot): a frame up to that much later than usual is still shown on its target, so the
 /// game's own spikes (an area change on the U3 ride at 120: the game's submit 14.6 ms after its
@@ -259,7 +268,8 @@ const s64 slack_ns = [] {
 }();
 
 void UpdateOffset(s64 period, u64 id) {
-    const bool slack = gpu_release.load(std::memory_order_relaxed);
+    const bool slack = release_queue.load(std::memory_order_relaxed);
+    const s64 extra = slack ? slack_ns : gpu_release.load(std::memory_order_relaxed) ? margin_ns : 0;
     if ((id & 15) == 0) {
         const u64 count = lag_count.load(std::memory_order_acquire);
         const u32 n = static_cast<u32>(std::min<u64>(count - lag_base, Samples - 32));
@@ -273,7 +283,6 @@ void UpdateOffset(s64 period, u64 id) {
             const u32 k = slack ? n * 95 / 100 : n - 1 - std::min<u32>(n / 200, 2);
             std::nth_element(copy.begin(), copy.begin() + k, copy.begin() + n);
             constexpr s64 margin = 500'000;
-            const s64 extra = slack ? slack_ns : 0;
             offset_goal = std::clamp<s64>(copy[k] + margin + extra, 0, 2 * period + extra);
         }
     }
@@ -281,7 +290,7 @@ void UpdateOffset(s64 period, u64 id) {
         // the first: nothing shown at a target yet. With the slack, from the frames' own time,
         // the slack added at the rate below (a jump to the full depth at once left U3's pipeline
         // deep: its submit waits for its GPU frame two back, s3)
-        offset = slack ? std::max<s64>(offset_goal - slack_ns, 1) : offset_goal;
+        offset = extra ? std::max<s64>(offset_goal - extra, 1) : offset_goal;
     } else if (offset_goal > offset) {
         offset += std::min<s64>(offset_goal - offset, 100'000);
     } else if (offset_goal + 1'000'000 < offset) {
@@ -407,7 +416,7 @@ void GateWait(u64 id, s64 period) {
     flip_id[id % Ring].store(id, std::memory_order_release);
     const s64 target = Target(id);
     if (!gate || !target || timed.load(std::memory_order_relaxed) ||
-        gpu_release.load(std::memory_order_relaxed)) {
+        release_queue.load(std::memory_order_relaxed)) {
         return; // with the release queue nothing on the GPU queue waits for a hold
     }
     const s64 flip = s64(id) - 1;
@@ -904,8 +913,11 @@ void MarkOutOfBandPresentQueue(vk::Queue queue) {
     }
 }
 
-void SetGpuRelease(bool on) {
-    Pace::gpu_release.store(on, std::memory_order_relaxed);
+void SetGpuHolds(int mode) {
+    Pace::gpu_release.store(mode >= 1, std::memory_order_relaxed);
+    Pace::release_queue.store(mode == 2, std::memory_order_relaxed);
+    std::printf("Even presents: paced frames held %s\n",
+                mode == 2 ? "on the release queue" : mode == 1 ? "on the GPU in the game's queue" : "on the presenter thread");
 }
 
 bool GpuRelease() {

@@ -85,8 +85,9 @@ void SetTimedPresents(bool on);
 void GateAfterFlip(s64 flip_arg);
 /// Even presents are on (the frame start paces and BB_EVEN_PRESENT is not 0).
 bool EvenPresents();
-/// The presenter holds paced frames on the GPU (vk_present_release.h) instead of on its thread.
-void SetGpuRelease(bool on);
+/// How the presenter holds paced frames (vk_present_release.h): 0 on its thread, 1 on the GPU in the
+/// game's queue, 2 on the release queue.
+void SetGpuHolds(int mode);
 /// Reflex: the release queue presents beside the game's queue (out of band, not its frames' work).
 void MarkOutOfBandPresentQueue(vk::Queue queue);
 bool GpuRelease();

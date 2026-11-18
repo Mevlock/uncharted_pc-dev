@@ -128,6 +128,7 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
         }
     }
 #endif
+    if (Wanted(instance)) {
     auto [pool_cmd_result, pool_cmd] = device.createCommandPoolUnique({
         .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer,
         .queueFamilyIndex = instance.GetReleaseQueueFamilyIndex(),
@@ -155,6 +156,7 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
     }
     LowLatency::MarkOutOfBandPresentQueue(instance.GetReleasePresentQueue() ? instance.GetReleasePresentQueue()
                                                                              : instance.GetReleaseQueue());
+    }
     Calibrate();
     made = cal_ticks != 0;
     std::printf("Even presents: the GPU holds each paced frame's present work to its target "
@@ -162,14 +164,24 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
                 tick_ns, static_cast<long long>(steady_minus_qpc), made ? "" : "; calibration FAILED");
 }
 
+int PresentRelease::Mode() {
+    static const int mode = [] {
+        const char* env = std::getenv("BB_EVEN_RELEASE");
+        return env && env[0] >= '0' && env[0] <= '2' ? env[0] - '0' : 1;
+    }();
+    return LowLatency::EvenPresents() ? mode : 0;
+}
+
+bool PresentRelease::Supported(const Instance& instance) {
+    return instance.IsPresentReleaseSupported();
+}
+
 bool PresentRelease::Wanted(const Instance& instance) {
-    const char* env = std::getenv("BB_EVEN_RELEASE");
-    return LowLatency::EvenPresents() && !(env && env[0] == '0') && instance.GetReleaseQueue() &&
-           instance.IsPresentReleaseSupported();
+    return Mode() == 2 && instance.GetReleaseQueue() && Supported(instance);
 }
 
 PresentRelease::~PresentRelease() {
-    if (instance.GetReleaseQueue()) {
+    if (instance.GetReleaseQueue() && command_pool) {
         std::scoped_lock lk{g_release_queue_mutex};
         (void)instance.GetReleaseQueue().waitIdle();
     }
@@ -207,7 +219,7 @@ u64 PresentRelease::NsToTicks(s64 ns) const {
     return cal_ticks + u64(std::llround(double(ns - cal_ns) / tick_ns));
 }
 
-s32 PresentRelease::RecordReady(vk::CommandBuffer cmdbuf) {
+u32 PresentRelease::TakeSlot() {
     Slot& slot = slots[next];
     if (slot.pending) {
         // Never polled (no present for a while): its times are dropped.
@@ -217,29 +229,18 @@ s32 PresentRelease::RecordReady(vk::CommandBuffer cmdbuf) {
     const u32 index = next;
     next = (next + 1) % Slots;
     // Its last run (Slots holds ago) is long done; a bounded wait all the same.
-    if (instance.GetDevice().waitForFences(*fences[index], VK_TRUE, 1'000'000'000) != vk::Result::eSuccess) {
+    if (fences[index] &&
+        instance.GetDevice().waitForFences(*fences[index], VK_TRUE, 1'000'000'000) != vk::Result::eSuccess) {
         std::printf("Even presents: a hold's command buffer was still in use after 1 s\n");
     }
-    cmdbuf.resetQueryPool(*pool, index * 3, 3);
-    cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, index * 3);
     stamps[index] = 0;
     slot = {.pending = false, .flip_arg = -1, .until_ns = 0};
-    return s32(index);
+    return index;
 }
 
-bool PresentRelease::Submit(s32 slot_index, vk::Semaphore blit_done, vk::Semaphore released, s64 flip_arg,
-                            s64 until_ns, s64 limit_ns) {
-    if (slot_index < 0 || slot_index >= s32(Slots)) {
-        return false;
-    }
-    Calibrate();
-    const u32 index = u32(slot_index);
-    Slot& slot = slots[index];
-    const vk::Device device = instance.GetDevice();
-    (void)device.resetFences(*fences[index]);
-    const vk::CommandBuffer cmdbuf = *cmdbufs[index];
-    (void)cmdbuf.reset();
-    (void)cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+/// The hold itself: one invocation keeps its queue until the device clock reaches the target (or
+/// its limit from its start); timestamps before (index * 3 + 1) and after (+ 2) it.
+void PresentRelease::Spin(vk::CommandBuffer cmdbuf, u32 index, s64 until_ns, s64 limit_ns) {
     // Until the device clock is known against the timestamps (200 ms of holds), the holds only
     // take their times.
     u64 until_clock = 0, limit_clock = 0;
@@ -264,9 +265,53 @@ bool PresentRelease::Submit(s32 slot_index, vk::Semaphore blit_done, vk::Semapho
         .dstAccessMask = vk::AccessFlagBits::eHostRead,
     };
     cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-                           vk::PipelineStageFlagBits::eBottomOfPipe | vk::PipelineStageFlagBits::eHost,
+                           vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost,
                            {}, after, {}, {});
     cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, index * 3 + 2);
+}
+
+void PresentRelease::RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns, s64 limit_ns) {
+    Calibrate();
+    const u32 index = TakeSlot();
+    cmdbuf.resetQueryPool(*pool, index * 3, 3);
+    // everything before it on the queue done (the frame), then its ready time
+    const vk::MemoryBarrier before{
+        .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
+        .dstAccessMask = vk::AccessFlagBits::eShaderWrite,
+    };
+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands,
+                           {}, before, {}, {});
+    cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, index * 3);
+    Spin(cmdbuf, index, until_ns, limit_ns);
+    slots[index] = {.pending = true, .flip_arg = flip_arg, .until_ns = until_ns};
+}
+
+void PresentRelease::RecordFence(vk::CommandBuffer cmdbuf) {
+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                           vk::PipelineStageFlagBits::eAllCommands, {}, {}, {}, {});
+}
+
+s32 PresentRelease::RecordReady(vk::CommandBuffer cmdbuf) {
+    const u32 index = TakeSlot();
+    cmdbuf.resetQueryPool(*pool, index * 3, 3);
+    cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, index * 3);
+    return s32(index);
+}
+
+bool PresentRelease::Submit(s32 slot_index, vk::Semaphore blit_done, vk::Semaphore released, s64 flip_arg,
+                            s64 until_ns, s64 limit_ns) {
+    if (slot_index < 0 || slot_index >= s32(Slots)) {
+        return false;
+    }
+    Calibrate();
+    const u32 index = u32(slot_index);
+    Slot& slot = slots[index];
+    const vk::Device device = instance.GetDevice();
+    (void)device.resetFences(*fences[index]);
+    const vk::CommandBuffer cmdbuf = *cmdbufs[index];
+    (void)cmdbuf.reset();
+    (void)cmdbuf.begin({.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit});
+    Spin(cmdbuf, index, until_ns, limit_ns);
     (void)cmdbuf.end();
     slot = {.pending = true, .flip_arg = flip_arg, .until_ns = until_ns};
     // The hold starts once the frame's blit is done on the graphics queue (GPU to GPU), and its

@@ -367,7 +367,7 @@ void Swapchain::SetSurfaceProperties() {
     // up to about three frames at 144) while the next frames are drawn.
     image_count = capabilities.minImageCount +
                   (BbSettings::Get().frame_gen != BbSettings::FrameGenOff ? 2 : 1) +
-                  (use_release ? 5 : 0); // capped by maxImageCount (8 on NVIDIA)
+                  (use_release ? 5 : LowLatency::EvenPresents() ? 1 : 0); // capped by maxImageCount
     if (capabilities.maxImageCount > 0) {
         image_count = std::min(image_count, capabilities.maxImageCount);
     }
