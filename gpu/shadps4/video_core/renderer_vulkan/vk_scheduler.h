@@ -76,6 +76,9 @@ struct SubmitInfo {
     vk::Fence fence;
     u32 num_wait_semas;
     u32 num_signal_semas;
+    /// bbport even presents: the recording thread's draw flushes this submission must follow, up
+    /// to this draw scheduler value (the presenter: its frame's work; WaitAsyncSubmits).
+    u64 async_up_to = ~u64{0};
 
     void AddWait(vk::Semaphore semaphore, u64 tick = 1) {
         wait_semas[num_wait_semas] = semaphore;

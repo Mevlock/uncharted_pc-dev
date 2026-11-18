@@ -1389,11 +1389,19 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     const bool gpu_holds = release && release->Ready();
     const bool via_release = gpu_holds && swapchain.UsesReleaseQueue();
     const bool held = gpu_holds && hold_until != 0;
+    // A paced frame whose target has passed by now is not held (its hold would end at once): no
+    // hold commands and nothing after it waits for its blit; only its ready time is taken.
+    bool hold_recorded = false;
     if (held && !via_release) {
         const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
-        const s64 period = std::max<s64>(Libraries::VideoOut::FrameCapPeriodNs(), 1'000'000);
-        release->RecordHold(cmdbuf, hold_flip, hold_until,
-                            std::clamp<s64>(hold_until - now + period, 0, 100'000'000));
+        if (hold_until > now) {
+            const s64 period = std::max<s64>(Libraries::VideoOut::FrameCapPeriodNs(), 1'000'000);
+            release->RecordHold(cmdbuf, hold_flip, hold_until,
+                                std::clamp<s64>(hold_until - now + period, 0, 100'000'000));
+            hold_recorded = true;
+        } else {
+            release->RecordLate(cmdbuf, hold_flip);
+        }
     }
 
     {
@@ -1507,7 +1515,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     // The frame's ready time for the hold's offset: when this blit is done, on this queue (the
     // release queue runs its holds in order, so its own start follows the last hold).
     const s32 hold_slot = held && via_release ? release->RecordReady(cmdbuf) : -1;
-    if (held && !via_release) {
+    if (hold_recorded) {
         PresentRelease::RecordFence(cmdbuf); // the next frame's GPU work waits for this blit
     }
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
@@ -1524,6 +1532,12 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
         // Also covers the generated frames' submissions before it on this queue.
         info.AddSignal(frame->present_done);
     }
+    // bbport even presents: this submission needs only the frame's own draw work submitted; the
+    // next frame's first draw flush waits for it at the gate (LowLatency::GateBeforeSubmit).
+    const u64 async_up_to = frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()
+                                ? frame->ready_tick
+                                : ~u64{0};
+    info.async_up_to = async_up_to;
     scheduler.Flush(info);
     if (release && PresentRelease::Probing()) {
         // BB_HOLD_PROBE: when this submission (a held one: its hold and blit) really ends
@@ -1571,7 +1585,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
         const auto t2 = Clock::now();
-        presented = swapchain.Present(latency_id, released);
+        presented = swapchain.Present(latency_id, released, async_up_to);
         const auto t3 = Clock::now();
         if (slow_ms > 0 && ms(t0, t3) > slow_ms) {
             char gpu_done[32] = "(not waited)";

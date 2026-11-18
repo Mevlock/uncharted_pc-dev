@@ -35,7 +35,8 @@ public:
     /// latency_id: the game frame's id in low latency mode (0: a generated or repeated frame).
     /// bbport even presents: with the release queue (UsesReleaseQueue) every present goes there;
     /// `released`: it waits for its hold (GetPresentReleaseSemaphore) instead of the blit.
-    bool Present(u64 latency_id = 0, bool released = false);
+    /// `async_up_to`: the draw work it must follow (WaitAsyncSubmits; the presenter: its frame's).
+    bool Present(u64 latency_id = 0, bool released = false, u64 async_up_to = ~u64{0});
 
     /// bbport even presents (vk_present_release.h): presents go to the release queue (a compute
     /// queue that can present), each paced one after its GPU hold.

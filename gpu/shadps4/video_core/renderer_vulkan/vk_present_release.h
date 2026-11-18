@@ -59,7 +59,11 @@ public:
     /// (steady clock) but `limit_ns` at most, notes the time again (its release). Later work waits
     /// for the hold too (RecordFence after the blit): the blit runs on an idle GPU at the target.
     void RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns, s64 limit_ns);
-    /// At the end of that command buffer: all later work on the queue waits for it.
+    /// Instead of RecordHold for a paced frame whose target has passed when its present work is
+    /// recorded (a hold would end at once): only its ready time, no barrier, dispatch or fence, so
+    /// a frame that is not early costs nothing.
+    void RecordLate(vk::CommandBuffer cmdbuf, s64 flip_arg);
+    /// At the end of a RecordHold command buffer: all later work on the queue waits for it.
     static void RecordFence(vk::CommandBuffer cmdbuf);
 
     /// At the end of a held frame's present command buffer on the graphics queue: notes when its

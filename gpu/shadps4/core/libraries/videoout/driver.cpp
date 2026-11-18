@@ -949,7 +949,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
     request_cv.notify_one();
     if (index != -1) {
         // bbport even presents: the next frame's GPU work waits for this one's post work
-        Vulkan::LowLatency::GateAfterFlip(flip_arg);
+        Vulkan::LowLatency::GateAfterFlip(flip_arg, frame->ready_tick);
     }
 }
 
