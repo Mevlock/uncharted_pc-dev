@@ -79,14 +79,18 @@ public:
     /// Records the motion vector pass from the velocity pass's camera into `motion_view`
     /// (RG16F storage, General), pixels, previous minus current; zero without that camera.
     /// `jitter_scale`: pixels written per render pixel (motion written below the render size).
+    /// `stencil_view`: the stencil aspect of the scene depth (an R8 uint view, General), read at
+    /// pixel / jitter_scale for the velocity pass's platform offset (stencil bits 0xc0); null
+    /// without one (every pixel taken as unmarked).
     void RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
                         vk::ImageView motion_view, u32 width, u32 height,
-                        float jitter_scale = 1.0f);
+                        float jitter_scale = 1.0f, vk::ImageView stencil_view = {});
     /// perf11: the same pass with its constants taken now, recorded in order by the Vulkan
     /// recording thread (Scheduler::Record) between barriers that take `motion_image` from
     /// undefined to General for the pass and make its writes visible to all later commands.
     void RecordVelocityDeferred(vk::Image motion_image, vk::ImageView depth_view,
-                                vk::ImageView motion_view, u32 width, u32 height);
+                                vk::ImageView motion_view, u32 width, u32 height,
+                                vk::ImageView stencil_view = {});
     [[nodiscard]] VideoCore::ImageId Depth() const noexcept {
         return depth_id;
     }
@@ -156,7 +160,16 @@ private:
         bool valid = false;
         bool cut = false; ///< a camera cut this frame: no motion, history reset
         bool still = false; ///< the camera is where it was last frame (to rounding): zero motion
+        /// The velocity pass's stencil term (pixels with or without stencil bits 0xc0 add a world
+        /// offset): its previous clip x, y, w offset and the camera_motion.comp mode bits (8:
+        /// marked pixels, 9: unmarked ones; 0: none).
+        std::array<float, 3> stencil_clip_offset{};
+        u32 stencil_select = 0;
     } velocity_camera;
+    /// A 1x1 R8 uint zero image (General) for the stencil binding without a scene stencil.
+    vk::ImageView ZeroStencil(vk::CommandBuffer cmdbuf);
+    VideoCore::UniqueImage zero_stencil;
+    vk::UniqueImageView zero_stencil_view;
     /// The last frame's camera (world forward and position), for detecting cuts.
     std::array<float, 3> last_forward{}, last_position{};
     bool has_last_camera = false;
