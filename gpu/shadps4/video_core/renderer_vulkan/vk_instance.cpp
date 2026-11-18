@@ -445,6 +445,7 @@ bool Instance::CreateDevice() {
         const u32 index = static_cast<u32>(i);
         if (family_properties[i].queueFlags & vk::QueueFlagBits::eGraphics) {
             queue_family_index = index;
+            graphics_timestamp_bits = family_properties[i].timestampValidBits;
             graphics_queue_found = true;
         }
     }
@@ -502,7 +503,7 @@ bool Instance::CreateDevice() {
         for (u32 i = 0; present_support && i < family_properties.size(); ++i) {
             const auto flags = family_properties[i].queueFlags;
             if ((flags & vk::QueueFlagBits::eCompute) && !(flags & vk::QueueFlagBits::eGraphics) &&
-                family_properties[i].queueCount > 0 && family_properties[i].timestampValidBits >= 48 &&
+                family_properties[i].queueCount > 0 && family_properties[i].timestampValidBits >= 64 &&
                 i != side_queue_family_index && i != sparse_queue_family_index &&
                 present_support(physical_device, i)) {
                 release_queue_family_index = i;

@@ -390,7 +390,9 @@ public:
     bool IsPresentReleaseSupported() const {
         return shader_clock && shader_clock_features.shaderDeviceClock &&
                (calibrated_khr || calibrated_ext) && properties.limits.timestampPeriod > 0.0f &&
-               properties.limits.timestampComputeAndGraphics;
+               properties.limits.timestampComputeAndGraphics &&
+               // the hold's times are 64-bit differences: a narrower counter wraps between them
+               graphics_timestamp_bits >= 64;
     }
     /// VK_KHR_calibrated_timestamps (else the EXT form) is on.
     bool IsCalibratedTimestampsKhr() const {
@@ -683,6 +685,7 @@ private:
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;
     TracyVkCtx profiler_context{};
     u32 queue_family_index{0};
+    u32 graphics_timestamp_bits{0}; ///< the graphics family's timestampValidBits
     bool custom_border_color{};
     bool fragment_shader_barycentric{};
     bool hdr_metadata{};
