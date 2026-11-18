@@ -969,6 +969,8 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         lk.unlock();
         LowLatency::GateBeforeSubmit(signal_value, false);
         lk.lock();
+    } else if (on_submit) {
+        LowLatency::GateBeforeSubmit(signal_value, false); // no wait: notes a frame's first submission
     }
     SyncRecording();
     // Guest memory copies into staging read by this submission (copy threads).
