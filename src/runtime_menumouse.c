@@ -947,6 +947,7 @@ static volatile int gallery_stick_dir;
 int runtime_menumouse_stick_x(void) { return now_us()<gallery_stick_until ? gallery_stick_dir : 0; }
 static pthread_mutex_t u3_lock=PTHREAD_MUTEX_INITIALIZER;
 static volatile uint64_t u3_page_us;     /* the last update of a focused menu page */
+static volatile uint64_t u3_page_self;   /* that page */
 static volatile uint64_t u3_info_us;     /* an information box (a locked reward) is over the menu */
 /* U2: the big pictures of a page (Chapter select's picture: 520 x 205 at 380, 210): their big < > are drawn just outside them, not as
  * texts (u3_lock) */
@@ -1234,7 +1235,7 @@ static void u3_text(const uint64_t *regs) {
  * its focus there when asked (our port of 2026-10-28, play-tested on US 1.02). */
 static void u3_page(uint64_t self, uint64_t image) {
     uint8_t focused=0;
-    if (self>0x10000 && safe_read(&focused,self+8,1) && focused) u3_page_us=now_us();
+    if (self>0x10000 && safe_read(&focused,self+8,1) && focused) { u3_page_self=self; u3_page_us=now_us(); }
     if (!u3_jump_req) return;
     /* BB_MOUSE_DEBUG=1: why a page did not take the jump (each page and reason once a second) */
 #define U3_PAGE_WHY(why) do { if (mouse_debug()) { static uint64_t shown_self[16], shown_us[16]; static int k; int f=-1; const uint64_t t=now_us();         for (int z=0;z<16;++z) if (shown_self[z]==self) f=z; if (f<0) { f=k; k=(k+1)%16; shown_self[f]=self; shown_us[f]=0; }         if (t-shown_us[f]>1000000) { shown_us[f]=t; printf("Menu mouse: U3 page %#llx: no jump to y %.0f: %s\n",(unsigned long long)self,u3_jump_cy,why); } } } while (0)
@@ -1386,19 +1387,38 @@ static void u2_jump(uint64_t image) {
     }
     u3_jump_done=1;
 }
+/* what turned the menu mode on last (printed with "menu on screen") */
+static char menu_why[192];
 static int u3_menu_open(uint64_t now) {
     static uint64_t seen;   /* (the highlight fades from row to row: the menu stays on for a moment without a lit row) */
+    char why[192]="";
     int lit=u3_page_us && now-u3_page_us<150000 && u3_page_us<=now+1000000;
-    if (u2_popup_us && now-u2_popup_us<300000 && u2_popup_us<=now+1000000) lit=1;   /* (U2's chapter carousel has no lit row) */
-    if (u2_layout_us && now-u2_layout_us<300000 && u2_layout_us<=now+1000000) lit=1;   /* (U2's controller picture: no rows) */
-    if (u3_gallery_us && now-u3_gallery_us<300000 && u3_gallery_us<=now+1000000) lit=1;   /* (U3's art gallery viewer: no lit row) */
-    if (menu_credits_us && now-menu_credits_us<300000 && menu_credits_us<=now+1000000) lit=1;   /* (the credits: no lit row either) */
+    if (lit) {
+        const uint64_t self=u3_page_self; uint64_t vt=0; int32_t cnt=0;
+        safe_read(&vt,self,8); safe_read(&cnt,self+0xac,4);
+        snprintf(why,sizeof(why),"focused page %#llx (vtable %#llx, %d children)",(unsigned long long)self,(unsigned long long)vt,cnt);
+    }
+    if (!lit && u2_popup_us && now-u2_popup_us<300000 && u2_popup_us<=now+1000000) { lit=1; snprintf(why,sizeof(why),"U2 chapter carousel"); }   /* (U2's chapter carousel has no lit row) */
+    /* U2's controller picture and U3's art gallery viewer have no lit row: they keep a menu on, they cannot open one. Both are only
+     * reached from a menu (Options, Rewards), so the menu mode is on when they show; their signs are a text lookup and a text box of
+     * a size (1080 x 60 at 100, 600) that play also has (a hint while a vehicle or horse camera runs: no follow camera to tell play
+     * from the menus), which freed the cursor in play and made the button icons be uploaded again (U3 horse chase, 2026-11-18). */
+    const int was_open=seen && now-seen<800000;
+    const int layout=u2_layout_us && now-u2_layout_us<300000 && u2_layout_us<=now+1000000;
+    const int gallery=u3_gallery_us && now-u3_gallery_us<300000 && u3_gallery_us<=now+1000000;
+    if (!lit && was_open && layout) { lit=1; snprintf(why,sizeof(why),"U2 controller picture"); }
+    if (!lit && was_open && gallery) { lit=1; snprintf(why,sizeof(why),"U3 art gallery"); }
+    if (!lit && !was_open && (layout || gallery)) {
+        static uint64_t told;
+        if (now-told>5000000) { told=now; printf("Menu mouse: %s seen with no menu open: play, not a menu\n",gallery ? "U3 art gallery box" : "U2 controller picture text"); }
+    }
+    if (!lit && menu_credits_us && now-menu_credits_us<300000 && menu_credits_us<=now+1000000) { lit=1; snprintf(why,sizeof(why),"credits text"); }   /* (the credits: no lit row either) */
     /* (a list on screen is a menu: dragging its scroll bar can take every lit row out of view, US 1.02's Skins) */
-    for (int i=0;i<16 && !lit && (u2m || u3m);++i) { const U2List *l=&u2_lists[i]; if (l->us && now-l->us<300000 && l->vis>=3 && l->rh>=70.0f && l->focused) lit=1; }
+    for (int i=0;i<16 && !lit && (u2m || u3m);++i) { const U2List *l=&u2_lists[i]; if (l->us && now-l->us<300000 && l->vis>=3 && l->rh>=70.0f && l->focused) { lit=1; snprintf(why,sizeof(why),"focused list %#llx (%d shown, rect %.0f %.0f %.0fx%.0f)",(unsigned long long)l->w,l->vis,l->rx,l->ry,l->rw,l->rh); } }
     pthread_mutex_lock(&u3_lock);
-    for (int i=0;i<U3_ROWS && !lit;++i) if (u3_rows[i].us && now-u3_rows[i].us<300000 && u3_rows[i].sel>=0.5f) lit=1;
+    for (int i=0;i<U3_ROWS && !lit;++i) if (u3_rows[i].us && now-u3_rows[i].us<300000 && u3_rows[i].sel>=0.5f) { lit=1; snprintf(why,sizeof(why),"lit row %.1f %.1f %.1fx%.1f (mark %.2f)",u3_rows[i].x,u3_rows[i].y,u3_rows[i].w,u3_rows[i].h,u3_rows[i].sel); }
     pthread_mutex_unlock(&u3_lock);
-    if (lit) seen=now;
+    if (lit) { seen=now; memcpy(menu_why,why,sizeof(why)); }
     return seen && now-seen<800000;
 }
 static uint32_t u3_menu_buttons(uint32_t mouse, uint64_t now) {
@@ -2708,7 +2728,8 @@ int runtime_menumouse_active(void) {
     if (open!=menu_mode) {
         menu_mode=open;
         if (open) runtime_title_shown=1;   /* the fast boot's vblank boost ends (videoout driver.cpp) */
-        printf("Menu mouse: %s\n",open ? "menu on screen: the cursor is free" : "menu gone");
+        if (open) printf("Menu mouse: menu on screen: the cursor is free (%s)\n",u1m ? (camera_stopped() ? "paused" : "menu rows or credits") : menu_why);
+        else printf("Menu mouse: menu gone\n");
     }
     return open;
 }
