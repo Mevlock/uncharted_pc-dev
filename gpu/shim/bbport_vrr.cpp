@@ -523,13 +523,29 @@ struct AmdSource {
     bool range_known = false;
     double range_min = 0, range_max = 0; ///< Hz (ADL)
     std::string logged;                  ///< the last display line logged
+    Clock::time_point refreshed{};       ///< the current mode's refresh rate last read
+    bool in_range = false;               ///< the frames inside the range (with the margins below)
+    bool faster_logged = false;
 
-    Raw Sample(HWND hwnd, bool front, double fps) {
+    /// `fifo`: the swapchain presents with FIFO or FIFO Relaxed (never faster than the display).
+    Raw Sample(HWND hwnd, bool front, double fps, bool fifo) {
         const auto now = Clock::now();
         const HMONITOR current = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         if (current != monitor || !freesync || now - checked > std::chrono::seconds(10)) {
             Resolve(hwnd);
-            checked = now;
+            checked = refreshed = now;
+        } else if (now - refreshed >= std::chrono::seconds(2)) {
+            // The current mode's refresh rate, read again (a mode change in play; the rate at the
+            // start need not be the one the game runs at).
+            refreshed = now;
+            const Monitor again = FindMonitor(hwnd);
+            if (!again.valid || again.source != mon.source || again.position.x != mon.position.x ||
+                again.position.y != mon.position.y || again.width != mon.width || again.height != mon.height) {
+                checked = {}; // the layout changed: the display is found again next time
+            } else if (std::fabs(again.refresh - mon.refresh) > 0.5) {
+                Log("VRR: ADLX %s: refresh rate %.2f -> %.2f Hz\n", mon.name.c_str(), mon.refresh, again.refresh);
+                mon.refresh = again.refresh;
+            }
         }
         if (!freesync) {
             return {-2, hidden};
@@ -569,7 +585,18 @@ struct AmdSource {
         if (fps <= 0.0) {
             return {-1, why + ": no frame rate yet"};
         }
-        const double top = mon.refresh > 0 && (!range_known || mon.refresh < range_max) ? mon.refresh : range_max;
+        // The top: the current mode's refresh rate, capped by the FreeSync range's maximum. FIFO
+        // never presents faster than the display refreshes, so FIFO frames above the mode's rate
+        // show the display running faster: then the range's maximum is the top.
+        double top = mon.refresh > 0 && (!range_known || mon.refresh < range_max) ? mon.refresh : range_max;
+        if (fifo && range_known && top < range_max && fps > top * 1.015) {
+            if (!faster_logged) {
+                Log("VRR: ADLX %s: FIFO at %.1f FPS above the mode's %.2f Hz: the top is the range's %.0f Hz\n",
+                    mon.name.c_str(), fps, mon.refresh, range_max);
+                faster_logged = true;
+            }
+            top = range_max;
+        }
         char text[160];
         if (range_known) {
             std::snprintf(text, sizeof(text), ": FreeSync on, %.0f FPS, range %.0f-%.0f Hz", fps, range_min, top);
@@ -578,10 +605,16 @@ struct AmdSource {
                           top);
         }
         why += text;
-        if (top > 0 && fps > top * 1.015) {
+        // Margins at the edges: in range from inside it (1 % tolerance for the measured rate), out
+        // only beyond 3 %, so dips around an edge do not flip the indicator.
+        const double out = in_range ? 0.03 : 0.01;
+        const bool above = top > 0 && fps > top * (1.0 + out);
+        const bool below = range_known && fps < range_min * (1.0 - out);
+        in_range = !above && !below;
+        if (above) {
             return {0, why + ", above the range"};
         }
-        if (range_known && fps < range_min * 0.985) {
+        if (below) {
             return {0, why + ", below the range"};
         }
         return {1, why};
@@ -933,10 +966,13 @@ void PollThread() {
         if (use_nv) {
             raw = hwnd ? nv.Sample(static_cast<HWND>(hwnd)) : Raw{-1, "no window yet"};
         } else if (use_amd && !Timing::swapchain_on) {
-            raw = hwnd ? amd.Sample(static_cast<HWND>(hwnd), front, screen_fps.load(std::memory_order_relaxed))
+            // The swapchain's present mode as made (after any fallback of an unsupported mode).
+            const int mode = present_mode.load(std::memory_order_relaxed);
+            const bool fifo = mode == VK_PRESENT_MODE_FIFO_KHR || mode == VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+            raw = hwnd ? amd.Sample(static_cast<HWND>(hwnd), front, screen_fps.load(std::memory_order_relaxed), fifo)
                        : Raw{-1, "no window yet"};
             if (raw.state >= 0) {
-                raw.why += std::string(", ") + PresentModeName(present_mode.load(std::memory_order_relaxed));
+                raw.why += std::string(", ") + PresentModeName(mode);
             }
         } else
 #endif
@@ -979,8 +1015,10 @@ void PollThread() {
             candidate = raw.state;
             candidate_since = now;
         }
-        // Half a second steady before the indicator follows (not known: keep what is shown).
-        if (candidate != shown && candidate != -1 && now - candidate_since >= std::chrono::milliseconds(500)) {
+        // Half a second steady before the indicator follows (not known: keep what is shown); the
+        // derived AMD state a full second (frame rate dips around a range edge, loading screens).
+        const auto hold = std::chrono::milliseconds(use_amd && !Timing::swapchain_on ? 1000 : 500);
+        if (candidate != shown && candidate != -1 && now - candidate_since >= hold) {
             Log("VRR: %s -> %s (%s)\n", shown == 1 ? "active" : shown == 0 ? "off" : "hidden",
                 candidate == 1 ? "active" : "off", raw.why.c_str());
             shown = candidate;
@@ -1085,7 +1123,9 @@ vk::SwapchainCreateFlagsKHR SwapchainFlags(vk::PhysicalDevice physical, vk::Surf
 }
 
 void OnSwapchain(vk::SwapchainKHR chain, vk::PresentModeKHR mode) {
-    present_mode = int(mode);
+    if (present_mode.exchange(int(mode)) != int(mode)) {
+        Log("VRR: swapchain present mode %s\n", PresentModeName(int(mode)));
+    }
     if (!Timing::swapchain_on) {
         return;
     }
