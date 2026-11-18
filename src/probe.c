@@ -1313,6 +1313,8 @@ static void patch_eop_tick_wait(uint64_t image_size) {
 static const uint32_t *rdtsc_sites;
 static size_t rdtsc_count;
 uint64_t runtime_guest_tsc(void);
+uint64_t runtime_tsc_frequency(void);  /* runtime_kernel.c */
+double runtime_time_scale_now(void);
 int runtime_time_scaled(void);
 static int rdtsc_patched;
 static int64_t paced_clock_site=-1; /* the frame clock read (find_frame_clock): not one of the time scale ud2 sites */
@@ -1402,8 +1404,14 @@ static void __attribute__((ms_abi)) game_frame_start(uint64_t rdi, uint64_t rsi,
     /* the frame function is also entered again within a frame (it is in a table of named functions): one stamp */
     if (paced_clock && frame!=paced_clock_frame) {
         paced_clock_frame=frame;
-        /* the time scale's TSC when the game's own reads are scaled (patch_rdtsc), as theirs */
-        *paced_clock=rdtsc_patched ? runtime_guest_tsc() : __rdtsc();
+        /* the time scale's TSC when the game's own reads are scaled (patch_rdtsc), as theirs; plus the time to the
+         * frame's present target (even presents, vk_low_latency.cpp): the world steps are then the intervals
+         * between the presents' targets, the intervals the frames are shown at */
+        int64_t lead=frame_start_sleeps ? bbgpu_present_lead_ns() : 0;
+        if (lead<-50000000 || lead>100000000) lead=0;
+        double ticks=(double)lead*(double)runtime_tsc_frequency()/1e9;
+        if (rdtsc_patched) ticks*=runtime_time_scale_now();
+        *paced_clock=(rdtsc_patched ? runtime_guest_tsc() : __rdtsc())+(uint64_t)(int64_t)ticks;
     }
     if (frame_clock_log && frame!=frame_clock_logged) {
         frame_clock_logged=frame;

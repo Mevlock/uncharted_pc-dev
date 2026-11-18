@@ -489,6 +489,7 @@ void VideoOutDriver::Flip(const Request& req) {
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr,
                   flip_arg = req.index >= 0 ? req.flip_arg : s64{-1}] {
         presenter->SetHDR(hdr);
+        Vulkan::LowLatency::HoldPresent(flip_arg); // bbport: even presents (to its target)
         presenter->Present(frame, false, true, flip_arg);
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left

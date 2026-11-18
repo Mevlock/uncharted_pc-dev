@@ -70,6 +70,14 @@ void TraceFlip(FlipStage stage, s64 flip_arg);
 /// game's frame start hook the present thread's slot hold keeps the cap).
 bool StartPacingRequested();
 
+/// Even presents (vk_low_latency.cpp Pace; BB_EVEN_PRESENT=0: off): the presenter holds the game's
+/// flip with this argument until its present target (its frame start's slot + the offset), so
+/// paced frames are shown one period apart.
+void HoldPresent(s64 flip_arg);
+/// The frame thread, right after GameFrameStart: the time from now to that frame's present target
+/// (0: none), for the frame clock (the world steps = the intervals between the targets).
+s64 PresentLeadNs();
+
 /// "Reflex", "Anti-Lag 2" while active, else nullptr (FPS counter).
 const char* Name();
 
