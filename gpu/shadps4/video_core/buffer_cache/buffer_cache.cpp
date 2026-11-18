@@ -3254,10 +3254,16 @@ void BufferCache::NoteStreamed(VAddr addr, u64 size) {
     streamed.push_back({addr, size, BbStats::gpu_frames.load(std::memory_order_relaxed)});
 }
 
-void BufferCache::UploadStreamed(const std::function<bool(VAddr, u64)>& is_mapped) {
+bool BufferCache::StreamUploadRoomy() const {
     // Video memory for data that may never be drawn: not on cards or budgets under 5 GB (as the
-    // arena's and the staging pool's own rules); there the queue is dropped.
+    // arena's and the staging pool's own rules).
     static const bool roomy = instance.GetTotalMemoryBudget() >= 5_GB;
+    return roomy;
+}
+
+void BufferCache::UploadStreamed(const std::function<bool(VAddr, u64)>& is_mapped) {
+    // Under 5 GB (StreamUploadRoomy) the queue is dropped.
+    const bool roomy = StreamUploadRoomy();
     if (!StreamUploadEnabled() || !roomy) {
         if (!roomy) {
             std::scoped_lock lock{streamed_mutex};
@@ -3304,9 +3310,12 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_add
         scheduler.WaitDeferredSignals();
     }
     // bbport: data already current in the arena (GPU-written, or uploaded ahead: UploadStreamed)
-    // is read there, in video memory, instead of copied from guest memory into host staging.
+    // is read there, in video memory, instead of copied from guest memory into host staging. The
+    // uploaded-ahead case only where uploads ahead are made (StreamUploadRoomy: not under 5 GB,
+    // where the arena would otherwise take in texture sources that are read once).
     if (IsRegionGpuModified(device_addr, size) ||
-        (StreamUploadEnabled() && !memory_tracker->IsRegionCpuModified(device_addr, size))) {
+        (StreamUploadEnabled() && StreamUploadRoomy() &&
+         !memory_tracker->IsRegionCpuModified(device_addr, size))) {
         return ObtainBuffer(device_addr, size, false);
     }
     const auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostUncached,

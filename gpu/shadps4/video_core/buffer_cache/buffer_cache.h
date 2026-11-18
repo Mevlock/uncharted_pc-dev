@@ -202,6 +202,8 @@ public:
     /// frames old into the buffer arena (video memory), a few MiB per call, so a texture first
     /// used later is read from there instead of copied over PCIe in that frame.
     void UploadStreamed(const std::function<bool(VAddr, u64)>& is_mapped);
+    /// Uploads ahead are made at all (a card or budget of 5 GB or more).
+    bool StreamUploadRoomy() const;
 
     /// Synchronizes all buffers needed for DMA.
     void SynchronizeDmaBuffers();
