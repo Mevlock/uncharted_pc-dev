@@ -44,9 +44,23 @@ public:
         return made;
     }
 
-    /// Even presents are on and this device has what the holds need (a present-capable compute
-    /// queue, the device clock, calibrated timestamps). BB_EVEN_RELEASE=0: off (A/B only).
+    /// How paced frames are held (BB_EVEN_RELEASE): 1 (default) on the GPU in the game's own queue
+    /// (RecordHold; the flips land within ~0.2 ms), 2 on the release queue (a compute queue beside
+    /// it; allows slack, but its presents flip ~1 ms loose on NVIDIA, 11-18), 0 on the presenter
+    /// thread (the CPU hold, as before). Even presents off: 0.
+    static int Mode();
+    /// The device has what the GPU holds need (the device clock, calibrated timestamps).
+    static bool Supported(const Instance& instance);
+    /// Mode 2 and the device has a present-capable compute queue.
     static bool Wanted(const Instance& instance);
+
+    /// Mode 1, at the start of a paced frame's present command buffer on the game's queue: waits
+    /// for all earlier work there, notes the time (the frame's ready time), holds until `until_ns`
+    /// (steady clock) but `limit_ns` at most, notes the time again (its release). Later work waits
+    /// for the hold too (RecordFence after the blit): the blit runs on an idle GPU at the target.
+    void RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns, s64 limit_ns);
+    /// At the end of that command buffer: all later work on the queue waits for it.
+    static void RecordFence(vk::CommandBuffer cmdbuf);
 
     /// At the end of a held frame's present command buffer on the graphics queue: notes when its
     /// blit is done there (the frame's ready time; the release queue's own start would follow the
@@ -70,6 +84,8 @@ private:
     static constexpr u32 Slots = 16;
 
     void Calibrate();
+    u32 TakeSlot();
+    void Spin(vk::CommandBuffer cmdbuf, u32 index, s64 until_ns, s64 limit_ns);
     s64 TicksToNs(u64 ticks) const;
     u64 NsToTicks(s64 ns) const;
 
