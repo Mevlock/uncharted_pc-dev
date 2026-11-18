@@ -621,6 +621,10 @@ static void camera_dump(const unsigned char *camera, const float *look, const ui
     }
     fwrite(player ? player : zero,0x1200,1,f);
     fwrite(body ? body : zero,0x200,1,f);
+    /* 1.02: player 0's animated camera additives (table 0x1d53290, 50 x 0x50; count at 0x1d551e0) */
+    const int ok=u3==&u3_codes[0];
+    fwrite(ok ? image+0x1d551e0 : zero,4,1,f);
+    fwrite(ok ? image+0x1d53290 : zero,0xfa0,1,f);
     pthread_mutex_unlock(&lock);
 }
 static void u3_camera_input(unsigned char *camera, float *look, uint64_t *regs) {

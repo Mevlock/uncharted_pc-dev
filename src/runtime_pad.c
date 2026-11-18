@@ -1288,7 +1288,16 @@ static const unsigned char u2_sniper_animate_102[]={0x55,0x48,0x89,0xe5,0x41,0x5
                                                    0xec,0x68,0x01,0x00,0x00,0x49,0x89,0xf7,0x4c};
 static const unsigned char u2_sniper_animate_100[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,
                                                    0xec,0x68,0x01,0x00,0x00,0x41,0x89,0xd4,0x49};
+/* U3 animated camera additives taken out at full weight (runtime_camadditive.c; BB_CAMERA_ADDITIVE_FADE=0: off): the
+ * additive removal loop after IsDone (mov ecx,[r13+r14*4]; test al,al; je), the same bytes in 1.02 and 1.00. */
+static const unsigned char u3_camera_additive_done[]={0x43,0x8b,0x4c,0xb5,0x00,0x84,0xc0,0x74,0x73};
+void __attribute__((ms_abi)) runtime_u3_camera_additive_102(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
+void __attribute__((ms_abi)) runtime_u3_camera_additive_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
 static const RuntimeGuestCallback guest_callbacks[]={
+    {"U3 camera additive fade-out (1.02)",0x10217f6,u3_camera_additive_done,sizeof(u3_camera_additive_done),7,
+     runtime_u3_camera_additive_102,NULL},
+    {"U3 camera additive fade-out (1.00)",0x6b4d76,u3_camera_additive_done,sizeof(u3_camera_additive_done),7,
+     runtime_u3_camera_additive_100,NULL},
     {"U2 monastery sniper: spawn (1.02)",0x2e57b0,u2_sniper_spawn_102,sizeof(u2_sniper_spawn_102),6,runtime_u2_sniper_spawn_102,NULL},
     {"U2 monastery sniper: spawn (1.00)",0x82a80,u2_sniper_spawn_100,sizeof(u2_sniper_spawn_100),6,runtime_u2_sniper_spawn_100,NULL},
     {"U2 monastery sniper: gate closes (1.02)",0xa04f60,u2_sniper_gate_on_102,sizeof(u2_sniper_gate_on_102),6,

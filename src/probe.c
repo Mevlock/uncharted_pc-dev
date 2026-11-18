@@ -1077,7 +1077,8 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
         }
         /* Single fixes with a switch of their own (name contains the text, the variable is 0: left out). */
         static const struct { const char *text, *env; } switches[]={{"light ortho guard","BB_LIGHT_ORTHO_GUARD"},
-                                                                      {"buddy zone","BB_U2_BUDDY_ZONE"}};
+                                                                      {"buddy zone","BB_U2_BUDDY_ZONE"},
+                                                                      {"camera additive fade-out","BB_CAMERA_ADDITIVE_FADE"}};
         const char *off=NULL;
         for (size_t k=0;k<sizeof(switches)/sizeof(*switches);++k) {
             const char *e=getenv(switches[k].env);
