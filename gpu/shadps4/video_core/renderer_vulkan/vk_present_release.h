@@ -14,11 +14,27 @@
 // The dispatch always ends by itself (a limit from its start): there is no wait that only the host
 // can release, so a process that is closed or killed during a hold ends as usual (a relay design
 // that waited for the host on the GPU left an unkillable process, 11-18).
+//
+// Host-timed holds (BB_EVEN_RELEASE=3, 2026-11-19): the same place in the game's queue, but the GPU
+// waits idle instead of spinning (the spin kept the GPU busy: 57% GPU usage against 34% at a 60
+// cap on an RTX 5080, under 60 FPS on an RTX 3060 laptop). The present work is queued at once in
+// two submissions: the first only takes the frame's ready time; the second (the blit) waits for a
+// timeline semaphore that a thread of ours signals at the target (vkSignalSemaphore after a
+// high-resolution waitable timer and a short spin), then the present follows it as before. That is
+// again a GPU wait that only the host releases: every way the process ends by itself (the menu's
+// Quit, the window's close, a fault, a restart) first releases them all (ReleaseAllForExit), and
+// releases are never later than the hold's limit. A process killed from outside (Task Manager,
+// TerminateProcess) inside a hold can still be left as an unkillable zombie, as 11-18.
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <mutex>
+#include <thread>
+#include <vector>
 
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
@@ -46,11 +62,18 @@ public:
 
     /// How paced frames are held (BB_EVEN_RELEASE): 1 (default) on the GPU in the game's own queue
     /// (RecordHold; the flips land within ~0.2 ms), 2 on the release queue (a compute queue beside
-    /// it; allows slack, but its presents flip ~1 ms loose on NVIDIA, 11-18), 0 on the presenter
-    /// thread (the CPU hold, as before). Even presents off: 0.
+    /// it; allows slack, but its presents flip ~1 ms loose on NVIDIA, 11-18), 3 in the game's own
+    /// queue as 1 but host-timed (the GPU waits idle for a semaphore our thread signals at the
+    /// target: RecordHostReady, QueueRelease, RecordHostRelease), 0 on the presenter thread (the
+    /// CPU hold, as before). Even presents off: 0.
     static int Mode();
-    /// The device has what the GPU holds need (the device clock, calibrated timestamps).
+    /// The device has what this mode's holds need (1/2: the device clock and calibrated
+    /// timestamps; 3: calibrated timestamps).
     static bool Supported(const Instance& instance);
+    /// Mode 3 and made: holds are host-timed.
+    bool HostTimed() const {
+        return host_timed && made;
+    }
     /// Mode 2 and the device has a present-capable compute queue.
     static bool Wanted(const Instance& instance);
 
@@ -65,6 +88,25 @@ public:
     void RecordLate(vk::CommandBuffer cmdbuf, s64 flip_arg);
     /// At the end of a RecordHold command buffer: all later work on the queue waits for it.
     static void RecordFence(vk::CommandBuffer cmdbuf);
+
+    /// Mode 3, a paced frame's present work whose target is still ahead, in two submissions on the
+    /// game's queue. RecordHostReady: into the first one (which waits for the frame): everything
+    /// before it done, then its ready time; returns the slot. QueueRelease: the value of
+    /// HostTimeline() that the second submission (the blit) must wait for (0: none, the holds are
+    /// released for the exit: submit it without that wait); our thread signals it at `until_ns`
+    /// (steady clock) but `limit_ns` from now at most. RecordHostRelease: first in the second
+    /// submission's command buffer (its release time, once the wait is over); RecordFence after
+    /// the blit as for RecordHold.
+    u32 RecordHostReady(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns);
+    u64 QueueRelease(u32 slot, s64 until_ns, s64 limit_ns);
+    void RecordHostRelease(vk::CommandBuffer cmdbuf, u32 slot);
+    vk::Semaphore HostTimeline() const {
+        return host.timeline;
+    }
+    /// Every hold a host thread must release is released now and none is made after it (the
+    /// process ends: TerminateProcess would leave it a zombie behind a GPU wait no one signals).
+    /// Any thread, also a fault handler; returns within ~100 ms. Nothing to do without mode 3.
+    static void ReleaseAllForExit();
 
     /// At the end of a held frame's present command buffer on the graphics queue: notes when its
     /// blit is done there (the frame's ready time; the release queue's own start would follow the
@@ -107,6 +149,10 @@ private:
 
     void Calibrate();
     u32 TakeSlot();
+    void HostThread();
+    void HostSignal(u64 value);
+    void HostReleaseAll();
+    void HostStats(u32 index, s64 ready_ns, s64 release_ns);
     void Spin(vk::CommandBuffer cmdbuf, u32 index, s64 until_ns, s64 limit_ns);
     s64 TicksToNs(u64 ticks) const;
     u64 NsToTicks(s64 ns) const;
@@ -149,6 +195,49 @@ private:
         s64 call_ns_sum = 0, call_ns_max = 0;
     } cal_stats;
     void NoteCalibration(u64 deviation, s64 call_ns);
+
+    // Mode 3: the host-timed holds (vk_present_release.cpp HostThread).
+    bool host_timed = false;
+    struct HostJob {
+        u64 value;     ///< HostTimeline() value to signal
+        s64 at;        ///< when (steady clock): the target less the learnt lead, never after `deadline`
+        s64 target;    ///< the hold's end (for the stats)
+        s64 deadline;  ///< the hold's limit
+        u32 slot;
+    };
+    struct Host {
+        vk::Semaphore timeline{};
+        std::thread thread;
+        std::mutex mutex;           ///< jobs, wake
+        std::condition_variable cv; ///< jobs added (non-Windows)
+        std::deque<HostJob> jobs;
+        void* wake_event = nullptr; ///< Windows: an auto-reset event (jobs added, exit)
+        void* timer = nullptr;      ///< Windows: a high-resolution waitable timer
+        bool high_resolution = false;
+        std::atomic<u64> next_value{0};   ///< the last value handed out
+        std::mutex signal_mutex;          ///< signalled, the signal calls
+        u64 signalled = 0;
+        std::atomic<bool> closed{false};  ///< released for the exit: no more holds
+        std::atomic<bool> drained{false}; ///< the thread has signalled everything for the exit
+        std::atomic<bool> quit{false};
+        std::atomic<u32> thread_id{0};
+        std::atomic<s64> lead_ns{0};      ///< signal this much before the target (GPU wake-up)
+        std::atomic<s64> spin_window_ns{250'000};
+        // per slot, from the thread (read by Poll once the slot's submission has run)
+        std::array<std::atomic<s64>, Slots> signal_at{};
+        std::array<std::atomic<s64>, Slots> spin_ns{};
+        std::array<std::atomic<s64>, Slots> oversleep_ns{};
+        // the thread's own timer misses (oversleep) of the last wakes, for the spin window
+        std::array<s64, 64> wakes{};
+        u32 wake_count = 0;
+        // Poll (presenter): the GPU's wake-up after our signal, for the lead
+        std::array<s64, 64> wakeups{};
+        u32 wakeup_count = 0;
+        // Poll: the 5 s stats (us)
+        std::vector<float> host_err, gpu_err, wake_err, sleep_err, spin;
+        u64 late_frames = 0, late_releases = 0, missed_limit = 0;
+        s64 window = 0;
+    } host;
 };
 
 } // namespace Vulkan

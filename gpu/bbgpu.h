@@ -72,6 +72,11 @@ void bbgpu_game_frame_start(uint64_t frame, uint64_t kicked);
 int64_t bbgpu_present_lead_ns(void);
 /* The shader cache's last writes, before the process ends without destructors (runtime_quit). */
 void bbgpu_prepare_exit(void);
+/* Right before the process ends itself (TerminateProcess: runtime_quit, a fault, a restart, the window's close):
+ * every present hold a host thread must release (even presents, BB_EVEN_RELEASE=3) is released, else the process
+ * could stay as an unkillable zombie behind a GPU wait no one signals. Any thread, the fault handler too; ~100 ms
+ * at most. */
+void bbgpu_release_presents(void);
 /* Button prompts (button_prompts.cpp), the device used last: 0 keyboard or mouse (pictures of the
  * bound keys), 1 a PlayStation controller (the game's own buttons), 2 an Xbox or other controller
  * (Xbox buttons). */

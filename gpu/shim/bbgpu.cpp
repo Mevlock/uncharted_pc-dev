@@ -354,6 +354,8 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
             }
             return !closed_again;
         });
+        // bbport even presents: no present may be left waiting for a host release (vk_present_release.h)
+        Vulkan::PresentRelease::ReleaseAllForExit();
 #ifdef _WIN32
         // bbport: _Exit is ExitProcess on Windows, which still runs every DLL's detach code with
         // the other threads already gone: libsrt's (through FFmpeg) joined a thread through a
@@ -598,6 +600,10 @@ extern "C" void bbgpu_game_frame_start(uint64_t frame, uint64_t kicked) {
 
 extern "C" int64_t bbgpu_present_lead_ns(void) {
     return Vulkan::LowLatency::PresentLeadNs();
+}
+
+extern "C" void bbgpu_release_presents(void) {
+    Vulkan::PresentRelease::ReleaseAllForExit();
 }
 
 extern "C" void bbgpu_prepare_exit(void) {

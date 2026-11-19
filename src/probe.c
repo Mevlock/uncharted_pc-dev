@@ -156,6 +156,8 @@ void runtime_quit(int code) {
     static volatile long quitting;
     fflush(NULL);
     if (!__atomic_exchange_n(&quitting,1,__ATOMIC_ACQ_REL) && gpu_enabled) bbgpu_prepare_exit();
+    /* even presents: no present left behind a host-released GPU wait (else a zombie process) */
+    if (gpu_enabled) bbgpu_release_presents();
     fflush(NULL);
 #ifdef _WIN32
     TerminateProcess(GetCurrentProcess(),(UINT)code);
@@ -470,6 +472,7 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     fflush(NULL);
     write_crash_dump(info);
     fflush(NULL);
+    if (gpu_enabled) bbgpu_release_presents(); /* even presents: else a zombie process */
     TerminateProcess(GetCurrentProcess(),3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -2522,6 +2525,7 @@ void runtime_restart(void) {
     }
     CloseHandle(process.hThread); CloseHandle(process.hProcess);
     /* The new launch waits for this process's GPU device to go away (run.py --after). */
+    if (gpu_enabled) bbgpu_release_presents(); /* even presents: else that never happens */
     TerminateProcess(GetCurrentProcess(),0);
 #else
     puts("Runtime: restarting through run.sh");

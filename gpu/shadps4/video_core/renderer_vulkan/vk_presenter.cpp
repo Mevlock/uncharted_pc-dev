@@ -236,7 +236,9 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     if (swapchain.UsesReleaseQueue() ||
         (PresentRelease::Mode() >= 1 && PresentRelease::Supported(instance))) {
         release = std::make_unique<PresentRelease>(instance);
-        LowLatency::SetGpuHolds(release->Ready() ? (swapchain.UsesReleaseQueue() ? 2 : 1) : 0);
+        LowLatency::SetGpuHolds(release->Ready()
+                                    ? (swapchain.UsesReleaseQueue() ? 2 : release->HostTimed() ? 3 : 1)
+                                    : 0);
     }
 }
 
@@ -1380,13 +1382,12 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     // bbport: the frame is blitted (letterboxed) straight into the swapchain image.
     const vk::Image swapchain_image = swapchain.Image();
     auto& scheduler = present_scheduler;
-    const auto cmdbuf = scheduler.CommandBuffer();
+    // bbport even presents: this submission needs only the frame's own draw work submitted; the
+    // next frame's first draw flush waits for it at the gate (LowLatency::GateBeforeSubmit).
+    const u64 async_up_to = frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()
+                                ? frame->ready_tick
+                                : ~u64{0};
 
-    if (EmulatorSettings.IsVkHostMarkersEnabled()) {
-        cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
-            .pLabelName = "Present",
-        });
-    }
     // bbport even presents: this image's present waits for a hold to its time on the release
     // queue (vk_present_release.h), after its blit here; nothing here waits for it.
     // With the release queue every present goes there, a paced one after its hold there; else a
@@ -1397,16 +1398,38 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     // A paced frame whose target has passed by now is not held (its hold would end at once): no
     // hold commands and nothing after it waits for its blit; only its ready time is taken.
     bool hold_recorded = false;
+    u64 host_release = 0; ///< host-timed: the release value the blit's submission waits for
     if (held && !via_release) {
         const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
         if (hold_until > now) {
             const s64 period = std::max<s64>(Libraries::VideoOut::FrameCapPeriodNs(), 1'000'000);
-            release->RecordHold(cmdbuf, hold_flip, hold_until,
-                                std::clamp<s64>(hold_until - now + period, 0, 100'000'000));
-            hold_recorded = true;
+            const s64 limit = std::clamp<s64>(hold_until - now + period, 0, 100'000'000);
+            if (release->HostTimed()) {
+                // Host-timed (BB_EVEN_RELEASE=3): the frame's ready time in a submission of its
+                // own (it waits for the frame), then this one (the blit) waits idle for our
+                // thread's release at the target. Both are queued now.
+                const u32 slot = release->RecordHostReady(scheduler.CommandBuffer(), hold_flip, hold_until);
+                SubmitInfo ready_info{};
+                ready_info.AddWait(frame->ready_semaphore, frame->ready_tick);
+                ready_info.async_up_to = async_up_to;
+                scheduler.Flush(ready_info);
+                host_release = release->QueueRelease(slot, hold_until, limit);
+                release->RecordHostRelease(scheduler.CommandBuffer(), slot);
+                hold_recorded = host_release != 0; // 0: released for the exit, not held
+            } else {
+                release->RecordHold(scheduler.CommandBuffer(), hold_flip, hold_until, limit);
+                hold_recorded = true;
+            }
         } else {
-            release->RecordLate(cmdbuf, hold_flip);
+            release->RecordLate(scheduler.CommandBuffer(), hold_flip);
         }
+    }
+    const auto cmdbuf = scheduler.CommandBuffer();
+
+    if (EmulatorSettings.IsVkHostMarkersEnabled()) {
+        cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
+            .pLabelName = "Present",
+        });
     }
 
     {
@@ -1532,16 +1555,14 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     SubmitInfo info{};
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
+    if (host_release) {
+        info.AddWait(release->HostTimeline(), host_release); // the host-timed hold: idle until our release
+    }
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     if (last) {
         // Also covers the generated frames' submissions before it on this queue.
         info.AddSignal(frame->present_done);
     }
-    // bbport even presents: this submission needs only the frame's own draw work submitted; the
-    // next frame's first draw flush waits for it at the gate (LowLatency::GateBeforeSubmit).
-    const u64 async_up_to = frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()
-                                ? frame->ready_tick
-                                : ~u64{0};
     info.async_up_to = async_up_to;
     scheduler.Flush(info);
     const u64 present_tick = scheduler.CurrentTick() - 1; // what this submission signals

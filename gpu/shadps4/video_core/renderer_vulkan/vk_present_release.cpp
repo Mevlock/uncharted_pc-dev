@@ -51,16 +51,70 @@ s64 QpcToNs(u64 ns) {
 constexpr VkTimeDomainKHR HostDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR;
 #endif
 
+/// Mode 3: the live host-timed releaser, for ReleaseAllForExit (any thread).
+std::mutex g_host_release_mutex;
+PresentRelease* g_host_release = nullptr;
+
+/// BB_EVEN_HOST_SPIN_US (default 400, 50-2000): the most our thread spins before a release (after
+/// the timer); the window it spins follows the timer's own misses, from 100 us up to this.
+s64 HostSpinMaxNs() {
+    static const s64 ns = [] {
+        const char* env = std::getenv("BB_EVEN_HOST_SPIN_US");
+        const long us = env && env[0] ? std::atol(env) : 400;
+        return s64(std::clamp<long>(us, 50, 2000)) * 1000;
+    }();
+    return ns;
+}
+
+/// BB_EVEN_HOST_LEAD=0: signal at the target itself; default: earlier by the GPU's usual wake-up
+/// after our signal (the median of the last 64, 0-500 us), so that the GPU goes on at the target.
+bool HostLead() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_EVEN_HOST_LEAD");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
+/// BB_EVEN_HOST_CSV=<file> (diagnosis): one line per host-timed hold, QPC milliseconds (joinable to
+/// PresentMon): target, our signal, the GPU's release and the frame's ready time.
+FILE* HostCsv() {
+    static FILE* f = [] {
+        const char* path = std::getenv("BB_EVEN_HOST_CSV");
+        FILE* out = path && path[0] ? std::fopen(path, "w") : nullptr;
+        if (out) {
+            std::fputs("flip,target_qpc_ms,signal_qpc_ms,gpu_release_qpc_ms,ready_qpc_ms,spin_us,oversleep_us\n",
+                       out);
+        }
+        return out;
+    }();
+    return f;
+}
+
+/// The q-quantile (0..1) of v (reordered).
+s64 Quantile(std::vector<float>& v, double q) {
+    if (v.empty()) {
+        return 0;
+    }
+    const size_t k = std::min(v.size() - 1, size_t(double(v.size()) * q));
+    std::nth_element(v.begin(), v.begin() + k, v.end());
+    return s64(std::llround(v[k]));
+}
+
 } // namespace
 
 PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} {
-    if (!instance.IsPresentReleaseSupported()) {
-        std::puts("Even presents: the GPU hold needs VK_KHR_shader_clock (device clock), 64-bit timestamps and calibrated "
-                  "timestamps; not available");
+    host_timed = Mode() == 3;
+    if (host_timed ? !instance.IsHostReleaseSupported() : !instance.IsPresentReleaseSupported()) {
+        std::puts(host_timed ? "Even presents: the host-timed hold needs 64-bit timestamps and calibrated timestamps; "
+                               "not available"
+                             : "Even presents: the GPU hold needs VK_KHR_shader_clock (device clock), 64-bit "
+                               "timestamps and calibrated timestamps; not available");
         return;
     }
     const vk::Device device = instance.GetDevice();
     tick_ns = instance.GetPhysicalDevice().getProperties().limits.timestampPeriod;
+    if (!host_timed) {
     const vk::PushConstantRange range{.stageFlags = vk::ShaderStageFlagBits::eCompute,
                                       .offset = 0,
                                       .size = sizeof(PushConstants)};
@@ -86,6 +140,7 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
         return;
     }
     pipeline = std::move(pipeline_value);
+    }
     auto [pool_result, pool_value] = device.createQueryPoolUnique({
         .queryType = vk::QueryType::eTimestamp,
         .queryCount = Slots * 3,
@@ -94,6 +149,7 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
         return;
     }
     pool = std::move(pool_value);
+    if (!host_timed) {
     const VkBufferCreateInfo buffer_ci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = Slots * sizeof(u64),
@@ -115,6 +171,7 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
     address = device.getBufferAddress({.buffer = buffer});
     if (!stamps || !address) {
         return;
+    }
     }
 #ifdef _WIN32
     // The steady clock against QueryPerformanceCounter (libc++ reads it; the same rate), read
@@ -160,8 +217,45 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
     LowLatency::MarkOutOfBandPresentQueue(instance.GetReleasePresentQueue() ? instance.GetReleasePresentQueue()
                                                                              : instance.GetReleaseQueue());
     }
+    if (host_timed) {
+        const vk::SemaphoreTypeCreateInfo type{.semaphoreType = vk::SemaphoreType::eTimeline,
+                                               .initialValue = 0};
+        auto [timeline_result, timeline] = device.createSemaphore({.pNext = &type});
+        if (timeline_result != vk::Result::eSuccess) {
+            std::puts("Even presents: the host-timed hold's semaphore could not be made");
+            return;
+        }
+        host.timeline = timeline;
+#ifdef _WIN32
+        host.wake_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Windows 10 1803 on): wakes within ~0.1-0.5 ms
+        // of its time instead of the system tick
+        host.timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002, TIMER_ALL_ACCESS);
+        host.high_resolution = host.timer != nullptr;
+        if (!host.timer) {
+            host.timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+        }
+        if (!host.wake_event || !host.timer) {
+            std::puts("Even presents: the host-timed hold's timer could not be made");
+            return;
+        }
+#endif
+        host.thread = std::thread([this] { HostThread(); });
+    }
     Calibrate();
     made = cal_ticks != 0;
+    if (host_timed) {
+        std::printf("Even presents: host-timed holds: the GPU waits idle for each paced frame's target, our thread "
+                    "releases it (%s timer, spin up to %lld us; timestamp %.3f ns, steady - QPC %lld ns)%s\n",
+                    host.high_resolution ? "high-resolution" : "standard",
+                    static_cast<long long>(HostSpinMaxNs() / 1000), tick_ns,
+                    static_cast<long long>(steady_minus_qpc), made ? "" : "; calibration FAILED");
+        if (made) {
+            std::scoped_lock lk{g_host_release_mutex};
+            g_host_release = this;
+        }
+        return;
+    }
     std::printf("Even presents: the GPU holds each paced frame's present work to its target "
                 "(timestamp %.3f ns, steady - QPC %lld ns)%s\n",
                 tick_ns, static_cast<long long>(steady_minus_qpc), made ? "" : "; calibration FAILED");
@@ -170,13 +264,13 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
 int PresentRelease::Mode() {
     static const int mode = [] {
         const char* env = std::getenv("BB_EVEN_RELEASE");
-        return env && env[0] >= '0' && env[0] <= '2' ? env[0] - '0' : 1;
+        return env && env[0] >= '0' && env[0] <= '3' ? env[0] - '0' : 1;
     }();
     return LowLatency::EvenPresents() ? mode : 0;
 }
 
 bool PresentRelease::Supported(const Instance& instance) {
-    return instance.IsPresentReleaseSupported();
+    return Mode() == 3 ? instance.IsHostReleaseSupported() : instance.IsPresentReleaseSupported();
 }
 
 bool PresentRelease::Wanted(const Instance& instance) {
@@ -184,6 +278,43 @@ bool PresentRelease::Wanted(const Instance& instance) {
 }
 
 PresentRelease::~PresentRelease() {
+    if (host_timed) {
+        {
+            std::scoped_lock lk{g_host_release_mutex};
+            if (g_host_release == this) {
+                g_host_release = nullptr;
+            }
+        }
+        // every hold is let go first (the device's idle waits that follow need them), then the thread ends
+        HostReleaseAll();
+        host.quit.store(true, std::memory_order_release);
+        {
+            std::scoped_lock lk{host.mutex};
+        }
+        host.cv.notify_all();
+#ifdef _WIN32
+        if (host.wake_event) {
+            SetEvent(host.wake_event);
+        }
+#endif
+        if (host.thread.joinable()) {
+            host.thread.join();
+        }
+        HostSignal(host.next_value.load(std::memory_order_acquire) + 1024); // the thread never started
+        if (host.timeline) {
+            // the presenter's and every scheduler's work is finished before it goes (~Presenter):
+            // no submission waits for it any more
+            instance.GetDevice().destroySemaphore(host.timeline);
+        }
+#ifdef _WIN32
+        if (host.timer) {
+            CloseHandle(host.timer);
+        }
+        if (host.wake_event) {
+            CloseHandle(host.wake_event);
+        }
+#endif
+    }
     if (instance.GetReleaseQueue() && command_pool) {
         std::scoped_lock lk{g_release_queue_mutex};
         (void)instance.GetReleaseQueue().waitIdle();
@@ -266,7 +397,13 @@ u32 PresentRelease::TakeSlot() {
         instance.GetDevice().waitForFences(*fences[index], VK_TRUE, 1'000'000'000) != vk::Result::eSuccess) {
         std::printf("Even presents: a hold's command buffer was still in use after 1 s\n");
     }
-    stamps[index] = 0;
+    if (stamps) {
+        stamps[index] = 0;
+    }
+    // mode 3: the thread's times of this slot's last use (its job is long done: 16 holds ago)
+    host.signal_at[index].store(0, std::memory_order_relaxed);
+    host.spin_ns[index].store(0, std::memory_order_relaxed);
+    host.oversleep_ns[index].store(-1, std::memory_order_relaxed);
     slot = {.pending = false, .flip_arg = -1, .until_ns = 0};
     return index;
 }
@@ -344,6 +481,306 @@ void PresentRelease::RecordLate(vk::CommandBuffer cmdbuf, s64 flip_arg) {
         cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, index * 3 + q);
     }
     slots[index] = {.pending = true, .flip_arg = flip_arg, .until_ns = 0};
+}
+
+u32 PresentRelease::RecordHostReady(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns) {
+    if (SteadyNs() - cal_ns > 100'000'000) {
+        Calibrate(); // the times only (no device clock to fit): fresh enough every 100 ms
+    }
+    const u32 index = TakeSlot();
+    cmdbuf.resetQueryPool(*pool, index * 3, 3);
+    // everything before it on the queue done (the frame), then its ready time
+    const vk::MemoryBarrier before{
+        .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
+        .dstAccessMask = vk::AccessFlagBits::eMemoryRead,
+    };
+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands,
+                           {}, before, {}, {});
+    cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, index * 3);
+    slots[index] = {.pending = true, .flip_arg = flip_arg, .until_ns = until_ns};
+    return index;
+}
+
+u64 PresentRelease::QueueRelease(u32 slot, s64 until_ns, s64 limit_ns) {
+    if (!HostTimed() || host.closed.load(std::memory_order_acquire)) {
+        return 0;
+    }
+    const s64 now = SteadyNs();
+    const s64 deadline = now + std::clamp<s64>(limit_ns, 0, 100'000'000);
+    const s64 lead = HostLead() ? host.lead_ns.load(std::memory_order_relaxed) : 0;
+    const u64 value = host.next_value.fetch_add(1, std::memory_order_acq_rel) + 1;
+    {
+        std::scoped_lock lk{host.mutex};
+        const bool was_empty = host.jobs.empty();
+        host.jobs.push_back({.value = value,
+                             .at = std::min(until_ns - lead, deadline),
+                             .target = until_ns,
+                             .deadline = deadline,
+                             .slot = slot});
+        if (was_empty) {
+            // the thread waits for a job (a later job never goes before the first: the values,
+            // and so the presents, go in order)
+            host.cv.notify_one();
+#ifdef _WIN32
+            SetEvent(host.wake_event);
+#endif
+        }
+    }
+    // An exit after the value was handed out but before its job: ReleaseAllForExit signals 1024
+    // past the last value it saw, so this one is covered as well.
+    return value;
+}
+
+void PresentRelease::RecordHostRelease(vk::CommandBuffer cmdbuf, u32 slot) {
+    // the second submission's first commands: once its wait (our signal) and the earlier work are done
+    cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, slot * 3 + 1);
+    cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, slot * 3 + 2);
+}
+
+void PresentRelease::HostSignal(u64 value) {
+    std::scoped_lock lk{host.signal_mutex};
+    if (!host.timeline || value <= host.signalled) {
+        return; // a timeline only goes up (an exit's release may have passed it already)
+    }
+    const vk::SemaphoreSignalInfo signal{.semaphore = host.timeline, .value = value};
+    // device lost: nothing waits any more; the value is taken as signalled all the same
+    (void)instance.GetDevice().signalSemaphore(signal);
+    host.signalled = value;
+}
+
+void PresentRelease::HostThread() {
+#ifdef _WIN32
+    host.thread_id.store(u32(GetCurrentThreadId()), std::memory_order_release);
+    // it sleeps nearly always; when it wakes, it must run at once
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+#endif
+    std::vector<s64> sorted;
+    for (;;) {
+        HostJob job{};
+        {
+            std::unique_lock lk{host.mutex};
+#ifdef _WIN32
+            while (host.jobs.empty() && !host.closed.load(std::memory_order_acquire) &&
+                   !host.quit.load(std::memory_order_acquire)) {
+                lk.unlock();
+                WaitForSingleObject(host.wake_event, 100);
+                lk.lock();
+            }
+#else
+            host.cv.wait_for(lk, std::chrono::milliseconds(100), [&] {
+                return !host.jobs.empty() || host.closed.load(std::memory_order_acquire) ||
+                       host.quit.load(std::memory_order_acquire);
+            });
+#endif
+            if (host.closed.load(std::memory_order_acquire)) {
+                host.jobs.clear();
+            } else if (!host.jobs.empty()) {
+                job = host.jobs.front();
+            }
+        }
+        if (host.closed.load(std::memory_order_acquire)) {
+            // past every value handed out (and any handed out while this runs)
+            HostSignal(host.next_value.load(std::memory_order_acquire) + 1024);
+            host.drained.store(true, std::memory_order_release);
+            if (host.quit.load(std::memory_order_acquire)) {
+                return;
+            }
+#ifdef _WIN32
+            WaitForSingleObject(host.wake_event, 100);
+#else
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+#endif
+            continue;
+        }
+        if (job.value == 0) {
+            if (host.quit.load(std::memory_order_acquire)) {
+                return;
+            }
+            continue;
+        }
+        // the timer to shortly before the release, then a short spin
+        const s64 window = host.spin_window_ns.load(std::memory_order_relaxed);
+        s64 now = SteadyNs();
+        const s64 wake = job.at - window;
+        if (wake - now > 50'000) {
+#ifdef _WIN32
+            LARGE_INTEGER due;
+            due.QuadPart = -std::max<s64>(1, (wake - now) / 100); // relative, 100 ns units
+            if (SetWaitableTimer(host.timer, &due, 0, nullptr, nullptr, FALSE)) {
+                const HANDLE handles[2] = {host.timer, host.wake_event};
+                const DWORD woke = WaitForMultipleObjects(2, handles, FALSE, 200);
+                if (woke == WAIT_OBJECT_0 + 1) {
+                    CancelWaitableTimer(host.timer);
+                    // an exit (the loop sees it), or a job queued while the queue looked empty:
+                    // the same job again
+                    continue;
+                }
+            } else {
+                Sleep(DWORD(std::max<s64>(0, (wake - now) / 1'000'000)));
+            }
+#else
+            std::this_thread::sleep_until(
+                std::chrono::steady_clock::time_point(std::chrono::nanoseconds(wake)));
+#endif
+            now = SteadyNs();
+            const s64 oversleep = now - wake;
+            host.oversleep_ns[job.slot].store(std::max<s64>(0, oversleep), std::memory_order_relaxed);
+            host.wakes[host.wake_count++ % host.wakes.size()] = oversleep;
+            if ((host.wake_count & 15) == 0 && host.wake_count >= 32) {
+                // the spin window: the timer's 95th percentile miss over the last 64 wakes, plus
+                // 50 us, between 100 us and BB_EVEN_HOST_SPIN_US
+                const u32 n = std::min<u32>(host.wake_count, u32(host.wakes.size()));
+                sorted.assign(host.wakes.begin(), host.wakes.begin() + n);
+                const u32 k = n * 95 / 100;
+                std::nth_element(sorted.begin(), sorted.begin() + k, sorted.end());
+                host.spin_window_ns.store(std::clamp<s64>(sorted[k] + 50'000, 100'000, HostSpinMaxNs()),
+                                          std::memory_order_relaxed);
+            }
+            if (host.closed.load(std::memory_order_acquire)) {
+                continue;
+            }
+        }
+        // the spin: the processor's pause between clock reads, no system call
+        const s64 spin_start = SteadyNs();
+        while ((now = SteadyNs()) < job.at) {
+#if defined(_M_X64) || defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#endif
+        }
+        host.spin_ns[job.slot].store(now - spin_start, std::memory_order_relaxed);
+        HostSignal(job.value);
+        host.signal_at[job.slot].store(SteadyNs(), std::memory_order_release);
+        {
+            std::scoped_lock lk{host.mutex};
+            if (!host.jobs.empty() && host.jobs.front().value == job.value) {
+                host.jobs.pop_front();
+            }
+        }
+    }
+}
+
+void PresentRelease::HostReleaseAll() {
+    if (!host_timed) {
+        return;
+    }
+    host.closed.store(true, std::memory_order_seq_cst);
+#ifdef _WIN32
+    const bool on_thread = host.thread_id.load(std::memory_order_acquire) == u32(GetCurrentThreadId());
+    if (host.wake_event) {
+        SetEvent(host.wake_event);
+    }
+#else
+    const bool on_thread = false;
+#endif
+    host.cv.notify_all();
+    if (!on_thread && host.thread.joinable()) {
+        // our thread signals (a fault handler's thread may have faulted inside the driver); 100 ms at most
+        for (int i = 0; i < 100 && !host.drained.load(std::memory_order_acquire); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (host.drained.load(std::memory_order_acquire)) {
+            return;
+        }
+    }
+    HostSignal(host.next_value.load(std::memory_order_acquire) + 1024);
+    host.drained.store(true, std::memory_order_release);
+}
+
+void PresentRelease::ReleaseAllForExit() {
+    // a fault handler must not wait long for the presenter (which takes this lock to make or end
+    // the releaser): 50 ms at most, then without it
+    std::unique_lock lk{g_host_release_mutex, std::defer_lock};
+    for (int i = 0; i < 50 && !lk.try_lock(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!lk.owns_lock()) {
+        return; // the presenter makes or ends the releaser (its destructor releases them all)
+    }
+    if (PresentRelease* release = g_host_release) {
+        std::printf("Even presents: host-timed holds released for the exit\n");
+        std::fflush(stdout);
+        release->HostReleaseAll();
+    }
+}
+
+void PresentRelease::HostStats(u32 index, s64 ready_ns, s64 release_ns) {
+    Host& h = host;
+    const Slot& slot = slots[index];
+    const s64 target = slot.until_ns;
+    const s64 signal = h.signal_at[index].load(std::memory_order_acquire);
+    const s64 spin = h.spin_ns[index].load(std::memory_order_relaxed);
+    const s64 oversleep = h.oversleep_ns[index].load(std::memory_order_relaxed);
+    if (FILE* csv = HostCsv()) {
+        const auto qpc_ms = [&](s64 ns) { return ns ? double(ns - steady_minus_qpc) / 1e6 : 0.0; };
+        std::fprintf(csv, "%lld,%.4f,%.4f,%.4f,%.4f,%.1f,%.1f\n", static_cast<long long>(slot.flip_arg),
+                     qpc_ms(target), qpc_ms(signal), qpc_ms(release_ns), qpc_ms(ready_ns), double(spin) / 1e3,
+                     double(oversleep) / 1e3);
+    }
+    const s64 now = SteadyNs();
+    if (h.window == 0) {
+        h.window = now;
+    }
+    if (!target) {
+        // not held (RecordLate)
+    } else if (ready_ns + 20'000 >= target) {
+        ++h.late_frames; // the frame itself was not ready by its target: the GPU went on when it was
+    } else if (signal) {
+        h.host_err.push_back(float(signal - target) / 1e3f);
+        h.gpu_err.push_back(float(release_ns - target) / 1e3f);
+        h.wake_err.push_back(float(release_ns - signal) / 1e3f);
+        h.spin.push_back(float(spin) / 1e3f);
+        if (oversleep >= 0) {
+            h.sleep_err.push_back(float(oversleep) / 1e3f);
+        }
+        if (release_ns - target > 200'000) {
+            ++h.late_releases;
+        }
+        // the GPU's usual wake-up after our signal: the lead (the median of the last 64, 0-500 us)
+        h.wakeups[h.wakeup_count++ % h.wakeups.size()] = release_ns - signal;
+        if ((h.wakeup_count & 15) == 0 && h.wakeup_count >= 32) {
+            const u32 n = std::min<u32>(h.wakeup_count, u32(h.wakeups.size()));
+            std::array<s64, 64> copy = h.wakeups;
+            std::nth_element(copy.begin(), copy.begin() + n / 2, copy.begin() + n);
+            h.lead_ns.store(std::clamp<s64>(copy[n / 2], 0, 500'000), std::memory_order_relaxed);
+        }
+    } else {
+        ++h.missed_limit; // released for the exit, not by its job
+    }
+    if (now - h.window < 5'000'000'000) {
+        return;
+    }
+    const size_t n = h.host_err.size();
+    double spin_sum = 0, spin_max = 0;
+    for (const float s : h.spin) {
+        spin_sum += s;
+        spin_max = std::max<double>(spin_max, s);
+    }
+    const double seconds = double(now - h.window) / 1e9;
+    const auto q = [](std::vector<float>& v, double at) { return static_cast<long long>(Quantile(v, at)); };
+    std::printf("Even presents (host-timed), %.1f s: %zu held, %llu frames late (not ready by the target), %llu "
+                "released for the exit | vs target, us: our signal median %lld p99 %lld; GPU release median %lld "
+                "p99 %lld max %lld (%llu over 200) | GPU wake-up after our signal median %lld p99 %lld, lead %lld "
+                "| timer miss median %lld p99 %lld (%s), spin window %lld | spin per release avg %.0f max %.0f us "
+                "(%.2f%% of a core)\n",
+                seconds, n, static_cast<unsigned long long>(h.late_frames),
+                static_cast<unsigned long long>(h.missed_limit), q(h.host_err, 0.5), q(h.host_err, 0.99),
+                q(h.gpu_err, 0.5), q(h.gpu_err, 0.99), q(h.gpu_err, 1.0),
+                static_cast<unsigned long long>(h.late_releases), q(h.wake_err, 0.5), q(h.wake_err, 0.99),
+                static_cast<long long>(h.lead_ns.load(std::memory_order_relaxed) / 1000), q(h.sleep_err, 0.5),
+                q(h.sleep_err, 0.99), h.high_resolution ? "high-resolution" : "standard",
+                static_cast<long long>(h.spin_window_ns.load(std::memory_order_relaxed) / 1000),
+                n ? spin_sum / double(n) : 0.0, spin_max, spin_sum / 1e4 / seconds);
+    std::fflush(stdout);
+    if (FILE* csv = HostCsv()) {
+        std::fflush(csv);
+    }
+    h.host_err.clear();
+    h.gpu_err.clear();
+    h.wake_err.clear();
+    h.sleep_err.clear();
+    h.spin.clear();
+    h.late_frames = h.late_releases = h.missed_limit = 0;
+    h.window = now;
 }
 
 void PresentRelease::RecordFence(vk::CommandBuffer cmdbuf) {
@@ -445,8 +882,11 @@ void PresentRelease::Poll(const std::function<void(s64, s64, s64)>& done) {
             !data[3] || !data[5]) {
             return; // not run yet: the later ones neither
         }
-        const u64 started = stamps[oldest];
+        const u64 started = stamps ? stamps[oldest] : 0;
         const u64 ready = data[0], entry = data[2], exit = data[4];
+        if (host_timed) {
+            HostStats(oldest, TicksToNs(ready), TicksToNs(exit));
+        }
         slot.pending = false;
         oldest = (oldest + 1) % Slots;
         if (started) {

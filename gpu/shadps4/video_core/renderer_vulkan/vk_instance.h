@@ -394,6 +394,13 @@ public:
                // the hold's times are 64-bit differences: a narrower counter wraps between them
                graphics_timestamp_bits >= 64;
     }
+    /// bbport: even presents, host-timed holds (BB_EVEN_RELEASE=3, vk_present_release.h): no
+    /// shader clock needed, only the device's timestamps against the CPU's clock.
+    bool IsHostReleaseSupported() const {
+        return (calibrated_khr || calibrated_ext) && properties.limits.timestampPeriod > 0.0f &&
+               properties.limits.timestampComputeAndGraphics && graphics_timestamp_bits >= 64;
+    }
+
     /// VK_KHR_calibrated_timestamps (else the EXT form) is on.
     bool IsCalibratedTimestampsKhr() const {
         return calibrated_khr;

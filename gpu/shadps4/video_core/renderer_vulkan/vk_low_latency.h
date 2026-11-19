@@ -99,7 +99,8 @@ void GateYieldEnd();
 /// Even presents are on (the frame start paces and BB_EVEN_PRESENT is not 0).
 bool EvenPresents();
 /// How the presenter holds paced frames (vk_present_release.h): 0 on its thread, 1 on the GPU in the
-/// game's queue, 2 on the release queue.
+/// game's queue, 2 on the release queue, 3 in the game's queue with the GPU idle until our thread
+/// releases them (host-timed; the gate and the GPU-bound check as for 1).
 void SetGpuHolds(int mode);
 /// Reflex: the release queue presents beside the game's queue (out of band, not its frames' work).
 void MarkOutOfBandPresentQueue(vk::Queue queue);

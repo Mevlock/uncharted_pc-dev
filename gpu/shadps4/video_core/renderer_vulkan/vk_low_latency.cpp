@@ -210,7 +210,8 @@ std::atomic<s64> slept_ns{0};
 /// Even presents (BB_EVEN_PRESENT=1: on; OFF by default since 0.3.6.60.1: the GPU hold below spins a
 /// shader on the GPU until each target, which kept GPU usage near 100% even at a 60 FPS cap and cost
 /// FPS on GPU-limited cards (RTX 3060 laptop, 1440p DLSS Quality: under 60, sometimes under 50; stable
-/// again with it off). Back on by default once the hold waits without spinning). Shown as soon as it is done, a frame's present interval
+/// again with it off). Back on by default once the hold waits without spinning: BB_EVEN_RELEASE=3,
+/// host-timed holds, vk_present_release.h). Shown as soon as it is done, a frame's present interval
 /// was the period plus the change in its render time (the frame start's slot plus its own time):
 /// under G-SYNC each refresh lasts that interval (QD-OLED: brightness flicker, U3 at 120 on a
 /// 165 Hz panel), and the paced frame clock stepped the world by the start intervals while the
@@ -279,13 +280,33 @@ const s64 slack_ns = [] {
 /// frame's release and the moment its own last work was queued (its flip): GPU-bound, the work is
 /// all queued before the GPU is free, so this is its GPU time; CPU-bound, only the tail after the
 /// last submission. On at a median over ~4 s of 0.9 x the period, off again under 0.8 x.
+/// That missed a GPU that only just keeps up (2026-11-19, a player's RTX 3060 laptop at 60: under
+/// 60 FPS with the holds, fine without): when the game queues its frame's work over most of its
+/// CPU frame and the GPU follows it, the last work is queued after the last frame's release and
+/// the "own time" is only the short tail after it, however busy the GPU is; and a frame that idled
+/// to its target leaves its spare time unused, so a slow frame after a fast one misses its target.
+/// So it is also on when the holds themselves make frames late: over ~4 s, 5% or more of the
+/// frames (BB_EVEN_GPU_BOUND_LATE, percent) late although they would have been on time without the
+/// delay the last frame's hold put on their GPU work (ready - delay <= target; the delay no more
+/// than the GPU's time after the later of the hold's end and the frame's last work). Off again only
+/// after a stay of 10 s, doubled (to 160 s at most) whenever it comes back within 60 s of going
+/// off: a check that cannot see the cost while nothing is held must not hold and drop by turns.
 const bool gpu_bound_check = [] {
     const char* env = std::getenv("BB_EVEN_GPU_BOUND");
     return !(env && env[0] == '0');
 }();
+const u32 gpu_bound_late_pct = [] {
+    const char* env = std::getenv("BB_EVEN_GPU_BOUND_LATE");
+    return env && env[0] ? u32(std::clamp(std::atoi(env), 1, 100)) : 5u;
+}();
 std::atomic<bool> gpu_bound{false};
 std::array<s64, 512> gpu_own{};
+std::array<u8, 512> hold_cost{}; ///< 1: late only because of the last frame's hold (presenter)
 u64 gpu_own_count = 0; ///< presenter thread
+s64 bound_since = 0, bound_left = 0; ///< presenter: when it went on / off last
+s64 bound_stay = 10'000'000'000;     ///< presenter: the stay before it may go off
+bool bound_local = false;            ///< presenter: on by its own check (Stop clears gpu_bound)
+std::atomic<u32> hold_cost_permille{0}; ///< for the log
 /// Stop (pacing ends: loads, menus) starts the GPU-bound check afresh: frame thread -> presenter.
 std::atomic<u64> gpu_own_epoch{0};
 u64 gpu_own_epoch_seen = 0; ///< presenter thread
@@ -679,27 +700,65 @@ void GpuTimes(u64 id, s64 ready, s64 release) {
     if (const u64 epoch = gpu_own_epoch.load(std::memory_order_acquire); epoch != gpu_own_epoch_seen) {
         gpu_own_epoch_seen = epoch; // a new paced stretch: its own history
         gpu_own_count = 0;
+        // Stop turned it off; within its stay it stays on (a load does not make the GPU faster)
+        if (bound_local && Now() - bound_since < bound_stay) {
+            gpu_bound.store(true, std::memory_order_relaxed);
+        } else if (bound_local) {
+            bound_local = false;
+            bound_left = Now();
+        }
     }
     if (gpu_bound_check && !release_queue.load(std::memory_order_relaxed) &&
         times_id[(id - 1) % Ring] == id - 1 && flip_id[id % Ring].load(std::memory_order_acquire) == id) {
         const s64 from = std::max(times_release[(id - 1) % Ring], flip_at[id % Ring].load(std::memory_order_relaxed));
+        // The hold's cost to this frame: its delay, but no more than the GPU's time after the later
+        // of the hold's end and the frame's last submission (a frame whose work came in late, a CPU
+        // spike, was not made late by the hold; a GPU that worked through a backlog was)
+        const s64 cost = std::min(own_delay, ready - from);
+        hold_cost[gpu_own_count % hold_cost.size()] = cost > 0 && ready > target && ready - cost <= target;
         gpu_own[gpu_own_count++ % gpu_own.size()] = ready - from;
         const s64 period = Libraries::VideoOut::FrameCapPeriodNs();
         if (period > 0 && (gpu_own_count & 15) == 0) {
             const u64 window = std::clamp<s64>(4'000'000'000 / period, 32, s64(gpu_own.size()));
             const u32 n = u32(std::min<u64>(gpu_own_count, window));
             std::array<s64, 512> copy;
+            u32 costly = 0;
             for (u32 i = 0; i < n; ++i) {
                 copy[i] = gpu_own[(gpu_own_count - 1 - i) % gpu_own.size()];
+                costly += hold_cost[(gpu_own_count - 1 - i) % hold_cost.size()];
             }
             std::nth_element(copy.begin(), copy.begin() + n / 2, copy.begin() + n);
             const s64 median = copy[n / 2];
             gpu_own_median.store(median, std::memory_order_relaxed);
+            hold_cost_permille.store(costly * 1000 / n, std::memory_order_relaxed);
             const bool was = gpu_bound.load(std::memory_order_relaxed);
-            const bool now_bound = was ? median * 10 >= period * 8 : median * 10 >= period * 9;
+            const s64 at = Now();
+            // on: the GPU's own time near the period, or the holds making frames late (64 frames
+            // at least, so a burst at the stretch's start does not decide it)
+            const bool costs = n >= 64 && costly * 100 >= n * gpu_bound_late_pct;
+            const bool now_bound = was ? median * 10 >= period * 8 || costs || at - bound_since < bound_stay
+                                       : median * 10 >= period * 9 || costs;
             if (now_bound != was) {
+                if (now_bound) {
+                    // back within 60 s of going off: it costs again, so a longer stay
+                    bound_stay = bound_left && at - bound_left < 60'000'000'000
+                                     ? std::min<s64>(bound_stay * 2, 160'000'000'000)
+                                     : 10'000'000'000;
+                    bound_since = at;
+                } else {
+                    bound_left = at;
+                }
                 gpu_bound.store(now_bound, std::memory_order_relaxed);
                 gpu_bound_changes.fetch_add(1, std::memory_order_relaxed);
+                bound_local = now_bound;
+                std::printf("Even presents: %s (GPU own time median %.2f ms of %.2f, %u of %u frames late by the "
+                            "holds)\n",
+                            now_bound ? "GPU-bound: paced frames not held" : "the GPU fits again: paced frames held",
+                            double(median) / 1e6, double(period) / 1e6, costly, n);
+                if (now_bound) {
+                    std::printf("Even presents: GPU-bound for %.0f s at least\n", double(bound_stay) / 1e9);
+                }
+                std::fflush(stdout);
             }
         }
     }
@@ -1087,11 +1146,12 @@ void Print(u64 current) {
         if (Pace::gpu_release.load(std::memory_order_relaxed) && at < sizeof(line)) {
             const u64 r = Pace::release_n.exchange(0);
             at += std::snprintf(line + at, sizeof(line) - at,
-                                " | GPU hold: %llu, hold %.2f, own delay %.2f, GPU own %.2f%s (%llu changes), off target %.3f (max %.3f, %llu over 0.2)",
+                                " | GPU hold: %llu, hold %.2f, own delay %.2f, GPU own %.2f, late by holds %.1f%%%s (%llu changes), off target %.3f (max %.3f, %llu over 0.2)",
                                 static_cast<unsigned long long>(r),
                                 double(Pace::release_hold_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, r)),
                                 double(Pace::own_delay_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, r)),
                                 double(Pace::gpu_own_median.load()) / 1e6,
+                                double(Pace::hold_cost_permille.load()) / 10.0,
                                 Pace::gpu_bound.load() ? " GPU-BOUND: not held" : "",
                                 static_cast<unsigned long long>(Pace::gpu_bound_changes.exchange(0)),
                                 double(Pace::release_err_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, h)),
@@ -1167,7 +1227,10 @@ void SetGpuHolds(int mode) {
     Pace::gpu_release.store(mode >= 1, std::memory_order_relaxed);
     Pace::release_queue.store(mode == 2, std::memory_order_relaxed);
     std::printf("Even presents: paced frames held %s\n",
-                mode == 2 ? "on the release queue" : mode == 1 ? "on the GPU in the game's queue" : "on the presenter thread");
+                mode == 3   ? "in the game's queue, the GPU idle until our thread releases them (host-timed)"
+                : mode == 2 ? "on the release queue"
+                : mode == 1 ? "on the GPU in the game's queue"
+                            : "on the presenter thread");
 }
 
 bool GpuRelease() {
