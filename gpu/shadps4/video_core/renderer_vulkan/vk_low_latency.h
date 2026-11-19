@@ -100,7 +100,8 @@ void GateYieldEnd();
 bool EvenPresents();
 /// How the presenter holds paced frames (vk_present_release.h): 0 on its thread, 1 on the GPU in the
 /// game's queue, 2 on the release queue, 3 in the game's queue with the GPU idle until our thread
-/// releases them (host-timed; the gate and the GPU-bound check as for 1).
+/// releases them (host-timed; the gate and the GPU-bound check as for 1), 4 as 1 but submitted
+/// just before the target (short spin; the gate holds the next frame's work until then).
 void SetGpuHolds(int mode);
 /// Reflex: the release queue presents beside the game's queue (out of band, not its frames' work).
 void MarkOutOfBandPresentQueue(vk::Queue queue);

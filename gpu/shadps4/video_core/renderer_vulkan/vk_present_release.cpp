@@ -10,6 +10,7 @@
 #include <string>
 #include <thread>
 
+#include "core/libraries/videoout/driver.h"
 #include "video_core/host_shaders/present_release_comp.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_low_latency.h"
@@ -66,6 +67,23 @@ s64 HostSpinMaxNs() {
     return ns;
 }
 
+/// Mode 4: W, how long before the target the present work is submitted (the GPU spins about
+/// that long): BB_EVEN_SPIN_MIN_US / BB_EVEN_SPIN_MAX_US (default 150 / 600); equal: fixed.
+s64 SpinWMinNs() {
+    static const s64 ns = [] {
+        const char* env = std::getenv("BB_EVEN_SPIN_MIN_US");
+        return s64(std::clamp<long>(env && env[0] ? std::atol(env) : 150, 0, 5000)) * 1000;
+    }();
+    return ns;
+}
+s64 SpinWMaxNs() {
+    static const s64 ns = [] {
+        const char* env = std::getenv("BB_EVEN_SPIN_MAX_US");
+        return std::max<s64>(SpinWMinNs(), s64(std::clamp<long>(env && env[0] ? std::atol(env) : 600, 0, 5000)) * 1000);
+    }();
+    return ns;
+}
+
 /// BB_EVEN_HOST_LEAD=0: signal at the target itself; default: earlier by the GPU's usual wake-up
 /// after our signal (the median of the last 64, 0-500 us), so that the GPU goes on at the target.
 bool HostLead() {
@@ -105,6 +123,7 @@ s64 Quantile(std::vector<float>& v, double q) {
 
 PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} {
     host_timed = Mode() == 3;
+    short_spin = Mode() == 4;
     if (host_timed ? !instance.IsHostReleaseSupported() : !instance.IsPresentReleaseSupported()) {
         std::puts(host_timed ? "Even presents: the host-timed hold needs 64-bit timestamps and calibrated timestamps; "
                                "not available"
@@ -256,6 +275,24 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
         }
         return;
     }
+    if (short_spin) {
+#ifdef _WIN32
+        // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION (Windows 10 1803 on)
+        ss.timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002, TIMER_ALL_ACCESS);
+        ss.high_resolution = ss.timer != nullptr;
+        if (!ss.timer) {
+            ss.timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+        }
+#endif
+        ss.w_ns = std::clamp<s64>(400'000, SpinWMinNs(), SpinWMaxNs());
+        std::printf("Even presents: short-spin holds: each paced frame's present work is submitted %lld us before "
+                    "its target (learnt, %lld-%lld us) and the GPU spins only that last part (%s timer; timestamp "
+                    "%.3f ns, steady - QPC %lld ns)%s\n",
+                    static_cast<long long>(ss.w_ns / 1000), static_cast<long long>(SpinWMinNs() / 1000),
+                    static_cast<long long>(SpinWMaxNs() / 1000), ss.high_resolution ? "high-resolution" : "standard",
+                    tick_ns, static_cast<long long>(steady_minus_qpc), made ? "" : "; calibration FAILED");
+        return;
+    }
     std::printf("Even presents: the GPU holds each paced frame's present work to its target "
                 "(timestamp %.3f ns, steady - QPC %lld ns)%s\n",
                 tick_ns, static_cast<long long>(steady_minus_qpc), made ? "" : "; calibration FAILED");
@@ -264,7 +301,7 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
 int PresentRelease::Mode() {
     static const int mode = [] {
         const char* env = std::getenv("BB_EVEN_RELEASE");
-        return env && env[0] >= '0' && env[0] <= '3' ? env[0] - '0' : 1;
+        return env && env[0] >= '0' && env[0] <= '4' ? env[0] - '0' : 1;
     }();
     return LowLatency::EvenPresents() ? mode : 0;
 }
@@ -278,6 +315,11 @@ bool PresentRelease::Wanted(const Instance& instance) {
 }
 
 PresentRelease::~PresentRelease() {
+#ifdef _WIN32
+    if (ss.timer) {
+        CloseHandle(ss.timer);
+    }
+#endif
     if (host_timed) {
         {
             std::scoped_lock lk{g_host_release_mutex};
@@ -445,9 +487,9 @@ void PresentRelease::Spin(vk::CommandBuffer cmdbuf, u32 index, s64 until_ns, s64
     cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, index * 3 + 2);
 }
 
-void PresentRelease::RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns, s64 limit_ns) {
+u32 PresentRelease::RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns, s64 limit_ns) {
     if (Part("skip")) {
-        return;
+        return Slots;
     }
     if (!Part("cal1s") || SteadyNs() - cal_ns > 1'000'000'000) {
         Calibrate();
@@ -464,6 +506,135 @@ void PresentRelease::RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 unti
     cmdbuf.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, *pool, index * 3);
     Spin(cmdbuf, index, until_ns, limit_ns);
     slots[index] = {.pending = true, .flip_arg = flip_arg, .until_ns = until_ns};
+    ss.intended[index] = ss.submitted[index] = 0;
+    return index;
+}
+
+void PresentRelease::SubmitWait(u32 slot, s64 until_ns, const std::function<bool()>& frame_done) {
+    if (slot >= Slots) {
+        return;
+    }
+    const s64 w = ss.w_ns;
+    const s64 at = std::min(until_ns - w, SteadyNs() + 100'000'000);
+    s64 now = SteadyNs();
+    s64 oversleep = -1;
+    const s64 wake = at - ss.spin_window_ns;
+    if (wake - now > 50'000) {
+#ifdef _WIN32
+        LARGE_INTEGER due;
+        due.QuadPart = -std::max<s64>(1, (wake - now) / 100); // relative, 100 ns units
+        if (ss.timer && SetWaitableTimer(ss.timer, &due, 0, nullptr, nullptr, FALSE)) {
+            WaitForSingleObject(ss.timer, 200);
+        } else {
+            Sleep(DWORD(std::max<s64>(0, (wake - now) / 1'000'000)));
+        }
+#else
+        std::this_thread::sleep_until(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(wake)));
+#endif
+        now = SteadyNs();
+        oversleep = std::max<s64>(0, now - wake);
+        ss.wakes[ss.wake_count++ % ss.wakes.size()] = now - wake;
+        if ((ss.wake_count & 15) == 0 && ss.wake_count >= 32) {
+            // the CPU spin window: the timer's 95th percentile miss over the last 64 wakes plus
+            // 50 us, 100 us to BB_EVEN_HOST_SPIN_US
+            const u32 n = std::min<u32>(ss.wake_count, u32(ss.wakes.size()));
+            std::array<s64, 64> copy = ss.wakes;
+            std::nth_element(copy.begin(), copy.begin() + n * 95 / 100, copy.begin() + n);
+            ss.spin_window_ns = std::clamp<s64>(copy[n * 95 / 100] + 50'000, 100'000, HostSpinMaxNs());
+        }
+    }
+    const s64 spin_start = SteadyNs();
+    while ((now = SteadyNs()) < at) {
+#if defined(_M_X64) || defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#endif
+    }
+    ss.intended[slot] = at;
+    ss.submitted[slot] = now;
+    ss.cpu_spin[slot] = now - spin_start;
+    ss.oversleep[slot] = oversleep;
+    ss.w_used[slot] = w;
+    ss.frame_done[slot] = frame_done();
+}
+
+void PresentRelease::ShortSpinStats(u32 index, s64 ready_ns, s64 entry_ns, s64 exit_ns) {
+    ShortSpinState& s = ss;
+    const Slot& slot = slots[index];
+    const s64 target = slot.until_ns;
+    const s64 now = SteadyNs();
+    if (s.window == 0) {
+        s.window = now;
+    }
+    (void)ready_ns;
+    if (!target || !s.submitted[index]) {
+        ++s.unheld; // not held (RecordLate), or held without SubmitWait
+    } else if (!s.frame_done[index] && entry_ns + 20'000 >= target) {
+        ++s.late_frames; // the frame itself was not done by its target: the GPU went on when it was
+    } else {
+        s.gpu_err.push_back(float(exit_ns - target) / 1e3f);
+        s.gpu_spin.push_back(float(std::max<s64>(0, exit_ns - entry_ns)) / 1e3f);
+        s.cpu.push_back(float(s.cpu_spin[index]) / 1e3f);
+        s.w.push_back(float(s.w_used[index]) / 1e3f);
+        if (s.oversleep[index] >= 0) {
+            s.sleep_err.push_back(float(s.oversleep[index]) / 1e3f);
+        }
+        if (exit_ns - target > 200'000) {
+            ++s.late_releases;
+        }
+        if (entry_ns > target) {
+            ++s.late_starts; // W was too short: the GPU started after the target
+        }
+        if (s.frame_done[index]) {
+            // the GPU's start after the moment we meant to submit (the timer's and the spin's own
+            // lateness, the submission, the GPU picking it up): W is its 95th percentile + 50 us
+            const s64 start = entry_ns - s.intended[index];
+            s.start_late.push_back(float(start) / 1e3f);
+            s.starts[s.start_count++ % s.starts.size()] = start;
+            if ((s.start_count & 15) == 0 && s.start_count >= 32) {
+                const u32 n = std::min<u32>(s.start_count, u32(s.starts.size()));
+                std::array<s64, 64> copy = s.starts;
+                std::nth_element(copy.begin(), copy.begin() + n * 95 / 100, copy.begin() + n);
+                s.w_ns = std::clamp<s64>(copy[n * 95 / 100] + 50'000, SpinWMinNs(), SpinWMaxNs());
+            }
+        }
+    }
+    if (now - s.window < 5'000'000'000) {
+        return;
+    }
+    const size_t n = s.gpu_err.size();
+    double spin_sum = 0, cpu_sum = 0, cpu_max = 0;
+    for (const float x : s.gpu_spin) {
+        spin_sum += x;
+    }
+    for (const float x : s.cpu) {
+        cpu_sum += x;
+        cpu_max = std::max<double>(cpu_max, x);
+    }
+    const double seconds = double(now - s.window) / 1e9;
+    const double period_us = double(std::max<s64>(Libraries::VideoOut::FrameCapPeriodNs(), 1)) / 1e3;
+    const auto q = [](std::vector<float>& v, double at) { return static_cast<long long>(Quantile(v, at)); };
+    const double gpu_spin_avg = n ? spin_sum / double(n) : 0.0;
+    std::printf("Even presents (short spin), %.1f s: %zu held, %llu frames late (not done by the target), %llu not "
+                "held | GPU release vs target, us: median %lld p99 %lld max %lld (%llu over 200, %llu started after "
+                "the target) | W %lld us now (median %lld), GPU start after our submit time median %lld p99 %lld | "
+                "GPU spin per frame avg %.0f us (%.1f%% of the frame time) | timer miss median %lld p99 %lld (%s), "
+                "CPU spin avg %.0f max %.0f us (%.2f%% of a core)\n",
+                seconds, n, static_cast<unsigned long long>(s.late_frames),
+                static_cast<unsigned long long>(s.unheld), q(s.gpu_err, 0.5), q(s.gpu_err, 0.99), q(s.gpu_err, 1.0),
+                static_cast<unsigned long long>(s.late_releases), static_cast<unsigned long long>(s.late_starts),
+                static_cast<long long>(s.w_ns / 1000), q(s.w, 0.5), q(s.start_late, 0.5), q(s.start_late, 0.99),
+                gpu_spin_avg, period_us > 1 ? 100.0 * gpu_spin_avg / period_us : 0.0, q(s.sleep_err, 0.5),
+                q(s.sleep_err, 0.99), s.high_resolution ? "high-resolution" : "standard",
+                n ? cpu_sum / double(n) : 0.0, cpu_max, cpu_sum / 1e4 / seconds);
+    std::fflush(stdout);
+    s.gpu_err.clear();
+    s.gpu_spin.clear();
+    s.sleep_err.clear();
+    s.cpu.clear();
+    s.start_late.clear();
+    s.w.clear();
+    s.late_frames = s.late_releases = s.late_starts = s.unheld = 0;
+    s.window = now;
 }
 
 void PresentRelease::RecordLate(vk::CommandBuffer cmdbuf, s64 flip_arg) {
@@ -886,6 +1057,8 @@ void PresentRelease::Poll(const std::function<void(s64, s64, s64)>& done) {
         const u64 ready = data[0], entry = data[2], exit = data[4];
         if (host_timed) {
             HostStats(oldest, TicksToNs(ready), TicksToNs(exit));
+        } else if (short_spin) {
+            ShortSpinStats(oldest, TicksToNs(ready), TicksToNs(entry), TicksToNs(exit));
         }
         slot.pending = false;
         oldest = (oldest + 1) % Slots;

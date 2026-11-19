@@ -64,8 +64,9 @@ public:
     /// (RecordHold; the flips land within ~0.2 ms), 2 on the release queue (a compute queue beside
     /// it; allows slack, but its presents flip ~1 ms loose on NVIDIA, 11-18), 3 in the game's own
     /// queue as 1 but host-timed (the GPU waits idle for a semaphore our thread signals at the
-    /// target: RecordHostReady, QueueRelease, RecordHostRelease), 0 on the presenter thread (the
-    /// CPU hold, as before). Even presents off: 0.
+    /// target: RecordHostReady, QueueRelease, RecordHostRelease), 4 in the game's own queue as 1 but
+    /// submitted only W before the target (the short spin: ShortSpin, SubmitWait), 0 on the
+    /// presenter thread (the CPU hold, as before). Even presents off: 0.
     static int Mode();
     /// The device has what this mode's holds need (1/2: the device clock and calibrated
     /// timestamps; 3: calibrated timestamps).
@@ -74,6 +75,17 @@ public:
     bool HostTimed() const {
         return host_timed && made;
     }
+    /// Mode 4 and made: the short-spin hybrid. The present work is recorded as for mode 1 (the
+    /// spin to the target, the blit), but submitted only at the target less W (SubmitWait, on the
+    /// presenter thread: a high-resolution timer, then a short CPU spin), so the GPU spins for
+    /// about W instead of the whole wait. W follows the GPU's start after our submission.
+    bool ShortSpin() const {
+        return short_spin && made;
+    }
+    /// Mode 4, right before the present submission of `slot` (RecordHold), held to `until_ns`:
+    /// waits until until_ns - W (100 ms at most), then `frame_done` says whether the frame's own
+    /// GPU work was done by then (the submission's start is then ours, a sample for W).
+    void SubmitWait(u32 slot, s64 until_ns, const std::function<bool()>& frame_done);
     /// Mode 2 and the device has a present-capable compute queue.
     static bool Wanted(const Instance& instance);
 
@@ -81,7 +93,8 @@ public:
     /// for all earlier work there, notes the time (the frame's ready time), holds until `until_ns`
     /// (steady clock) but `limit_ns` at most, notes the time again (its release). Later work waits
     /// for the hold too (RecordFence after the blit): the blit runs on an idle GPU at the target.
-    void RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns, s64 limit_ns);
+    /// Returns the slot (Slots: none, BB_HOLD_PART=skip).
+    u32 RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns, s64 limit_ns);
     /// Instead of RecordHold for a paced frame whose target has passed when its present work is
     /// recorded (a hold would end at once): only its ready time, no barrier, dispatch or fence, so
     /// a frame that is not early costs nothing.
@@ -195,6 +208,28 @@ private:
         s64 call_ns_sum = 0, call_ns_max = 0;
     } cal_stats;
     void NoteCalibration(u64 deviation, s64 call_ns);
+
+    // Mode 4: the short-spin hybrid (presenter thread).
+    bool short_spin = false;
+    void ShortSpinStats(u32 index, s64 ready_ns, s64 entry_ns, s64 exit_ns);
+    struct ShortSpinState {
+        void* timer = nullptr; ///< Windows: a high-resolution waitable timer
+        bool high_resolution = false;
+        s64 w_ns = 400'000;           ///< W: the submission this long before the target
+        s64 spin_window_ns = 250'000; ///< the CPU spin after the timer
+        std::array<s64, 64> wakes{};  ///< the timer's misses
+        u32 wake_count = 0;
+        std::array<s64, 64> starts{}; ///< GPU start - our intended submission (frames done by then)
+        u32 start_count = 0;
+        // per slot (SubmitWait -> Poll)
+        std::array<s64, Slots> intended{}, submitted{}, cpu_spin{}, oversleep{};
+        std::array<bool, Slots> frame_done{};
+        std::array<s64, Slots> w_used{};
+        // the 5 s stats (us)
+        std::vector<float> gpu_err, gpu_spin, sleep_err, cpu, start_late, w;
+        u64 late_frames = 0, late_releases = 0, late_starts = 0, unheld = 0;
+        s64 window = 0;
+    } ss;
 
     // Mode 3: the host-timed holds (vk_present_release.cpp HostThread).
     bool host_timed = false;

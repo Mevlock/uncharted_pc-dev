@@ -586,11 +586,17 @@ bool GateNeeded(u64 tick) {
     return GateFor(tick) != nullptr;
 }
 
-void NoteFirstSubmit(u64 tick) {
+/// Short-spin holds (mode 4): the present work is submitted only just before its target, so the
+/// gate holds the next frame's first draw submission much longer than with mode 1; its "could
+/// start" time (own delay, GpuTimes) is then when it came to the gate, not when the gate let it go
+/// (else the gate's wait stayed in the offset's samples and fed the offset, as m1_gate).
+std::atomic<bool> short_spin{false};
+
+void NoteFirstSubmit(u64 tick, s64 at = 0) {
     u64 id = first_pending_id.load(std::memory_order_acquire);
     if (id != 0 && tick > first_pending_tick.load(std::memory_order_relaxed) &&
         first_pending_id.compare_exchange_strong(id, 0, std::memory_order_acq_rel)) {
-        first_submit_at[id % Ring].store(Now(), std::memory_order_relaxed);
+        first_submit_at[id % Ring].store(at ? at : Now(), std::memory_order_relaxed);
         first_submit_id[id % Ring].store(id, std::memory_order_release);
     }
 }
@@ -628,7 +634,8 @@ void GateBeforeSubmit(u64 tick, bool recorder) {
         g_async_gated_tick.store(0, std::memory_order_release);
     }
     lk.unlock();
-    NoteFirstSubmit(tick); // submitted now: after the wait
+    // submitted now: after the wait (short spin: when it came, see short_spin)
+    NoteFirstSubmit(tick, short_spin.load(std::memory_order_relaxed) ? start : 0);
     const s64 end = Now();
     gate_waits.fetch_add(1, std::memory_order_relaxed);
     gate_wait_ns.fetch_add(end - start, std::memory_order_relaxed);
@@ -1226,8 +1233,11 @@ void MarkOutOfBandPresentQueue(vk::Queue queue) {
 void SetGpuHolds(int mode) {
     Pace::gpu_release.store(mode >= 1, std::memory_order_relaxed);
     Pace::release_queue.store(mode == 2, std::memory_order_relaxed);
+    Pace::short_spin.store(mode == 4, std::memory_order_relaxed);
     std::printf("Even presents: paced frames held %s\n",
-                mode == 3   ? "in the game's queue, the GPU idle until our thread releases them (host-timed)"
+                mode == 4   ? "in the game's queue, submitted just before the target, the GPU spinning only the "
+                              "last part (short spin)"
+                : mode == 3 ? "in the game's queue, the GPU idle until our thread releases them (host-timed)"
                 : mode == 2 ? "on the release queue"
                 : mode == 1 ? "on the GPU in the game's queue"
                             : "on the presenter thread");

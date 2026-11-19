@@ -237,7 +237,10 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
         (PresentRelease::Mode() >= 1 && PresentRelease::Supported(instance))) {
         release = std::make_unique<PresentRelease>(instance);
         LowLatency::SetGpuHolds(release->Ready()
-                                    ? (swapchain.UsesReleaseQueue() ? 2 : release->HostTimed() ? 3 : 1)
+                                    ? (swapchain.UsesReleaseQueue() ? 2
+                                       : release->HostTimed()       ? 3
+                                       : release->ShortSpin()       ? 4
+                                                                    : 1)
                                     : 0);
     }
 }
@@ -1399,6 +1402,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     // hold commands and nothing after it waits for its blit; only its ready time is taken.
     bool hold_recorded = false;
     u64 host_release = 0; ///< host-timed: the release value the blit's submission waits for
+    u32 spin_slot = ~0u;  ///< short spin: the hold whose submission waits for its time here
     if (held && !via_release) {
         const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
         if (hold_until > now) {
@@ -1417,8 +1421,11 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
                 release->RecordHostRelease(scheduler.CommandBuffer(), slot);
                 hold_recorded = host_release != 0; // 0: released for the exit, not held
             } else {
-                release->RecordHold(scheduler.CommandBuffer(), hold_flip, hold_until, limit);
+                const u32 slot = release->RecordHold(scheduler.CommandBuffer(), hold_flip, hold_until, limit);
                 hold_recorded = true;
+                if (release->ShortSpin()) {
+                    spin_slot = slot; // short spin (BB_EVEN_RELEASE=4): submitted just before the target
+                }
             }
         } else {
             release->RecordLate(scheduler.CommandBuffer(), hold_flip);
@@ -1564,6 +1571,19 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
         info.AddSignal(frame->present_done);
     }
     info.async_up_to = async_up_to;
+    if (spin_slot != ~0u) {
+        // Short spin (BB_EVEN_RELEASE=4): everything is recorded; this submission (the spin to the
+        // target, then the blit) goes to the GPU only W before the target, so the GPU spins for
+        // about W. The next frame's GPU work stays behind it as in mode 1: the gate holds that
+        // frame's first draw submission until GatePostSubmitted below (deadline: target + a period).
+        release->SubmitWait(spin_slot, hold_until, [&] {
+            u64 value = 0;
+            return VULKAN_HPP_DEFAULT_DISPATCHER.vkGetSemaphoreCounterValue(
+                       static_cast<VkDevice>(instance.GetDevice()), static_cast<VkSemaphore>(frame->ready_semaphore),
+                       &value) == VK_SUCCESS &&
+                   value >= frame->ready_tick;
+        });
+    }
     scheduler.Flush(info);
     const u64 present_tick = scheduler.CurrentTick() - 1; // what this submission signals
     if (release && PresentRelease::Probing()) {
