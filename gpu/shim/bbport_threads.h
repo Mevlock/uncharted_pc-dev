@@ -283,17 +283,39 @@ inline void TakeRenderCore(int which) {
             const char* env = std::getenv("BB_RENDER_CORES_STRICT");
             return !(env && env[0] == '1');
         }();
+        // The draw recording thread's core is kept for it alone only when the game's own threads still have enough
+        // cores without it (its job workers, audio and streaming need about 5): measured 2026-11-19 on 0.3.6.59 at
+        // the U3 market, route windows aligned. Ryzen 7 5800X (8 cores): soft alone -6.2%, its core kept +4.2% (lows
+        // +9%). Ryzen 7 9800X3D (8 cores): +7.2% / +6.4%. 4 cores / 8 threads at 60%: soft +6.4%, its core kept
+        // only +1.8% (3 cores left for the game). BB_RENDER_CORES_KEEP=b / =none overrides.
+        static constexpr size_t game_cores = 5;
+        const bool keep_b = [&] {
+            const char* env = std::getenv("BB_RENDER_CORES_KEEP");
+            if (env && env[0] == 'b') {
+                return true;
+            }
+            if (env && env[0] == 'n') {
+                return false;
+            }
+            return cores.size() - 1 >= game_cores;
+        }();
+        if (soft && keep_b) {
+            others.push_back(p.core[0][0]); // the GPU command thread's core stays open to the other threads
+            others.push_back(p.core[0][1]);
+        }
         if (filled[0] != 2 || filled[1] != 2 || filled[2] != 2 ||
-            (!soft && !SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(),
-                                                static_cast<ULONG>(others.size())))) {
+            ((!soft || keep_b) && !SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(),
+                                                            static_cast<ULONG>(others.size())))) {
             std::printf("Render cores: not reserved (CPU sets refused)\n");
             return p;
         }
         p.ok = true;
         if (soft) {
             std::printf("Render cores: the GPU command thread and the draw recording thread%s each select one of "
-                        "the last %d of %zu cores (soft: the other threads may still run there)\n",
-                        wanted == 3 ? " and the Vulkan recording thread" : "", wanted, cores.size());
+                        "the last %d of %zu cores; %s\n",
+                        wanted == 3 ? " and the Vulkan recording thread" : "", wanted, cores.size(),
+                        keep_b ? "the draw recording thread's core is kept for it (enough cores left for the game)"
+                               : "the other threads may still run there");
         } else {
             std::printf("Render cores (strict): the GPU command thread and the draw recording thread%s have the "
                         "last %d of %zu cores to themselves (BB_RENDER_CORES=%d); everything else runs on the "
