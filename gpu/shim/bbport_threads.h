@@ -177,7 +177,7 @@ inline void PreferPerformanceCores() {
     SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &state, sizeof(state));
 }
 
-/// perf15 experiment (BB_RENDER_CORES=1, off by default; Windows, 8 or more physical cores, all with two
+/// perf15 experiment (BB_RENDER_CORES=1, off by default; Windows, 4 or more physical cores, all with two
 /// hardware threads, no affinity limit on the process): the GPU command thread and the draw recording thread
 /// each get a physical core of their own. The process's default CPU sets leave those two cores out, so the
 /// game's threads (its six job workers spin while idle: ~5 cores of load on purpose, for an even camera), the
@@ -225,7 +225,7 @@ inline void TakeRenderCore(int which) {
         // Every core must have exactly two hardware threads, and the process must be allowed on all.
         DWORD_PTR mask = 0, system_mask = 0;
         // Test only (BB_RENDER_CORES_TEST=1): under an affinity limit the cores inside it are used, as
-        // if the CPU had only those (a 6-core CPU on an 8-core one); BB_RENDER_CORES_MIN=<cores> (8).
+        // if the CPU had only those (a 6-core CPU on an 8-core one); BB_RENDER_CORES_MIN=<cores> (4).
         static const bool test = [] {
             const char* env = std::getenv("BB_RENDER_CORES_TEST");
             return env && env[0] == '1';
@@ -239,7 +239,9 @@ inline void TakeRenderCore(int which) {
             std::erase_if(cpus, [mask](const Cpu& c) { return c.slot >= 64 || !(mask >> c.slot & 1); });
         }
         const char* min_env = std::getenv("BB_RENDER_CORES_MIN");
-        const size_t min_cores = test && min_env ? std::strtoul(min_env, nullptr, 10) : 8;
+        // 2026-11-19: 4 physical cores are enough (a 4-core / 8-thread CPU at 60% clock: +6.7% mean, +13.5% lowest
+        // window at the U3 market with the two render threads on the last 2 cores); BB_RENDER_CORES_MIN=<cores> overrides.
+        const size_t min_cores = min_env ? std::strtoul(min_env, nullptr, 10) : 4;
         std::vector<unsigned> cores;
         for (const auto& c : cpus) {
             if (std::find(cores.begin(), cores.end(), c.core) == cores.end()) {
