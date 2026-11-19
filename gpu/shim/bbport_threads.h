@@ -177,7 +177,7 @@ inline void PreferPerformanceCores() {
     SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &state, sizeof(state));
 }
 
-/// perf15 experiment (BB_RENDER_CORES=1, off by default; Windows, 4 or more physical cores, all with two
+/// Render cores (on by default, BB_RENDER_CORES=0 off; Windows, 4 or more physical cores, all with two
 /// hardware threads, no affinity limit on the process): the GPU command thread and the draw recording thread
 /// each get a physical core of their own. The process's default CPU sets leave those two cores out, so the
 /// game's threads (its six job workers spin while idle: ~5 cores of load on purpose, for an even camera), the
@@ -188,8 +188,14 @@ inline void PreferPerformanceCores() {
 /// (BB_RENDER_CORES=2 only: three cores reserved).
 inline void TakeRenderCore(int which) {
     static const int wanted = [] {
+        // On by default (2026-11-19: a 4-core / 8-thread CPU +12% at the U3 market, +10% at the horse ride; an 8-core
+        // +8%; no worse frame times). BB_RENDER_CORES=0 (the launcher's "Reserve CPU cores for rendering" off): off;
+        // =2: the Vulkan recording thread gets a third core (test).
         const char* env = std::getenv("BB_RENDER_CORES");
-        return env && (env[0] == '1' || env[0] == '2') ? env[0] - '0' + 1 : 0; // cores to reserve
+        if (env && env[0] == '0') {
+            return 0;
+        }
+        return env && env[0] == '2' ? 3 : 2; // cores to reserve
     }();
     if (which < 0 || which >= wanted) {
         return;
@@ -270,11 +276,12 @@ inline void TakeRenderCore(int which) {
                 others.push_back(c.id);
             }
         }
-        // BB_RENDER_CORES_SOFT=1 (2026-11-19 experiment): the render threads still select their cores, but the
-        // other threads are not kept off them (a 4-core CPU left the game's threads only 2 cores: more 25+ ms frames).
+        // Soft (the default): the render threads select their cores, but the other threads are not kept off them.
+        // BB_RENDER_CORES_STRICT=1 (testing only) keeps everything else off those cores, the perf15 form: on a 4-core
+        // CPU that left the game's own threads 2 cores and gave more 25+ ms frames (worst 28-37 ms vs 17-21).
         static const bool soft = [] {
-            const char* env = std::getenv("BB_RENDER_CORES_SOFT");
-            return env && env[0] == '1';
+            const char* env = std::getenv("BB_RENDER_CORES_STRICT");
+            return !(env && env[0] == '1');
         }();
         if (filled[0] != 2 || filled[1] != 2 || filled[2] != 2 ||
             (!soft && !SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(),

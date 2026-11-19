@@ -247,7 +247,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'portable': False, 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
+                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'reserve_render_cores': True, 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
@@ -967,6 +967,8 @@ def game_environment(s, start=None):
     job_threads = str(s.get('job_threads') or 'auto')
     if job_threads != 'auto':
         env['BB_JOB_SLEEP'] = '0' if job_threads == 'spin' else '1'
+    if not s.get('reserve_render_cores', True):
+        env['BB_RENDER_CORES'] = '0'
     env['BB_ANISO'] = str(s.get('anisotropy') or '0')
     if s.get('full_res_textures', False):
         env['BB_FULL_RES_TEXTURES'] = '1'
@@ -1970,6 +1972,10 @@ class Launcher:
         self.row(f, _('Idle game threads'), self.choice(f, 'job_threads', JOB_THREADS, 34),
                  _('Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them '
                    '(best for 4-8 thread CPUs) and is just as smooth.'))
+        self.check(f, 'reserve_render_cores', _('Reserve CPU cores for rendering'),
+                   _('Gives the two threads that prepare each frame for the graphics card a CPU core each '
+                     '(CPUs with 4 or more cores and two threads per core). Faster, most of all on 4-core '
+                     'CPUs; turn it off only if another program needs those cores.'))
         self.section(f, _('Resolution'))
         self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
                  _('The window\'s size in windowed mode. With Render resolution at 1920 × 1080, a larger '
