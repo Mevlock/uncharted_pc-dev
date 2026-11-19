@@ -40,7 +40,8 @@ const bool log_raw = [] {
     const char* env = std::getenv("BB_VRR_LOG");
     return env && env[0] == '1';
 }();
-/// BB_VRR_INDICATOR=1: the indicator on whatever the option says (test runs).
+/// BB_VRR_INDICATOR=1: the indicator starts on whatever bbport.ini says (test runs); the in-game
+/// menu can still turn it off (and on) live.
 const bool indicator_forced = [] {
     const char* env = std::getenv("BB_VRR_INDICATOR");
     return env && env[0] == '1';
@@ -1046,11 +1047,14 @@ void* PrepareDevice(vk::PhysicalDevice physical, const std::vector<std::string>&
     if (!enabled) {
         return nullptr;
     }
+    if (indicator_forced) {
+        BbSettings::Get().show_vrr = true; // the starting value only: the menu's checkbox follows it
+    }
     vendor = physical.getProperties().vendorID;
     label = vendor == 0x10de ? "G-SYNC" : vendor == 0x1002 ? "FreeSync" : "VRR";
     // The indicator is an option (off by default): without it (and without BB_VRR_LOG=1) at start
     // the present timing extensions are not enabled. NVAPI and ADLX start only when shown.
-    if (!BbSettings::Get().show_vrr && !indicator_forced && !log_raw) {
+    if (!BbSettings::Get().show_vrr && !log_raw) {
         return nullptr;
     }
     // NVIDIA reads NVAPI; the timing source there only on request (BB_VRR_TIMING=1), and never
@@ -1184,7 +1188,7 @@ const void* PresentNext(const void* next) {
 
 Shown Get(float fps) {
     // The option off: nothing started or queried (BB_VRR_LOG=1 runs the source for the log only).
-    const bool option = indicator_forced || BbSettings::Get().show_vrr.load(std::memory_order_relaxed);
+    const bool option = BbSettings::Get().show_vrr.load(std::memory_order_relaxed); // live (the menu)
     if (!enabled || (!option && !log_raw)) {
         return {};
     }

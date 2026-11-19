@@ -20,7 +20,7 @@
 // A change shows after it held for half a second; each change is logged ("VRR: on -> off (...)").
 // An option, off by default (bbport.ini show_vrr, the launcher and the in-game menu): off, no
 // source is started or queried (BB_VRR_LOG=1 runs it for the log, the indicator stays hidden;
-// BB_VRR_INDICATOR=1 turns it on whatever the option says).
+// BB_VRR_INDICATOR=1 starts it on whatever bbport.ini says; the in-game menu still switches it).
 // BB_VRR=0: no indicator, nothing queried. BB_VRR_LOG=1: the raw sample in the log at each change and every 5 s.
 #pragma once
 
