@@ -32,6 +32,16 @@ jobs:
         with:
           submodules: recursive
 
+      # The FSR-Vulkan patches are LF (.gitattributes) and git apply needs the submodule's files LF too: the
+      # Windows runner's core.autocrlf=true checked them out CRLF ("patch does not apply"). Only that submodule.
+      - name: FSR-Vulkan submodule with LF line endings
+        shell: bash
+        run: |
+          git -C gpu/third_party/fsr-vulkan config core.longpaths true
+          git -C gpu/third_party/fsr-vulkan config core.autocrlf false
+          git -C gpu/third_party/fsr-vulkan rm --cached -r -q .
+          git -C gpu/third_party/fsr-vulkan reset --hard -q
+
       # The runner's own MSYS2 in C:\msys64, where msys2-env.sh and build_dlss.sh look.
       - uses: msys2/setup-msys2@v2
         with:
