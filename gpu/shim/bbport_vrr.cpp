@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // bbport: the FPS counter's live VRR indicator (bbport_vrr.h).
 #include "bbport_vrr.h"
+#include "bbport_settings.h"
 
 #include <algorithm>
 #include <atomic>
@@ -37,6 +38,11 @@ const bool enabled = [] {
 }();
 const bool log_raw = [] {
     const char* env = std::getenv("BB_VRR_LOG");
+    return env && env[0] == '1';
+}();
+/// BB_VRR_INDICATOR=1: the indicator on whatever the option says (test runs).
+const bool indicator_forced = [] {
+    const char* env = std::getenv("BB_VRR_INDICATOR");
     return env && env[0] == '1';
 }();
 const bool timing_forced = [] {
@@ -1042,6 +1048,11 @@ void* PrepareDevice(vk::PhysicalDevice physical, const std::vector<std::string>&
     }
     vendor = physical.getProperties().vendorID;
     label = vendor == 0x10de ? "G-SYNC" : vendor == 0x1002 ? "FreeSync" : "VRR";
+    // The indicator is an option (off by default): without it (and without BB_VRR_LOG=1) at start
+    // the present timing extensions are not enabled. NVAPI and ADLX start only when shown.
+    if (!BbSettings::Get().show_vrr && !indicator_forced && !log_raw) {
+        return nullptr;
+    }
     // NVIDIA reads NVAPI; the timing source there only on request (BB_VRR_TIMING=1), and never
     // beside low latency mode's present ids.
     if ((vendor == 0x10de && !timing_forced) || reflex_present_id) {
@@ -1172,7 +1183,9 @@ const void* PresentNext(const void* next) {
 }
 
 Shown Get(float fps) {
-    if (!enabled) {
+    // The option off: nothing started or queried (BB_VRR_LOG=1 runs the source for the log only).
+    const bool option = indicator_forced || BbSettings::Get().show_vrr.load(std::memory_order_relaxed);
+    if (!enabled || (!option && !log_raw)) {
         return {};
     }
     screen_fps.store(fps, std::memory_order_relaxed);
@@ -1181,7 +1194,7 @@ Shown Get(float fps) {
         std::thread(PollThread).detach();
     }
     std::scoped_lock lk{shown_mutex};
-    if (!label || !shown_known) {
+    if (!option || !label || !shown_known) {
         return {};
     }
     Shown out{label, shown_active};

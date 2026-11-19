@@ -1324,6 +1324,7 @@ void Menu() {
     Checkbox(TI("FPS counter in the corner"), s.show_fps);
     ImGui::BeginDisabled(!s.show_fps);
     Checkbox(TI("Frame time graph"), s.show_fps_graph);
+    Checkbox(TI("G-SYNC / FreeSync indicator"), s.show_vrr);
     ImGui::EndDisabled();
     Hint(T("Top line, the game's own frames: FPS and frame time, 1%L the average of the slowest "
            "1% (stutter), MAX the slowest frame (last 5 seconds). Below: the anti-aliasing, the "
