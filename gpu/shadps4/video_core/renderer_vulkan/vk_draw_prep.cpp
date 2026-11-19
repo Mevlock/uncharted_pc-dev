@@ -18,7 +18,6 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
-#include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include <xxhash.h>
 
@@ -891,9 +890,7 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     prep_worker.stages.clear();
                     prep_worker.failed = false;
                     sel.draw_indirect_params = {};
-                    if (pipeline_cache.PrepareGraphicsPipeline(sel)) {
-                        pipeline_cache.BuildMotionTwin(sel);
-                    }
+                    pipeline_cache.PrepareGraphicsPipeline(sel);
                 }
                 ++ordinal;
                 return;
@@ -928,11 +925,6 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     }
                     draw.vertex.valid = false;
                     const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
-                    draw.motion_geometry = 0;
-                    draw.motion_records = 0;
-                    if (vs && sel.graphics_key.motion_vectors && Shader::MotionVectors::characters) {
-                        draw.motion_geometry = MotionDrawIdentity(*vs, draw.motion_records);
-                    }
                     if (vs && sel.fetch_shader) {
                         PrepareVertexInputs(*vs, *sel.fetch_shader, *regs, draw.vertex, arena);
                     }
@@ -940,9 +932,6 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     draw.direct_reads = arena.AppendArray(direct_reads.data(), direct_reads.size());
                     draw.num_direct_reads = static_cast<u32>(direct_reads.size());
                     draw.state.store(PreparedDraw::Ready, std::memory_order_release);
-                    // bbport (object motion twins): the draw went out with its ordinary pipeline; its twin is built
-                    // now, for the draws to come (a no-op when it was there).
-                    pipeline_cache.BuildMotionTwin(sel);
                 } else {
                     t_direct_reads = nullptr;
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);

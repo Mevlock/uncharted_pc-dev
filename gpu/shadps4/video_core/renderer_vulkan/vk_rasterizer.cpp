@@ -723,16 +723,6 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         // The driver, for the game-side patches (projection jitter itself is on with every GPU).
         runtime_gpu_nvidia = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ? 1 : 0;
     }
-    // bbport (from BilalReloaded's Uncharted port, #84): the object motion vectors (characters, vehicles, the level:
-    // vk_camera_motion.cpp) with Uncharted's velocity-pass camera: on by default, BB_CHARACTER_MOTION=0: off. Fixed
-    // before the warm-up, which prepares the G-buffer pipelines' motion twins.
-    {
-        const char* upscaler = std::getenv("BB_UPSCALER");
-        const char* velocity = std::getenv("BB_VELOCITY_PS");
-        const char* characters = std::getenv("BB_CHARACTER_MOTION");
-        Shader::MotionVectors::characters = !(upscaler && std::strcmp(upscaler, "none") == 0) && velocity &&
-                                            *velocity && !(characters && characters[0] == '0');
-    }
     // bbport: from here the stored pipelines load on background threads (the motion shaders
     // among them need the buffer addresses fixed just above).
     pipeline_cache.StartWarmUp();
@@ -5154,18 +5144,25 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // index list is not scanned (the cached scan cost ~70 ns a draw on the GPU thread, its page
     // checks more). Constant buffers (stride 16) and raw buffers (stride 0) are not streams.
     u32 stream_records = 0;
-    const u64 motion_tsc = motion_draw && BbStats::enabled ? __rdtsc() : 0;
     if (motion_draw && Shader::MotionVectors::characters && !motion_geometry) {
-        // (The draw-preparation worker's when the draw was prepared: the same sharps.)
-        if (draw_prepared && draw_prepared->motion_geometry) {
-            motion_geometry = draw_prepared->motion_geometry;
-            stream_records = draw_prepared->motion_records;
-        } else {
-            motion_geometry =
-                MotionDrawIdentity(pipeline->GetStage(Shader::SwStage::Vertex), stream_records);
+        const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
+        u64 hash = 0x6a09e667f3bcc909ULL;
+        u32 records = 0;
+        for (const auto& resource : vs.buffers) {
+            if (resource.IsSpecial()) continue;
+            const auto buffer = resource.GetSharp(vs);
+            if (!buffer.Valid()) continue;
+            // (A multiply-mix, not XXH3: once per buffer of every G-buffer draw.)
+            hash = (hash ^ (u64(buffer.num_records) << 32 | buffer.GetStride())) *
+                   0x9e3779b97f4a7c15ULL;
+            hash ^= hash >> 29;
+            if (buffer.GetStride() != 16 && buffer.GetStride() != 0) {
+                records = std::max<u32>(records, buffer.num_records);
+            }
         }
+        stream_records = records;
+        motion_geometry = hash;
     }
-    const u64 motion_identity_tsc = motion_tsc ? __rdtsc() : 0;
     if (motion_draw && motion_geometry) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         const auto [base_vertex, first_instance] =
@@ -5252,10 +5249,6 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 .vertices = range,
             });
         }
-    }
-    if (motion_tsc) {
-        const u64 end = __rdtsc();
-        object_motion->AddCycles(end - motion_tsc, motion_identity_tsc - motion_tsc);
     }
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).

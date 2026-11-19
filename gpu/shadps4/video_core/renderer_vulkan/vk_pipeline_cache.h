@@ -105,15 +105,6 @@ struct PipelineSelection {
     std::optional<Shader::Gcn::FetchShaderData> fetch_shader{};
     GraphicsPipelineKey graphics_key{};
     bool motion = false;
-    /// bbport (object motion twins): the motion twin's stages are looked up only (GetProgram creates nothing and waits
-    /// for no claim); `twin_missing` is set when one is not there yet. `no_motion`: select the ordinary pipeline.
-    /// `twin_wanted` (set by every selection): the twin of this draw is not ready, its ordinary pipeline was
-    /// selected (a worker builds the twin after the draw is handed over, BuildMotionTwin).
-    bool twin_lookup = false;
-    bool twin_missing = false;
-    bool no_motion = false;
-    bool twin_wanted = false;
-    bool twin_build = false; ///< a worker's BuildMotionTwin: the twin's stages are translated when missing
     bool ui_squeeze = false; ///< bbport: ultrawide UI draw (UiSqueezeDraw)
     /// bbport (BB_GPL): select the split-layout variant: the pre-raster stages declare their resources in descriptor
     /// set 1, numbered from 0 (the fragment stage keeps set 0), so each half can be a pipeline library of its own.
@@ -146,13 +137,6 @@ struct PreparedDraw;
 
 /// bbport (shader variant list): one line of a variant list (vk_pipeline_serialization.cpp).
 struct ListedVariant;
-
-/// bbport (object motion): what a G-buffer pipeline's motion twin adds to its key: the motion vector attachment
-/// (Shader::MotionVectors::Output). The twin's stage hashes are its own (the stages' motion permutations).
-void AddMotionAttachment(GraphicsPipelineKey& key);
-/// bbport (object motion twins, the BB_FRAME_STATS object motion line): draws that went out with the ordinary
-/// pipeline while their twin was not ready (selected on the GPU thread / by a worker), and twins built in play.
-inline std::atomic<u64> g_twin_fallback_gpu{0}, g_twin_fallback_worker{0}, g_twins_built_in_play{0};
 
 /// bbport: held shared while a pipeline is created in a pipeline cache, alone while the driver's cache data is read.
 std::shared_mutex& PipelineCacheUse();
@@ -190,10 +174,6 @@ public:
     bool PrepareGraphicsPipeline(PipelineSelection& sel);
     /// bbport: builds the selected graphics pipeline for a worker when it does not exist yet.
     void EnsureWorkerPipeline(PipelineSelection& sel);
-    /// bbport (object motion twins): worker side, after its draw went out with the ordinary pipeline
-    /// (sel.twin_wanted): translates the twin's stages and builds the twin for the draws to come. The GPU thread
-    /// never translates or builds a twin and never waits for one (it draws the ordinary pipeline meanwhile).
-    void BuildMotionTwin(PipelineSelection& sel);
 
     /// bbport: GPU-thread side: the pipeline for a prepared draw after checking that registers
     /// and flattened user data match; null to take the regular path.

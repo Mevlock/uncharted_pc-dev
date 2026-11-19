@@ -102,12 +102,7 @@ bool PrepDirectCheck();
 struct PreparedDraw {
     enum : u32 { Pending = 0, Ready = 1, Unavailable = 2 };
     std::atomic<u32> state{Pending};
-    /// bbport (object motion): a motion twin's draw identity and longest vertex stream (MotionDrawIdentity; 0: not
-    /// a twin), so the GPU thread does not walk the vertex shader's buffers again. Next to the state and checksum
-    /// the GPU thread reads first: the same cache line (further back it was a miss on another core's line).
-    u32 motion_records{};
     u64 reg_checksum{};
-    u64 motion_geometry{};
     GraphicsPipelineKey key{};
     u32 num_stages{};
     std::array<PreparedStage, MaxShaderStages> stages{};

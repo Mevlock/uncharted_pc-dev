@@ -4,14 +4,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <immintrin.h>
 
 #include <vk_mem_alloc.h>
 #include "bbport_settings.h"
 #include "bbport_toggles.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
-#include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
@@ -111,25 +109,6 @@ void ObjectMotion::OnFrameStart() {
                     (unsigned long long)index_ranges.stats.stale, index_ranges.Size());
         index_ranges.stats = {};
         history.stats = {};
-        // The GPU thread's time on the motion draws' history (the cycle counter's rate from the wall clock).
-        const u64 tsc = __rdtsc();
-        const auto now = std::chrono::steady_clock::now();
-        if (cycles_tsc0 && cycles_draws) {
-            const double ns = std::chrono::duration<double, std::nano>(now - cycles_t0).count();
-            const double ns_per_cycle = ns / double(tsc - cycles_tsc0);
-            std::printf("Object motion: GPU thread %.0f ns a motion draw (identity %.0f ns), %.3f ms a frame\n",
-                        double(cycles_total) * ns_per_cycle / double(cycles_draws),
-                        double(cycles_identity) * ns_per_cycle / double(cycles_draws),
-                        double(cycles_total) * ns_per_cycle / 600.0 / 1e6);
-        }
-        std::printf("Object motion: twins not ready yet: %llu draws (GPU thread), %llu (prepared); %llu twins built "
-                    "in play so far\n",
-                    (unsigned long long)g_twin_fallback_gpu.exchange(0, std::memory_order_relaxed),
-                    (unsigned long long)g_twin_fallback_worker.exchange(0, std::memory_order_relaxed),
-                    (unsigned long long)g_twins_built_in_play.load(std::memory_order_relaxed));
-        cycles_tsc0 = tsc;
-        cycles_t0 = now;
-        cycles_total = cycles_identity = cycles_draws = 0;
     }
     history.NextFrame();
     ++frame;
