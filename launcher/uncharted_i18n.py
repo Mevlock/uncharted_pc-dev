@@ -155,8 +155,6 @@ TRANSLATIONS = {
         'Qué botón del control corresponde a cada botón de PS4 (nombres de Xbox / PlayStation).',
         'You have the latest version ({}).': 'Tienes la versión más reciente ({}).',
         'Your display runs at {} Hz.': 'Tu pantalla funciona a {} Hz.',
-        'Show the G-SYNC / FreeSync indicator': 'Mostrar el indicador de G-SYNC / FreeSync',
-        'Beside the FPS counter: lit while the display\'s variable refresh rate (G-SYNC, FreeSync) follows the game\'s frames, grey ("off") while it does not.': 'Junto al contador de FPS: encendido mientras la frecuencia de actualización variable de la pantalla (G-SYNC, FreeSync) sigue los cuadros del juego, en gris ("off") cuando no.',
         'Your own decrypted dump of the collection (CUSA02343, CUSA02320, …).':
         'Tu propia copia descifrada de la colección (CUSA02343, CUSA02320, …).',
         'by {}': 'por {}', 'see the Log page': 'consulta la página Registro',
@@ -275,8 +273,6 @@ TRANSLATIONS = {
         'Qual botão do controle corresponde a cada botão do PS4 (nomes de Xbox / PlayStation).',
         'You have the latest version ({}).': 'Você tem a versão mais recente ({}).',
         'Your display runs at {} Hz.': 'Sua tela funciona a {} Hz.',
-        'Show the G-SYNC / FreeSync indicator': 'Mostrar o indicador de G-SYNC / FreeSync',
-        'Beside the FPS counter: lit while the display\'s variable refresh rate (G-SYNC, FreeSync) follows the game\'s frames, grey ("off") while it does not.': 'Ao lado do contador de FPS: aceso enquanto a taxa de atualização variável da tela (G-SYNC, FreeSync) acompanha os quadros do jogo, em cinza ("off") quando não.',
         'Your own decrypted dump of the collection (CUSA02343, CUSA02320, …).':
         'Seu próprio dump descriptografado da coleção (CUSA02343, CUSA02320, …).',
         'by {}': 'por {}', 'see the Log page': 'consulte a página Registro',
@@ -395,8 +391,6 @@ TRANSLATIONS = {
         'Bouton de la manette correspondant à chaque bouton PS4 (noms Xbox / PlayStation).',
         'You have the latest version ({}).': 'Vous avez la dernière version ({}).',
         'Your display runs at {} Hz.': 'Votre écran fonctionne à {} Hz.',
-        'Show the G-SYNC / FreeSync indicator': 'Afficher l’indicateur G-SYNC / FreeSync',
-        'Beside the FPS counter: lit while the display\'s variable refresh rate (G-SYNC, FreeSync) follows the game\'s frames, grey ("off") while it does not.': 'À côté du compteur de FPS : allumé tant que la fréquence de rafraîchissement variable de l’écran (G-SYNC, FreeSync) suit les images du jeu, en gris (« off ») sinon.',
         'Your own decrypted dump of the collection (CUSA02343, CUSA02320, …).':
         'Votre propre dump déchiffré de la collection (CUSA02343, CUSA02320, …).',
         'by {}': 'par {}', 'see the Log page': 'consultez la page Journal',

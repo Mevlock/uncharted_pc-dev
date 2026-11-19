@@ -116,8 +116,6 @@ EXTRA_TRANSLATIONS = {
         'Welche Controller-Taste welcher PS4-Taste entspricht (Xbox-/PlayStation-Namen).',
         'Window size': 'Fenstergröße',
         'Your display runs at {} Hz.': 'Dein Bildschirm läuft mit {} Hz.',
-        'Show the G-SYNC / FreeSync indicator': 'G-SYNC-/FreeSync-Anzeige zeigen',
-        'Beside the FPS counter: lit while the display\'s variable refresh rate (G-SYNC, FreeSync) follows the game\'s frames, grey ("off") while it does not.': 'Neben dem FPS-Zähler: leuchtet, solange die variable Bildwiederholrate des Bildschirms (G-SYNC, FreeSync) den Bildern des Spiels folgt, grau („off“), wenn nicht.',
         'Your own decrypted dump of the collection (CUSA02343, CUSA02320, …).':
         'Dein eigener entschlüsselter Dump der Sammlung (CUSA02343, CUSA02320, …).',
         'by {}': 'von {}',
@@ -557,8 +555,6 @@ EXTRA_TRANSLATIONS = {
         'Quale pulsante del controller corrisponde a ogni pulsante PS4 (nomi Xbox/PlayStation).',
         'Window size': 'Dimensioni finestra',
         'Your display runs at {} Hz.': 'Il tuo schermo funziona a {} Hz.',
-        'Show the G-SYNC / FreeSync indicator': "Mostra l'indicatore G-SYNC / FreeSync",
-        'Beside the FPS counter: lit while the display\'s variable refresh rate (G-SYNC, FreeSync) follows the game\'s frames, grey ("off") while it does not.': 'Accanto al contatore FPS: acceso finché la frequenza di aggiornamento variabile dello schermo (G-SYNC, FreeSync) segue i fotogrammi del gioco, grigio ("off") quando no.',
         'Your own decrypted dump of the collection (CUSA02343, CUSA02320, …).':
         'Il tuo dump decrittato della raccolta (CUSA02343, CUSA02320, …).',
         'by {}': 'di {}',
@@ -998,8 +994,6 @@ EXTRA_TRANSLATIONS = {
         '各PS4ボタンに割り当てるコントローラーボタン（Xbox / PlayStation表記）です。',
         'Window size': 'ウィンドウサイズ',
         'Your display runs at {} Hz.': '画面のリフレッシュレートは{} Hzです。',
-        'Show the G-SYNC / FreeSync indicator': 'G-SYNC / FreeSync インジケーターを表示',
-        'Beside the FPS counter: lit while the display\'s variable refresh rate (G-SYNC, FreeSync) follows the game\'s frames, grey ("off") while it does not.': 'FPS カウンターの横に表示します。画面の可変リフレッシュレート（G-SYNC、FreeSync）がゲームのフレームに合わせて動いているあいだは点灯、そうでないときはグレー（「off」）です。',
         'Your own decrypted dump of the collection (CUSA02343, CUSA02320, …).':
         'ご自身で復号したコレクションのダンプ（CUSA02343、CUSA02320など）。',
         'by {}': '作成者：{}',
@@ -2598,8 +2592,6 @@ EXTRA_TRANSLATIONS = {
         'Y / Triangle': 'Y / Треугольник',
         'You have the latest version ({}).': 'Установлена последняя версия ({}).',
         'Your display runs at {} Hz.': 'Частота обновления экрана: {} Гц.',
-        'Show the G-SYNC / FreeSync indicator': 'Показывать индикатор G-SYNC / FreeSync',
-        'Beside the FPS counter: lit while the display\'s variable refresh rate (G-SYNC, FreeSync) follows the game\'s frames, grey ("off") while it does not.': 'Рядом со счётчиком кадров/с: горит, пока переменная частота обновления экрана (G-SYNC, FreeSync) следует за кадрами игры, серый («off»), когда нет.',
         'Your own decrypted dump of the collection (CUSA02343, CUSA02320, …).': 'Ваша расшифрованная копия коллекции (CUSA02343, CUSA02320, …).',
         'Zoom': 'Масштаб',
         'bb-probe.exe was not found.': 'Файл bb-probe.exe не найден.',
