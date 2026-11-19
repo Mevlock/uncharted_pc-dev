@@ -290,11 +290,17 @@ inline void TakeRenderCore(int which) {
             return p;
         }
         p.ok = true;
-        std::printf("Render cores: the GPU command thread and the draw recording thread%s have the last "
-                    "%d of %zu cores to themselves (BB_RENDER_CORES=%d); everything else runs on the other "
-                    "%zu hardware threads\n",
-                    wanted == 3 ? " and the Vulkan recording thread" : "", wanted, cores.size(), wanted - 1,
-                    others.size());
+        if (soft) {
+            std::printf("Render cores: the GPU command thread and the draw recording thread%s each select one of "
+                        "the last %d of %zu cores (soft: the other threads may still run there)\n",
+                        wanted == 3 ? " and the Vulkan recording thread" : "", wanted, cores.size());
+        } else {
+            std::printf("Render cores (strict): the GPU command thread and the draw recording thread%s have the "
+                        "last %d of %zu cores to themselves (BB_RENDER_CORES=%d); everything else runs on the "
+                        "other %zu hardware threads\n",
+                        wanted == 3 ? " and the Vulkan recording thread" : "", wanted, cores.size(), wanted - 1,
+                        others.size());
+        }
         std::fflush(stdout);
         return p;
     }();
