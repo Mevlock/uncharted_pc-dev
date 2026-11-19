@@ -270,9 +270,15 @@ inline void TakeRenderCore(int which) {
                 others.push_back(c.id);
             }
         }
+        // BB_RENDER_CORES_SOFT=1 (2026-11-19 experiment): the render threads still select their cores, but the
+        // other threads are not kept off them (a 4-core CPU left the game's threads only 2 cores: more 25+ ms frames).
+        static const bool soft = [] {
+            const char* env = std::getenv("BB_RENDER_CORES_SOFT");
+            return env && env[0] == '1';
+        }();
         if (filled[0] != 2 || filled[1] != 2 || filled[2] != 2 ||
-            !SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(),
-                                      static_cast<ULONG>(others.size()))) {
+            (!soft && !SetProcessDefaultCpuSets(GetCurrentProcess(), others.data(),
+                                                static_cast<ULONG>(others.size())))) {
             std::printf("Render cores: not reserved (CPU sets refused)\n");
             return p;
         }
