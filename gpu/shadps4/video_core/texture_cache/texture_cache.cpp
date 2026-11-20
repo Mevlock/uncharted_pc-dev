@@ -1629,7 +1629,7 @@ bool TextureCache::PatchKeyIcons(Image& image) {
         return true;
     }
     const bool pulse_mask = !atlas && BbKeyIcons::IsPulseMask(hash);
-    const u64 state = BbKeyIcons::PaintState(pulse_mask);
+    const u64 state = BbKeyIcons::PaintState(pulse_mask, atlas);
     std::vector<u8> data;
     {
         std::scoped_lock lock{key_icon_mutex};
@@ -1704,13 +1704,13 @@ void TextureCache::KeyIconWorker(std::stop_token stop) {
         key_icon_jobs.pop_front();
         key_icon_busy = true;
         lock.unlock();
-        bool keep = BbKeyIcons::PaintState(job.pulse_mask) == job.state; // (not when the device changed since)
+        bool keep = BbKeyIcons::PaintState(job.pulse_mask, job.atlas != 0) == job.state; // (not when it changed since)
         bool changed = false;
         if (keep) {
             changed = job.atlas == 2   ? BbKeyIcons::PatchU3Atlas(job.canonical, job.data.data(), job.width, job.height)
                       : job.atlas == 1 ? BbKeyIcons::PatchU1Atlas(job.data.data(), job.width, job.height)
                                        : BbKeyIcons::PatchU1Texture(job.canonical, job.data.data(), job.data.size(), job.levels);
-            keep = BbKeyIcons::PaintState(job.pulse_mask) == job.state;
+            keep = BbKeyIcons::PaintState(job.pulse_mask, job.atlas != 0) == job.state;
         }
         lock.lock();
         key_icon_busy = false;
@@ -1719,8 +1719,11 @@ void TextureCache::KeyIconWorker(std::stop_token stop) {
                 key_icon_painted.clear(); // (a few dozen textures and states at most; a bound for the long session)
             }
             key_icon_painted[{job.hash, job.state}] = KeyIconPainted{changed, changed ? std::move(job.data) : std::vector<u8>{}};
-            key_icon_landed.emplace_back(job.address, job.guest_size);
         }
+        // Painted: uploaded again with it. Dropped (the state changed during its wait or paint): uploaded again all the
+        // same, so the upload queues it under the state of then (else a HUD texture or the Controls diagram kept the
+        // game's picture until the next device switch).
+        key_icon_landed.emplace_back(job.address, job.guest_size);
     }
 }
 

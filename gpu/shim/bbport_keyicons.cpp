@@ -2705,17 +2705,21 @@ void ForceRepaint() {
     ++g_menu_generation;
 }
 
-uint64_t PaintState(bool pulse_mask) {
+uint64_t PaintState(bool pulse_mask, bool atlas) {
     const int mode = g_input_mode;
     if (pulse_mask && mode == 0) {
         return 0; // the blinking halo of the keys: its brightness follows the clock, painted again at each beat
     }
-    // Everything the painted pictures depend on: the device, the menu keys (Alt), the jetski's keys, the bindings, and in a
-    // menu with the keyboard the step of the pastilles' fade. (Bit 0 set: never 0.)
-    uint64_t state = 1 | uint64_t(mode & 3) << 1 | uint64_t(g_menu_mode.load()) << 3 | uint64_t(g_menu_alt.load()) << 4 |
-                     uint64_t(g_jetski_mode.load()) << 5 | uint64_t(g_bindings_generation.load()) << 32;
-    if (mode == 0 && g_menu_mode) {
-        state |= uint64_t(g_fade_step.load() & 0xff) << 8;
+    // Everything the painted pictures depend on: the device and the bindings; for the atlases also the menu keys (Alt), the
+    // jetski's keys, and in a menu with the keyboard the step of the pastilles' fade (PaintAtlas, PatchU1Atlas: the HUD
+    // textures and the Controls diagram read none of them, and a state that changed under their paint dropped it). (Bit 0
+    // set: never 0.)
+    uint64_t state = 1 | uint64_t(mode & 3) << 1 | uint64_t(g_bindings_generation.load()) << 32;
+    if (atlas) {
+        state |= uint64_t(g_menu_mode.load()) << 3 | uint64_t(g_menu_alt.load()) << 4 | uint64_t(g_jetski_mode.load()) << 5;
+        if (mode == 0 && g_menu_mode) {
+            state |= uint64_t(g_fade_step.load() & 0xff) << 8;
+        }
     }
     return state;
 }
