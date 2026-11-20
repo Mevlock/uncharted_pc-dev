@@ -1541,6 +1541,7 @@ void TemporalUpscaler::Run() {
     runtime.FlushBarriers();
     vk::Image input_color = color.GetImage(), input_depth = depth.GetImage();
     vk::ImageView input_color_view = color_view, input_depth_view = depth_view;
+    vk::ImageView input_stencil_view = StencilView(depth);
     if (reduced) {
         VideoCore::ImageViewInfo ci;
         ci.format = color.info.pixel_format;
@@ -1551,6 +1552,10 @@ void TemporalUpscaler::Run() {
         input_depth = d.image;
         input_color_view = c.view;
         input_depth_view = d.view;
+        // The proxy's stencil (SceneTargets::View: format S8 asks for the stencil aspect).
+        ci.format = vk::Format::eS8Uint;
+        input_stencil_view =
+            input_stencil_view ? scene_targets.Read(camera_motion.Depth(), ci).view : vk::ImageView{};
     }
     const auto cmdbuf = scheduler.CommandBuffer();
 
@@ -1580,7 +1585,8 @@ void TemporalUpscaler::Run() {
                 vk::AccessFlagBits2::eNone, vk::ImageLayout::eGeneral, all, rw);
 
     if (camera_motion.VelocityMode()) {
-        camera_motion.RecordVelocity(cmdbuf, input_depth_view, *motion_view, w, h);
+        camera_motion.RecordVelocity(cmdbuf, input_depth_view, *motion_view, w, h, 1.0f,
+                                     input_stencil_view);
     } else {
         camera_motion.RecordMotion(cmdbuf, input_depth_view, *motion_view, w, h);
     }
@@ -1707,6 +1713,10 @@ void TemporalUpscaler::Run() {
                         {vk::Image(output_image), ow, oh, 8, "output", "rgba16f"}});
             DumpImages(instance, scheduler, cmdbuf, dump,
                        {{input_depth, w, h, 4, "depth", "f32", vk::ImageAspectFlagBits::eDepth}});
+            if (input_stencil_view) {
+                DumpImages(instance, scheduler, cmdbuf, dump,
+                           {{input_depth, w, h, 1, "stencil", "u8", vk::ImageAspectFlagBits::eStencil}});
+            }
         }
         reset = false;
         dispatched_last_frame = true;
@@ -1814,7 +1824,7 @@ void TemporalUpscaler::CaptureFrameGen() {
         const bool scaled = capture.width != w || capture.height != h;
         const float s = scaled ? float(capture.width) / float(w) : 1.0f;
         camera_motion.RecordVelocity(cmdbuf, scaled ? frame_generator->CaptureDepth() : depth_view,
-                                     motion, capture.width, capture.height, s);
+                                     motion, capture.width, capture.height, s, StencilView(depth));
         frame_generator->EndCapture(cmdbuf,
                                     Active() ? std::array<float, 2>{jitter[0] * s, jitter[1] * s}
                                              : std::array<float, 2>{},
@@ -1993,6 +2003,13 @@ void TemporalUpscaler::SharpenDisplay(VideoCore::ImageId color) {
                     format == vk::Format::eR8G8B8A8Srgb ? "sRGB" : "UNORM",
                     BbSettings::Get().sharpness.load());
     }
+}
+
+vk::ImageView TemporalUpscaler::StencilView(const VideoCore::Image& depth) {
+    if (!(depth.aspect_mask & vk::ImageAspectFlagBits::eStencil)) {
+        return {};
+    }
+    return CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eStencil);
 }
 
 vk::ImageView TemporalUpscaler::CachedView(const VideoCore::Image& image, vk::Format format,
@@ -2594,6 +2611,14 @@ bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::I
                 DumpImages(instance, scheduler, cmdbuf, dump,
                            {{depth_image, source_width, source_height, 4, "depth", "f32",
                              vk::ImageAspectFlagBits::eDepth}});
+                // The stencil the motion vectors read (the scene's own depth target: scaled
+                // sessions, BeforeDisplayPass).
+                if (depth_image == depth.GetImage() &&
+                    (depth.aspect_mask & vk::ImageAspectFlagBits::eStencil)) {
+                    DumpImages(instance, scheduler, cmdbuf, dump,
+                               {{depth_image, source_width, source_height, 1, "stencil", "u8",
+                                 vk::ImageAspectFlagBits::eStencil}});
+                }
                 if (BbSettings::Get().upscaler == BbSettings::UpscalerTaa &&
                     std::getenv("BB_TAA_DIAGNOSTICS")) {
                     DumpImages(instance, scheduler, cmdbuf, dump,
@@ -2728,9 +2753,10 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
         const char* env = std::getenv("BB_UPSCALER_DEFER");
         return env && env[0] == '1';
     }();
+    const vk::ImageView stencil_view = StencilView(depth);
     if (defer) {
         camera_motion.RecordVelocityDeferred(vk::Image(motion_image), depth_view, *motion_view, w,
-                                             h);
+                                             h, stencil_view);
     } else {
         const auto cmdbuf = scheduler.CommandBuffer();
         vk::ImageMemoryBarrier2 b{
@@ -2744,7 +2770,7 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         };
         cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
-        camera_motion.RecordVelocity(cmdbuf, depth_view, *motion_view, w, h);
+        camera_motion.RecordVelocity(cmdbuf, depth_view, *motion_view, w, h, 1.0f, stencil_view);
         b.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
         b.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
         b.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
