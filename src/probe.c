@@ -1390,6 +1390,7 @@ extern const volatile uint64_t *runtime_draw_frame_number; /* runtime_ultrawide.
  * game's own read. */
 static volatile uint64_t *paced_clock;   /* near the image (rip-relative load at the read): the last frame start */
 static uint64_t paced_clock_frame=UINT64_MAX;
+static uint64_t paced_clock_last;        /* the last value written there (0: none yet) */
 static int frame_start_sleeps;           /* the low latency mode or the cap at the frame start */
 /* BB_FRAME_CLOCK_LOG=<file> (diagnosis): per frame start, after the sleep: the game's frame number, the TSC and the
  * game's last frame time read ([now]: the previous frame's read, so its steps are the differences), and the host ms
@@ -1413,8 +1414,15 @@ static void __attribute__((ms_abi)) game_frame_start(uint64_t rdi, uint64_t rsi,
         int64_t lead=frame_start_sleeps ? bbgpu_present_lead_ns() : 0;
         if (lead<-50000000 || lead>100000000) lead=0;
         double ticks=(double)lead*(double)runtime_tsc_frequency()/1e9;
-        if (rdtsc_patched) ticks*=runtime_time_scale_now();
-        *paced_clock=(rdtsc_patched ? runtime_guest_tsc() : __rdtsc())+(uint64_t)(int64_t)ticks;
+        double min_ticks=1e-4*(double)runtime_tsc_frequency(); /* 0.1 ms */
+        if (rdtsc_patched) { const double scale=runtime_time_scale_now(); ticks*=scale; min_ticks*=scale; }
+        uint64_t value=(rdtsc_patched ? runtime_guest_tsc() : __rdtsc())+(uint64_t)(int64_t)ticks;
+        /* never back: the game's step is an unsigned difference (a step back wraps to a huge one); the lead is
+         * kept continuous (vk_low_latency.cpp UnpacedClock, PacedClock), this only guards its edges */
+        if (paced_clock_last && (int64_t)(value-(paced_clock_last+(uint64_t)min_ticks))<0)
+            value=paced_clock_last+(uint64_t)min_ticks;
+        paced_clock_last=value;
+        *paced_clock=value;
     }
     if (frame_clock_log && frame!=frame_clock_logged) {
         frame_clock_logged=frame;
@@ -1523,6 +1531,7 @@ static void install_game_frame_start(uint64_t image_size) {
     if (variable) {
         paced_clock=(volatile uint64_t *)variable;
         *paced_clock=__rdtsc(); /* the first frame start overwrites it before the read runs */
+        paced_clock_last=0;
     }
     if (!callback_thunk(image+frame,sizeof(entry),(const void *)game_frame_start)) {
         paced_clock=NULL;

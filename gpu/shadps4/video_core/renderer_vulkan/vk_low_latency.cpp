@@ -388,11 +388,15 @@ std::atomic<u64> shown_id{0};       ///< presenter: the last frame whose showing
 std::atomic<s64> shown_at{0};       ///< and when it was shown (its release)
 std::atomic<u32> unheld_history{0}; ///< presenter: the last 16 shown frames, bit set = not held
 s64 clock_last = 0, clock_last_raw = 0; ///< frame thread: the last frame's clock and target
+s64 clock_last_start = 0; ///< frame thread: the last frame's start (its lead: clock_last - this)
 std::array<std::atomic<u64>, Ring> clock_id{};
 std::array<std::atomic<s64>, Ring> clock_at{};
 std::atomic<u64> clock_unheld{0}; ///< frames whose clock followed the present cadence (for the log)
 
-s64 PacedClock(u64 id, s64 raw, s64 period) {
+/// `jump`: the part of this frame's offset change beyond its usual rate (the first offset after a
+/// stop is set at once, the targets moving by up to 2 periods in one frame): held, it is spread as
+/// any other difference to the target, by 1/8 a frame.
+s64 PacedClock(u64 id, s64 raw, s64 period, s64 jump) {
     s64 clock = raw;
     if (clock_last && std::abs(raw - clock_last_raw) < 100'000'000) {
         const bool unheld = gpu_bound.load(std::memory_order_relaxed) ||
@@ -408,8 +412,9 @@ s64 PacedClock(u64 id, s64 raw, s64 period) {
         } else if (unheld) {
             clock = clock_last + std::max<s64>(raw - clock_last_raw, period / 2); // no cadence known yet
         } else {
-            // held: the target, after a stretch not held the rest of the difference going by 1/8
-            const s64 rest = (clock_last - clock_last_raw) * 7 / 8;
+            // held: the target, after a stretch not held (or a stop, or an offset jump) the rest of
+            // the difference going by 1/8
+            const s64 rest = (clock_last - clock_last_raw - jump) * 7 / 8;
             clock = raw + (std::abs(rest) > 20'000 ? rest : 0);
         }
         clock = std::max(clock, clock_last + 100'000); // never back
@@ -419,15 +424,33 @@ s64 PacedClock(u64 id, s64 raw, s64 period) {
     return clock;
 }
 
+/// The frame clock of a frame with no present target (pacing stopped: a movie, a load, a flip rate
+/// change; or even presents off), starting at `start`: its start, plus what is left of the last
+/// frames' lead over their starts, going by 1/8 a frame (the last paced frame's clock was its
+/// target, up to 2 periods after its start: dropping that lead in one frame stepped the world back,
+/// and the game's unsigned step wrapped). Never back, as PacedClock. current_target: the clock while
+/// a lead is left, else 0 (the frame start's own time).
+s64 UnpacedClock(s64 start) {
+    s64 clock = start;
+    if (clock_last && start - clock_last_start < 100'000'000) {
+        const s64 rest = (clock_last - clock_last_start) * 7 / 8;
+        if (std::abs(rest) > 20'000) {
+            clock = std::max(start + rest, clock_last + 100'000);
+        }
+    }
+    clock_last = clock;
+    clock_last_raw = clock_last_start = start;
+    current_target.store(clock != start ? clock : 0, std::memory_order_relaxed);
+    return clock;
+}
+
 void Stop() {
     last_wake = 0;
-    clock_last = clock_last_raw = 0;
     shown_interval.store(0, std::memory_order_relaxed);
     shown_id.store(0, std::memory_order_relaxed);
     unheld_history.store(0, std::memory_order_relaxed);
     gpu_bound.store(false, std::memory_order_relaxed);
     gpu_own_epoch.fetch_add(1, std::memory_order_release);
-    current_target.store(0, std::memory_order_relaxed);
     offset = offset_goal = 0;
     lag_base = lag_count.load(std::memory_order_acquire);
     Libraries::VideoOut::SetStartPaced(false);
@@ -478,7 +501,7 @@ void BeforeFrame(u64 id) {
     if (period <= 0 || queued_last.load(std::memory_order_relaxed) + 8 < id) {
         Stop();
         unpaced.fetch_add(1, std::memory_order_relaxed);
-        NoteStep(id, now);
+        NoteStep(id, UnpacedClock(now));
         return;
     }
     // The frame's slot: one period after the last one's, at most one period in the past (as the
@@ -492,22 +515,26 @@ void BeforeFrame(u64 id) {
     last_wake = slot;
     last_target = wake;
     if (Even()) {
+        const s64 offset_before = offset;
         UpdateOffset(period, id);
+        // an offset change beyond its usual rate (0.1 ms a frame): the first after a stop
+        const s64 change = offset - offset_before;
+        const s64 jump = change - std::clamp<s64>(change, -100'000, 100'000);
         FrameSlot& entry = frames[id % Ring];
         entry.id.store(0, std::memory_order_relaxed);
         entry.slot.store(slot, std::memory_order_relaxed);
         entry.target.store(slot + offset, std::memory_order_relaxed);
         entry.id.store(id, std::memory_order_release);
         // the frame clock's time (probe.c): the target, or not held the present cadence (PacedClock)
-        const s64 clock = PacedClock(id, slot + offset, period);
+        const s64 clock = PacedClock(id, slot + offset, period, jump);
+        clock_last_start = wake;
         clock_at[id % Ring].store(clock, std::memory_order_relaxed);
         clock_id[id % Ring].store(id, std::memory_order_release);
         current_target.store(clock, std::memory_order_relaxed);
         last_target = slot + offset; // the trace's target: the present target
         NoteStep(id, clock);
     } else {
-        current_target.store(0, std::memory_order_relaxed); // even presents off (EvenPresentsOff)
-        NoteStep(id, wake);
+        NoteStep(id, UnpacedClock(wake)); // even presents off (EvenPresentsOff): what is left of a lead
     }
     Libraries::VideoOut::SetStartPaced(true);
     paced.fetch_add(1, std::memory_order_relaxed);
