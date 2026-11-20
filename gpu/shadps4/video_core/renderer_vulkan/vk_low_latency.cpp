@@ -207,11 +207,12 @@ s64 last_target = 0; ///< frame thread: the last frame's wake time (BB_LATENCY_T
 std::atomic<u64> paced{0}, unpaced{0}; ///< counts for BB_LATENCY_TRACE
 std::atomic<s64> slept_ns{0};
 
-/// Even presents (BB_EVEN_PRESENT=1: on; OFF by default since 0.3.6.60.1: the GPU hold below spins a
-/// shader on the GPU until each target, which kept GPU usage near 100% even at a 60 FPS cap and cost
-/// FPS on GPU-limited cards (RTX 3060 laptop, 1440p DLSS Quality: under 60, sometimes under 50; stable
-/// again with it off). Back on by default once the hold waits without spinning: BB_EVEN_RELEASE=3,
-/// host-timed holds, vk_present_release.h). Shown as soon as it is done, a frame's present interval
+/// Even presents (BB_EVEN_PRESENT=0: off). On by default in this build (0.3.6.63-test-pacing1) with
+/// the short-spin holds (BB_EVEN_RELEASE=4, vk_present_release.h): the present work is submitted just
+/// before its target, so the GPU spins for well under a millisecond. 0.3.6.60.1 had turned them off:
+/// the GPU hold of 0.3.6.59 (BB_EVEN_RELEASE=1) spun a shader on the GPU until each target, which
+/// kept GPU usage near 100% even at a 60 FPS cap and cost FPS on GPU-limited cards (RTX 3060 laptop,
+/// 1440p DLSS Quality: under 60, sometimes under 50). Shown as soon as it is done, a frame's present interval
 /// was the period plus the change in its render time (the frame start's slot plus its own time):
 /// under G-SYNC each refresh lasts that interval (QD-OLED: brightness flicker, U3 at 120 on a
 /// 165 Hz panel), and the paced frame clock stepped the world by the start intervals while the
@@ -229,7 +230,7 @@ std::atomic<s64> slept_ns{0};
 /// frame later than its target is shown when it is done.
 const bool even = [] {
     const char* env = std::getenv("BB_EVEN_PRESENT");
-    return env && env[0] == '1';
+    return !(env && env[0] == '0');
 }();
 constexpr u32 Ring = 256;
 struct FrameSlot {

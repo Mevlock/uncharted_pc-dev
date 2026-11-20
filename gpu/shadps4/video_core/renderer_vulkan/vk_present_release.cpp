@@ -301,7 +301,7 @@ PresentRelease::PresentRelease(const Instance& instance_) : instance{instance_} 
 int PresentRelease::Mode() {
     static const int mode = [] {
         const char* env = std::getenv("BB_EVEN_RELEASE");
-        return env && env[0] >= '0' && env[0] <= '4' ? env[0] - '0' : 1;
+        return env && env[0] >= '0' && env[0] <= '4' ? env[0] - '0' : 4;
     }();
     return LowLatency::EvenPresents() ? mode : 0;
 }

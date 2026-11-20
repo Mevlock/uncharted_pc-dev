@@ -60,7 +60,7 @@ public:
         return made;
     }
 
-    /// How paced frames are held (BB_EVEN_RELEASE): 1 (default) on the GPU in the game's own queue
+    /// How paced frames are held (BB_EVEN_RELEASE; default 4): 1 on the GPU in the game's own queue
     /// (RecordHold; the flips land within ~0.2 ms), 2 on the release queue (a compute queue beside
     /// it; allows slack, but its presents flip ~1 ms loose on NVIDIA, 11-18), 3 in the game's own
     /// queue as 1 but host-timed (the GPU waits idle for a semaphore our thread signals at the

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <algorithm>
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
-#include "core/libraries/videoout/game_frame.h"
 
 #include <atomic>
 #include <chrono>
@@ -911,7 +910,7 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                     std::atan2(fx, fz) * 57.29578f,
                     std::asin(std::clamp(fy / std::sqrt(fx * fx + fy * fy + fz * fz), -1.0f, 1.0f)) * 57.29578f,
                     c[15], c[19], c[23],
-                    static_cast<long long>(Libraries::VideoOut::CurrentGameFrames().submitted));
+                    static_cast<long long>(Libraries::VideoOut::g_gpu_flip_arg.load(std::memory_order_relaxed)));
     }
     // The stencil term on a platform: said once.
     static bool reported = false;
