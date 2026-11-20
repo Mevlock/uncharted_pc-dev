@@ -665,7 +665,11 @@ void CheckpointsPage() {
                 // checkpoint the player is at (from El Dorado, michelle: the game's task reset there leaves the scene
                 // without its characters).
                 if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !(now.known && list[i].task == now.task)) {
-                    BbSaves::Jump(list[i], message);
+                    // A jump that starts closes the menu, so the game is in view at once; a refused one keeps it
+                    // open with its message.
+                    if (BbSaves::Jump(list[i], message)) {
+                        SetOpen(false);
+                    }
                 }
             }
             if (is_current) {
