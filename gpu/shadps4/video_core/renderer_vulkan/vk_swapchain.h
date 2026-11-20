@@ -33,16 +33,7 @@ public:
 
     /// Presents the current image and move to the next one
     /// latency_id: the game frame's id in low latency mode (0: a generated or repeated frame).
-    /// bbport even presents: with the release queue (UsesReleaseQueue) every present goes there;
-    /// `released`: it waits for its hold (GetPresentReleaseSemaphore) instead of the blit.
-    /// `async_up_to`: the draw work it must follow (WaitAsyncSubmits; the presenter: its frame's).
-    bool Present(u64 latency_id = 0, bool released = false, u64 async_up_to = ~u64{0});
-
-    /// bbport even presents (vk_present_release.h): presents go to the release queue (a compute
-    /// queue that can present), each paced one after its GPU hold.
-    bool UsesReleaseQueue() const {
-        return use_release;
-    }
+    bool Present(u64 latency_id = 0);
 
     /// bbport (hitch diagnosis): the last Present's waits for the async submissions and the queue lock, and the
     /// present call itself (ms).
@@ -58,11 +49,6 @@ public:
 
     vk::ImageView ImageView() const {
         return images_view[image_index];
-    }
-
-    /// bbport even presents: the images' format (the HDR one when HDR is on).
-    vk::Format ImageFormat() const {
-        return needs_hdr ? hdr_format.format : surface_format.format;
     }
 
     vk::SurfaceFormatKHR GetSurfaceFormat() const {
@@ -99,11 +85,6 @@ public:
 
     [[nodiscard]] vk::Semaphore GetPresentReadySemaphore() const {
         return present_ready[image_index];
-    }
-
-    /// bbport even presents: signalled by the current image's GPU hold, waited by its present.
-    [[nodiscard]] vk::Semaphore GetPresentReleaseSemaphore() const {
-        return present_release[image_index];
     }
 
     bool HasHDR() const {
@@ -155,8 +136,6 @@ private:
     std::vector<vk::ImageView> images_view;
     std::vector<vk::Semaphore> image_acquired;
     std::vector<vk::Semaphore> present_ready;
-    std::vector<vk::Semaphore> present_release; ///< bbport even presents
-    bool use_release = false;                   ///< bbport even presents
     u32 width = 0;
     u32 height = 0;
     u32 image_count = 0;

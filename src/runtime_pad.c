@@ -1104,23 +1104,14 @@ static const unsigned char u1_menu_update_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,
                                                   0x80,0x00,0x00,0x00,0x49,0x89,0xfe,0x4c,0x8b,0x3d};
 static const unsigned char u2_menu_update_eu_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
                                                      0x48,0x83,0xec,0x78,0x49,0x89,0xfe,0x4c,0x8b,0x25};
-/* Uncharted 2 damage after Npc::ComputeArmorDamage's armour step (runtime_onehit.c): 1.00 in the caller after both
- * helpers, mov r14d, eax; mov [rbp-0x4040], r14d (10 bytes moved; then cmp r14d, r13d); 1.02 where the final damage
- * goes into the record, mov rax, [rbp-0x4040]; mov rcx, [rbp-0x4038] (14 bytes moved; then the stores to [r15+8] and
- * [r15]), the attack noted by the hook at the function's start: push rbp; mov rbp,rsp; push r15/r14/r13/r12/rbx;
- * sub rsp,0x40f8. */
-static const unsigned char u2_armor_damage_100[]={0x41,0x89,0xc6,0x44,0x89,0xb5,0xc0,0xbf,0xff,0xff,0x45,0x39,0xee};
-static const unsigned char u2_armor_damage_102[]={0x48,0x8b,0x85,0xc0,0xbf,0xff,0xff,0x48,0x8b,0x8d,0xc8,0xbf,0xff,0xff,
-                                                  0x49,0x89,0x4f,0x08,0x49,0x89,0x07};
-/* Uncharted 3 damage after the armour step (runtime_onehit.c): 1.02 inside Npc::ComputeArmorDamage, mov [rbp-0x4040],
- * ebx (6 bytes moved; then mov rax, [r14+8]); 1.00 in its caller after both helpers, mov r15d, eax; mov [rbp-0x4040],
- * r15d (10 bytes moved; then mov rax, [r14+8]). */
-static const unsigned char u3_armor_damage_102[]={0x89,0x9d,0xc0,0xbf,0xff,0xff,0x49,0x8b,0x46,0x08};
-static const unsigned char u3_armor_damage_100[]={0x41,0x89,0xc7,0x44,0x89,0xbd,0xc0,0xbf,0xff,0xff,0x49,0x8b,0x46,0x08};
+/* Uncharted 2 Npc::ComputeArmorDamage (runtime_onehit.c), where an attack's damage reaches the NPC's health (before
+ * RespondToAttack, which only reacts): push rbp; mov rbp,rsp; push r15/r14/r13/r12/rbx; sub rsp,.. (EU 0x30430: 0x88,
+ * 1.02 0x244ef0: 0x40f8). */
 /* Uncharted 1 Npc::RespondToAttack (runtime_onehit.c), EU and 1.02 alike: push rbp ... sub rsp,0xa8. */
 static const unsigned char u1_respond_attack[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xa8,0x00,0x00,0x00};
 /* Uncharted 1 BuddyJetskiSkill update (runtime_onehit.c), all four code versions: push rbp ... sub rsp,0xb8; mov r14,rsi. */
 static const unsigned char u1_jetski_skill[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xb8,0x00,0x00,0x00,0x49,0x89,0xf6,0x48};
+static const unsigned char u2_armor_damage_eu[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0x88,0x00,0x00,0x00};
 static const unsigned char u2_armor_damage_us[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xf8,0x40,0x00,0x00};
 static const unsigned char u2_menu_update_us_code[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
                                                      0x48,0x81,0xec,0xd8,0x00,0x00,0x00,0x49,0x89,0xfd,0x4c,0x8b,0x25};
@@ -1288,16 +1279,7 @@ static const unsigned char u2_sniper_animate_102[]={0x55,0x48,0x89,0xe5,0x41,0x5
                                                    0xec,0x68,0x01,0x00,0x00,0x49,0x89,0xf7,0x4c};
 static const unsigned char u2_sniper_animate_100[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,
                                                    0xec,0x68,0x01,0x00,0x00,0x41,0x89,0xd4,0x49};
-/* U3 animated camera additives taken out at full weight (runtime_camadditive.c; BB_CAMERA_ADDITIVE_FADE=0: off): the
- * additive removal loop after IsDone (mov ecx,[r13+r14*4]; test al,al; je), the same bytes in 1.02 and 1.00. */
-static const unsigned char u3_camera_additive_done[]={0x43,0x8b,0x4c,0xb5,0x00,0x84,0xc0,0x74,0x73};
-void __attribute__((ms_abi)) runtime_u3_camera_additive_102(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
-void __attribute__((ms_abi)) runtime_u3_camera_additive_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14, const uint64_t *regs);
 static const RuntimeGuestCallback guest_callbacks[]={
-    {"U3 camera additive fade-out (1.02)",0x10217f6,u3_camera_additive_done,sizeof(u3_camera_additive_done),7,
-     runtime_u3_camera_additive_102,NULL},
-    {"U3 camera additive fade-out (1.00)",0x6b4d76,u3_camera_additive_done,sizeof(u3_camera_additive_done),7,
-     runtime_u3_camera_additive_100,NULL},
     {"U2 monastery sniper: spawn (1.02)",0x2e57b0,u2_sniper_spawn_102,sizeof(u2_sniper_spawn_102),6,runtime_u2_sniper_spawn_102,NULL},
     {"U2 monastery sniper: spawn (1.00)",0x82a80,u2_sniper_spawn_100,sizeof(u2_sniper_spawn_100),6,runtime_u2_sniper_spawn_100,NULL},
     {"U2 monastery sniper: gate closes (1.02)",0xa04f60,u2_sniper_gate_on_102,sizeof(u2_sniper_gate_on_102),6,
@@ -1353,16 +1335,10 @@ static const RuntimeGuestCallback guest_callbacks[]={
      runtime_u1_respond_to_attack,NULL},
     {"U1 jet ski buddy (One Hit Kills)",0x4bf80,u1_jetski_skill,sizeof(u1_jetski_skill),6,
      runtime_u1_jetski_skill,NULL},
-    {"U2 NPC damage after armour (EU)",0x2fff0,u2_armor_damage_100,sizeof(u2_armor_damage_100),10,
-     runtime_u2_armor_damage_100,NULL},
-    {"U2 NPC armor damage start (1.02)",0x244ef0,u2_armor_damage_us,sizeof(u2_armor_damage_us),6,
+    {"U2 NPC armor damage (EU)",0x30430,u2_armor_damage_eu,sizeof(u2_armor_damage_eu),6,
      runtime_u2_npc_damage,NULL},
-    {"U2 NPC damage after armour (1.02)",0x245b3e,u2_armor_damage_102,sizeof(u2_armor_damage_102),14,
-     runtime_u2_armor_damage_102,NULL},
-    {"U3 NPC damage after armour (1.02)",0x35784e,u3_armor_damage_102,sizeof(u3_armor_damage_102),6,
-     runtime_u3_armor_damage_102,NULL},
-    {"U3 NPC damage after armour (EU)",0x2a6ff,u3_armor_damage_100,sizeof(u3_armor_damage_100),10,
-     runtime_u3_armor_damage_100,NULL},
+    {"U2 NPC armor damage (1.02)",0x244ef0,u2_armor_damage_us,sizeof(u2_armor_damage_us),6,
+     runtime_u2_npc_damage,NULL},
     {"U3 checkpoint jumps (EU)",0x6cbdb0,u3_menu_update_eu_code,sizeof(u3_menu_update_eu_code),20,
      runtime_checkpoint_frame_eu,NULL},
     {"U3 checkpoint jumps (1.02)",0x103ff10,u3_menu_update_us_code,sizeof(u3_menu_update_us_code),23,
@@ -1948,7 +1924,7 @@ static ABI int32_t pad_close(int32_t handle) {
 static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
-    bbgpu_input_sample(); /* low latency log (BB_REFLEX_LOG=1): reads per second; the frame start is the game's own (probe.c) */
+    bbgpu_input_sample(); /* low latency mode: a new frame starts here and may wait (outside the lock) */
     pthread_mutex_lock(&lock);
     sample(data); ++reads;
     pthread_mutex_unlock(&lock);

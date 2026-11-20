@@ -1,2 +1,0 @@
-# FSR-Vulkan patches are applied with git apply by build.sh; a CRLF checkout (core.autocrlf=true) fails to apply.
-gpu/patches/fsr-vulkan/*.patch text eol=lf

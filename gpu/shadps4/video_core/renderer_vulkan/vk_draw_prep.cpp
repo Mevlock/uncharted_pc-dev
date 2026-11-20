@@ -970,12 +970,6 @@ void DrawPreparation::Count(bool was_used) {
                 "%llu scanner rebases)\n",
                 static_cast<unsigned long long>(used), static_cast<unsigned long long>(unused),
                 worker_count, static_cast<unsigned long long>(rebases));
-    // bbport diagnosis: how long that line held the GPU thread (a console write that waits)
-    const double took =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - now).count();
-    if (took > 0.5) {
-        std::printf("Draw preparation: that line took %.2f ms on the GPU thread\n", took);
-    }
     used = unused = 0;
 }
 

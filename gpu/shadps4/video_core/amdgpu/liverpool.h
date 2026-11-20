@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include "bbport_trace.h"
 #include <cstdlib>
 
 #include <chrono>
@@ -198,9 +197,7 @@ public:
             std::scoped_lock lk{submit_mutex};
             ordered_queue.emplace([&sem, &func, queued] {
                 const auto start = std::chrono::steady_clock::now();
-                BbTrace::Record(BbTrace::OrderedBegin);
                 func();
-                BbTrace::Record(BbTrace::OrderedEnd);
                 const auto end = std::chrono::steady_clock::now();
                 const auto picked = ordered_picked < queued ? start : ordered_picked;
                 const auto ns = [](auto d) {

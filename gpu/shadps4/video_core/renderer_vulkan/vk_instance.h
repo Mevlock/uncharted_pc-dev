@@ -30,21 +30,11 @@ namespace Vulkan {
 inline std::mutex g_graphics_queue_mutex;
 /// BB_ASYNC_SUBMIT=1: draw scheduler flushes handed to its recording thread, and those submitted.
 inline std::atomic<u64> g_async_submits_queued{0}, g_async_submits_done{0};
-/// bbport even presents: the draw scheduler flush (its timeline value) the recording thread holds
-/// back at the GPU gate (LowLatency::GateBeforeSubmit; 0: none). The thread submits in order, so
-/// every flush before it is submitted.
-inline std::atomic<u64> g_async_gated_tick{0};
 /// Waits until the recording thread has submitted every flush handed to it so far, so a
-/// submission or present made elsewhere keeps its place in the queue order. `up_to_tick`: only the
-/// flushes up to that draw scheduler value are needed (the presenter: its frame's), so a later
-/// flush the gate holds back for this very submission is not waited for.
-inline void WaitAsyncSubmits(u64 up_to_tick = ~u64{0}) {
+/// submission or present made elsewhere keeps its place in the queue order.
+inline void WaitAsyncSubmits() {
     const u64 queued = g_async_submits_queued.load(std::memory_order_acquire);
     while (g_async_submits_done.load(std::memory_order_acquire) < queued) {
-        const u64 gated = g_async_gated_tick.load(std::memory_order_acquire);
-        if (gated != 0 && gated > up_to_tick) {
-            return;
-        }
         std::this_thread::yield();
     }
 }
@@ -136,20 +126,6 @@ public:
 
     vk::Queue GetPresentQueue() const {
         return present_queue;
-    }
-
-    /// bbport even presents (vk_present_release.h): a compute-only queue that can present (null:
-    /// none) and its family.
-    vk::Queue GetReleaseQueue() const {
-        return release_queue;
-    }
-    u32 GetReleaseQueueFamilyIndex() const {
-        return release_queue_family_index;
-    }
-    /// bbport even presents: a graphics-family queue that only presents (null: none; then the
-    /// release queue presents).
-    vk::Queue GetReleasePresentQueue() const {
-        return release_present_queue;
     }
 
     TracyVkCtx GetProfilerContext() const {
@@ -383,20 +359,6 @@ public:
     /// VK_KHR_shader_clock is supported.
     bool IsShaderSubgroupClockSupported() const {
         return shader_clock && shader_clock_features.shaderSubgroupClock;
-    }
-
-    /// bbport: even presents (vk_present_release.h): the shader can read the device clock and the
-    /// device's timestamps can be read together with the CPU's QueryPerformanceCounter.
-    bool IsPresentReleaseSupported() const {
-        return shader_clock && shader_clock_features.shaderDeviceClock &&
-               (calibrated_khr || calibrated_ext) && properties.limits.timestampPeriod > 0.0f &&
-               properties.limits.timestampComputeAndGraphics &&
-               // the hold's times are 64-bit differences: a narrower counter wraps between them
-               graphics_timestamp_bits >= 64;
-    }
-    /// VK_KHR_calibrated_timestamps (else the EXT form) is on.
-    bool IsCalibratedTimestampsKhr() const {
-        return calibrated_khr;
     }
 
     /// Returns the vendor ID of the physical device
@@ -671,10 +633,6 @@ private:
     std::string vendor_name;
     VmaAllocator allocator{};
     vk::Queue present_queue;
-    vk::Queue release_queue;                   ///< bbport even presents
-    u32 release_queue_family_index{UINT32_MAX}; ///< bbport even presents
-    vk::Queue release_present_queue;            ///< bbport even presents
-    u32 release_present_index{UINT32_MAX};      ///< its index in the graphics family
     vk::Queue side_queue;
     u32 side_queue_family_index{};
     vk::Queue graphics_queue;
@@ -685,7 +643,6 @@ private:
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;
     TracyVkCtx profiler_context{};
     u32 queue_family_index{0};
-    u32 graphics_timestamp_bits{0}; ///< the graphics family's timestampValidBits
     bool custom_border_color{};
     bool fragment_shader_barycentric{};
     bool hdr_metadata{};
@@ -713,8 +670,6 @@ private:
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
     bool shader_clock{};
-    bool calibrated_khr{}; ///< bbport: VK_KHR_calibrated_timestamps
-    bool calibrated_ext{}; ///< bbport: VK_EXT_calibrated_timestamps (without the KHR form)
     bool compute_shader_derivatives{};
     bool mixed_float_dot_product{}; // bbport: VK_VALVE_shader_mixed_float_dot_product (FSR 4.1.1)
     bool supports_memory_budget{};

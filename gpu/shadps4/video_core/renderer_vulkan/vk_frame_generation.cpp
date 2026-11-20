@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <string>
 
@@ -19,7 +18,6 @@
 #include "video_core/host_shaders/frame_gen_ui_hdr_comp.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
-#include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
@@ -479,16 +477,6 @@ u32 FrameGenerator::Generate(vk::CommandBuffer cmdbuf, vk::Image color, vk::Imag
     last_generate = now;
     if (!(frame_ms > 0.0f && frame_ms < 200.0f)) {
         frame_ms = 16.6f;
-    }
-    // bbport: the frame's world step (the time from the last picture to this one, as the upscalers
-    // get it: TemporalUpscaler::FrameMs) where it is known; the GPU thread's time between frames
-    // follows the GPU (GPU holds) and is uneven where the pictures are even.
-    static const bool cpu_only = [] {
-        const char* env = std::getenv("BB_UPSCALER_FRAME_TIME");
-        return env && std::strcmp(env, "cpu") == 0;
-    }();
-    if (const s64 step = cpu_only ? 0 : LowLatency::FrameStepNs(); step > 0 && step < 200'000'000) {
-        frame_ms = float(double(step) / 1e6);
     }
     // Views the FSR 3.1 context took for frames the GPU has finished.
     while (fsr3 && !fsr3_pending.empty() && scheduler.IsFree(fsr3_pending.front().tick)) {

@@ -11,7 +11,6 @@
 
 #pragma once
 
-#include "video_core/chained_writes.h"
 #include <cstdlib>
 #include "bbport_causal.h"
 #include "bbport_threads.h"
@@ -193,9 +192,7 @@ private:
 
     void Run(std::stop_token stop) {
         Common::SetCurrentThreadName("bb:DrawRec");
-        VideoCore::ChainedWrites::AllowWait();
         BbThreads::MakeRenderThread();
-        BbThreads::TakeRenderCore(1); // perf15 experiment (BB_RENDER_CORES=1)
         on_stage_b = true;
         stage_b_tid.store(static_cast<u32>(gettid()), std::memory_order_release);
         u64 at = 0;

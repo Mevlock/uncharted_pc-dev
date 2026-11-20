@@ -201,10 +201,7 @@ public:
             bits.UnsetRange(start_page, end_page);
             if constexpr (type == Type::CPU) {
                 KeepHotPagesModified(start_page, end_page);
-                // The ranges are copied next (func): their revokes may wait for the copy.
-                t_defer_revoke = true;
                 UpdateProtection<true, false>();
-                t_defer_revoke = false;
             } else if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
                 UpdateProtection<false, true>();
             }

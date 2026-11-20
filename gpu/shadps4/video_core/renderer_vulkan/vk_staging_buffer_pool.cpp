@@ -26,14 +26,8 @@ namespace {
 // ~2 ms per 16 MiB block. Streaming bursts a few seconds apart re-created the blocks trimmed
 // in between and copies into them ran at 0.3 GB/s (stutter). Blocks now live 30 s idle, the
 // upload ring keeps BB_STAGING_KEEP_MB (512) and is populated at startup.
-// 2026-11-18: the idle times were counted in TickFrame calls, which come per guest submission
-// (~3 per frame in U3), so "30 s" was ~8 s: the dedicated buffers of a texture burst (U3 horse
-// ride: 25-67 MB each) were freed ~8 s later (vkFreeMemory, 13-19 ms frames) and allocated
-// again at the next burst. Idle times are seconds now, and idle dedicated buffers are also
-// kept up to BB_STAGING_KEEP_MB per memory type (the oldest beyond it go after the idle time).
-constexpr auto RING_IDLE = std::chrono::seconds(30);
-constexpr auto LARGE_IDLE = std::chrono::seconds(30);
-constexpr auto EAGER_IDLE = std::chrono::seconds(4);
+constexpr u64 RING_IDLE_FRAMES = 3000;
+constexpr u64 LARGE_IDLE_FRAMES = 3000;
 constexpr u64 PREWARM_BLOCKS = 8;
 constexpr u64 LARGE_MIN_GRANULARITY = 64_KB;
 constexpr u64 BLOCK_SIZE = 16_MB;
@@ -55,7 +49,6 @@ StagingBufferPool::StagingBufferPool(const Instance& instance_, Scheduler& sched
             .buffer = std::make_unique<VideoCore::StreamBuffer>(
                 instance, scheduler, MemoryType::HostUncached, BLOCK_SIZE),
             .last_used_frame = frame,
-            .last_used = now,
         });
         if (!block.buffer->mapped_data.empty()) {
             std::memset(block.buffer->mapped_data.data(), 0, block.buffer->mapped_data.size());
@@ -94,7 +87,6 @@ StagingBufferRef StagingBufferPool::RequestFromRing(Ring& ring, u64 size, u64 al
             .buffer =
                 std::make_unique<VideoCore::StreamBuffer>(instance, scheduler, type, BLOCK_SIZE),
             .last_used_frame = frame,
-            .last_used = now,
         });
         ring.current = ring.blocks.size() - 1;
         best_offset = *best->buffer->Reserve(size, alignment, false);
@@ -102,7 +94,6 @@ StagingBufferRef StagingBufferPool::RequestFromRing(Ring& ring, u64 size, u64 al
 
     auto& buffer = *best->buffer;
     best->last_used_frame = frame;
-    best->last_used = now;
 
     StagingBufferRef ref{
         .buffer = &buffer,
@@ -139,13 +130,11 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
             .tick = 0,
             .last_used_frame = frame,
             .held = false,
-            .last_used = now,
         });
     }
 
     best->tick = scheduler.CurrentTick();
     best->last_used_frame = frame;
-    best->last_used = now;
     best->held = deferred;
 
     VideoCore::Buffer& buffer = *best->buffer;
@@ -169,12 +158,10 @@ void StagingBufferPool::FreeDeferred(const StagingBufferRef& ref) {
     it->held = false;
     it->tick = scheduler.CurrentTick();
     it->last_used_frame = frame;
-    it->last_used = now;
 }
 
 void StagingBufferPool::TickFrame() {
     ++frame;
-    now = Clock::now();
     // bbport: the device-local rings (detiling scratch) hold video memory: on a small card idle
     // blocks go after ~4 s instead of staying (up to 512 MiB) for 30 s.
     const bool tight = instance.GetTotalMemoryBudget() < 5_GB && !Vram::Legacy();
@@ -192,7 +179,7 @@ void StagingBufferPool::TrimRing(Ring& ring, bool eager) {
     for (size_t i = blocks.size(); i-- > 0;) {
         const Block& block = blocks[i];
         if (blocks.size() <= (eager ? 1 : keep_blocks) ||
-            now - block.last_used < (eager ? EAGER_IDLE : RING_IDLE) ||
+            frame - block.last_used_frame < (eager ? 240 : RING_IDLE_FRAMES) ||
             !scheduler.IsFree(block.buffer->LastTick())) {
             continue;
         }
@@ -209,36 +196,10 @@ void StagingBufferPool::TrimRing(Ring& ring, bool eager) {
 }
 
 void StagingBufferPool::TrimLarge(std::vector<LargeBuffer>& cache, bool eager) {
-    const auto idle = [this, eager](const LargeBuffer& entry) {
-        return !entry.held && now - entry.last_used >= (eager ? EAGER_IDLE : LARGE_IDLE) &&
+    std::erase_if(cache, [this, eager](const LargeBuffer& entry) {
+        return !entry.held && frame - entry.last_used_frame >= (eager ? 240 : LARGE_IDLE_FRAMES) &&
                scheduler.IsFree(entry.tick);
-    };
-    if (eager) {
-        std::erase_if(cache, idle);
-        return;
-    }
-    // Idle buffers stay while all the idle ones fit in the keep budget; beyond it the longest
-    // idle go first.
-    u64 idle_bytes = 0;
-    for (const LargeBuffer& entry : cache) {
-        if (!entry.held) {
-            idle_bytes += entry.buffer->SizeBytes();
-        }
-    }
-    const u64 keep_bytes = keep_blocks * BLOCK_SIZE;
-    while (idle_bytes > keep_bytes) {
-        auto oldest = cache.end();
-        for (auto it = cache.begin(); it != cache.end(); ++it) {
-            if (idle(*it) && (oldest == cache.end() || it->last_used < oldest->last_used)) {
-                oldest = it;
-            }
-        }
-        if (oldest == cache.end()) {
-            break;
-        }
-        idle_bytes -= oldest->buffer->SizeBytes();
-        cache.erase(oldest);
-    }
+    });
 }
 
 void StagingBufferPool::PublishStats() const {

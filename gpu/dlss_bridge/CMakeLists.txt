@@ -28,14 +28,3 @@ add_library(bbport_dlss SHARED bbport_dlss_bridge.cpp bbport_dlss_bridge.h)
 target_include_directories(bbport_dlss PRIVATE "${DLSS_SDK_ROOT}/include" "${VULKAN_INCLUDE}")
 target_link_libraries(bbport_dlss PRIVATE "${DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib")
 target_compile_definitions(bbport_dlss PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-
-# NVIDIA Reflex PC Latency Stats (optional): REFLEX_SDK_ROOT = a checkout of github.com/NVIDIA-RTX/REFLEX
-# (Reflex_Stats/pclstats.h). Without it the bridge has no PCLStats exports and the port sends no PCLStats markers.
-set(REFLEX_SDK_ROOT "" CACHE PATH "NVIDIA Reflex SDK root (contains Reflex_Stats/pclstats.h)")
-if (EXISTS "${REFLEX_SDK_ROOT}/Reflex_Stats/pclstats.h")
-    target_sources(bbport_dlss PRIVATE bbport_pclstats.cpp)
-    target_include_directories(bbport_dlss PRIVATE "${REFLEX_SDK_ROOT}/Reflex_Stats")
-    message(STATUS "PCLStats: on (${REFLEX_SDK_ROOT}/Reflex_Stats/pclstats.h)")
-else()
-    message(STATUS "PCLStats: off (REFLEX_SDK_ROOT has no Reflex_Stats/pclstats.h)")
-endif()

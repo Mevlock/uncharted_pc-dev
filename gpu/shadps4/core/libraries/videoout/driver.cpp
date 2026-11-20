@@ -26,8 +26,6 @@
 #include "core/libraries/kernel/time.h"
 #include <array>
 #include "core/libraries/videoout/driver.h"
-#include "video_core/renderer_vulkan/vk_low_latency.h"
-#include "core/libraries/videoout/game_frame.h"
 #include "core/libraries/videoout/videoout_error.h"
 #include "imgui/renderer/imgui_core.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -52,7 +50,6 @@ extern "C" double runtime_time_scale_now(void);
 extern "C" volatile int runtime_freeze_flag; // runtime_thread.c: the game's threads are held (preparation page/hold)
 extern "C" volatile int runtime_title_shown; // runtime_menumouse.c: a game menu showed (the title, after the boot)
 
-extern "C" const volatile uint64_t* runtime_game_frame_count; // runtime_ultrawide.c: g_frameState.m_frameCount
 extern "C" volatile int runtime_movie_starts; // src/probe.c patch_movie_start: the game asked for a movie
 
 // bbport: faster boot (on for everyone; BB_FAST_BOOT=0: off). From the end of the shader preparation (the stored
@@ -481,23 +478,11 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
     return 0;
 }
 
-// bbport: the flip argument (the game's frame number) of the last game flip whose present finished (game_frame.h).
-std::atomic<s64> g_presented_flip_arg{-1};
-
 void VideoOutDriver::Flip(const Request& req) {
-    if (req.index >= 0) {
-        Vulkan::LowLatency::TraceFlip(Vulkan::LowLatency::FlipStage::Taken, req.flip_arg);
-    }
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
-    // bbport: the flip argument (the game's frame number) goes with the frame for the low latency
-    // mode's present marker; -1: a blank frame.
-    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr,
-                  flip_arg = req.index >= 0 ? req.flip_arg : s64{-1}] {
+    RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);
-        presenter->Present(frame, false, true, flip_arg);
-        if (flip_arg >= 0) {
-            g_presented_flip_arg.store(flip_arg, std::memory_order_relaxed);
-        }
+        presenter->Present(frame);
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
@@ -512,12 +497,6 @@ void VideoOutDriver::Flip(const Request& req) {
         static double worst_ms;
         const auto now = Clock::now();
         const double frame_ms = std::chrono::duration<double, std::milli>(now - last).count();
-        // BB_STALL_MS=<ms> (diagnosis): the per-frame stall lines for frames over it (default 40)
-        static const double stall_ms = [] {
-            const char* env = std::getenv("BB_STALL_MS");
-            return env ? std::atof(env) : 40.0;
-        }();
-        static bool stall_primed = false; // the counters' last values are set (a frame seen)
         worst_ms = std::max(worst_ms, frame_ms);
         static std::vector<double> intervals;
         intervals.push_back(frame_ms);
@@ -534,7 +513,7 @@ void VideoOutDriver::Flip(const Request& req) {
         static u64 last_proc_flt, last_copy_ns, last_copy_bytes, last_rf, last_trf, last_twf;
         const u64 rf = BbStats::read_faults.load(), trf = BbStats::t_read_faults.load(),
                   twf = BbStats::t_write_faults.load();
-        if (frame_ms > stall_ms && stall_primed) {
+        if (frame_ms > 40.0 && last_gpu_ns != 0) {
             std::printf("       fault handlers: %llu read faults %.1f ms, write faults %.1f ms\n",
                         static_cast<unsigned long long>(rf - last_rf), (trf - last_trf) / 1e6,
                         (twf - last_twf) / 1e6);
@@ -566,12 +545,10 @@ void VideoOutDriver::Flip(const Request& req) {
         const u64 images = BbStats::images_registered.load();
         const u64 image_bytes = BbStats::image_upload_bytes.load();
         const u64 buffer_bytes = BbStats::buffer_upload_bytes.load();
-        if (frame_ms > stall_ms && stall_primed) {
-            char game_frame[96];
-            std::printf("Stall: %.1f ms frame (%s); GPU thread on CPU %.1f ms; %llu images registered, "
+        if (frame_ms > 40.0 && last_gpu_ns != 0) {
+            std::printf("Stall: %.1f ms frame; GPU thread on CPU %.1f ms; %llu images registered, "
                         "%.1f MB image uploads, %.1f MB buffer uploads\n",
-                        frame_ms, GameFrameText(game_frame, sizeof(game_frame), true),
-                        (gpu_ns - last_gpu_ns) / 1e6,
+                        frame_ms, (gpu_ns - last_gpu_ns) / 1e6,
                         static_cast<unsigned long long>(images - last_images),
                         (image_bytes - last_image_bytes) / 1e6,
                         (buffer_bytes - last_buffer_bytes) / 1e6);
@@ -583,7 +560,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         (sys_us - last_sys) / 1e3, static_cast<unsigned long long>(invol - last_invol),
                         static_cast<unsigned long long>(vol - last_vol));
         }
-        if (frame_ms > stall_ms && stall_primed) {
+        if (frame_ms > 40.0 && last_gpu_ns != 0) {
             std::printf("       ms in: resident %.1f, protect %.1f, image create %.1f, "
                         "image refresh %.1f, staging %.1f, waiting for host copies %.1f\n",
                         (t_now[0] - last_t[0]) / 1e6, (t_now[1] - last_t[1]) / 1e6,
@@ -599,79 +576,12 @@ void VideoOutDriver::Flip(const Request& req) {
                         static_cast<unsigned long long>(rc - last_rc),
                         static_cast<unsigned long long>(rp - last_rp));
         }
-        static u64 last_va[2], last_vb[2], last_vf[2], last_vfb[2];
-        u64 va[2], vb[2], vf[2], vfb[2];
-        for (int h = 0; h < 2; ++h) {
-            va[h] = BbStats::vma_allocs[h].load();
-            vb[h] = BbStats::vma_alloc_bytes[h].load();
-            vf[h] = BbStats::vma_frees[h].load();
-            vfb[h] = BbStats::vma_free_bytes[h].load();
-        }
-        if (frame_ms > stall_ms && stall_primed) {
-            std::printf("       device memory: video %llu allocated (%.1f MB), %llu freed (%.1f MB); system %llu "
-                        "allocated (%.1f MB), %llu freed (%.1f MB)\n",
-                        static_cast<unsigned long long>(va[1] - last_va[1]), (vb[1] - last_vb[1]) / 1e6,
-                        static_cast<unsigned long long>(vf[1] - last_vf[1]), (vfb[1] - last_vfb[1]) / 1e6,
-                        static_cast<unsigned long long>(va[0] - last_va[0]), (vb[0] - last_vb[0]) / 1e6,
-                        static_cast<unsigned long long>(vf[0] - last_vf[0]), (vfb[0] - last_vfb[0]) / 1e6);
-        }
-        for (int h = 0; h < 2; ++h) {
-            last_va[h] = va[h];
-            last_vb[h] = vb[h];
-            last_vf[h] = vf[h];
-            last_vfb[h] = vfb[h];
-        }
-        // ordered faults: the window block below exchanges these every 5 s, so per frame they are
-        // read as they are (a frame's share is its value minus the last frame's, or all since the reset)
-        static u64 last_of, last_op, last_ob, last_or;
-        const u64 of = BbStats::ordered_faults.load(), op = BbStats::ordered_pickup_ns.load(),
-                  ob = BbStats::ordered_behind_ns.load(), orun = BbStats::ordered_run_ns.load();
-        if (frame_ms > stall_ms && stall_primed && of >= last_of) {
-            const u64 n = of - last_of;
-            std::printf("       ordered faults %llu: until taken %.1f ms, behind draws %.1f ms, running %.1f ms\n",
-                        static_cast<unsigned long long>(n), (op - last_op) / 1e6, (ob - last_ob) / 1e6,
-                        (orun - last_or) / 1e6);
-        }
-        static u64 last_wfc, last_wfi, last_wfu;
-        const u64 wfc = BbStats::write_fault_count.load(), wfi = BbStats::write_fault_image_pages.load(),
-                  wfu = BbStats::write_fault_images_untracked.load();
-        if (frame_ms > stall_ms && stall_primed) {
-            std::printf("       write faults %llu, on image pages %llu (whole image unwatched %llu)\n",
-                        static_cast<unsigned long long>(wfc - last_wfc),
-                        static_cast<unsigned long long>(wfi - last_wfi),
-                        static_cast<unsigned long long>(wfu - last_wfu));
-        }
-        last_of = BbStats::ordered_faults.load();
-        last_op = BbStats::ordered_pickup_ns.load();
-        last_ob = BbStats::ordered_behind_ns.load();
-        last_or = BbStats::ordered_run_ns.load();
-        last_wfc = wfc;
-        last_wfi = wfi;
-        last_wfu = wfu;
-        static u64 last_sb, last_sbr, last_sbb, last_sbns, last_rb, last_sd;
-        const u64 sb = BbStats::sparse_binds.load(), sbr = BbStats::sparse_bind_ranges.load(),
-                  sbb = BbStats::sparse_bind_bytes.load(), sbns = BbStats::sparse_bind_ns.load(),
-                  rb = BbStats::gpu_read_backs.load(), sd = BbStats::gpu_side_downloads.load();
-        if (frame_ms > stall_ms && stall_primed) {
-            std::printf("       sparse binds %llu (%llu ranges, %.1f MB, %.2f ms in the call); GPU read backs %llu, "
-                        "side downloads %llu\n",
-                        static_cast<unsigned long long>(sb - last_sb),
-                        static_cast<unsigned long long>(sbr - last_sbr), (sbb - last_sbb) / 1e6,
-                        (sbns - last_sbns) / 1e6, static_cast<unsigned long long>(rb - last_rb),
-                        static_cast<unsigned long long>(sd - last_sd));
-        }
-        last_sb = sb;
-        last_sbr = sbr;
-        last_sbb = sbb;
-        last_sbns = sbns;
-        last_rb = rb;
-        last_sd = sd;
         last_pc = pc;
         last_pp = pp;
         last_rc = rc;
         last_rp = rp;
         last_minflt = minflt;
-        if (frame_ms > stall_ms && stall_primed && copy_ns > last_copy_ns) {
+        if (frame_ms > 40.0 && last_gpu_ns != 0 && copy_ns > last_copy_ns) {
             std::printf("       guest copies %.1f MB in %.1f thread-ms, %.1f ms on CPU (kernel %.1f ms, "
                         "%llu page faults in large copies) (%.2f GB/s per thread)\n",
                         (copy_bytes - last_copy_bytes) / 1e6, (copy_ns - last_copy_ns) / 1e6,
@@ -695,14 +605,12 @@ void VideoOutDriver::Flip(const Request& req) {
         last_invol = invol;
         last_vol = vol;
         last_gpu_ns = gpu_ns;
-        stall_primed = true;
         last_images = images;
         last_image_bytes = image_bytes;
         last_buffer_bytes = buffer_bytes;
         ++frames;
         const double window = std::chrono::duration<double>(now - window_start).count();
         if (window >= 5.0) {
-            const auto stats_begin = Clock::now(); // bbport: how long this block holds the present thread
             const u32 compiles = Vulkan::g_bb_compiles.exchange(0);
             const u64 compile_ns = Vulkan::g_bb_compile_ns.exchange(0);
             if (const u32 mismatches = Shader::g_spec_count_mismatches.exchange(0)) {
@@ -724,7 +632,6 @@ void VideoOutDriver::Flip(const Request& req) {
             window_draws = all_draws;
             window_gpu_us = gpu_us;
             const u64 side_downloads = BbStats::gpu_side_downloads.exchange(0);
-            char game_frame[96];
             std::printf("Frame stats: %.1f FPS, worst frame %.1f ms (vblank %u Hz); "
                         "%u shader/pipeline compiles, %.1f ms; %llu recorder syncs; "
                         "%.0f write faults/s (%.0f/s over dead GPU data, "
@@ -733,7 +640,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         "%lld hot pages; GPU thread %.2f us/draw, "
                         "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%%, host copies "
                         "%.1f%% (%.0f/frame), copy threads %.1f%%, GPU ticks %.1f%%; "
-                        "reduced-size draws %.0f/frame of %.0f in the scene; %s\n",
+                        "reduced-size draws %.0f/frame of %.0f in the scene\n",
                         frames / window, worst_ms, EmulatorSettings.GetVblankFrequency(), compiles,
                         compile_ns / 1e6, static_cast<unsigned long long>(direct),
                         faults / window, BbStats::dead_gpu_drops.exchange(0) / window,
@@ -752,8 +659,7 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::copy_threads_wait_ns.exchange(0) / (window * 1e7),
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
-                        frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0,
-                        GameFrameText(game_frame, sizeof(game_frame)));
+                        frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
             // bbport diagnosis: the shaders' resource table walks (flat buffers with their
             // per-lane read windows, srt.h): what the copies amount to per frame.
             if (const u64 walks = Shader::g_flatbuf_walks.exchange(0)) {
@@ -861,8 +767,6 @@ void VideoOutDriver::Flip(const Request& req) {
             window_start = now;
             frames = 0;
             worst_ms = 0;
-            std::printf("Frame stats block: %.2f ms on the present thread\n",
-                        std::chrono::duration<double, std::milli>(Clock::now() - stats_begin).count());
         }
     }
 
@@ -1008,34 +912,6 @@ void WaitEopFlipsReached(u64 count, u32 timeout_ms) {
 // games pass their frame number (the projection jitter's game side, CameraMotion).
 std::atomic<s64> g_gpu_flip_arg{-1};
 
-GameFrames CurrentGameFrames() {
-    const volatile u64* count = runtime_game_frame_count;
-    return {count ? static_cast<s64>(*count) : s64{-1}, g_gpu_flip_arg.load(std::memory_order_relaxed),
-            g_presented_flip_arg.load(std::memory_order_relaxed)};
-}
-
-const char* GameFrameText(char* out, std::size_t size, bool full) {
-    const GameFrames f = CurrentGameFrames();
-    if (f.started < 0) {
-        std::snprintf(out, size, "game frame unknown");
-        return out;
-    }
-    if (!full) {
-        std::snprintf(out, size, "game frame %lld", static_cast<long long>(f.started));
-        return out;
-    }
-    char submitted[24] = "none", presented[24] = "none";
-    if (f.submitted >= 0) {
-        std::snprintf(submitted, sizeof(submitted), "%lld", static_cast<long long>(f.submitted));
-    }
-    if (f.presented >= 0) {
-        std::snprintf(presented, sizeof(presented), "%lld", static_cast<long long>(f.presented));
-    }
-    std::snprintf(out, size, "game frame %lld started, %s submitted, %s presented",
-                  static_cast<long long>(f.started), submitted, presented);
-    return out;
-}
-
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
     if (index != -1) {
         g_gpu_flip_arg.store(flip_arg, std::memory_order_relaxed);
@@ -1060,14 +936,7 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
             .eop = is_eop,
         });
     }
-    if (index != -1) {
-        Vulkan::LowLatency::TraceFlip(Vulkan::LowLatency::FlipStage::GpuReached, flip_arg);
-    }
     request_cv.notify_one();
-    if (index != -1) {
-        // bbport even presents: the next frame's GPU work waits for this one's post work
-        Vulkan::LowLatency::GateAfterFlip(flip_arg, frame->ready_tick);
-    }
 }
 
 namespace {
@@ -1180,21 +1049,6 @@ void PaceGuestFlip() {
     }
 }
 
-namespace {
-// bbport latency pacing (vk_low_latency.cpp): the frame rate cap the frame start keeps, and
-// whether it does (then the present thread's slot hold stands aside).
-std::atomic<s64> cap_period_ns{0};
-std::atomic<bool> start_paced{false};
-} // namespace
-
-s64 FrameCapPeriodNs() {
-    return cap_period_ns.load(std::memory_order_relaxed);
-}
-
-void SetStartPaced(bool paced) {
-    start_paced.store(paced, std::memory_order_relaxed);
-}
-
 void VideoOutDriver::PresentThread(std::stop_token token) {
     const std::chrono::nanoseconds vblank_period(1000000000 /
                                                  EmulatorSettings.GetVblankFrequency());
@@ -1202,27 +1056,12 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     Common::SetCurrentThreadName("shadPS4:PresentThread");
     BbThreads::PreferPerformanceCores(); // bbport: hybrid CPUs
     Common::SetCurrentThreadRealtime(vblank_period);
-    // bbport test switch: BB_DEBUG_PRESENT_CPU=<n> pins this thread to logical CPU n (a slow core)
-    if (const char* cpu = std::getenv("BB_DEBUG_PRESENT_CPU"); cpu && cpu[0]) {
-#ifdef _WIN32
-        SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR(1) << std::strtol(cpu, nullptr, 10));
-#endif
-        std::printf("VideoOut: present thread pinned to CPU %s (BB_DEBUG_PRESENT_CPU)\n", cpu);
-    }
 
     Common::AccurateTimer timer{vblank_period};
 
     // bbport: frame limit (see EmulatorSettings::GetFrameLimit). A request waits in the queue
     // until its slot; slots advance by one period (no drift) but never lag behind by more.
-    // bbport latency pacing (vk_low_latency.cpp, with the low latency mode on): the Frame rate is
-    // also the frame limit, kept at the game's frame start (before its input) instead of by
-    // holding finished frames for a vblank tick: a frame is shown as soon as it is done. The game
-    // still gets its vblanks at the Frame rate.
-    const u32 frame_limit = EmulatorSettings.GetFrameLimit()
-                                ? EmulatorSettings.GetFrameLimit()
-                                : (Vulkan::LowLatency::StartPacingRequested()
-                                       ? EmulatorSettings.GetVblankFrequency()
-                                       : 0u);
+    const u32 frame_limit = EmulatorSettings.GetFrameLimit();
     const auto frame_period = frame_limit ? std::chrono::nanoseconds(1000000000 / frame_limit)
                                           : std::chrono::nanoseconds(0);
     auto next_flip = std::chrono::steady_clock::now();
@@ -1294,17 +1133,6 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
             }
             next_movie_vblank = std::max(next_movie_vblank + movie_period, now - movie_period);
         }
-        // bbport latency pacing: while the frame start keeps the cap, the slot hold stands aside
-        // (one limiter); the cap the frame start keeps (0: none now: a movie, the boot's fast
-        // vblank, a freeze or a flip rate change the cadence)
-        if (frame_limit && start_paced.load(std::memory_order_relaxed) && next_flip > now) {
-            next_flip = now;
-        }
-        cap_period_ns.store(frame_limit && !movie && !boot_boost && runtime_freeze_flag == 0 &&
-                                    main_port.flip_rate == 0
-                                ? frame_period.count()
-                                : 0,
-                            std::memory_order_relaxed);
         const bool flip_slot = movie || !frame_limit || boot_boost || now >= next_flip;
         // bbport: while the game's threads are frozen (preparation page/hold) its clocks stand still
         // (runtime_kernel.c) and so do its vblanks: no count step and no events, so it resumes without a jump. A
@@ -1375,9 +1203,6 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
                                            [&] { return !requests.empty(); })) {
                     break; // next vblank
                 }
-            }
-            if (start_paced.load(std::memory_order_relaxed)) {
-                next_flip = std::min(next_flip, std::chrono::steady_clock::now());
             }
             if (std::chrono::steady_clock::now() < next_flip) {
                 if (next_flip >= tick_deadline) {

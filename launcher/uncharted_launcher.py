@@ -41,22 +41,17 @@ DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
 # expanduser, not Path.home(): started without USERPROFILE or HOME, the launcher still opens.
 CONFIG_DIR = Path(os.environ.get('APPDATA') or os.path.expanduser('~')) / 'uncharted-launcher'
 CONFIG_FILE = CONFIG_DIR / 'settings.json'
-# Portable (Game page): the launcher's settings live in this file next to the launcher instead of %APPDATA%;
-# the file being there is the switch.
-PORTABLE_FILE = DATA_DIR / 'launcher_settings.json'
-if PORTABLE_FILE.is_file():
-    CONFIG_DIR, CONFIG_FILE = DATA_DIR, PORTABLE_FILE
 NAME = 'Uncharted'
 AUTHOR = 'SuperMedo · fork by Mevlock'  # shown after 'by '
 # This build; GitHub release tags are v<VERSION> (their digits are compared).
-VERSION = '0.3.6.60.1'  # fork: upstream 0.3.6 + this fork's changes
+VERSION = '0.3.6.62'  # fork: upstream 0.3.6 + this fork's changes
 # Fork: updates come from this fork's own releases (the latest one; -pre tags are published as normal releases).
 RELEASES_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases/latest'
 RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
 UPDATES = True
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'uncharted-update'
 # Never copied over an installation by an update (the package does not hold them either).
-USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log', 'launcher_settings.json')
+USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log')
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -69,7 +64,6 @@ GAMES = [
     ('u2', 'Among Thieves', 'Uncharted 2 · 2009', 'big2-ps4_Shipping.elf'),
     ('u3', "Drake's Deception", 'Uncharted 3 · 2011', 'big3-ps4_Shipping.elf'),
 ]
-PORTABLE_HINT = "The launcher's own settings are kept in launcher_settings.json next to the launcher instead of your Windows user profile (%APPDATA%), so the folder can be moved or copied to another PC with them. Saves and shaders are kept here already, unless you chose another Saves folder above."
 # Console language (system parameter 1), as the PS4 numbers them.
 LANGUAGES = [('1', 'English (United States)'), ('18', 'English (United Kingdom)'), ('2', 'French'),
              ('22', 'French (Canada)'), ('4', 'German'), ('5', 'Italian'), ('3', 'Spanish'),
@@ -170,7 +164,7 @@ AA_SHARPNESS = [('0', 'Off'), ('0.2', 'Low'), ('0.4', 'Medium'), ('0.7', 'High')
 # Frames generated between two of the game's (BB_FRAME_GEN, BB_FRAME_GEN_MULTIPLIER).
 FRAME_GENERATION = [('off', 'Off'), ('fsr3', 'AMD FSR 3 Frame Generation (any GPU)'),
                     ('dlss', 'NVIDIA DLSS Frame Generation (GeForce RTX 40/50)')]
-LOW_LATENCY = [('0', 'Off'), ('1', 'On'), ('2', 'On + boost (NVIDIA Reflex Boost: GPU clocks stay up)')]
+LOW_LATENCY = [('0', 'Off'), ('1', 'On'), ('2', 'On + boost (NVIDIA: GPU clocks stay up)')]
 # The speaker layout the games are told (BB_SPEAKERS; from drakolordx7's upstream change, PR #392).
 SPEAKERS = [('auto', 'Automatic (the Windows speaker setup)'), ('2', 'Stereo'), ('6', '5.1 surround'),
             ('8', '7.1 surround')]
@@ -246,8 +240,8 @@ CAMERA_VERTICAL_MAX = 8.0   # the normal camera's up / down (its arc is 1.3-5x s
 RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
-APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'portable': False, 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'reserve_render_cores': True, 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
+APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
+                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
@@ -967,8 +961,6 @@ def game_environment(s, start=None):
     job_threads = str(s.get('job_threads') or 'auto')
     if job_threads != 'auto':
         env['BB_JOB_SLEEP'] = '0' if job_threads == 'spin' else '1'
-    if not s.get('reserve_render_cores', True):
-        env['BB_RENDER_CORES'] = '0'
     env['BB_ANISO'] = str(s.get('anisotropy') or '0')
     if s.get('full_res_textures', False):
         env['BB_FULL_RES_TEXTURES'] = '1'
@@ -1076,7 +1068,6 @@ def load_settings():
             saved['mouse_aim_sensitivity'] = value
         saved['mouse_camera_vertical'] = '2.0'
     settings = {**APP_DEFAULTS, **saved}
-    settings['portable'] = CONFIG_FILE == PORTABLE_FILE
     if import_game_controls(settings):   # the in-game menu's Controls page changed them in the last game
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1613,9 +1604,6 @@ class Launcher:
             side='left', padx=(self.px(24), 0))
         self.pill(row, _('Desktop shortcut'), self.shortcut, background=SURFACE, padding=(14, 6)).pack(
             side='left', padx=(self.px(8), 0))
-        # The collection's own menu (it lives in Uncharted 1's eboot.bin): pick any of the three games, as on the PS4.
-        self.pill(row, _('Collection menu'), lambda: self.play(collection=True), background=SURFACE,
-                  padding=(14, 6)).pack(side='left', padx=(self.px(8), 0))
         self.ready = tk.Label(shell, text='', bg=SURFACE, fg=MUTED, font=self.font_ui_sm,
                               wraplength=self.px(820), justify='left')
         self.ready.pack(anchor='w', padx=self.px(22), pady=(0, self.px(16)))
@@ -1920,8 +1908,6 @@ class Launcher:
                     on_change=self.refresh)
         self.folder(f, 'user_dir', _('Saves folder'), _('Where saves and the shader cache are kept'),
                     _('Empty: the user folder next to the launcher.'))
-        self.check(f, 'portable', _('Portable: keep the launcher settings in this folder'), _(PORTABLE_HINT))
-        self.var('portable').trace_add('write', lambda *_a: self.set_portable(self.var('portable').get()))
         self.section(f, _('Separate game folders'))
         self.note(f, _('Only when the games are not in one collection folder (each dumped on its own). A game with '
                        'a folder here is taken from it; the others from the collection folder above.'), top=2)
@@ -1972,10 +1958,6 @@ class Launcher:
         self.row(f, _('Idle game threads'), self.choice(f, 'job_threads', JOB_THREADS, 34),
                  _('Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them '
                    '(best for 4-8 thread CPUs) and is just as smooth.'))
-        self.check(f, 'reserve_render_cores', _('Reserve CPU cores for rendering'),
-                   _('Gives the two threads that prepare each frame for the graphics card a CPU core each '
-                     '(CPUs with 4 or more cores and two threads per core). Faster, most of all on 4-core '
-                     'CPUs; turn it off only if another program needs those cores.'))
         self.section(f, _('Resolution'))
         self.row(f, _('Window size'), self.choice(f, 'window_size', WINDOW_SIZES, 34),
                  _('The window\'s size in windowed mode. With Render resolution at 1920 × 1080, a larger '
@@ -2083,7 +2065,7 @@ class Launcher:
         self.row(f, _('Multiplier'), self.choice(f, 'frame_gen_multiplier', FRAME_GEN_MULTIPLIERS, 34),
                  _('FSR 3 makes one frame (2×). DLSS makes up to three on a GeForce RTX 50 (4×), '
                    'one on an RTX 40.'))
-        self.row(f, _('Low latency (NVIDIA Reflex / AMD Anti-Lag 2)'), self.choice(f, 'low_latency', LOW_LATENCY, 34),
+        self.row(f, _('Low latency'), self.choice(f, 'low_latency', LOW_LATENCY, 34),
                  _('NVIDIA Reflex on GeForce cards, AMD Anti-Lag 2 on Radeon cards (with a recent driver). '
                    'The game waits to read the controller until the GPU is ready for the next frame, so '
                    'what you press shows sooner. It helps most when the GPU is the limit; the FPS '
@@ -2690,23 +2672,6 @@ class Launcher:
                                   else _('Preparing the game; it opens in its own window…'), fg=GOLD)
         self.detect_controller()
 
-    def set_portable(self, on):
-        """Moves the launcher's settings between %APPDATA% and launcher_settings.json next to the launcher."""
-        global CONFIG_DIR, CONFIG_FILE
-        if on == (CONFIG_FILE == PORTABLE_FILE):
-            return
-        appdata = Path(os.environ.get('APPDATA') or os.path.expanduser('~')) / 'uncharted-launcher'
-        old_file = CONFIG_FILE
-        CONFIG_DIR, CONFIG_FILE = (DATA_DIR, PORTABLE_FILE) if on else (appdata, appdata / 'settings.json')
-        try:
-            self.collect()   # writes the settings to the new place
-            if not on:
-                PORTABLE_FILE.unlink(missing_ok=True)
-        except OSError as error:
-            CONFIG_DIR, CONFIG_FILE = old_file.parent, old_file
-            self.var('portable').set(not on)
-            self.messagebox.showerror(NAME, _('Could not move the launcher settings: {}').format(error))
-
     def collect(self):
         for key, v in self.vars.items():
             self.app[key] = v.get()
@@ -2848,11 +2813,9 @@ class Launcher:
             (folder / f'prepared_{lists[0].stem}').unlink(missing_ok=True)
         self.play(prepare=True)
 
-    def play(self, prepare=False, collection=False):
+    def play(self, prepare=False):
         if self.process:
             return
-        if collection:  # Uncharted 1's executable with its collection menu (the skip stays off this once)
-            self.var('start').set('u1')
         if prepare and not shader_list(self.current()['start']):
             self.messagebox.showinfo(NAME, _('There is no shader list for this game yet.'))
             return
@@ -2872,8 +2835,6 @@ class Launcher:
             return
         self.set_log('')
         env = game_environment(self.app)
-        if collection:
-            env.pop('BB_SKIP_COLLECTION_MENU', None)
         self.show_imported_controls()
         if prepare:
             # No window and no game (BB_PREPARE_ONLY): the progress comes back as PREP lines for the bar.

@@ -9,7 +9,6 @@
 #include <cstdio>
 #include "bbport_hdr.h"
 #include "bbport_settings.h"
-#include "bbport_vrr.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
@@ -18,7 +17,6 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
-#include "video_core/renderer_vulkan/vk_present_release.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 
 namespace Vulkan {
@@ -30,17 +28,6 @@ static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
 
 Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_)
     : instance{instance_}, window{window_}, surface{CreateSurface(instance.GetInstance(), window)} {
-    // bbport even presents (vk_present_release.h): the release queue must present to this surface.
-    if (PresentRelease::Wanted(instance)) {
-        const auto [result, supported] = instance.GetPhysicalDevice().getSurfaceSupportKHR(
-            instance.GetReleaseQueueFamilyIndex(), surface);
-        use_release = result == vk::Result::eSuccess && supported;
-        if (!use_release) {
-            std::printf("Even presents: the release queue (family %u) cannot present to the window; "
-                        "the GPU holds are off\n",
-                        instance.GetReleaseQueueFamilyIndex());
-        }
-    }
     FindPresentFormat();
     FindPresentMode();
 
@@ -65,11 +52,9 @@ void Swapchain::Create(u32 width_, u32 height_) {
 
     SetSurfaceProperties();
 
-    // bbport even presents: the release queue's family presents the images (and may hold them).
     const std::array queue_family_indices = {
         instance.GetGraphicsQueueFamilyIndex(),
-        use_release && !instance.GetReleasePresentQueue() ? instance.GetReleaseQueueFamilyIndex()
-                                                          : instance.GetPresentQueueFamilyIndex(),
+        instance.GetPresentQueueFamilyIndex(),
     };
 
     const bool exclusive = queue_family_indices[0] == queue_family_indices[1];
@@ -79,8 +64,6 @@ void Swapchain::Create(u32 width_, u32 height_) {
     const auto format = needs_hdr ? hdr_format : surface_format;
     const vk::SwapchainCreateInfoKHR swapchain_info = {
         .pNext = LowLatency::SwapchainNext(),
-        // bbport: the VRR indicator's present timing source (bbport_vrr.h), where it measures.
-        .flags = BbVrr::SwapchainFlags(instance.GetPhysicalDevice(), surface),
         .surface = surface,
         .minImageCount = image_count,
         .imageFormat = format.format,
@@ -104,7 +87,6 @@ void Swapchain::Create(u32 width_, u32 height_) {
                vk::to_string(swapchain_result));
     swapchain = chain;
     LowLatency::OnSwapchain(swapchain);
-    BbVrr::OnSwapchain(swapchain, present_mode);
     metadata_peak = 0.0f; // a new swapchain has no metadata yet
     UpdateHdrMetadata();
 
@@ -189,7 +171,7 @@ bool Swapchain::AcquireNextImage() {
     return !needs_recreation;
 }
 
-bool Swapchain::Present(u64 latency_id, bool released, u64 async_up_to) {
+bool Swapchain::Present(u64 latency_id) {
     UpdateHdrMetadata();
     // bbport: low latency mode (vk_low_latency.h): the game's frame carries its frame id.
     const vk::PresentIdKHR present_id{
@@ -197,10 +179,9 @@ bool Swapchain::Present(u64 latency_id, bool released, u64 async_up_to) {
         .pPresentIds = &latency_id,
     };
     const vk::PresentInfoKHR present_info = {
-        // bbport: the VRR indicator's present timing (bbport_vrr.h), while it shows.
-        .pNext = BbVrr::PresentNext(LowLatency::UsesPresentId() ? &present_id : nullptr),
+        .pNext = LowLatency::UsesPresentId() ? &present_id : nullptr,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = released && use_release ? &present_release[image_index] : &present_ready[image_index],
+        .pWaitSemaphores = &present_ready[image_index],
         .swapchainCount = 1,
         .pSwapchains = &swapchain,
         .pImageIndices = &image_index,
@@ -211,20 +192,14 @@ bool Swapchain::Present(u64 latency_id, bool released, u64 async_up_to) {
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
     const auto t0 = Clock::now();
-    WaitAsyncSubmits(async_up_to);
+    WaitAsyncSubmits();
     const auto t1 = Clock::now();
     LowLatency::PresentStart(latency_id); // bbport: low latency mode (vk_low_latency.h)
     vk::Result result;
     {
-        // bbport even presents: on the release queue (vk_present_release.h), its own lock.
-        std::scoped_lock queue_lk{use_release ? g_release_queue_mutex : g_graphics_queue_mutex};
+        std::scoped_lock queue_lk{g_graphics_queue_mutex};
         const auto t2 = Clock::now();
-        // the graphics family's present-only queue when there is one (the hold signals from the
-        // release queue), else the release queue itself
-        const vk::Queue queue = !use_release                         ? instance.GetPresentQueue()
-                                : instance.GetReleasePresentQueue() ? instance.GetReleasePresentQueue()
-                                                                    : instance.GetReleaseQueue();
-        result = queue.presentKHR(present_info);
+        result = instance.GetPresentQueue().presentKHR(present_info);
         const auto t3 = Clock::now();
         last_async_ms = ms(t0, t1);
         last_queue_lock_ms = ms(t1, t2);
@@ -233,10 +208,6 @@ bool Swapchain::Present(u64 latency_id, bool released, u64 async_up_to) {
     LowLatency::PresentEnd(latency_id);
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
-    } else if (result == static_cast<vk::Result>(VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT)) {
-        // bbport: the VRR indicator's timing reports (bbport_vrr.h) are collected before every
-        // present, so this should not happen; it costs one frame, not the game.
-        LOG_WARNING(Render_Vulkan, "Present timing queue full");
     } else {
         ASSERT_MSG(result == vk::Result::eSuccess, "Swapchain presentation failed: {}",
                    vk::to_string(result));
@@ -372,11 +343,8 @@ void Swapchain::SetSurfaceProperties() {
 
     // Select number of images in swap chain, we prefer one buffer in the background to work on
     // (bbport: two with frame generation, which presents several images per game frame).
-    // bbport even presents: five more for the presents that wait for their targets (the slack:
-    // up to about three frames at 144) while the next frames are drawn.
     image_count = capabilities.minImageCount +
-                  (BbSettings::Get().frame_gen != BbSettings::FrameGenOff ? 2 : 1) +
-                  (use_release ? 5 : LowLatency::EvenPresents() ? 1 : 0); // capped by maxImageCount
+                  (BbSettings::Get().frame_gen != BbSettings::FrameGenOff ? 2 : 1);
     if (capabilities.maxImageCount > 0) {
         image_count = std::min(image_count, capabilities.maxImageCount);
     }
@@ -396,7 +364,6 @@ void Swapchain::SetSurfaceProperties() {
 
 void Swapchain::Destroy() {
     LowLatency::OnSwapchainDestroy();
-    BbVrr::OnSwapchainDestroy();
     vk::Device device = instance.GetDevice();
     // bbport: vkDeviceWaitIdle needs the queues externally synchronized: the GPU command thread
     // submits under submit_mutex while the presenter recreates the swapchain (a window resize, a
@@ -424,13 +391,9 @@ void Swapchain::Destroy() {
     for (const auto& sem : present_ready) {
         device.destroySemaphore(sem);
     }
-    for (const auto& sem : present_release) {
-        device.destroySemaphore(sem);
-    }
 
     image_acquired.clear();
     present_ready.clear();
-    present_release.clear();
 }
 
 void Swapchain::RefreshSemaphores() {
@@ -450,15 +413,6 @@ void Swapchain::RefreshSemaphores() {
         ASSERT_MSG(semaphore_result == vk::Result::eSuccess,
                    "Failed to create present ready semaphore: {}", vk::to_string(semaphore_result));
         semaphore = sem;
-    }
-    if (use_release) {
-        present_release.resize(image_count);
-        for (vk::Semaphore& semaphore : present_release) {
-            auto [semaphore_result, sem] = device.createSemaphore({});
-            ASSERT_MSG(semaphore_result == vk::Result::eSuccess,
-                       "Failed to create present release semaphore: {}", vk::to_string(semaphore_result));
-            semaphore = sem;
-        }
     }
 
     for (u32 i = 0; i < image_count; ++i) {

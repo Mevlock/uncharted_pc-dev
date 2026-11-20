@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "bbport_trace.h"
-#include "video_core/chained_writes.h"
 #include <chrono>
 #include <thread>
 #include <array>
@@ -17,7 +15,6 @@
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
 #include "common/thread.h"
-#include "core/libraries/videoout/game_frame.h"
 #include "video_core/landing_gate.h"
 #include "common/alignment.h"
 #include "core/memory.h"
@@ -166,38 +163,11 @@ struct BufferCache::PrefetchBatch {
         boost::container::small_vector<std::pair<VAddr, VAddr>, 4> parts; ///< GPU bytes copied
         u64 offset; ///< of the first part in staging; the others follow, 16-byte aligned
     };
-    /// The batch's tick as written by the GPU after its copies (Landed): the last 16 bytes of the
-    /// staging; the copies stay below MarkSpace.
-    static constexpr u64 MarkOffset = StagingSize - 16;
-    static constexpr u64 MarkSpace = StagingSize - 256;
-
     Buffer staging;
     std::vector<Entry> entries;
     u64 tick = 0; ///< the command buffer that copies them (0: unused)
-    bool landed = false;      ///< its mark was seen: the copies are in host memory
     bool invalidated = false;
 };
-
-/// bbport: a prefetch batch's copies are in host memory (prefetch_mutex held). Its tick counting
-/// as done on the GPU is not enough: on the U3 horse ride at a 60 cap with combo2's GPU holds (~10 ms
-/// between frames) 12% of the copies served were not there yet although their tick was done (the
-/// staging still held the batch's previous use, 60 submissions older; the copy landed ~15 ms
-/// later, 2026-11-18, BB_PREFETCH_VERIFY diagnosis): the guest got the last frame but one's GPU
-/// bytes of its skinning ring, and single frames had the game's motion blur bursting around Nate.
-/// The GPU writes the batch's tick after its copies; it counts as landed once that is there.
-bool BufferCache::PrefetchLanded(PrefetchBatch& batch) {
-    if (batch.landed) {
-        return true;
-    }
-    if (batch.tick == 0 || !scheduler.IsFree(batch.tick)) {
-        return false;
-    }
-    batch.staging.Invalidate(PrefetchBatch::MarkOffset, 16);
-    u32 mark;
-    std::memcpy(&mark, batch.staging.mapped_data.data() + PrefetchBatch::MarkOffset, sizeof(mark));
-    batch.landed = mark == u32(batch.tick);
-    return batch.landed;
-}
 
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                          Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
@@ -779,7 +749,7 @@ bool BufferCache::ReadBackOnFaultThread(VAddr device_addr, u64 size) {
         for (const auto& candidate : pages) {
             const auto it = prefetch_latest.find(candidate.at);
             if (it == prefetch_latest.end() || it->second.batch->tick < candidate.tick ||
-                !PrefetchLanded(*it->second.batch)) {
+                !scheduler.IsFree(it->second.batch->tick)) {
                 prefetched.clear();
                 break;
             }
@@ -1252,7 +1222,7 @@ void BufferCache::PrefetchRecurringPages() {
     // The oldest batch whose copies the GPU has run (only the GPU thread reads them).
     PrefetchBatch* batch = nullptr;
     for (auto& candidate : prefetch_batches) {
-        if ((candidate->tick == 0 || PrefetchLanded(*candidate)) &&
+        if ((candidate->tick == 0 || scheduler.IsFree(candidate->tick)) &&
             (!batch || candidate->tick < batch->tick)) {
             batch = candidate.get();
         }
@@ -1268,7 +1238,6 @@ void BufferCache::PrefetchRecurringPages() {
     }
     batch->entries.clear();
     batch->tick = 0;
-    batch->landed = false;
     batch->invalidated = false;
 
     struct ArenaCopies {
@@ -1296,7 +1265,7 @@ void BufferCache::PrefetchRecurringPages() {
                                                entry.parts.emplace_back(start, end);
                                                size += Common::AlignUp(end - start, 16);
                                            });
-        if (entry.parts.empty() || total + size > PrefetchBatch::MarkSpace) {
+        if (entry.parts.empty() || total + size > PrefetchBatch::StagingSize) {
             continue;
         }
         const u64 block = page >> block_shift;
@@ -1339,15 +1308,6 @@ void BufferCache::PrefetchRecurringPages() {
     for (const auto& [arena, copies] : by_arena) {
         cmdbuf.copyBuffer(arena->Handle(), batch->staging.Handle(), copies);
     }
-    // The batch's tick after its copies: the copies are in host memory once it is (Landed).
-    const vk::MemoryBarrier2 copied = {
-        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
-        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
-        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
-        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
-    };
-    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &copied});
-    cmdbuf.fillBuffer(batch->staging.Handle(), PrefetchBatch::MarkOffset, 4, u32(tick));
     const vk::MemoryBarrier2 to_host = {
         .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
         .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
@@ -1381,7 +1341,7 @@ bool BufferCache::TryPrefetched(VAddr page, u64 length) {
         }
         PrefetchBatch* batch = it->second.batch;
         if (memory_tracker->LatestGpuWriteTick(at, TRACKER_BYTES_PER_PAGE) > batch->tick ||
-            !PrefetchLanded(*batch)) {
+            !scheduler.IsFree(batch->tick)) {
             prefetch_missed.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
@@ -1727,10 +1687,8 @@ bool BufferCache::WaitLandingTick(u64 tick) {
         }
         if (!reported && std::chrono::steady_clock::now() - begin > std::chrono::seconds(5)) {
             reported = true;
-            char game_frame[96];
-            std::printf("GPU stall: the landing thread waits 5 s for tick %llu (%s)\n",
-                        static_cast<unsigned long long>(tick),
-                        Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
+            std::printf("GPU stall: the landing thread waits 5 s for tick %llu\n",
+                        static_cast<unsigned long long>(tick));
         }
     }
     return false;
@@ -2052,10 +2010,8 @@ void BufferCache::WaitLanding(u64 seq) {
     // the GPU, which ends the game when the device is lost).
     const auto done = [&] { return landing_stop || landing_done_seq >= seq; };
     if (!landing_done_cv.wait_for(lk, std::chrono::seconds(5), done)) {
-        char game_frame[96];
-        std::printf("GPU stall: a label waits 5 s for the landing of copy %llu (%s)\n",
-                    static_cast<unsigned long long>(seq),
-                    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
+        std::printf("GPU stall: a label waits 5 s for the landing of copy %llu\n",
+                    static_cast<unsigned long long>(seq));
         landing_done_cv.wait(lk, done);
     }
 }
@@ -2494,16 +2450,12 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
             const char* env = std::getenv("BB_ORDERED_FAULTS");
             return !(env && env[0] == '0');
         }();
-        // BB_FRAME_TRACE diagnosis: the fault's path (5 read back here, 6 ordered on the GPU side)
         if (assume_locks) {
             resolve();
-        } else if (BbTrace::Record(BbTrace::PhaseBegin, 5), ReadBackOnFaultThread(device_addr, size)) {
+        } else if (ReadBackOnFaultThread(device_addr, size)) {
             // read back on this thread (che2281337): nothing more to do
-            BbTrace::Record(BbTrace::PhaseEnd, 5);
         } else if (!async_side && ordered) {
-            BbTrace::Record(BbTrace::PhaseBegin, 6);
             liverpool->SendOrderedCommand(std::move(resolve));
-            BbTrace::Record(BbTrace::PhaseEnd, 6);
         } else if (!async_side) {
             liverpool->SendCommand<true>(std::move(resolve));
         } else {
@@ -3039,10 +2991,6 @@ extern "C" void BbEopTraceRead(u64 address, u64 size, const char* path);
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer,
                                                         u64 stream_limit) {
-    // A chained WriteData into this memory lands first (chained_writes.h).
-    if (ChainedWrites::MustWait(device_addr, size)) {
-        scheduler.WaitDeferredSignals();
-    }
     const bool stats = BufferStatsEnabled();
     if (stats) {
         PrintBufferStats();
@@ -3231,91 +3179,8 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     return {arena, arena->Offset(device_addr)};
 }
 
-namespace {
-/// bbport: BB_STREAM_UPLOAD=0: streamed file data is not uploaded ahead (textures are copied from
-/// guest memory when first used, as before).
-bool StreamUploadEnabled() {
-    static const bool on = [] {
-        const char* env = std::getenv("BB_STREAM_UPLOAD");
-        return !(env && env[0] == '0');
-    }();
-    return on;
-}
-} // namespace
-
-void BufferCache::NoteStreamed(VAddr addr, u64 size) {
-    if (!StreamUploadEnabled()) {
-        return;
-    }
-    std::scoped_lock lock{streamed_mutex};
-    if (streamed.size() >= 4096) {
-        return; // far behind (a level load): the rest uploads on first use, as before
-    }
-    streamed.push_back({addr, size, BbStats::gpu_frames.load(std::memory_order_relaxed)});
-}
-
-bool BufferCache::StreamUploadRoomy() const {
-    // Video memory for data that may never be drawn: not on cards or budgets under 5 GB (as the
-    // arena's and the staging pool's own rules).
-    static const bool roomy = instance.GetTotalMemoryBudget() >= 5_GB;
-    return roomy;
-}
-
-void BufferCache::UploadStreamed(const std::function<bool(VAddr, u64)>& is_mapped) {
-    // Under 5 GB (StreamUploadRoomy) the queue is dropped.
-    const bool roomy = StreamUploadRoomy();
-    if (!StreamUploadEnabled() || !roomy) {
-        if (!roomy) {
-            std::scoped_lock lock{streamed_mutex};
-            streamed.clear();
-        }
-        return;
-    }
-    // Ranges at least 8 frames old (the loader's own passes over fresh data, e.g. pointer fixups,
-    // are done by then: writes after the upload fault and are uploaded again), up to 8 MiB per
-    // submission (~3 per frame: ~3 GB/s at 120 FPS).
-    constexpr u64 MinAgeFrames = 8;
-    constexpr u64 BudgetBytes = 8_MB;
-    const u64 now = BbStats::gpu_frames.load(std::memory_order_relaxed);
-    u64 budget = BudgetBytes;
-    while (budget > 0) {
-        StreamedRange range;
-        {
-            std::scoped_lock lock{streamed_mutex};
-            if (streamed.empty() || streamed.front().frame + MinAgeFrames > now) {
-                return;
-            }
-            range = streamed.front();
-            const u64 take = std::min(range.size, budget);
-            if (take == range.size) {
-                streamed.pop_front();
-            } else {
-                streamed.front().addr += take;
-                streamed.front().size -= take;
-            }
-            range.size = take;
-        }
-        budget -= range.size;
-        if (!is_mapped(range.addr, range.size) ||
-            !memory_tracker->IsRegionCpuModified(range.addr, range.size)) {
-            continue; // not GPU memory, or already current in the arena
-        }
-        (void)ObtainBuffer(range.addr, static_cast<u32>(range.size), false);
-        BbStats::stream_upload_bytes.fetch_add(range.size, std::memory_order_relaxed);
-    }
-}
-
 std::pair<const Buffer*, u64> BufferCache::ObtainBufferForImage(VAddr device_addr, u32 size) {
-    if (ChainedWrites::MustWait(device_addr, size)) {
-        scheduler.WaitDeferredSignals();
-    }
-    // bbport: data already current in the arena (GPU-written, or uploaded ahead: UploadStreamed)
-    // is read there, in video memory, instead of copied from guest memory into host staging. The
-    // uploaded-ahead case only where uploads ahead are made (StreamUploadRoomy: not under 5 GB,
-    // where the arena would otherwise take in texture sources that are read once).
-    if (IsRegionGpuModified(device_addr, size) ||
-        (StreamUploadEnabled() && StreamUploadRoomy() &&
-         !memory_tracker->IsRegionCpuModified(device_addr, size))) {
+    if (IsRegionGpuModified(device_addr, size)) {
         return ObtainBuffer(device_addr, size, false);
     }
     const auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostUncached,
@@ -3999,36 +3864,11 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     }
     vk::Result submit_result;
     {
-        const auto bind_start = std::chrono::steady_clock::now();
         std::scoped_lock queue_lk{Vulkan::g_graphics_queue_mutex};
         submit_result = instance.GetSparseQueue().bindSparse(sparse_info);
-        BbStats::sparse_bind_ns.fetch_add(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
-                                                                 bind_start).count(),
-            std::memory_order_relaxed);
-        BbStats::sparse_binds.fetch_add(1, std::memory_order_relaxed);
-        if (const auto took = std::chrono::steady_clock::now() - bind_start;
-            took > std::chrono::milliseconds(4) && std::getenv("BB_STALL_MS")) {
-            const u64 last_alloc = BbStats::vma_last_alloc_ns.load(std::memory_order_relaxed);
-            const double since =
-                last_alloc ? (double(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                         std::chrono::steady_clock::now().time_since_epoch()).count()) -
-                              double(last_alloc)) / 1e6
-                           : -1.0;
-            std::printf("Slow sparse bind: %.1f ms, %zu arenas; VMA's last allocation %.0f ms before\n",
-                        std::chrono::duration<double, std::milli>(took).count(), buffer_binds.size(), since);
-        }
-        for (const auto& b : buffer_binds) {
-            BbStats::sparse_bind_ranges.fetch_add(b.bindCount, std::memory_order_relaxed);
-            for (u32 i = 0; i < b.bindCount; ++i) {
-                BbStats::sparse_bind_bytes.fetch_add(b.pBinds[i].size, std::memory_order_relaxed);
-            }
-        }
     }
     if (submit_result == vk::Result::eErrorDeviceLost) {
-        char game_frame[96];
-        std::printf("Device lost during a sparse bind (%s)\n",
-                    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame)));
+        std::printf("Device lost during a sparse bind\n");
         Vulkan::DeviceLost(instance.GetDevice());
     } else if (submit_result != vk::Result::eSuccess) {
         std::printf("Arena: sparse bind failed (%s), %zu arenas\n",

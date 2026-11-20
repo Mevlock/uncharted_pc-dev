@@ -261,9 +261,6 @@ TRANSLATIONS = {
     'FPS counter in the corner': L('Contador de FPS en la esquina', 'Contador de FPS no canto',
                                    'Compteur de FPS dans le coin', 'FPS-Zähler in der Ecke',
                                    "Contatore FPS nell'angolo", '画面隅に FPS カウンター'),
-    'G-SYNC / FreeSync indicator': L('Indicador G-SYNC / FreeSync', 'Indicador G-SYNC / FreeSync',
-                                     'Indicateur G-SYNC / FreeSync', 'G-SYNC-/FreeSync-Anzeige',
-                                     'Indicatore G-SYNC / FreeSync', 'G-SYNC / FreeSync 表示'),
     'Frame time graph': L('Gráfico de tiempos de cuadro', 'Gráfico de tempo de quadro', 'Graphique des temps d’image',
                           'Frametime-Diagramm', 'Grafico dei tempi dei fotogrammi', 'フレームタイムのグラフ'),
     "Top line, the game's own frames: FPS and frame time, 1%L the average of the slowest 1% (stutter), MAX the "

@@ -34,7 +34,6 @@
 #include "common/logging/log.h"
 #include "common/rdtsc.h"
 #include "core/libraries/kernel/orbis_error.h"
-#include "core/libraries/videoout/game_frame.h"
 #include "core/libraries/libs.h"
 #include "core/memory.h"
 #include "core/signals.h"
@@ -85,10 +84,6 @@ struct Symbol {
 std::vector<Symbol> g_symbols;
 u32 g_sdk_version;
 } // namespace
-
-namespace VideoCore {
-void FlushDeferredProtects(VAddr address, u64 size); // page_manager.cpp
-}
 
 namespace Core::Loader {
 void SymbolsResolver::AddSymbol(const char* nid, const char* library, const char* module, SymbolType,
@@ -159,8 +154,6 @@ static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
     }
 }
 void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
-    // bbport: revokes waiting for this copy (page_manager.cpp, deferred revokes) go first.
-    VideoCore::FlushDeferredProtects(source, size);
     // bbport: large uploads (streaming) are split across the copy threads.
     constexpr u64 Chunk = 512 * 1024;
     if (size < 4 * Chunk || !BbCopy::Enabled()) {
@@ -273,7 +266,6 @@ static void StartProfileWriter() {
 void BbSamplerStart(); // bbport_sampler.cpp (BB_SAMPLE_THREADS)
 
 extern "C" void runtime_freeze_reason(unsigned reason, int on, const char* why); // runtime_thread.c
-extern "C" void runtime_output_flush(void); // src/probe.c: the console output written before an exit
 
 extern "C" int bbgpu_init(const BbGpuConfig* config) {
     BbSettings::Load();
@@ -295,7 +287,6 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         std::printf("Preparation only: done\n");
         std::fflush(stdout);
 #ifdef _WIN32
-        runtime_output_flush();
         TerminateProcess(GetCurrentProcess(), 0);
 #endif
         std::_Exit(0);
@@ -367,7 +358,6 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         // bbport: _Exit is ExitProcess on Windows, which still runs every DLL's detach code with
         // the other threads already gone: libsrt's (through FFmpeg) joined a thread through a
         // winpthread lock one of them held, and the process never ended (exit hang, lldb).
-        runtime_output_flush();
         TerminateProcess(GetCurrentProcess(), 0);
 #endif
         std::_Exit(0);
@@ -596,31 +586,6 @@ extern "C" int bbgpu_preparation_screen(void) {
 
 extern "C" void bbgpu_input_sample(void) {
     Vulkan::LowLatency::InputSample();
-}
-
-/// bbport: the game read `size` bytes from a file into guest memory at `addr` (runtime_file.c):
-/// the GPU side may upload them ahead (BufferCache::UploadStreamed).
-void (*g_bb_note_streamed)(uint64_t addr, uint64_t size) = nullptr;
-extern "C" void bbgpu_note_streamed(uint64_t addr, uint64_t size) {
-    if (auto* note = g_bb_note_streamed) {
-        note(addr, size);
-    }
-}
-
-extern "C" void bbgpu_game_frame_source(int found) {
-    Vulkan::LowLatency::SetFrameSource(found != 0);
-}
-
-extern "C" void bbgpu_game_frame_start(uint64_t frame, uint64_t kicked) {
-    Vulkan::LowLatency::GameFrameStart(frame, kicked);
-}
-
-extern "C" int64_t bbgpu_present_lead_ns(void) {
-    return Vulkan::LowLatency::PresentLeadNs();
-}
-
-extern "C" const char* bbgpu_game_frame_text(char* out, size_t size, int full) {
-    return Libraries::VideoOut::GameFrameText(out, size, full != 0);
 }
 
 extern "C" void bbgpu_prepare_exit(void) {

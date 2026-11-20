@@ -2,7 +2,6 @@
  * GnmDriver, VideoOut and kernel event queues, adapted to the native loader. */
 #ifndef BBGPU_H
 #define BBGPU_H
-#include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
@@ -60,21 +59,9 @@ int bbgpu_preparation_screen(void);
 /* 1 once after the game's window came back from the background while it was in gameplay (BB_PAUSE_ON_FOCUS_LOST=1;
  * the game stood still meanwhile): runtime_pad.c opens the game's pause menu then. */
 int bbgpu_take_back_request(void);
-/* The game reads the controller (counted for the low latency log, BB_REFLEX_LOG=1). */
+/* The game reads the controller: the frame start of the low latency mode (NVIDIA Reflex / AMD
+ * Anti-Lag 2, BB_LOW_LATENCY), which may sleep there until the GPU is ready for the next frame. */
 void bbgpu_input_sample(void);
-/* probe.c, low latency mode (NVIDIA Reflex / AMD Anti-Lag 2, BB_LOW_LATENCY): whether the game's frame start was
- * found and hooked (once, after the code patches, before the game runs), and each frame start: the game's own frame
- * number (g_frameState.m_frameCount) and KickJob's lastFrameNumber then (UINT64_MAX: not known). May sleep there
- * until the GPU is ready for the next frame. */
-void bbgpu_game_frame_source(int found);
-void bbgpu_game_frame_start(uint64_t frame, uint64_t kicked);
-/* Right after bbgpu_game_frame_start: ns from now to that frame's present target (0: none; even presents), for the
- * paced frame clock. */
-int64_t bbgpu_present_lead_ns(void);
-/* The game frame for a report line (core/libraries/videoout/game_frame.h): "game frame N" or, full, "game frame N
- * started, S submitted, P presented" ("game frame unknown" without the number). Writes into out, returns it. Only
- * loads; safe in the fault handler. */
-const char *bbgpu_game_frame_text(char *out, size_t size, int full);
 /* The shader cache's last writes, before the process ends without destructors (runtime_quit). */
 void bbgpu_prepare_exit(void);
 /* Button prompts (button_prompts.cpp), the device used last: 0 keyboard or mouse (pictures of the

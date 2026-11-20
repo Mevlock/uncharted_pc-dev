@@ -8,8 +8,6 @@
 #include "common/singleton.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
-#include "core/libraries/videoout/driver.h"
-#include "core/libraries/videoout/game_frame.h"
 #include "sdl_window.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderdoc.h"
@@ -230,15 +228,6 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
 
     frame_generator = std::make_unique<FrameGenerator>(instance, draw_scheduler);
     rasterizer->GetUpscaler().SetFrameGenerator(frame_generator.get());
-
-    // bbport even presents: paced frames held to their targets on the release queue
-    // (vk_present_release.h; the swapchain presents there). Without it (BB_EVEN_RELEASE=0, A/B
-    // only, or a device without such a queue) the presenter thread holds them, as before.
-    if (swapchain.UsesReleaseQueue() ||
-        (PresentRelease::Mode() >= 1 && PresentRelease::Supported(instance))) {
-        release = std::make_unique<PresentRelease>(instance);
-        LowLatency::SetGpuHolds(release->Ready() ? (swapchain.UsesReleaseQueue() ? 2 : 1) : 0);
-    }
 }
 
 Presenter::~Presenter() {
@@ -252,7 +241,6 @@ Presenter::~Presenter() {
     Check(flip_scheduler.CommandBuffer().reset());
 
     const vk::Device device = instance.GetDevice();
-    release.reset(); // waits for the release queue
     if (overlay_image) {
         device.destroyImageView(overlay_view);
         vmaDestroyImage(instance.GetAllocator(), overlay_image, overlay_allocation);
@@ -261,10 +249,6 @@ Presenter::~Presenter() {
         DestroyGenerated(&frame);
         vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
         device.destroyImageView(frame.image_view);
-        if (frame.other.image) {
-            device.destroyImageView(frame.other.image_view);
-            vmaDestroyImage(instance.GetAllocator(), frame.other.image, frame.other.allocation);
-        }
         device.destroyFence(frame.present_done);
     }
     if (hudless_frame.image) {
@@ -404,57 +388,15 @@ bool Presenter::IsVideoOutSurface(const AmdGpu::ColorBuffer& color_buffer) const
     return std::ranges::find(vo_buffers_addr, color_buffer.Address()) != vo_buffers_addr.cend();
 }
 
-bool Presenter::KeepFrameSizes() const {
-    // bbport: both frame sizes stay allocated (about 75 MiB a frame more at 3440x1440 with the
-    // FSR pass) unless video memory is tight (a card or budget under 5 GB, as the staging pool's
-    // and the arena's own rules).
-    static const bool keep = [this] {
-        const char* env = std::getenv("BB_KEEP_FRAME_SIZES");
-        if (env) {
-            return env[0] != '0';
-        }
-        return instance.GetTotalMemoryBudget() >= 5_GB;
-    }();
-    return keep;
-}
-
 void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     const vk::Device device = instance.GetDevice();
-    DestroyGenerated(frame); // made again at the new size when needed
-    // bbport: the presenter switches between two frame sizes (16:9 menus and scenes, gameplay
-    // filling an ultrawide window). Making the frames (and the FSR pass images) again at each
-    // switch put ~316 MiB of new video memory in one frame at U3's gameplay start, and the
-    // kernel then blocked a queue submission for 18-24 ms ~0.5 s later (the horse ride's worst
-    // hitch, 25-32 ms, in 10 of 11 runs before; none in 6 runs with this). The
-    // other size's image is kept and swapped in; it is made ahead (PrewarmFrame).
-    const bool hdr = swapchain.GetHDR();
-    if (KeepFrameSizes() && frame->image && frame != &hudless_frame) {
-        if (frame->other.image && frame->other.width == width && frame->other.height == height &&
-            frame->other.is_hdr == hdr) {
-            std::swap(frame->image, frame->other.image);
-            std::swap(frame->image_view, frame->other.image_view);
-            std::swap(frame->allocation, frame->other.allocation);
-            std::swap(frame->width, frame->other.width);
-            std::swap(frame->height, frame->other.height);
-            std::swap(frame->is_hdr, frame->other.is_hdr);
-            return;
-        }
-        if (frame->other.image) {
-            device.destroyImageView(frame->other.image_view);
-            vmaDestroyImage(instance.GetAllocator(), frame->other.image, frame->other.allocation);
-        }
-        frame->other = {frame->width, frame->height, frame->is_hdr, frame->allocation, frame->image,
-                        frame->image_view};
-        frame->image = vk::Image{};
-        frame->image_view = vk::ImageView{};
-        frame->allocation = nullptr;
-    }
     if (frame->image_view) {
         device.destroyImageView(frame->image_view);
     }
     if (frame->image) {
         vmaDestroyImage(instance.GetAllocator(), frame->image, frame->allocation);
     }
+    DestroyGenerated(frame); // made again at the new size when needed
 
     const vk::Format format = FrameGenerator::ColorFormat;
     const vk::ImageCreateInfo image_info = {
@@ -511,20 +453,6 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     frame->is_hdr = swapchain.GetHDR();
 }
 
-void Presenter::PrewarmFrame(Frame* frame, u32 width, u32 height) {
-    // The other size's image, made now (before it is needed) through RecreateFrame: the current
-    // image goes aside, the new one is made, then they swap back.
-    if (!KeepFrameSizes() || frame->width == 0 || width == 0 || height == 0 ||
-        (frame->width == width && frame->height == height) ||
-        (frame->other.image && frame->other.width == width && frame->other.height == height &&
-         frame->other.is_hdr == swapchain.GetHDR())) {
-        return;
-    }
-    const u32 keep_width = frame->width, keep_height = frame->height;
-    RecreateFrame(frame, width, height);           // current aside, the other size made
-    RecreateFrame(frame, keep_width, keep_height); // swapped back
-}
-
 Frame* Presenter::PrepareLastFrame() {
     if (last_submit_frame == nullptr) {
         return nullptr;
@@ -541,9 +469,8 @@ Frame* Presenter::PrepareLastFrame() {
         if (result == vk::Result::eTimeout) {
             continue;
         }
-        char game_frame[96];
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during waiting for a frame ({})",
-                   Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
+        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
+                   "Device lost during waiting for a frame");
     }
 
     auto& scheduler = flip_scheduler;
@@ -1277,7 +1204,7 @@ void Presenter::ReadThumbnail() {
     BbThumbnail::Store(static_cast<const unsigned char*>(thumbnail.mapped));
 }
 
-void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame, s64 flip_arg) {
+void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
     // bbport: a finished save picture copy is read before any present_done fence is reset.
     ReadThumbnail();
     if (thumbnail.pending == frame->present_done) {
@@ -1296,9 +1223,6 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
     // bbport: a minimized window has no pixels on Windows (0x0); keep the swapchain and skip
     // presenting until the window is restored.
     if (window.GetWidth() == 0 || window.GetHeight() == 0) {
-        if (!is_reusing_frame && is_game_frame) {
-            LowLatency::GatePostSubmitted(flip_arg); // nothing is shown: the gate opens
-        }
         free_frame();
         return;
     }
@@ -1311,35 +1235,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
     // bbport: frame generation: the generated frames first, then the game's own, evenly
     // spaced over the interval between the game's frames (the generated ones belong to the
     // time before this frame). A frame shown again has none.
-    // bbport even presents (vk_low_latency.h): a paced game frame waits until the GPU has drawn it
-    // (its ready time, which the offset learns from) and then until its target; its upscaling /
-    // post-processing and present follow at once, on a GPU the gate keeps idle meanwhile.
-    // With GPU holds (vk_present_release.h) nothing waits here: the present work is queued at once
-    // behind a hold to the target, and the times the GPU took come back a frame or two later.
-    const s64 even_target =
-        !is_reusing_frame && is_game_frame ? LowLatency::PresentTarget(flip_arg) : 0;
-    const bool even_frame = even_target != 0;
-    const bool gpu_hold = even_frame && release && release->Ready();
-    if (release) {
-        release->Poll([](s64 flip, s64 ready, s64 released) {
-            LowLatency::PresentGpuTimes(flip, ready, released);
-        });
-    }
-    if (even_frame && !gpu_hold) {
-        const vk::SemaphoreWaitInfo ready{.semaphoreCount = 1,
-                                          .pSemaphores = &frame->ready_semaphore,
-                                          .pValues = &frame->ready_tick};
-        (void)instance.GetDevice().waitSemaphores(ready, 100'000'000);
-        LowLatency::PresentReadyAndWait(flip_arg);
-    }
     u32 generated = is_reusing_frame ? 0 : frame->generated_count;
-    // A held frame's times are its hold's end (its target, or the next frame's slot when that is
-    // sooner; LowLatency::PresentHoldEnd), the CPU's are only when it was queued. 0: not held while
-    // the GPU does not fit its frames in a period: its present work only takes its ready time.
-    const s64 hold_end = gpu_hold ? LowLatency::PresentHoldEnd(flip_arg) : 0;
-    const auto start = gpu_hold ? std::chrono::steady_clock::time_point(
-                                      std::chrono::nanoseconds(hold_end ? hold_end : even_target))
-                                : std::chrono::steady_clock::now();
+    const auto start = std::chrono::steady_clock::now();
     if (!is_reusing_frame && is_game_frame) {
         const double ms =
             std::chrono::duration<double, std::milli>(start - last_game_present).count();
@@ -1372,40 +1269,27 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
             std::this_thread::yield();
         }
     };
-    // GPU holds: each image is held to its own time on the GPU (the first, which carries the
-    // frame's times, to the target), none on this thread.
-    // (1: a time long passed, so PresentImage takes the ready time only and holds nothing)
-    const auto hold_at = [&](u32 index) -> s64 {
-        return !gpu_hold ? 0 : hold_end ? (start + step * index).time_since_epoch().count() : 1;
-    };
     u32 shown = 0;
     for (; shown < generated; ++shown) {
         if (shown > 0) {
             if (behind()) {
                 break;
             }
-            if (!gpu_hold) {
-                wait_until(start + step * shown);
-            }
+            wait_until(start + step * shown);
         }
-        PresentImage(frame, frame->generated[shown].image, false, 0, hold_at(shown),
-                     shown == 0 ? flip_arg : -1);
+        PresentImage(frame, frame->generated[shown].image, false);
     }
-    if (shown && !behind() && !gpu_hold) {
+    if (shown && !behind()) {
         wait_until(start + step * shown);
     }
-    // bbport: low latency mode: the game's own frame carries its frame id, from the game's frame
-    // number (its flip argument; vk_low_latency.h).
+    // bbport: low latency mode: the game's own frame carries its frame id (vk_low_latency.h).
     const bool game_frame = !is_reusing_frame && is_game_frame;
-    const u64 latency_id = game_frame ? LowLatency::PresentId(flip_arg) : 0;
+    const u64 latency_id = game_frame ? LowLatency::TakeGameFrame() : 0;
     thumbnail_game_frame = game_frame;
-    even_flip = game_frame ? flip_arg : -1;
-    const bool presented = PresentImage(frame, frame->image, true, latency_id, hold_at(shown),
-                                        shown == 0 ? flip_arg : -1);
-    even_flip = -1;
+    const bool presented = PresentImage(frame, frame->image, true, latency_id);
     thumbnail_game_frame = false;
     if (game_frame) {
-        LowLatency::GatePostSubmitted(flip_arg); // also when PresentImage gave up early
+        LowLatency::GameFramePresented();
     }
     if (!presented) {
         free_frame();
@@ -1418,8 +1302,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
     }
 }
 
-bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 latency_id,
-                             s64 hold_until, s64 hold_flip) {
+bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 latency_id) {
     if (!swapchain.AcquireNextImage()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
         if (!swapchain.AcquireNextImage()) {
@@ -1448,27 +1331,6 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
         cmdbuf.beginDebugUtilsLabelEXT(vk::DebugUtilsLabelEXT{
             .pLabelName = "Present",
         });
-    }
-    // bbport even presents: this image's present waits for a hold to its time on the release
-    // queue (vk_present_release.h), after its blit here; nothing here waits for it.
-    // With the release queue every present goes there, a paced one after its hold there; else a
-    // paced frame's blit is held on this queue (the hold first, the next frame's work after it).
-    const bool gpu_holds = release && release->Ready();
-    const bool via_release = gpu_holds && swapchain.UsesReleaseQueue();
-    const bool held = gpu_holds && hold_until != 0;
-    // A paced frame whose target has passed by now is not held (its hold would end at once): no
-    // hold commands and nothing after it waits for its blit; only its ready time is taken.
-    bool hold_recorded = false;
-    if (held && !via_release) {
-        const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
-        if (hold_until > now) {
-            const s64 period = std::max<s64>(Libraries::VideoOut::FrameCapPeriodNs(), 1'000'000);
-            release->RecordHold(cmdbuf, hold_flip, hold_until,
-                                std::clamp<s64>(hold_until - now + period, 0, 100'000'000));
-            hold_recorded = true;
-        } else {
-            release->RecordLate(cmdbuf, hold_flip);
-        }
     }
 
     {
@@ -1579,12 +1441,6 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
                                    vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
         }
     }
-    // The frame's ready time for the hold's offset: when this blit is done, on this queue (the
-    // release queue runs its holds in order, so its own start follows the last hold).
-    const s32 hold_slot = held && via_release ? release->RecordReady(cmdbuf) : -1;
-    if (hold_recorded) {
-        PresentRelease::RecordFence(cmdbuf); // the next frame's GPU work waits for this blit
-    }
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
     }
@@ -1599,36 +1455,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
         // Also covers the generated frames' submissions before it on this queue.
         info.AddSignal(frame->present_done);
     }
-    // bbport even presents: this submission needs only the frame's own draw work submitted; the
-    // next frame's first draw flush waits for it at the gate (LowLatency::GateBeforeSubmit).
-    const u64 async_up_to = frame->ready_semaphore == draw_scheduler.GetWorkSemaphore()->Handle()
-                                ? frame->ready_tick
-                                : ~u64{0};
-    info.async_up_to = async_up_to;
     scheduler.Flush(info);
-    const u64 present_tick = scheduler.CurrentTick() - 1; // what this submission signals
-    if (release && PresentRelease::Probing()) {
-        // BB_HOLD_PROBE: when this submission (a held one: its hold and blit) really ends
-        release->ProbeNote(scheduler.GetWorkSemaphore()->Handle(), scheduler.CurrentTick() - 1,
-                           hold_flip, held ? hold_until : 0);
-    }
-    if (last && even_flip >= 0) {
-        LowLatency::GatePostSubmitted(even_flip); // the gate opens: this frame's post work is queued
-    }
-    bool released = false;
-    if (held && via_release) {
-        // The hold on the release queue (it ends by itself at the latest one cap period after its
-        // time); the present waits for it.
-        const s64 now = std::chrono::steady_clock::now().time_since_epoch().count();
-        const s64 period = std::max<s64>(Libraries::VideoOut::FrameCapPeriodNs(), 1'000'000);
-        released = release->Submit(hold_slot, swapchain.GetPresentReadySemaphore(),
-                                   swapchain.GetPresentReleaseSemaphore(), hold_flip, hold_until,
-                                   std::clamp<s64>(hold_until - now + period, 0, 100'000'000));
-    }
-    if (release) {
-        // the hold slots recorded into this submission: their times are read once it has run
-        release->Submitted(scheduler.GetWorkSemaphore()->Handle(), present_tick);
-    }
 
     // bbport (hitch diagnosis, BB_HITCH_MS): a present slower than the hitch threshold prints where its time went.
     // BB_PRESENT_GPU_WAIT=1 (experiment): wait for the GPU to finish this frame before taking the submit lock, which
@@ -1657,7 +1484,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
         const auto t2 = Clock::now();
-        presented = swapchain.Present(latency_id, released, async_up_to);
+        presented = swapchain.Present(latency_id);
         const auto t3 = Clock::now();
         if (slow_ms > 0 && ms(t0, t3) > slow_ms) {
             char gpu_done[32] = "(not waited)";
@@ -1701,9 +1528,8 @@ Frame* Presenter::GetRenderFrame(bool fill) {
 
     // Wait for the presentation to be finished so all frame resources are free
     while (wait() != vk::Result::eSuccess) {
-        char game_frame[96];
-        ASSERT_MSG(result != vk::Result::eErrorDeviceLost, "Device lost during waiting for a frame ({})",
-                   Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
+        ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
+                   "Device lost during waiting for a frame");
         // Retry if the waiting times out
         if (result == vk::Result::eTimeout) {
             continue;
@@ -1715,18 +1541,6 @@ Frame* Presenter::GetRenderFrame(bool fill) {
     if (frame->width != want_width || frame->height != want_height ||
         frame->is_hdr != swapchain.GetHDR()) {
         RecreateFrame(frame, want_width, want_height);
-    }
-    // bbport: the other frame size made ahead (at the title, not when gameplay starts).
-    if (window_frame_width != expected_frame_width || window_frame_height != expected_frame_height) {
-        const bool other_fill = !fill;
-        const u32 other_width = other_fill ? window_frame_width : expected_frame_width;
-        const u32 other_height = other_fill ? window_frame_height : expected_frame_height;
-        PrewarmFrame(frame, other_width, other_height);
-        if (KeepFrameSizes() && fsr_settings.enable) {
-            // the FSR pass's images at the gameplay size (filling the window); it may not run at 16:9
-            fsr_pass.SetKeepSizes(true);
-            fsr_pass.Prewarm({window_frame_width, window_frame_height});
-        }
     }
     frame->fill = fill;
 

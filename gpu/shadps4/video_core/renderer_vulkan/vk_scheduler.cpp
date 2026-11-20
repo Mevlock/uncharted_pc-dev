@@ -25,28 +25,17 @@
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
-#include "core/libraries/videoout/game_frame.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
-#include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "bbport_threads.h"
 
 #include <chrono>
-#include <map>
 
 namespace Vulkan {
 
 namespace {
-static double FrameThreshold() {
-    static const double ms = [] {
-        const char* env = std::getenv("BB_GPU_BUSY_FRAMES");
-        return env ? std::atof(env) : 0.0;
-    }();
-    return ms;
-}
-
 /// bbport diagnosis: BB_GPU_BUSY=1 — a timestamp where each command buffer of the draw scheduler
 /// starts and ends; every 5 s: how busy the GPU was, its idle gaps, and how long submissions
 /// took from submit to done (how far the GPU runs behind).
@@ -74,11 +63,7 @@ struct GpuBusy {
         u32 slot;
         u64 tick;
         std::chrono::steady_clock::time_point submitted;
-        s64 frame = -1; ///< BB_GPU_BUSY_FRAMES: the game frame the command processor was on
     };
-    /// BB_GPU_BUSY_FRAMES=<ms>: GPU time per game frame (by the frame the GPU command thread was
-    /// on at submission) and label; frames over <ms> are printed.
-    std::map<s64, std::array<double, Labels>> frame_ns;
     std::vector<Pending> pending;
     std::vector<std::pair<u64, u64>> spans; // GPU [start, end) of finished command buffers
     double latency_ms = 0;
@@ -139,15 +124,13 @@ std::vector<std::pair<const Scheduler*, const Instance*>> g_schedulers;
 
 void Scheduler::ReportStall() {
     std::scoped_lock lk{g_recent_mutex};
-    char game_frame[96];
-    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true);
     for (const auto& [scheduler, inst] : g_schedulers) {
         const VkSemaphore timeline = scheduler->work_semaphore.Handle();
         const auto [result, value] = inst->GetDevice().getSemaphoreCounterValue(timeline);
-        std::printf("GPU stall: scheduler %p timeline %p: GPU reached %llu, next tick %llu (%s)\n",
+        std::printf("GPU stall: scheduler %p timeline %p: GPU reached %llu, next tick %llu\n",
                     static_cast<const void*>(scheduler), static_cast<void*>(timeline),
                     static_cast<unsigned long long>(value),
-                    static_cast<unsigned long long>(scheduler->work_semaphore.CurrentTick()), game_frame);
+                    static_cast<unsigned long long>(scheduler->work_semaphore.CurrentTick()));
         scheduler->ReportBreadcrumbs();
     }
     const u64 count = std::min<u64>(g_recent_count, g_recent.size());
@@ -160,7 +143,7 @@ void Scheduler::ReportStall() {
             std::printf(" %p=%llu", static_cast<void*>(r.wait_semaphore[w]),
                         static_cast<unsigned long long>(r.wait_value[w]));
         }
-        std::printf(" (%s)\n", game_frame);
+        std::printf("\n");
     }
     std::fflush(stdout);
     // bbport: a tick nobody submits means the port's threads wait for each other: their stacks
@@ -215,19 +198,12 @@ void Scheduler::CreateBreadcrumbBuffer() {
     const auto requirements = device.getBufferMemoryRequirements(buffer);
     const auto properties = instance.GetPhysicalDevice().getMemoryProperties();
     const auto wanted = vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent;
-    // System RAM first (BilalReloaded's 0.8.4): with resizable BAR the first host-visible type is video memory, and
-    // after the reset that follows a lost device it read 0 ("every checkpoint before 0 finished", RTX 5080). The
-    // counter must outlive the GPU's reset; video memory only when there is no host-visible system memory.
     u32 type = ~0u;
-    for (int pass = 0; pass < 2 && type == ~0u; ++pass) {
-        for (u32 i = 0; i < properties.memoryTypeCount; ++i) {
-            const auto flags = properties.memoryTypes[i].propertyFlags;
-            const bool device_local = bool(flags & vk::MemoryPropertyFlagBits::eDeviceLocal);
-            if ((requirements.memoryTypeBits & (1u << i)) && (flags & wanted) == wanted &&
-                (pass == 1 || !device_local)) {
-                type = i;
-                break;
-            }
+    for (u32 i = 0; i < properties.memoryTypeCount; ++i) {
+        if ((requirements.memoryTypeBits & (1u << i)) &&
+            (properties.memoryTypes[i].propertyFlags & wanted) == wanted) {
+            type = i;
+            break;
         }
     }
     if (type == ~0u) {
@@ -649,31 +625,14 @@ void Scheduler::KickRecording(bool force) {
     }
 }
 
-/// bbport even presents: this thread holds submit_mutex (in SubmitExecution).
-static thread_local bool t_holds_submit_mutex = false;
-
 void Scheduler::SyncRecording() {
     if (!recording_threaded) {
         return;
     }
     KickRecording(true);
     BbStats::WaitTimer timer{BbStats::sync_recording_ns};
-    // bbport even presents: the recording thread may be holding a flush at the GPU gate until the
-    // presenter has submitted the last frame's present work, and the presenter needs submit_mutex
-    // for that. A thread that waits here while holding submit_mutex (Rasterizer::OnSubmit's
-    // prefetch, UploadStreamed) makes the gate give way instead (that flush then goes before the
-    // present work, as without the gate), so nothing waits for the gate's deadline.
-    const bool yield = t_holds_submit_mutex;
-    if (yield) {
-        LowLatency::GateYieldBegin();
-    }
-    {
-        std::unique_lock lk{recorder_mutex};
-        recorder_idle_cv.wait(lk, [this] { return recorder_queue.empty() && !recorder_busy; });
-    }
-    if (yield) {
-        LowLatency::GateYieldEnd();
-    }
+    std::unique_lock lk{recorder_mutex};
+    recorder_idle_cv.wait(lk, [this] { return recorder_queue.empty() && !recorder_busy; });
 }
 
 static thread_local bool t_on_recorder_thread = false;
@@ -685,7 +644,6 @@ bool Scheduler::OnRecorderThread() {
 void Scheduler::RecorderThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("bb:VkRecorder");
     BbThreads::MakeRenderThread();
-    BbThreads::TakeRenderCore(2); // perf15 experiment (BB_RENDER_CORES=2)
     t_on_recorder_thread = true;
     while (true) {
         // Spin briefly before sleeping: the next chunk usually follows within microseconds,
@@ -808,11 +766,6 @@ bool Scheduler::SegmentsEnabled() const {
     return busy && busy->owner == this;
 }
 
-u32 Scheduler::SegmentLabel() const {
-    auto* busy = GpuBusy::Get(instance);
-    return busy ? busy->last_label : 0;
-}
-
 void Scheduler::MarkSegment(u32 label) {
     auto* busy = GpuBusy::Get(instance);
     if (!busy || busy->owner != this) {
@@ -885,45 +838,13 @@ void Scheduler::SubmitOnRecorder(u64 signal_value) {
         std::scoped_lock lk{g_recent_mutex};
         g_recent[g_recent_count++ % g_recent.size()] = {this, timeline, signal_value, 0, {}, {}};
     }
-    // bbport even presents: a flush of the next game frame waits here (on this thread, not the GPU
-    // thread) until the flipped frame's present work is submitted, so it keeps its place before it.
-    LowLatency::GateBeforeSubmit(signal_value, true);
     vk::Result submit_result;
-    // bbport diagnosis (BB_STALL_MS): a submit call slower than 4 ms prints how long, how far the
-    // GPU was behind when it started and how long ago VMA last allocated device memory.
-    static const bool time_submits = std::getenv("BB_STALL_MS") != nullptr;
-    u64 gpu_reached = 0;
-    std::chrono::steady_clock::time_point call_start{};
-    if (time_submits) {
-        gpu_reached = instance.GetDevice().getSemaphoreCounterValue(timeline).value;
-        call_start = std::chrono::steady_clock::now();
-    }
     {
         std::scoped_lock queue_lk{g_graphics_queue_mutex};
         submit_result = instance.GetGraphicsQueue().submit(submit_info, nullptr);
     }
-    if (time_submits) {
-        const auto end = std::chrono::steady_clock::now();
-        const double ms = std::chrono::duration<double, std::milli>(end - call_start).count();
-        if (ms > 4.0) {
-            const u64 last_alloc = BbStats::vma_last_alloc_ns.load(std::memory_order_relaxed);
-            const double since =
-                last_alloc ? (double(std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch())
-                                         .count()) - double(last_alloc)) / 1e6
-                           : -1.0;
-            char game_frame[96];
-            std::printf("Slow submit: vkQueueSubmit %.1f ms (%s); GPU at %llu, this signals %llu (%llu behind); "
-                        "VMA's last allocation %.0f ms before\n",
-                        ms, Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame)),
-                        static_cast<unsigned long long>(gpu_reached),
-                        static_cast<unsigned long long>(signal_value),
-                        static_cast<unsigned long long>(signal_value - gpu_reached), since);
-        }
-    }
     if (submit_result == vk::Result::eErrorDeviceLost) {
-        char game_frame[96];
-        std::printf("Device lost during submit (%s)\n",
-                    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame)));
+        std::printf("Device lost during submit\n");
         DeviceLost(instance.GetDevice());
     }
     g_async_submits_done.fetch_add(1, std::memory_order_release);
@@ -939,11 +860,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         return env ? std::atof(env) : 0.0;
     }();
     const auto lock_start = std::chrono::steady_clock::now();
-    std::unique_lock lk{submit_mutex};
-    struct HeldFlag {
-        HeldFlag() { t_holds_submit_mutex = true; }
-        ~HeldFlag() { t_holds_submit_mutex = false; }
-    } held_flag;
+    std::scoped_lock lk{submit_mutex};
     if (slow_lock_ms > 0) {
         const double waited =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lock_start).count();
@@ -1042,17 +959,6 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         PopPendingOperations();
         return;
     }
-    if (on_submit && LowLatency::GateNeeded(signal_value)) {
-        // bbport even presents: the gate (LowLatency::GateBeforeSubmit) without the submit lock,
-        // which the presenter takes for the submission this one must follow.
-        lk.unlock();
-        t_holds_submit_mutex = false;
-        LowLatency::GateBeforeSubmit(signal_value, false);
-        lk.lock();
-        t_holds_submit_mutex = true;
-    } else if (on_submit) {
-        LowLatency::GateBeforeSubmit(signal_value, false); // no wait: notes a frame's first submission
-    }
     SyncRecording();
     // Guest memory copies into staging read by this submission (copy threads).
     WaitHostCopies();
@@ -1103,23 +1009,20 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
         }
     }
     ImGui::Core::TextureManager::Submit();
-    WaitAsyncSubmits(info.async_up_to);
+    WaitAsyncSubmits();
     vk::Result submit_result;
     {
         std::scoped_lock queue_lk{g_graphics_queue_mutex};
         submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     }
     if (submit_result == vk::Result::eErrorDeviceLost) {
-        char game_frame[96];
-        std::printf("Device lost during submit (%s)\n",
-                    Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame)));
+        std::printf("Device lost during submit\n");
         DeviceLost(instance.GetDevice());
     }
 
     work_semaphore.Refresh();
     if (busy_timed) {
-        busy->pending.push_back({u32(busy->open), signal_value, std::chrono::steady_clock::now(),
-                                 Libraries::VideoOut::CurrentGameFrames().submitted});
+        busy->pending.push_back({u32(busy->open), signal_value, std::chrono::steady_clock::now()});
         busy->open = -1;
         const auto now = std::chrono::steady_clock::now();
         std::erase_if(busy->pending, [&](const GpuBusy::Pending& p) {
@@ -1150,42 +1053,12 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
                         label = block.labels[i];
                     }
                     busy->label_ns[label % GpuBusy::Labels] += (stamps[1] - previous) * busy->period_ns;
-                    if (FrameThreshold() > 0) {
-                        auto& f = busy->frame_ns[p.frame];
-                        u64 prev = stamps[0];
-                        u8 lab = block.initial;
-                        for (u32 i = 0; i < count; ++i) {
-                            const u64 at = std::clamp(marks[i], prev, stamps[1]);
-                            f[lab % GpuBusy::Labels] += (at - prev) * busy->period_ns;
-                            prev = at;
-                            lab = block.labels[i];
-                        }
-                        f[lab % GpuBusy::Labels] += (stamps[1] - prev) * busy->period_ns;
-                    }
                 }
             }
             busy->latency_ms += std::chrono::duration<double, std::milli>(now - p.submitted).count();
             ++busy->latency_count;
             return true;
         });
-        if (FrameThreshold() > 0) {
-            // frames the GPU command thread is 3 past are complete
-            const s64 current = Libraries::VideoOut::CurrentGameFrames().submitted;
-            while (!busy->frame_ns.empty() && busy->frame_ns.begin()->first + 3 < current) {
-                const auto& [frame, ns] = *busy->frame_ns.begin();
-                double total = 0;
-                for (double v : ns) total += v;
-                if (total / 1e6 > FrameThreshold()) {
-                    std::string line;
-                    for (u32 l = 0; l < GpuBusy::Labels; ++l) {
-                        if (ns[l] > 0) line += fmt::format(" q{} {:.2f}", l, ns[l] / 1e6);
-                    }
-                    std::printf("GPU frame: game frame %lld: %.2f ms GPU time by guest queue (ms):%s\n",
-                                static_cast<long long>(frame), total / 1e6, line.c_str());
-                }
-                busy->frame_ns.erase(busy->frame_ns.begin());
-            }
-        }
         if (now - busy->window >= std::chrono::seconds(5) && busy->spans.size() > 2) {
             auto& spans = busy->spans;
             std::ranges::sort(spans);

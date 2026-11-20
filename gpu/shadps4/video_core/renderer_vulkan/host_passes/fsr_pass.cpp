@@ -1,7 +1,6 @@
 //  SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 //  SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <cstdio>
 #include <cstdlib>
 #include "common/assert.h"
 #include "core/emulator_settings.h"
@@ -122,42 +121,13 @@ void FsrPass::Create(vk::Device device, VmaAllocator allocator, u32 num_images) 
     device.destroyShaderModule(cs_easu_module);
     device.destroyShaderModule(cs_rcas_module);
 
-    this->allocator = allocator;
-    available_imgs = NewImageSet();
-}
-
-std::vector<FsrPass::Img> FsrPass::NewImageSet() const {
-    std::vector<Img> imgs(num_images);
-    for (u32 i = 0; i < num_images; ++i) {
-        auto& img = imgs[i];
-        img.id = static_cast<u8>(i);
+    available_imgs.resize(num_images);
+    for (int i = 0; i < num_images; ++i) {
+        auto& img = available_imgs[i];
+        img.id = i;
         img.intermediary_image = VideoCore::UniqueImage(device, allocator);
         img.output_image = VideoCore::UniqueImage(device, allocator);
     }
-    return imgs;
-}
-
-void FsrPass::Prewarm(vk::Extent2D size) {
-    if (!keep_sizes || size.width == 0 || size.height == 0 || size == cur_size) {
-        return;
-    }
-    for (const auto& [kept_size, imgs] : kept_sets) {
-        if (kept_size == size) {
-            return;
-        }
-    }
-    auto imgs = NewImageSet();
-    for (auto& img : imgs) {
-        CreateImages(img, size);
-    }
-    KeepSet(size, std::move(imgs));
-}
-
-void FsrPass::KeepSet(vk::Extent2D size, std::vector<Img>&& imgs) {
-    if (kept_sets.size() >= 2) {
-        kept_sets.erase(kept_sets.begin()); // the longest kept
-    }
-    kept_sets.emplace_back(size, std::move(imgs));
 }
 
 vk::ImageView FsrPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
@@ -489,39 +459,16 @@ vk::ImageView FsrPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
 }
 
 void FsrPass::ResizeAndInvalidate(u32 width, u32 height) {
-    const vk::Extent2D size{.width = width, .height = height};
-    // bbport: the presenter switches between two frame sizes (16:9 and filling the window, U3's
-    // gameplay vs menus and scenes). Making these images again at a switch (with the frames:
-    // ~316 MiB of new video memory in one frame at U3's gameplay start) was followed ~0.5 s later
-    // by the kernel blocking a queue submission for 18-24 ms (the horse ride's worst hitch).
-    // Image sets of the other sizes are kept and swapped in; the gameplay size is made ahead
-    // (Prewarm, from the presenter).
-    if (keep_sizes) {
-        std::vector<Img> next;
-        for (auto it = kept_sets.begin(); it != kept_sets.end(); ++it) {
-            if (it->first == size) {
-                next = std::move(it->second);
-                kept_sets.erase(it);
-                break;
-            }
-        }
-        if (next.empty()) {
-            next = NewImageSet(); // made at first use, as before
-        }
-        if (cur_size.width != 0 && cur_size.height != 0) {
-            KeepSet(cur_size, std::move(available_imgs));
-        }
-        available_imgs = std::move(next);
-        cur_size = size;
-        return;
-    }
-    this->cur_size = size;
-    for (u32 i = 0; i < num_images; ++i) {
+    this->cur_size = vk::Extent2D{
+        .width = width,
+        .height = height,
+    };
+    for (int i = 0; i < num_images; ++i) {
         available_imgs[i].dirty = true;
     }
 }
 
-void FsrPass::CreateImages(Img& img, vk::Extent2D size) const {
+void FsrPass::CreateImages(Img& img) const {
     img.dirty = false;
 
     // Destroy previous resources before re-creating at new size.
@@ -535,8 +482,8 @@ void FsrPass::CreateImages(Img& img, vk::Extent2D size) const {
         .imageType = vk::ImageType::e2D,
         .format = vk::Format::eR16G16B16A16Sfloat,
         .extent{
-            .width = size.width,
-            .height = size.height,
+            .width = cur_size.width,
+            .height = cur_size.height,
             .depth = 1,
         },
         .mipLevels = 1,

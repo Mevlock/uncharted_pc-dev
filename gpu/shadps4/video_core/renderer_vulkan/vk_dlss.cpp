@@ -385,20 +385,7 @@ void Dlss::Shutdown() {
     }
 }
 
-void* DlssBridgeExport(const char* name) {
-    // The same module as Dlss's when both load it (reference counted); never freed.
-    static const HMODULE module = [] {
-        const auto path = ExecutableDirectory() / BridgeName;
-        return std::filesystem::is_regular_file(path) ? LoadLibraryW(path.c_str()) : nullptr;
-    }();
-    return module ? reinterpret_cast<void*>(GetProcAddress(module, name)) : nullptr;
-}
-
 #else
-
-void* DlssBridgeExport(const char*) {
-    return nullptr;
-}
 
 struct Dlss::Impl {};
 Dlss::Dlss() = default;

@@ -592,43 +592,7 @@ static const int *u3_invert_flags(const unsigned char *camera) {
     flags[1]=*(const int *)(options+player*4+0x4c58);
     return flags;
 }
-/* DIAG (cam snap): BB_CAMERA_DUMP=<file>: every U3 follow-camera input call, the camera's first 0x8000 bytes. */
-static void camera_dump(const unsigned char *camera, const float *look, const uint64_t *regs) {
-    static FILE *f; static int init;
-    static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
-    if (!init) { init=1; const char *p=getenv("BB_CAMERA_DUMP"); f=p && p[0] ? fopen(p,"wb") : NULL; if (f) setvbuf(f,NULL,_IOFBF,1<<20); }
-    if (!f || !camera) return;
-    uint64_t hdr[6]={now_us(),(uint64_t)(uintptr_t)camera,*(const uint64_t *)camera-(uint64_t)(uintptr_t)image,
-                     look ? (uint64_t)((const unsigned char *)look-camera) : 0,regs[25]-(uint64_t)(uintptr_t)image,0x8000};
-    pthread_mutex_lock(&lock);
-    fwrite(hdr,sizeof hdr,1,f);
-    fwrite(camera,0x8000,1,f);
-    static const float zero4[4]; fwrite(look ? look : zero4,16,1,f);
-    /* 1.02: the player (table 0x1bb9500 by the camera's player index) 0x1200 bytes, its bound frame's body 0x200 */
-    static unsigned char zero[0x1200];
-    const unsigned char *player=NULL, *body=NULL;
-    const int idx=*(const int *)(camera+0xe4);
-    if (u3==&u3_codes[0] && idx>=0 && idx<4) {
-        const unsigned char *g=image+0x1bb9500+idx*16;
-        const unsigned char *const *h=*(const unsigned char *const *const *)g;
-        if (h && *(const int *)(g+8) && *h && *(const int *)(*h+0x7c)==*(const int *)(g+8)) player=*h;
-        if (player) {
-            const unsigned char *bf=player+0x1040;
-            const unsigned char *const *bh=*(const unsigned char *const *const *)(bf+0xc0);
-            const int id=*(const int *)(bf+0xc8);
-            if (bh && id && *bh && *(const int *)(*bh+0x7c)==id) body=*bh;
-        }
-    }
-    fwrite(player ? player : zero,0x1200,1,f);
-    fwrite(body ? body : zero,0x200,1,f);
-    /* 1.02: player 0's animated camera additives (table 0x1d53290, 50 x 0x50; count at 0x1d551e0) */
-    const int ok=u3==&u3_codes[0];
-    fwrite(ok ? image+0x1d551e0 : zero,4,1,f);
-    fwrite(ok ? image+0x1d53290 : zero,0xfa0,1,f);
-    pthread_mutex_unlock(&lock);
-}
 static void u3_camera_input(unsigned char *camera, float *look, uint64_t *regs) {
-    camera_dump(camera,look,regs);
     void *stick=(void *)(uintptr_t)regs[5];
     if (look_debug()) stick_debug("U3",look,stick);
     if (!camera) return;

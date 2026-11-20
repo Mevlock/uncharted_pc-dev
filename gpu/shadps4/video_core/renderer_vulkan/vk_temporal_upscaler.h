@@ -207,8 +207,6 @@ private:
     /// images by view in a registry of eight (a new view per frame filled it at Native AA).
     vk::ImageView CachedView(const VideoCore::Image& image, vk::Format format,
                              vk::ImageAspectFlags aspect);
-    /// The stencil aspect of a depth image (CachedView), or null for a format without one.
-    vk::ImageView StencilView(const VideoCore::Image& depth);
     struct ViewEntry {
         vk::Image image;
         u64 uid = 0;
@@ -217,7 +215,7 @@ private:
         vk::ImageView view;
         u64 last_use = 0;
     };
-    std::array<ViewEntry, 8> view_cache{};
+    std::array<ViewEntry, 6> view_cache{};
     u64 view_uses = 0;
 
     void Run();
@@ -384,9 +382,6 @@ private:
     bool reset = true;
     u64 frame_id = 0;
     std::chrono::steady_clock::time_point last_frame{};
-    float last_frame_cpu_ms = 0.0f; ///< the GPU thread's time between the last two evaluations
-    /// The frame time for the upscalers (the frame's world step; see the definition).
-    float FrameMs();
 
     u32 width = 0, height = 0;             ///< render size
     u32 out_width = 0, out_height = 0;     ///< output size of the context

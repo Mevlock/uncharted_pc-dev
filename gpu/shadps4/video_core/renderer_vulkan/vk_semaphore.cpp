@@ -11,11 +11,9 @@
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 
 #include "common/assert.h"
-#include "core/libraries/videoout/game_frame.h"
 #ifdef _WIN32
 // windows.h would clash with WAIT_TIMEOUT below.
 extern "C" __declspec(dllimport) int __stdcall TerminateProcess(void* process, unsigned int code);
-extern "C" void runtime_output_flush(void); // src/probe.c
 extern "C" __declspec(dllimport) void* __stdcall GetCurrentProcess();
 #endif
 
@@ -40,9 +38,7 @@ namespace Vulkan {
 // the game ends: every later GPU wait would fail the same way (it used to wait forever).
 // Also called where a submission or present reports the loss (vk_semaphore.h).
 [[noreturn]] void DeviceLost(vk::Device device) {
-    char game_frame[96];
-    std::printf("GPU crash: the graphics device was lost (%s)\n",
-                Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
+    std::printf("GPU crash: the graphics device was lost\n");
     if (g_device_fault_ext && VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT) {
         const auto get = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT;
         VkDeviceFaultCountsEXT counts{.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
@@ -96,7 +92,6 @@ namespace Vulkan {
     std::fflush(stdout);
 #ifdef _WIN32
     // bbport: no DLL detach code (ExitProcess could hang in libsrt's; see runtime_quit).
-    runtime_output_flush();
     TerminateProcess(GetCurrentProcess(), 5);
 #endif
     std::_Exit(5);
@@ -168,11 +163,9 @@ void Semaphore::Wait(u64 tick) {
             DeviceLost(instance.GetDevice());
         }
         if (!reported && g_gpu_stall_report) {
-            char game_frame[96];
-            std::printf("GPU stall: waiting 5 s for tick %llu of timeline %p (%s)\n",
+            std::printf("GPU stall: waiting 5 s for tick %llu of timeline %p\n",
                         static_cast<unsigned long long>(tick),
-                        reinterpret_cast<void*>(static_cast<VkSemaphore>(Handle())),
-                        Libraries::VideoOut::GameFrameText(game_frame, sizeof(game_frame), true));
+                        reinterpret_cast<void*>(static_cast<VkSemaphore>(Handle())));
             g_gpu_stall_report();
         }
         reported = true;

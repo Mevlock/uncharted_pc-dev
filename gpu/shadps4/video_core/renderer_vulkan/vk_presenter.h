@@ -16,7 +16,6 @@
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_frame_generation.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
-#include "video_core/renderer_vulkan/vk_present_release.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
@@ -55,16 +54,6 @@ struct Frame {
     };
     std::array<Generated, FrameGenerator::MaxGenerated> generated{};
     u32 generated_count{};
-    /// bbport: the image of the presenter's other frame size (16:9 / filling the window), kept
-    /// for a switch back and made ahead (Presenter::RecreateFrame, GetRenderFrame).
-    struct Other {
-        u32 width{};
-        u32 height{};
-        bool is_hdr{};
-        VmaAllocation allocation{};
-        vk::Image image{};
-        vk::ImageView image_view{};
-    } other{};
 };
 
 enum SchedulerType {
@@ -126,28 +115,20 @@ public:
 
     Frame* PrepareBlankFrame(bool present_thread);
 
-    /// flip_arg: the game's flip argument of this frame (low latency mode; -1: none).
-    void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true,
-                 s64 flip_arg = -1);
+    void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
     Frame* PrepareLastFrame();
 
 private:
     Frame* GetRenderFrame(bool fill = false);
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
-    /// bbport: makes the other frame size's image of `frame` ahead (kept aside).
-    void PrewarmFrame(Frame* frame, u32 width, u32 height);
-    [[nodiscard]] bool KeepFrameSizes() const;
     /// bbport: the images frame generation writes for `frame` (its size, made once).
     void EnsureGenerated(Frame* frame);
     void DestroyGenerated(Frame* frame);
     /// bbport: blits `image` (General layout) into a swapchain image with the overlay and
     /// presents it. `last`: the game frame itself, which also signals the frame's fence.
     /// False when the swapchain could not give an image.
-    /// `hold_until` (steady clock ns; 0: none): the GPU holds the image's blit to that time
-    /// (vk_present_release.h); `hold_flip`: the game flip whose times that hold reports (-1: none).
-    bool PresentImage(Frame* frame, vk::Image image, bool last, u64 latency_id = 0,
-                      s64 hold_until = 0, s64 hold_flip = -1);
+    bool PresentImage(Frame* frame, vk::Image image, bool last, u64 latency_id = 0);
 
     void SetExpectedGameSize(s32 width, s32 height);
 
@@ -212,8 +193,6 @@ private:
         bool failed = false; ///< not supported or not created: no pictures
     } thumbnail;
     bool thumbnail_game_frame = false; ///< the image PresentImage shows is the game's own new frame
-    s64 even_flip = -1; ///< bbport even presents: the game flip PresentImage shows (-1: none)
-    std::unique_ptr<PresentRelease> release; ///< bbport even presents: GPU holds (null: not used)
     void CaptureThumbnail(vk::CommandBuffer cmdbuf, const Frame* frame);
     void ReadThumbnail();
 };

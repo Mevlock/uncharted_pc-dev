@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include <algorithm>
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
-#include "core/libraries/videoout/game_frame.h"
 
 #include <atomic>
 #include <chrono>
@@ -16,7 +15,6 @@ extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c, or nul
 // The game's frame number the game side steps the jitter by (its draw script's frame check), or null.
 extern "C" const volatile uint32_t* runtime_projection_jitter_frame;
 extern "C" float* runtime_projection_jitter_table;
-// The game's frame time (world step) per frame number (runtime_ultrawide.c, written by probe.c's frame start hook).
 extern "C" volatile uint32_t* runtime_projection_jitter_phases;
 namespace Libraries::VideoOut {
 extern std::atomic<s64> g_gpu_flip_arg;
@@ -51,12 +49,7 @@ struct PushConstants {
     std::array<float, 2> jitter;
     std::array<float, 2> previous_jitter;
     u32 mode;
-    u32 pad;
-    /// xyz: previous clip offset of the stencil-selected pixels (mode bits 8/9), w: stencil
-    /// pixels per motion pixel (camera_motion.comp).
-    std::array<float, 4> stencil_offset;
 };
-static_assert(sizeof(PushConstants) == 128, "camera_motion.comp push constants (128 bytes at most)");
 
 /// a * b for 3x4 affine matrices (rows [R | t]).
 std::array<float, 12> Multiply(const std::array<float, 12>& a, const std::array<float, 12>& b) {
@@ -109,7 +102,7 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
     }
     const auto device = instance.GetDevice();
     if (for_upscaler) {
-        const std::array<vk::DescriptorSetLayoutBinding, 4> motion_bindings = {{
+        const std::array<vk::DescriptorSetLayoutBinding, 3> motion_bindings = {{
             {.binding = 0,
              .descriptorType = vk::DescriptorType::eSampledImage,
              .descriptorCount = 1,
@@ -119,10 +112,6 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
              .descriptorCount = 1,
              .stageFlags = vk::ShaderStageFlagBits::eCompute},
             {.binding = 2,
-             .descriptorType = vk::DescriptorType::eSampledImage,
-             .descriptorCount = 1,
-             .stageFlags = vk::ShaderStageFlagBits::eCompute},
-            {.binding = 3,
              .descriptorType = vk::DescriptorType::eSampledImage,
              .descriptorCount = 1,
              .stageFlags = vk::ShaderStageFlagBits::eCompute},
@@ -307,18 +296,14 @@ void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_vi
         .jitter = jitter,
         .previous_jitter = previous_jitter,
         .mode = object_valid ? 1u : 0u,
-        .pad = 0,
-        .stencil_offset = {0.0f, 0.0f, 0.0f, 1.0f},
     };
-    const vk::DescriptorImageInfo stencil_info{.imageView = ZeroStencil(cmdbuf),
-                                               .imageLayout = vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo depth_info{.imageView = depth_view,
                                              .imageLayout = vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo motion_info{.imageView = motion_view,
                                               .imageLayout = vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo object_info{.imageView = object_view,
                                               .imageLayout = vk::ImageLayout::eGeneral};
-    const std::array<vk::WriteDescriptorSet, 4> writes = {{
+    const std::array<vk::WriteDescriptorSet, 3> writes = {{
         {.dstBinding = 0,
          .descriptorCount = 1,
          .descriptorType = vk::DescriptorType::eSampledImage,
@@ -331,10 +316,6 @@ void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_vi
          .descriptorCount = 1,
          .descriptorType = vk::DescriptorType::eSampledImage,
          .pImageInfo = &object_info},
-        {.dstBinding = 3,
-         .descriptorCount = 1,
-         .descriptorType = vk::DescriptorType::eSampledImage,
-         .pImageInfo = &stencil_info},
     }};
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *motion_pipeline);
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *motion_pipeline_layout, 0,
@@ -476,54 +457,7 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
         return;
     }
     auto& camera = velocity_camera;
-    // The previous clip (c40..c55) is the game's own value, and the game does not always give last frame's
-    // camera there: in U3's horse ride (and other stretches: whole 600-frame windows at 60-144 FPS, 0.3.6.58
-    // too) its velocity pass carries this frame's clip rows as the previous ones, so the camera's motion read
-    // from it is zero while the camera moves (the upscaler was told the picture stood still: flicker on the
-    // sand around the rider, smeared history). The previous clip is therefore taken from last frame's own
-    // pass: frame F's c24..c39 (its jittered clip rows, the ones it was drawn with) are frame F+1's previous
-    // clip whenever the passes are of consecutive frames (by the flip argument); where the game's value is
-    // last frame's camera the two are equal bit for bit. Without last frame's pass (the first frame after a
-    // gap) the game's value is all there is. BB_GAME_PREVIOUS_CLIP=1 (diagnosis): the game's value always.
-    const s64 pass_frame = DrawnFrame();
-    if (pass_frame != own_clip_frame) {
-        own_previous_clip = own_clip;
-        own_previous_clip_frame = own_clip_frame;
-        own_previous_camera = own_camera;
-    }
-    std::copy(c + 24, c + 40, own_clip.begin());
-    own_camera = {c[15], c[19], c[23]};
-    own_clip_frame = pass_frame;
-    static const bool game_previous = [] {
-        const char* env = std::getenv("BB_GAME_PREVIOUS_CLIP");
-        const bool v = env && env[0] == '1';
-        std::printf("Camera motion: previous clip from %s (BB_GAME_PREVIOUS_CLIP)\n",
-                    v ? "the game's velocity pass" : "last frame's own velocity pass (the game's without one)");
-        return v;
-    }();
-    const bool own_previous = !game_previous && pass_frame >= 1 && own_previous_clip_frame == pass_frame - 1;
-    // c40..c55: last frame's own clip rows, or the game's
-    const float* previous = own_previous ? own_previous_clip.data() : c + 40;
-    {
-        // The count: frames whose game previous clip was not last frame's clip rows (held: this frame's own).
-        static u32 frames = 0, held = 0, other = 0, lines = 0;
-        if (own_previous) {
-            ++frames;
-            const bool same_as_last = std::equal(c + 40, c + 56, own_previous_clip.begin());
-            const bool same_as_now = std::equal(c + 40, c + 56, c + 24);
-            held += !same_as_last && same_as_now;
-            other += !same_as_last && !same_as_now;
-            if (frames % 600 == 0) {
-                if (lines < 20 && (held || other || lines < 3)) {
-                    ++lines;
-                    std::printf("Camera motion: the game's previous clip was this frame's own in %u of 600 frames, "
-                                "another than last frame's in %u (last frame's own used)\n", held, other);
-                }
-                held = other = 0;
-            }
-        }
-    }
-    const float* rows[3] = {previous, previous + 4, previous + 12};
+    const float* rows[3] = {c + 40, c + 44, c + 52};
     for (int r = 0; r < 3; ++r) {
         for (int col = 0; col < 4; ++col) {
             float v = col == 3 ? rows[r][3] : 0.0f;
@@ -531,69 +465,6 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
                 v += rows[r][k] * c[12 + k * 4 + col];
             }
             camera.to_previous_clip[r * 4 + col] = v;
-        }
-    }
-    // The velocity pass's stencil term (its pixel shader): pixels WITHOUT stencil bits 0xc0 add the
-    // world offset c56..c58 before the previous clip; the marked ones (what moves with the camera's
-    // platform: U3's rider and horse, U1's jeep, U2's convoy truck) do not. On a platform the game
-    // gives this frame's own clip rows as the previous ones: its motion is then taken in the
-    // platform's frame, the marked pixels standing still and the world moving by the offset. Here
-    // the previous clip is last frame's real one (above), under which the world stands still: the
-    // marked pixels moved with the platform, so they were at p - (the platform's step this frame).
-    // Without that, the rider got the world's motion past him while he stays on screen: DLSS took
-    // his history from the wrong place (flicker on Nate and a band around him on U3's horse ride,
-    // from 12eacdd0 on). With the game's own previous clip (not held, or no last frame's pass) the
-    // game's form exactly: the unmarked pixels add the offset. BB_STENCIL_MOTION=0 (diagnosis):
-    // the term left out (the build before).
-    // The platform's step is the camera's own step between the two passes (c15, c19, c23: the
-    // view-to-world translation), not the game's offset: that offset points the same way (cosine
-    // 0.999-1.000 on U3's horse, U1's jeep, U2's convoy) but is a motion-blur length, not a step:
-    // at 120 FPS it alternates 1.66 / 2.49 times the step frame by frame, about the step in a long
-    // frame, so scaling it by the frame time left Nate's vectors jumping a few pixels every other
-    // frame and 30-60 px off around a long frame (the frame times run a frame apart from the
-    // passes). The camera's step comes with the two clips that are used, so it is the step of
-    // exactly this frame pair.
-    {
-        static const bool stencil_motion = [] {
-            const char* env = std::getenv("BB_STENCIL_MOTION");
-            const bool v = !(env && env[0] == '0');
-            std::printf("Camera motion: the velocity pass's stencil (platform) motion %s "
-                        "(BB_STENCIL_MOTION)\n", v ? "on" : "off");
-            return v;
-        }();
-        const bool held = std::equal(c + 40, c + 56, c + 24);
-        const bool carried = own_previous && held;
-        const std::array<float, 3> step{own_camera[0] - own_previous_camera[0],
-                                         own_camera[1] - own_previous_camera[1],
-                                         own_camera[2] - own_previous_camera[2]};
-        const float offset[3] = {carried ? -step[0] : c[56], carried ? -step[1] : c[57],
-                                 carried ? -step[2] : c[58]};
-        // the platform offset in use (the game's form) or a held clip (ours): the term applies
-        const bool platform = c[56] != 0.0f || c[57] != 0.0f || c[58] != 0.0f;
-        camera.stencil_select = 0;
-        camera.stencil_clip_offset = {};
-        if (stencil_motion && platform && std::isfinite(offset[0]) && std::isfinite(offset[1]) &&
-            std::isfinite(offset[2])) {
-            for (int r = 0; r < 3; ++r) {
-                camera.stencil_clip_offset[r] =
-                    rows[r][0] * offset[0] + rows[r][1] * offset[1] + rows[r][2] * offset[2];
-            }
-            camera.stencil_select = carried ? 0x100u : 0x200u;
-        }
-        // BB_STENCIL_MOTION_LOG=1: every 60 frames the offset against the camera's step; 2: every frame.
-        static const char* log_env = std::getenv("BB_STENCIL_MOTION_LOG");
-        if (static const bool log = log_env != nullptr; log) {
-            const bool every = log_env[0] == '2';
-            static u32 frames = 0, lines = 0;
-            if ((++frames % 60 == 0 || every) && lines < 8000) {
-                ++lines;
-                std::printf("Stencil motion: frame %lld held %d own %d offset %g %g %g camera step %g %g %g "
-                            "(marked pixels %s)\n", static_cast<long long>(pass_frame), int(held),
-                            int(own_previous), c[56], c[57], c[58], step[0], step[1], step[2],
-                            camera.stencil_select == 0x100u ? "carry the camera's step"
-                            : camera.stencil_select       ? "still, the others add the offset"
-                                                          : "-");
-            }
         }
     }
     camera.uv_to_view = {c[0], c[1], c[2], c[3]};
@@ -632,7 +503,7 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
             }
             return j;
         };
-        const std::array<float, 2> last = jitter_of(previous, previous + 4, previous + 12);
+        const std::array<float, 2> last = jitter_of(c + 40, c + 44, c + 52);
         const std::array<float, 2> now = jitter_of(c + 24, c + 28, c + 36);
         // The check: the jitter the upscaler was given for the frame before (GiveProjectionJitter, the frame by the
         // flip argument) against what this frame's pass says that frame was drawn with: one line every 600 frames (20
@@ -905,20 +776,16 @@ void CameraMotion::OnVelocityConstants(const float* c, u32 dwords) {
     }
     static const bool camera_log = std::getenv("BB_CAMERA_LOG") != nullptr;
     if (camera_log) {
-        // pos: the camera's position (the velocity pass's view, c[15], c[19], c[23]); frame: the game frame
-        // the GPU thread is at (submitted), for joining with the frame clock log.
-        std::printf("Camera: t=%.4f yaw=%.3f pitch=%.3f pos=%.4f %.4f %.4f frame=%lld\n", t,
+        std::printf("Camera: t=%.4f yaw=%.3f pitch=%.3f\n", t,
                     std::atan2(fx, fz) * 57.29578f,
-                    std::asin(std::clamp(fy / std::sqrt(fx * fx + fy * fy + fz * fz), -1.0f, 1.0f)) * 57.29578f,
-                    c[15], c[19], c[23],
-                    static_cast<long long>(Libraries::VideoOut::CurrentGameFrames().submitted));
+                    std::asin(std::clamp(fy / std::sqrt(fx * fx + fy * fy + fz * fz), -1.0f, 1.0f)) * 57.29578f);
     }
-    // The stencil term on a platform: said once.
+    // The extra motion of stencil-marked pixels is not reproduced: say when it is used.
     static bool reported = false;
-    if (!reported && camera.stencil_select == 0x100u) {
+    if (!reported && (c[56] != 0.0f || c[57] != 0.0f || c[58] != 0.0f)) {
         reported = true;
-        std::printf("Camera motion: on a platform (offset %g, %g, %g; the game's previous clip is this "
-                    "frame's): the stencil-marked pixels move with the camera's step\n", c[56], c[57], c[58]);
+        std::printf("Camera motion: the velocity pass moves stencil-marked pixels by "
+                    "(%g, %g, %g); not reproduced\n", c[56], c[57], c[58]);
     }
     // bbport (DLSS rework 11): with BB_STENCIL_MOTION_LOG=1, every 2 s: frames whose velocity pass
     // moved stencil-marked pixels, and the largest such offset (vehicles, platforms? train,
@@ -988,56 +855,9 @@ static bool zero_motion_test() {
     return on;
 }
 
-vk::ImageView CameraMotion::ZeroStencil(vk::CommandBuffer cmdbuf) {
-    if (zero_stencil_view) {
-        return *zero_stencil_view;
-    }
-    const auto device = instance.GetDevice();
-    zero_stencil = VideoCore::UniqueImage(device, instance.GetAllocator());
-    zero_stencil.Create(vk::ImageCreateInfo{
-        .imageType = vk::ImageType::e2D,
-        .format = vk::Format::eR8Uint,
-        .extent = {1, 1, 1},
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        .samples = vk::SampleCountFlagBits::e1,
-        .tiling = vk::ImageTiling::eOptimal,
-        .usage = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst,
-        .initialLayout = vk::ImageLayout::eUndefined,
-    });
-    zero_stencil_view = Check(device.createImageViewUnique({
-        .image = vk::Image(zero_stencil),
-        .viewType = vk::ImageViewType::e2D,
-        .format = vk::Format::eR8Uint,
-        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-    }));
-    vk::ImageMemoryBarrier2 barrier{
-        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
-        .srcAccessMask = vk::AccessFlagBits2::eNone,
-        .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
-        .dstAccessMask = vk::AccessFlagBits2::eTransferWrite,
-        .oldLayout = vk::ImageLayout::eUndefined,
-        .newLayout = vk::ImageLayout::eGeneral,
-        .image = vk::Image(zero_stencil),
-        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
-    };
-    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
-    vk::ClearColorValue zero{};
-    zero.uint32 = std::array<u32, 4>{0, 0, 0, 0};
-    const vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
-    cmdbuf.clearColorImage(vk::Image(zero_stencil), vk::ImageLayout::eGeneral, zero, range);
-    barrier.srcStageMask = vk::PipelineStageFlagBits2::eTransfer;
-    barrier.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
-    barrier.dstStageMask = vk::PipelineStageFlagBits2::eComputeShader;
-    barrier.dstAccessMask = vk::AccessFlagBits2::eShaderRead;
-    barrier.oldLayout = vk::ImageLayout::eGeneral;
-    cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
-    return *zero_stencil_view;
-}
-
 void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
                                   vk::ImageView motion_view, u32 width, u32 height,
-                                  float jitter_scale, vk::ImageView stencil_view) {
+                                  float jitter_scale) {
     const auto& camera = velocity_camera;
     // Mode 4 (BilalReloaded's #84): the characters' own motion (ObjectMotion,
     // Shader::MotionVectors::characters) where it was written this frame; the camera's elsewhere.
@@ -1078,27 +898,16 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
         .jitter = now_jitter,
         .previous_jitter = before_jitter,
         // BB_DLSS_ZERO_MOTION=1 (diagnosis): no camera motion vectors at all.
-        .mode = still ? 3u : (objects ? 4u : 2u) | (stencil_view ? camera.stencil_select : 0u),
-        .pad = 0,
-        .stencil_offset = {camera.stencil_clip_offset[0], camera.stencil_clip_offset[1],
-                           camera.stencil_clip_offset[2], 1.0f / jitter_scale},
+        .mode = still ? 3u : objects ? 4u : 2u,
     };
-    const vk::ImageView stencil = stencil_view ? stencil_view : ZeroStencil(cmdbuf);
-    if (static const char* log = std::getenv("BB_STENCIL_MOTION_LOG"); log && log[0] == '2') {
-        std::printf("Stencil record: mode %#x offset %g %g %g scale %g stencil %d\n", push.mode,
-                    push.stencil_offset[0], push.stencil_offset[1], push.stencil_offset[2],
-                    push.stencil_offset[3], int(bool(stencil_view)));
-    }
     const vk::DescriptorImageInfo depth_info{.imageView = depth_view,
                                              .imageLayout = vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo motion_info{.imageView = motion_view,
                                               .imageLayout = vk::ImageLayout::eGeneral};
-    // Binding 2: the object motion in mode 4 (not read in the others); 3: the stencil.
+    // Binding 2: the object motion in mode 4 (not read in the others).
     const vk::DescriptorImageInfo velocity_info{.imageView = object_view,
                                                 .imageLayout = vk::ImageLayout::eGeneral};
-    const vk::DescriptorImageInfo stencil_info{.imageView = stencil,
-                                               .imageLayout = vk::ImageLayout::eGeneral};
-    const std::array<vk::WriteDescriptorSet, 4> writes = {{
+    const std::array<vk::WriteDescriptorSet, 3> writes = {{
         {.dstBinding = 0,
          .descriptorCount = 1,
          .descriptorType = vk::DescriptorType::eSampledImage,
@@ -1111,10 +920,6 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
          .descriptorCount = 1,
          .descriptorType = vk::DescriptorType::eSampledImage,
          .pImageInfo = &velocity_info},
-        {.dstBinding = 3,
-         .descriptorCount = 1,
-         .descriptorType = vk::DescriptorType::eSampledImage,
-         .pImageInfo = &stencil_info},
     }};
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *motion_pipeline);
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *motion_pipeline_layout, 0,
@@ -1125,13 +930,8 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
 }
 
 void CameraMotion::RecordVelocityDeferred(vk::Image motion_image, vk::ImageView depth_view,
-                                          vk::ImageView motion_view, u32 width, u32 height,
-                                          vk::ImageView stencil_view) {
+                                          vk::ImageView motion_view, u32 width, u32 height) {
     const auto& camera = velocity_camera;
-    // The zero image is made here, on this thread, before the recording thread runs.
-    const vk::ImageView stencil = stencil_view ? stencil_view
-                                  : zero_stencil_view ? *zero_stencil_view
-                                                      : ZeroStencil(scheduler.CommandBuffer());
     const PushConstants push{
         .reproject = camera.to_previous_clip,
         .proj = camera.uv_to_view,
@@ -1139,11 +939,7 @@ void CameraMotion::RecordVelocityDeferred(vk::Image motion_image, vk::ImageView 
         .size = {float(width), float(height)},
         .jitter = {jitter[0], jitter[1]},
         .previous_jitter = {previous_jitter[0], previous_jitter[1]},
-        .mode = (zero_motion_test() || !camera.valid || camera.cut)
-                    ? 3u : 2u | (stencil_view ? camera.stencil_select : 0u),
-        .pad = 0,
-        .stencil_offset = {camera.stencil_clip_offset[0], camera.stencil_clip_offset[1],
-                           camera.stencil_clip_offset[2], 1.0f},
+        .mode = (zero_motion_test() || !camera.valid || camera.cut) ? 3u : 2u,
     };
     const vk::Pipeline pipeline = *motion_pipeline;
     const vk::PipelineLayout layout = *motion_pipeline_layout;
@@ -1163,9 +959,7 @@ void CameraMotion::RecordVelocityDeferred(vk::Image motion_image, vk::ImageView 
                                                  .imageLayout = vk::ImageLayout::eGeneral};
         const vk::DescriptorImageInfo motion_info{.imageView = motion_view,
                                                   .imageLayout = vk::ImageLayout::eGeneral};
-        const vk::DescriptorImageInfo stencil_info{.imageView = stencil,
-                                                   .imageLayout = vk::ImageLayout::eGeneral};
-        const std::array<vk::WriteDescriptorSet, 4> writes = {{
+        const std::array<vk::WriteDescriptorSet, 3> writes = {{
             {.dstBinding = 0,
              .descriptorCount = 1,
              .descriptorType = vk::DescriptorType::eSampledImage,
@@ -1178,10 +972,6 @@ void CameraMotion::RecordVelocityDeferred(vk::Image motion_image, vk::ImageView 
              .descriptorCount = 1,
              .descriptorType = vk::DescriptorType::eSampledImage,
              .pImageInfo = &depth_info},
-            {.dstBinding = 3,
-             .descriptorCount = 1,
-             .descriptorType = vk::DescriptorType::eSampledImage,
-             .pImageInfo = &stencil_info},
         }};
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
         cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, layout, 0, writes);

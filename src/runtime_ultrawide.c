@@ -53,13 +53,24 @@ void runtime_ultrawide_select(int wide) {
     }
 }
 
-/* A writable page within 2 GiB of the code (rel32 from the stubs): from the pool reserved near the
- * image before the GPU started (`code` is the image). */
-void *runtime_near_image_alloc(size_t size); /* runtime_memory.c */
+/* A writable page within 2 GiB of the code (rel32 from the stubs). */
 static float *alloc_near(uint8_t *code, uint64_t size) {
+#ifdef _WIN32
+    const uintptr_t base = ((uintptr_t)code + size + 0xffff) & ~(uintptr_t)0xffff;
+    for (uintptr_t step = 0; step < (1800ull << 20); step += 1u << 16) {
+        void *p = VirtualAlloc((void *)(base + step), 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (p) return (float *)p;
+        if ((uintptr_t)code > step + (2u << 20)) {
+            p = VirtualAlloc((void *)((((uintptr_t)code - step) & ~(uintptr_t)0xffff) - 0x10000), 4096,
+                             MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            if (p) return (float *)p;
+        }
+    }
+#else
     (void)code;
     (void)size;
-    return (float *)runtime_near_image_alloc(4096);
+#endif
+    return NULL;
 }
 
 typedef struct {
@@ -1238,13 +1249,6 @@ const volatile uint32_t *runtime_projection_jitter_frame;
 int runtime_gpu_nvidia = -1;
 /* Which game's program was recognised when the code was patched (1, 2, 3; 0: none / not yet): read by the GPU side. */
 int runtime_uncharted_game;
-/* KickJob's lastFrameNumber (the number of the last frame whose draw script was kicked), whatever
- * BB_PROJECTION_JITTER says; NULL: not found. Read by the low latency log (probe.c, game_frame_start). */
-const volatile uint64_t *runtime_draw_frame_number;
-/* g_frameState.m_frameCount, the game's own frame number (+1 per frame in its main loop, the number it passes as its
- * flip argument); NULL: not found. Set by probe.c (install_game_frame_start) before the game runs; read by the low
- * latency mode and by the reports that name the game frame (bbgpu_game_frame_text). */
-const volatile uint64_t *runtime_game_frame_count;
 
 typedef struct {
     const char *name;
@@ -1383,15 +1387,8 @@ void runtime_patch_projection_jitter(uint8_t *code, uint64_t size) {
     for (unsigned i = 0; i < sizeof(projection_jitter_games) / sizeof(projection_jitter_games[0]); ++i) {
         const ProjectionJitterGame *t = &projection_jitter_games[i];
         if (size >= t->join + 0x400 && !memcmp(code + t->start, t->start_bytes, sizeof(t->start_bytes)) &&
-            !memcmp(code + t->join, t->join_bytes, sizeof(t->join_bytes))) {
+            !memcmp(code + t->join, t->join_bytes, sizeof(t->join_bytes)))
             runtime_uncharted_game = t->name[10] - '0'; /* "Uncharted N ..." */
-            const uint8_t *s = t->frame_site && t->frame_site + 10 <= size ? code + t->frame_site : NULL;
-            if (s && s[0] == 0x48 && s[1] == 0x8b && s[2] == 0x05 && s[7] == 0x48 && s[8] == 0xff && s[9] == 0xc0) {
-                int32_t rel; /* mov rax, [rip + lastFrameNumber]; inc rax */
-                memcpy(&rel, s + 3, 4);
-                runtime_draw_frame_number = (const volatile uint64_t *)(s + 7 + rel);
-            }
-        }
     }
 #endif
     const char *env = getenv("BB_PROJECTION_JITTER");

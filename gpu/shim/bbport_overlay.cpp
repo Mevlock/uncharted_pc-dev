@@ -32,7 +32,6 @@
 #include "bbport_i18n.h"
 #include "bbport_saves.h"
 #include "bbport_settings.h"
-#include "bbport_vrr.h"
 #include <miniz.h>
 #include "imgui.h"
 
@@ -1322,8 +1321,6 @@ void Menu() {
 
     ImGui::SeparatorText(T("Other"));
     Checkbox(TI("FPS counter in the corner"), s.show_fps);
-    // Always enabled (saved in bbport.ini show_vrr): the label itself shows while the counter is on.
-    Checkbox(TI("G-SYNC / FreeSync indicator"), s.show_vrr);
     ImGui::BeginDisabled(!s.show_fps);
     Checkbox(TI("Frame time graph"), s.show_fps_graph);
     ImGui::EndDisabled();
@@ -1456,16 +1453,6 @@ void FpsCounter() {
     if (runtime_dev_text_shown() == 0) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(0.35f, 1.0f, 0.35f, 1.0f), " DEV MODE");
-    }
-    // "G-SYNC" (NVIDIA, green), "FreeSync" (AMD, red) or "VRR": lit while the display refreshes with the game's frames, dimmed
-    // with "off" while it does not (the game not in front, composed by the desktop, a fixed refresh); bbport_vrr.h.
-    if (const BbVrr::Shown vrr = BbVrr::Get(frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f); vrr.label) {
-        ImGui::SameLine();
-        if (vrr.active) {
-            ImGui::TextColored(ImVec4(vrr.lit[0], vrr.lit[1], vrr.lit[2], 1.0f), " %s", vrr.label);
-        } else {
-            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 0.8f), " %s off", vrr.label);
-        }
     }
     // "DLSS 2288x960 Q  FG 2x 120": anti-aliasing, render size (Quality, Balanced,
     // Performance), and with frame generation adding frames (none in menus and movies) the

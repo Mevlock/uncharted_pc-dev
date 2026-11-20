@@ -576,26 +576,7 @@ static void touch_for_write(void *buffer,uint64_t size) {
  * complete loses data (U2's script module: 16384 of 392775 bytes, issue #101; streamed level
  * data). Files are read until the request is done or the file ends, touching the rest again.
  * offset -1: at the file position. */
-extern const volatile uint64_t *runtime_game_frame_count;
-/* BB_READ_LOG=1 (diagnosis): reads of 64 KiB or more with their guest address and the game frame */
-static void log_read(const void *buffer,uint64_t size,ssize_t n) {
-    static int on=-1;
-    if (on<0) { const char *e=getenv("BB_READ_LOG"); on=e && e[0]=='1'; }
-    if (!on || size<65536) return;
-    const volatile uint64_t *f=runtime_game_frame_count;
-    printf("File read: %#llx +%#llx (%lld) frame %llu\n",(unsigned long long)(uintptr_t)buffer,(unsigned long long)size,
-           (long long)n,f ? (unsigned long long)*f : 0ull);
-}
-static ssize_t read_full_inner(int h,void *buffer,uint64_t size,int64_t offset);
-void bbgpu_note_streamed(uint64_t addr,uint64_t size); /* gpu/shim/bbgpu.cpp: upload ahead to the GPU */
 static ssize_t read_full(int h,void *buffer,uint64_t size,int64_t offset) {
-    const ssize_t n=read_full_inner(h,buffer,size,offset);
-    log_read(buffer,size,n);
-    /* bulk file data (asset streaming) the GPU may read later: its upload can start now */
-    if (n>=65536) bbgpu_note_streamed((uint64_t)(uintptr_t)buffer,(uint64_t)n);
-    return n;
-}
-static ssize_t read_full_inner(int h,void *buffer,uint64_t size,int64_t offset) {
     unsigned char *at=buffer;
     uint64_t done=0;
     int retries=0;

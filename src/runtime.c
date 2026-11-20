@@ -272,24 +272,9 @@ static _Thread_local struct { const char *what; double start, dur; uint64_t call
 static _Thread_local int wait_note_count;
 static _Thread_local uint64_t wait_caller, wait_arg; /* the guest's return address and the wait's argument */
 void runtime_wait_caller(uint64_t caller, uint64_t arg) { wait_caller=caller; wait_arg=arg; }
-/* BB_LATENCY_TRACE=1 (diagnosis): the blocking waits of each thread summed by kind, taken by the game's frame thread
- * at its frame start (runtime_frame_waits_take; the low latency mode's frame timeline, vk_low_latency.cpp). */
-static int frame_trace=-1;
-static _Thread_local struct { const char *what; double sum; } frame_waits[12];
-static _Thread_local int frame_wait_kinds;
-int runtime_frame_waits_take(const char **what, double *seconds, int max) {
-    int n=0;
-    for (int i=0;i<frame_wait_kinds && n<max;++i) {
-        if (frame_waits[i].sum<=0.0) continue;
-        what[n]=frame_waits[i].what; seconds[n]=frame_waits[i].sum; ++n;
-        frame_waits[i].sum=0.0;
-    }
-    return n;
-}
 double runtime_wait_begin(void) {
     runtime_freeze_point();
-    if (frame_trace<0) frame_trace=getenv("BB_LATENCY_TRACE")!=NULL && getenv("BB_LATENCY_TRACE")[0]=='1';
-    if (wait_timing<0) wait_timing=getenv("BB_PAD_TIMING")!=NULL || frame_trace;
+    if (wait_timing<0) wait_timing=getenv("BB_PAD_TIMING")!=NULL;
     if (!wait_timing) return 0.0;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
     return (double)ts.tv_sec+ts.tv_nsec*1e-9;
@@ -298,14 +283,6 @@ void runtime_wait_end(const char *what, double start) {
     if (start==0.0) return;
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
     const double end=(double)ts.tv_sec+ts.tv_nsec*1e-9;
-    if (frame_trace>0) {
-        int i=0;
-        while (i<frame_wait_kinds && strcmp(frame_waits[i].what,what)) ++i;
-        if (i<12) {
-            if (i==frame_wait_kinds) { frame_waits[i].what=what; frame_waits[i].sum=0.0; ++frame_wait_kinds; }
-            frame_waits[i].sum+=end-start;
-        }
-    }
     if (wait_note_count<24) {
         wait_notes[wait_note_count].what=what; wait_notes[wait_note_count].start=start; wait_notes[wait_note_count].dur=end-start;
         wait_notes[wait_note_count].caller=wait_caller; wait_notes[wait_note_count].arg=wait_arg; ++wait_note_count;

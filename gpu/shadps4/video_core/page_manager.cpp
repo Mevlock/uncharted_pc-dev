@@ -1,18 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "bbport_trace.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <x86intrin.h>
 #include <map>
-#include <condition_variable>
-#include <mutex>
 #include <string>
-#include <thread>
-#include <vector>
 #include <unordered_map>
 #include <boost/container/small_vector.hpp>
 #include "bbport_toggles.h"
@@ -22,7 +17,6 @@
 #include "common/error.h"
 #include "common/range_lock.h"
 #include "common/signal_context.h"
-#include "common/thread.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "core/signals.h"
@@ -58,135 +52,6 @@ extern "C" int runtime_thread_is_guest(void); // runtime_thread.c
 #endif
 
 namespace VideoCore {
-
-/// BB_FRAME_TRACE diagnosis: 1 while the texture cache changes watches (image pages).
-static thread_local u64 t_protect_origin = 0;
-
-// bbport: write revokes of pages an upload clears (RegionManager::ForEachModifiedRange) are
-// queued instead of made on the calling thread, and a thread of their own (bb:Protect) makes
-// them, adjacent ones in one call: a new area's first frame (U3's desert canyon) made ~760 calls
-// of a few pages each, ~3-4 ms of the draw recording thread, the frame's longest chain (moved to
-// the copies, they cost the Vulkan recording thread the same, the next in that chain). A page
-// stays writable until then, which is safe: the copy of it starts later and takes what the guest
-// wrote meanwhile; a copy that reads queued or in-flight pages (MemoryManager::CopySparseMemory)
-// first waits for them. Every other change (a grant after a fault, read protection, unmap) first
-// makes the queued ones, under the same lock, so the host's protection follows the order the
-// caches asked for it. BB_DEFER_REVOKES=1: on. Off by default: the desert ride's hitches were not
-// shorter with it in clean rides (2026-11-18).
-thread_local bool t_defer_revoke = false;
-static bool DeferRevokes() {
-    static const bool on = [] {
-        const char* env = std::getenv("BB_DEFER_REVOKES");
-        return env && env[0] == '1';
-    }();
-    return on;
-}
-struct DeferredRevokes {
-    std::mutex queue_mutex;                      ///< ranges, bounds, count
-    std::mutex apply_mutex;                      ///< held while host protection changes
-    std::condition_variable queue_cv;            ///< wakes bb:Protect
-    std::vector<std::pair<VAddr, VAddr>> ranges; ///< [begin, end), in request order
-    std::atomic<u32> count{0};
-    std::atomic<VAddr> lo{~VAddr{0}}, hi{0};     ///< bounds of the queued ranges
-    std::atomic<VAddr> flight_lo{~VAddr{0}}, flight_hi{0}; ///< ...of the ones being made
-    bool thread_started = false;                 ///< under queue_mutex
-};
-static DeferredRevokes g_deferred;
-static void ApplyRanges(std::vector<std::pair<VAddr, VAddr>>& ranges);
-
-/// With apply_mutex held: makes every queued revoke.
-static void DrainDeferredLocked() {
-    std::vector<std::pair<VAddr, VAddr>> ranges;
-    {
-        std::scoped_lock lk{g_deferred.queue_mutex};
-        if (g_deferred.ranges.empty()) {
-            return;
-        }
-        ranges.swap(g_deferred.ranges);
-        // In flight before no longer queued: a copy that checks in the other order sees one.
-        g_deferred.flight_lo.store(g_deferred.lo.load(std::memory_order_relaxed),
-                                   std::memory_order_release);
-        g_deferred.flight_hi.store(g_deferred.hi.load(std::memory_order_relaxed),
-                                   std::memory_order_release);
-        g_deferred.lo.store(~VAddr{0}, std::memory_order_release);
-        g_deferred.hi.store(0, std::memory_order_release);
-        g_deferred.count.store(0, std::memory_order_release);
-    }
-    ApplyRanges(ranges);
-    g_deferred.flight_lo.store(~VAddr{0}, std::memory_order_release);
-    g_deferred.flight_hi.store(0, std::memory_order_release);
-}
-
-void FlushDeferredProtects() {
-    if (!DeferRevokes() || (g_deferred.count.load(std::memory_order_acquire) == 0 &&
-                            g_deferred.flight_hi.load(std::memory_order_acquire) == 0)) {
-        return;
-    }
-    std::scoped_lock lk{g_deferred.apply_mutex};
-    DrainDeferredLocked();
-}
-
-void FlushDeferredProtects(VAddr address, u64 size) {
-    // Only a copy that reads queued or in-flight pages waits: the copies of other memory (the
-    // constant ring's, the recording thread's small ones) go on.
-    if (!DeferRevokes()) {
-        return;
-    }
-    const VAddr end = address + size;
-    const bool queued = g_deferred.count.load(std::memory_order_acquire) != 0 &&
-                        address < g_deferred.hi.load(std::memory_order_acquire) &&
-                        g_deferred.lo.load(std::memory_order_acquire) < end;
-    const bool flying = address < g_deferred.flight_hi.load(std::memory_order_acquire) &&
-                        g_deferred.flight_lo.load(std::memory_order_acquire) < end;
-    if (!queued && !flying) {
-        return;
-    }
-    std::scoped_lock lk{g_deferred.apply_mutex};
-    DrainDeferredLocked();
-}
-
-static void DeferredRevokeThread() {
-    Common::SetCurrentThreadName("bb:Protect");
-    for (;;) {
-        {
-            std::unique_lock lk{g_deferred.queue_mutex};
-            g_deferred.queue_cv.wait(lk, [] { return !g_deferred.ranges.empty(); });
-        }
-        // At once: ahead of the copies (the Vulkan recording thread runs them a chunk behind),
-        // with whatever queued meanwhile.
-        std::scoped_lock lk{g_deferred.apply_mutex};
-        DrainDeferredLocked();
-    }
-}
-
-/// Queues a revoke (of a range the caller's upload copies next).
-static void QueueRevoke(VAddr address, u64 size) {
-    bool wake;
-    {
-        std::scoped_lock lk{g_deferred.queue_mutex};
-        auto& ranges = g_deferred.ranges;
-        wake = ranges.empty();
-        if (!ranges.empty() && ranges.back().second == address) {
-            ranges.back().second = address + size;
-        } else {
-            ranges.push_back({address, address + size});
-        }
-        if (address < g_deferred.lo.load(std::memory_order_relaxed)) {
-            g_deferred.lo.store(address, std::memory_order_release);
-        }
-        if (address + size > g_deferred.hi.load(std::memory_order_relaxed)) {
-            g_deferred.hi.store(address + size, std::memory_order_release);
-        }
-        g_deferred.count.store(static_cast<u32>(ranges.size()), std::memory_order_release);
-        if (!g_deferred.thread_started) {
-            g_deferred.thread_started = true;
-            std::thread(DeferredRevokeThread).detach();
-        }
-    }
-    if (wake) {
-        g_deferred.queue_cv.notify_one();
-    }
-}
 
 constexpr size_t PM_PAGE_SIZE = 4_KB;
 constexpr size_t PM_PAGE_BITS = 12;
@@ -272,7 +137,6 @@ struct PageManager::Impl {
         // Writes stay as the tracker keeps them: allowed on pages it holds CPU-modified (it
         // expects no fault there), trapped on the others.
         const bool writable = rasterizer->GetBufferCache().IsRegionCpuModified(page, 4096);
-        FlushDeferredProtects();
         runtime_memory_gpu_protect(page, 4096, 1, writable ? 1 : 0);
         const VAddr rip = reinterpret_cast<VAddr>(Common::GetRip(context));
 #ifdef _WIN32
@@ -368,8 +232,6 @@ struct PageManager::Impl {
         }
         if (Common::IsWriteError(context)) {
             BbStats::Timer timer{BbStats::t_write_faults};
-            BbTrace::Record(BbTrace::FaultBegin, addr);
-            BbTrace::Scope trace_end{BbTrace::FaultEnd};
             return rasterizer->OnWriteFault(addr, is_gpu_thread);
         } else {
             BbStats::read_faults.fetch_add(1, std::memory_order_relaxed);
@@ -396,7 +258,6 @@ struct PageManager::Impl {
                 }
                 const VAddr page = addr & ~VAddr{4095};
                 const bool writable = rasterizer->GetBufferCache().IsRegionCpuModified(page, 4096);
-                FlushDeferredProtects();
                 runtime_memory_gpu_protect(page, 4096, 1, writable ? 1 : 0);
                 return true;
             }
@@ -710,18 +571,7 @@ struct SignalImpl : public PageManager::Impl {
             return env && env[0] == '1';
         }();
         const u64 t0 = stats ? __rdtsc() : 0;
-        if (DeferRevokes()) {
-            if (t_defer_revoke && perms == Core::MemoryPermission::Read) {
-                QueueRevoke(address, size);
-                return;
-            }
-            // Every other change comes after the revokes queued before it.
-            std::scoped_lock lk{g_deferred.apply_mutex};
-            DrainDeferredLocked();
-            ProtectTraced(address, size, perms);
-        } else {
-            ProtectTraced(address, size, perms);
-        }
+        ProtectInner(address, size, perms);
         if (stats) {
             static std::atomic<u64> calls[2][2]{}, pages[2]{}, cycles[2]{};
             static std::atomic<u64> window{0};
@@ -754,17 +604,7 @@ struct SignalImpl : public PageManager::Impl {
         }
     }
 
-    static void ProtectTraced(VAddr address, size_t size, Core::MemoryPermission perms) {
-        // arg: first page (28 bits) | pages << 28 | write granted << 62
-        BbTrace::Record(BbTrace::ProtectBegin,
-                        ((address >> 12) & 0xfffffff) | ((((size + 4095) >> 12) & 0x3ffffffff) << 28) |
-                            (u64(True(perms & Core::MemoryPermission::Write)) << 62) |
-                            (t_protect_origin << 63));
-        ProtectInner(address, size, perms);
-        BbTrace::Record(BbTrace::ProtectEnd);
-    }
-
-    static void ProtectInner(VAddr address, size_t size, Core::MemoryPermission perms) {
+    void ProtectInner(VAddr address, size_t size, Core::MemoryPermission perms) {
         auto* memory = Core::Memory::Instance();
         auto& impl = memory->GetAddressSpace();
         // bbport: with read tracking (BB_READBACKS=2) a page both GPU- and CPU-modified (the
@@ -777,24 +617,6 @@ struct SignalImpl : public PageManager::Impl {
     }
 
 };
-
-static void ApplyRanges(std::vector<std::pair<VAddr, VAddr>>& ranges) {
-    if (ranges.empty()) {
-        return;
-    }
-    std::sort(ranges.begin(), ranges.end());
-    VAddr begin = ranges[0].first, end = ranges[0].second;
-    for (size_t i = 1; i < ranges.size(); ++i) {
-        if (ranges[i].first <= end) {
-            end = std::max(end, ranges[i].second);
-            continue;
-        }
-        SignalImpl::ProtectTraced(begin, end - begin, Core::MemoryPermission::Read);
-        begin = ranges[i].first;
-        end = ranges[i].second;
-    }
-    SignalImpl::ProtectTraced(begin, end - begin, Core::MemoryPermission::Read);
-}
 
 PageManager::PageManager(Vulkan::Rasterizer* rasterizer_) {
 #ifdef __linux__
@@ -815,20 +637,16 @@ PageManager::PageManager(Vulkan::Rasterizer* rasterizer_) {
 PageManager::~PageManager() = default;
 
 void PageManager::OnGpuMap(VAddr address, size_t size) {
-    FlushDeferredProtects();
     impl->OnMap(address, size);
 }
 
 void PageManager::OnGpuUnmap(VAddr address, size_t size) {
-    FlushDeferredProtects();
     impl->OnUnmap(address, size);
 }
 
 template <bool track>
 void PageManager::UpdatePageWatchers(VAddr addr, u64 size) const {
-    t_protect_origin = 1;
     impl->UpdatePageWatchers<track, false>(addr, size);
-    t_protect_origin = 0;
 }
 
 template <bool track, bool is_read>

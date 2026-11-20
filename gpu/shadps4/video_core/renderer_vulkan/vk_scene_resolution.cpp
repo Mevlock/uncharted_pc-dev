@@ -425,11 +425,7 @@ SceneTargets::Entry& SceneTargets::Get(VideoCore::ImageId id, u32 level) {
 vk::ImageView SceneTargets::View(Entry& e, const VideoCore::Image& original,
                                  const VideoCore::ImageViewInfo& info) {
     for (const auto& [key,view] : e.views) if (key == info) return *view;
-    // A depth image's stencil aspect: asked for with the format S8 (TemporalUpscaler, the motion vectors).
-    const bool stencil = original.info.props.is_depth && info.format == vk::Format::eS8Uint &&
-                         (original.aspect_mask & vk::ImageAspectFlagBits::eStencil);
-    const auto aspect = stencil ? vk::ImageAspectFlags(vk::ImageAspectFlagBits::eStencil)
-        : original.info.props.is_depth
+    const auto aspect = original.info.props.is_depth
         ? (info.is_storage ? original.aspect_mask : vk::ImageAspectFlags(vk::ImageAspectFlagBits::eDepth))
         : vk::ImageAspectFlags(vk::ImageAspectFlagBits::eColor);
     const auto format = original.info.props.is_depth ? original.backing->image.image_ci.format : info.format;

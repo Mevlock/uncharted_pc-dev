@@ -76,9 +76,6 @@ struct SubmitInfo {
     vk::Fence fence;
     u32 num_wait_semas;
     u32 num_signal_semas;
-    /// bbport even presents: the recording thread's draw flushes this submission must follow, up
-    /// to this draw scheduler value (the presenter: its frame's work; WaitAsyncSubmits).
-    u64 async_up_to = ~u64{0};
 
     void AddWait(vk::Semaphore semaphore, u64 tick = 1) {
         wait_semas[num_wait_semas] = semaphore;
@@ -781,8 +778,6 @@ public:
     /// work changes to `label`; GPU time is reported per label.
     void MarkSegment(u32 label);
     [[nodiscard]] bool SegmentsEnabled() const;
-    /// BB_GPU_BUSY: the label of the open segment.
-    [[nodiscard]] u32 SegmentLabel() const;
 
     /// Records `func(vk::CommandBuffer)` in order with other commands. The closure must own
     /// everything it uses (capture by value): it may run later on the recording thread.

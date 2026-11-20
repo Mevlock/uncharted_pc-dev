@@ -1,21 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <atomic>
-#include <cstdio>
 #include "shader_recompiler/frontend/translate/translate.h"
 
 namespace Shader::Gcn {
-
-/// bbport: float atomic min/max have no native Vulkan op without VK_EXT_shader_atomic_float2 (NVIDIA has none) and
-/// take the sign-split integer fallback (emit_spirv_atomic.cpp). Say once which shaders use them; a scan of every
-/// shader of U1/U2/U3 (EU/US, 1.00/1.02) found none, so a line here is news.
-static void ReportFloatAtomicMinMax(const char* what, u64 pgm_hash) {
-    static std::atomic<u32> reported{0};
-    if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
-        std::printf("Shader %016llx uses %s\n", static_cast<unsigned long long>(pgm_hash), what);
-    }
-}
 
 void Translator::EmitVectorMemory(const GcnInst& inst) {
     switch (inst.opcode) {
@@ -381,10 +369,6 @@ void Translator::BUFFER_STORE(u32 num_dwords, bool is_inst_typed, bool is_buffer
 
 template <typename T>
 void Translator::BUFFER_ATOMIC(AtomicOp op, const GcnInst& inst) {
-    if (op == AtomicOp::Fmin || op == AtomicOp::Fmax) {
-        ReportFloatAtomicMinMax(op == AtomicOp::Fmin ? "BUFFER_ATOMIC_FMIN" : "BUFFER_ATOMIC_FMAX",
-                                info.pgm_hash);
-    }
     const auto& mubuf = inst.control.mubuf;
     const IR::VectorReg vaddr{inst.src[0].code};
     const IR::VectorReg vdata{inst.src[1].code};
@@ -583,10 +567,6 @@ void Translator::IMAGE_GET_RESINFO(const GcnInst& inst) {
 }
 
 void Translator::IMAGE_ATOMIC(AtomicOp op, const GcnInst& inst) {
-    if (op == AtomicOp::Fmin || op == AtomicOp::Fmax) {
-        ReportFloatAtomicMinMax(op == AtomicOp::Fmin ? "IMAGE_ATOMIC_FMIN" : "IMAGE_ATOMIC_FMAX",
-                                info.pgm_hash);
-    }
     const auto& mimg = inst.control.mimg;
     IR::VectorReg val_reg{inst.dst[0].code};
     IR::VectorReg addr_reg{inst.src[0].code};

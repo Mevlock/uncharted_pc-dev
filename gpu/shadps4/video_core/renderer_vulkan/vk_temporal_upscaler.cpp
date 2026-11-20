@@ -42,7 +42,6 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
-#include "video_core/renderer_vulkan/vk_low_latency.h"
 #include "video_core/texture_cache/texture_cache.h"
 
 namespace Vulkan {
@@ -57,33 +56,6 @@ extern "C" int runtime_uncharted_game;            // runtime_ultrawide.c: 1, 2, 
 static int g_frames_since_cut = 100000; // bbport: frames since the last camera cut (dumps)
 void BbDrawLogNote(const char* text); // vk_rasterizer.cpp
 extern std::atomic<u64> g_flips;       // vk_rasterizer.cpp: flips so far
-
-/// bbport: the frame time the temporal upscalers get (DLSS's InFrameTimeDeltaInMsec, FSR's frame
-/// time): the frame's world step, i.e. the time between this picture and the last one on screen and
-/// in the game's frame clock (LowLatency::FrameStepNs). It was the time between the evaluations
-/// on the GPU thread, whose recording follows the GPU: at a 60 cap with the GPU holds on the
-/// game's queue (combo2) the recording ran into the holds' releases on a stretch of the U3 horse
-/// ride, and the times went 5-9 / 23-28 ms in turns while the pictures came every 16.7 ms (the
-/// user: Nate flickering there, at every start). Without a frame start hook (no world steps) the
-/// GPU thread's time is all there is. BB_UPSCALER_FRAME_TIME=cpu: that time always (A/B).
-float TemporalUpscaler::FrameMs() {
-    const auto now = std::chrono::steady_clock::now();
-    float cpu_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
-    last_frame = now;
-    if (cpu_ms <= 0.0f || cpu_ms > 200.0f) {
-        cpu_ms = 16.6f;
-    }
-    static const bool cpu_only = [] {
-        const char* env = std::getenv("BB_UPSCALER_FRAME_TIME");
-        const bool v = env && std::strcmp(env, "cpu") == 0;
-        std::printf("Upscaler: frame time = %s (BB_UPSCALER_FRAME_TIME)\n",
-                    v ? "the GPU thread's time between evaluations" : "the frame's world step");
-        return v;
-    }();
-    const s64 step = cpu_only ? 0 : LowLatency::FrameStepNs();
-    last_frame_cpu_ms = cpu_ms;
-    return step > 0 && step < 200'000'000 ? float(double(step) / 1e6) : cpu_ms;
-}
 
 namespace {
 
@@ -1569,7 +1541,6 @@ void TemporalUpscaler::Run() {
     runtime.FlushBarriers();
     vk::Image input_color = color.GetImage(), input_depth = depth.GetImage();
     vk::ImageView input_color_view = color_view, input_depth_view = depth_view;
-    vk::ImageView input_stencil_view = StencilView(depth);
     if (reduced) {
         VideoCore::ImageViewInfo ci;
         ci.format = color.info.pixel_format;
@@ -1580,10 +1551,6 @@ void TemporalUpscaler::Run() {
         input_depth = d.image;
         input_color_view = c.view;
         input_depth_view = d.view;
-        // The proxy's stencil (SceneTargets::View: format S8 asks for the stencil aspect).
-        ci.format = vk::Format::eS8Uint;
-        input_stencil_view =
-            input_stencil_view ? scene_targets.Read(camera_motion.Depth(), ci).view : vk::ImageView{};
     }
     const auto cmdbuf = scheduler.CommandBuffer();
 
@@ -1613,8 +1580,7 @@ void TemporalUpscaler::Run() {
                 vk::AccessFlagBits2::eNone, vk::ImageLayout::eGeneral, all, rw);
 
     if (camera_motion.VelocityMode()) {
-        camera_motion.RecordVelocity(cmdbuf, input_depth_view, *motion_view, w, h, 1.0f,
-                                     input_stencil_view);
+        camera_motion.RecordVelocity(cmdbuf, input_depth_view, *motion_view, w, h);
     } else {
         camera_motion.RecordMotion(cmdbuf, input_depth_view, *motion_view, w, h);
     }
@@ -1634,7 +1600,12 @@ void TemporalUpscaler::Run() {
     }
     const bool has_reactive = mask_ready || RecordReactive(input_color_view);
 
-    const float frame_ms = FrameMs();
+    const auto now = std::chrono::steady_clock::now();
+    float frame_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
+    if (frame_ms <= 0.0f || frame_ms > 200.0f) {
+        frame_ms = 16.6f;
+    }
+    last_frame = now;
 
     bool dispatched = false;
     if (BbSettings::Get().upscaler == BbSettings::UpscalerTaa) {
@@ -1736,10 +1707,6 @@ void TemporalUpscaler::Run() {
                         {vk::Image(output_image), ow, oh, 8, "output", "rgba16f"}});
             DumpImages(instance, scheduler, cmdbuf, dump,
                        {{input_depth, w, h, 4, "depth", "f32", vk::ImageAspectFlagBits::eDepth}});
-            if (input_stencil_view) {
-                DumpImages(instance, scheduler, cmdbuf, dump,
-                           {{input_depth, w, h, 1, "stencil", "u8", vk::ImageAspectFlagBits::eStencil}});
-            }
         }
         reset = false;
         dispatched_last_frame = true;
@@ -1847,7 +1814,7 @@ void TemporalUpscaler::CaptureFrameGen() {
         const bool scaled = capture.width != w || capture.height != h;
         const float s = scaled ? float(capture.width) / float(w) : 1.0f;
         camera_motion.RecordVelocity(cmdbuf, scaled ? frame_generator->CaptureDepth() : depth_view,
-                                     motion, capture.width, capture.height, s, StencilView(depth));
+                                     motion, capture.width, capture.height, s);
         frame_generator->EndCapture(cmdbuf,
                                     Active() ? std::array<float, 2>{jitter[0] * s, jitter[1] * s}
                                              : std::array<float, 2>{},
@@ -2026,13 +1993,6 @@ void TemporalUpscaler::SharpenDisplay(VideoCore::ImageId color) {
                     format == vk::Format::eR8G8B8A8Srgb ? "sRGB" : "UNORM",
                     BbSettings::Get().sharpness.load());
     }
-}
-
-vk::ImageView TemporalUpscaler::StencilView(const VideoCore::Image& depth) {
-    if (!(depth.aspect_mask & vk::ImageAspectFlagBits::eStencil)) {
-        return {};
-    }
-    return CachedView(depth, depth.info.pixel_format, vk::ImageAspectFlagBits::eStencil);
 }
 
 vk::ImageView TemporalUpscaler::CachedView(const VideoCore::Image& image, vk::Format format,
@@ -2542,7 +2502,12 @@ bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::I
     const auto color_access = vk::AccessFlagBits2::eColorAttachmentRead |
                               vk::AccessFlagBits2::eColorAttachmentWrite;
     const auto rw = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite;
-    const float frame_ms = FrameMs();
+    const auto now = std::chrono::steady_clock::now();
+    float frame_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
+    if (frame_ms <= 0.0f || frame_ms > 200.0f) {
+        frame_ms = 16.6f;
+    }
+    last_frame = now;
 
     // bbport: FSR 4 writes its HDR-format output, copied into the output-size UI image.
     if (UseFsr4() || UseDlss() || UseXess() ||
@@ -2629,14 +2594,6 @@ bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::I
                 DumpImages(instance, scheduler, cmdbuf, dump,
                            {{depth_image, source_width, source_height, 4, "depth", "f32",
                              vk::ImageAspectFlagBits::eDepth}});
-                // The stencil the motion vectors read (the scene's own depth target: scaled
-                // sessions, BeforeDisplayPass).
-                if (depth_image == depth.GetImage() &&
-                    (depth.aspect_mask & vk::ImageAspectFlagBits::eStencil)) {
-                    DumpImages(instance, scheduler, cmdbuf, dump,
-                               {{depth_image, source_width, source_height, 1, "stencil", "u8",
-                                 vk::ImageAspectFlagBits::eStencil}});
-                }
                 if (BbSettings::Get().upscaler == BbSettings::UpscalerTaa &&
                     std::getenv("BB_TAA_DIAGNOSTICS")) {
                     DumpImages(instance, scheduler, cmdbuf, dump,
@@ -2771,10 +2728,9 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
         const char* env = std::getenv("BB_UPSCALER_DEFER");
         return env && env[0] == '1';
     }();
-    const vk::ImageView stencil_view = StencilView(depth);
     if (defer) {
         camera_motion.RecordVelocityDeferred(vk::Image(motion_image), depth_view, *motion_view, w,
-                                             h, stencil_view);
+                                             h);
     } else {
         const auto cmdbuf = scheduler.CommandBuffer();
         vk::ImageMemoryBarrier2 b{
@@ -2788,7 +2744,7 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
             .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
         };
         cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
-        camera_motion.RecordVelocity(cmdbuf, depth_view, *motion_view, w, h, 1.0f, stencil_view);
+        camera_motion.RecordVelocity(cmdbuf, depth_view, *motion_view, w, h);
         b.srcStageMask = vk::PipelineStageFlagBits2::eComputeShader;
         b.srcAccessMask = vk::AccessFlagBits2::eShaderWrite;
         b.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;

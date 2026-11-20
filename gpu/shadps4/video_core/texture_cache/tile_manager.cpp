@@ -24,9 +24,6 @@
 #include "video_core/host_shaders/tiling_micro_96_comp.h"
 
 #include <cstdio>
-#include "bbport_toggles.h"
-#include <array>
-#include <map>
 #include <fstream>
 #include "bbport_threads.h"
 #include "common/thread.h"
@@ -313,97 +310,6 @@ void TileManager::RecordTilingDispatch(vk::Pipeline pipeline, const vk::Descript
     });
 }
 
-
-namespace {
-/// bbport diagnosis (BB_TILING_TIMES=1): GPU time of each tiling (detile) dispatch from its own
-/// timestamp pair, read back a while later without waiting; per frame with over 1 ms of tiling:
-/// the dispatches, bytes, GPU time, and the time by tile mode and texel size.
-struct TilingTimes {
-    static constexpr u32 Slots = 2048;
-    struct Meta {
-        u64 bytes;
-        u32 mode;
-        u32 bits;
-        u64 frame;
-        bool pending;
-    };
-    vk::Device device;
-    vk::QueryPool pool;
-    double period_ns = 1.0;
-    std::array<Meta, Slots> meta{};
-    u64 next = 0, collected = 0;
-    u64 cur_frame = ~0ull;
-    double frame_ms = 0, frame_mb = 0;
-    u32 frame_n = 0;
-    std::map<std::pair<u32, u32>, std::pair<double, u32>> by_mode;
-
-    static TilingTimes* Get(const Vulkan::Instance& instance) {
-        static TilingTimes* t = [&]() -> TilingTimes* {
-            const char* env = std::getenv("BB_TILING_TIMES");
-            if (!env || env[0] != '1') {
-                return nullptr;
-            }
-            auto* x = new TilingTimes;
-            x->device = instance.GetDevice();
-            x->period_ns = instance.GetPhysicalDevice().getProperties().limits.timestampPeriod;
-            x->pool = Vulkan::Check(x->device.createQueryPool(
-                {.queryType = vk::QueryType::eTimestamp, .queryCount = Slots * 2}));
-            x->device.resetQueryPool(x->pool, 0, Slots * 2);
-            std::printf("Tiling times: on\n");
-            return x;
-        }();
-        return t;
-    }
-    /// A slot for the next dispatch, or -1 when the ring is still waiting for results.
-    s64 Take(u64 bytes, u32 mode, u32 bits) {
-        Collect();
-        if (next - collected >= Slots) {
-            return -1;
-        }
-        const u32 slot = u32(next++ % Slots);
-        device.resetQueryPool(pool, slot * 2, 2); // its last results were read (collected)
-        meta[slot] = {bytes, mode, bits, BbStats::gpu_frames.load(std::memory_order_relaxed), true};
-        return slot;
-    }
-    void Collect() {
-        while (collected < next) {
-            const u32 slot = u32(collected % Slots);
-            u64 stamps[2]{};
-            if (device.getQueryPoolResults(pool, slot * 2, 2, sizeof(stamps), stamps, sizeof(u64),
-                                           vk::QueryResultFlagBits::e64) != vk::Result::eSuccess) {
-                return;
-            }
-            const Meta& m = meta[slot];
-            if (m.frame != cur_frame) {
-                Flush();
-                cur_frame = m.frame;
-            }
-            const double ms = stamps[1] > stamps[0] ? double(stamps[1] - stamps[0]) * period_ns / 1e6 : 0.0;
-            frame_ms += ms;
-            frame_mb += double(m.bytes) / 1e6;
-            ++frame_n;
-            auto& e = by_mode[{m.mode, m.bits}];
-            e.first += ms;
-            ++e.second;
-            ++collected;
-        }
-    }
-    void Flush() {
-        if (frame_ms > 1.0) {
-            std::printf("Tiling times: GPU frame %llu: %u dispatches, %.1f MB, %.2f ms GPU;",
-                        static_cast<unsigned long long>(cur_frame), frame_n, frame_mb, frame_ms);
-            for (const auto& [key, v] : by_mode) {
-                std::printf(" mode %u/%u bits: %u in %.2f ms;", key.first, key.second, v.second, v.first);
-            }
-            std::printf("\n");
-        }
-        frame_ms = frame_mb = 0;
-        frame_n = 0;
-        by_mode.clear();
-    }
-};
-} // namespace
-
 std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* in_buffer,
                                                        u64 in_offset, const ImageInfo& info) {
     if (!info.props.is_tiled) {
@@ -446,20 +352,8 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
     };
     const auto dim_x = static_cast<u32>((info.guest_size / (info.num_bits / 8)) / 64);
     // bbport: recorded with copies of the descriptor infos (threaded recording).
-    auto* times = TilingTimes::Get(instance);
-    const s64 slot = times ? times->Take(info.guest_size, u32(info.tile_mode), info.num_bits) : -1;
-    if (slot >= 0) {
-        scheduler.Record([pool = times->pool, q = u32(slot) * 2](vk::CommandBuffer cmdbuf) {
-            cmdbuf.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, pool, q);
-        });
-    }
     RecordTilingDispatch(GetTilingPipeline(info, false), tiled_buffer_info, linear_buffer_info,
                          params_buffer_info, dim_x);
-    if (slot >= 0) {
-        scheduler.Record([pool = times->pool, q = u32(slot) * 2 + 1](vk::CommandBuffer cmdbuf) {
-            cmdbuf.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, pool, q);
-        });
-    }
 
     runtime.AccessBuffer(staging.buffer, staging.offset, info.guest_size,
                          vk::PipelineStageFlagBits2::eComputeShader,

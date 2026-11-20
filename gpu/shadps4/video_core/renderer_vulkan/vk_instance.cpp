@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include "bbport_toggles.h"
-#ifdef _WIN32
-#include <windows.h>
-#endif
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <boost/container/static_vector.hpp>
@@ -23,7 +18,6 @@
 #include "video_core/renderer_vulkan/vk_xess.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_low_latency.h"
-#include "bbport_vrr.h"
 #include "video_core/renderer_vulkan/vk_vram.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
@@ -412,11 +406,8 @@ bool Instance::CreateDevice() {
         LOG_INFO(Render_Vulkan, "- shaderSubgroupClock: {}",
                  shader_clock_features.shaderSubgroupClock);
     }
-    // bbport: even presents (vk_present_release.h): the GPU's clock against the CPU's (the release
-    // dispatch's targets); Tracy's GPU zones use the EXT form too.
-    calibrated_khr = add_extension(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
-    calibrated_ext = !calibrated_khr && add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
-    const bool calibrated_timestamps = TRACY_GPU_ENABLED && calibrated_ext;
+    const bool calibrated_timestamps =
+        TRACY_GPU_ENABLED ? add_extension(VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) : false;
     // bbport: what the GPU touched when the device is lost (reported by vk_semaphore.cpp).
     // GeForce GTX 10-series cards (Pascal) crash at start with it (BilalReloaded's port 0.8.1, #211/#285: a GTX 1070
     // starts without it), so NVIDIA cards older than Turing (device IDs below 0x1e00) leave it off.
@@ -445,7 +436,6 @@ bool Instance::CreateDevice() {
         const u32 index = static_cast<u32>(i);
         if (family_properties[i].queueFlags & vk::QueueFlagBits::eGraphics) {
             queue_family_index = index;
-            graphics_timestamp_bits = family_properties[i].timestampValidBits;
             graphics_queue_found = true;
         }
     }
@@ -458,7 +448,7 @@ bool Instance::CreateDevice() {
     // bbport: a side queue (BufferCache reads GPU data back there, past the work queued for
     // graphics): a transfer-only family, a copy engine that runs beside graphics work; else a
     // second queue of the graphics family.
-    static constexpr std::array queue_priorities = {1.0f, 1.0f, 1.0f};
+    static constexpr std::array queue_priorities = {1.0f, 1.0f};
     side_queue_family_index = queue_family_index;
     for (u32 i = 0; i < family_properties.size(); ++i) {
         const auto flags =
@@ -491,36 +481,8 @@ bool Instance::CreateDevice() {
         std::printf("GPU: sparse binds on queue family %u (the graphics family has none)\n",
                     sparse_queue_family_index);
     }
-    // bbport even presents (vk_present_release.h): a compute-only family that can present, for the
-    // holds and the presents (beside the graphics work, never in its queue). None: the holds stay
-    // off (presents as before).
-    release_queue_family_index = UINT32_MAX;
-    {
-        using PresentSupportFn = VkBool32(VKAPI_PTR*)(VkPhysicalDevice, uint32_t);
-        const auto present_support = reinterpret_cast<PresentSupportFn>(
-            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr(
-                *instance, "vkGetPhysicalDeviceWin32PresentationSupportKHR"));
-        for (u32 i = 0; present_support && i < family_properties.size(); ++i) {
-            const auto flags = family_properties[i].queueFlags;
-            if ((flags & vk::QueueFlagBits::eCompute) && !(flags & vk::QueueFlagBits::eGraphics) &&
-                family_properties[i].queueCount > 0 && family_properties[i].timestampValidBits >= 64 &&
-                i != side_queue_family_index && i != sparse_queue_family_index &&
-                present_support(physical_device, i)) {
-                release_queue_family_index = i;
-                break;
-            }
-        }
-    }
-    const u32 base_graphics_queues =
-        side_family ? 1u : std::min<u32>(2u, family_properties[queue_family_index].queueCount);
-    // bbport even presents: one more graphics-family queue that only presents (after the release
-    // queue's hold), so a present waiting for its hold never holds the graphics work back.
     const u32 graphics_queues =
-        release_queue_family_index != UINT32_MAX &&
-                family_properties[queue_family_index].queueCount > base_graphics_queues
-            ? base_graphics_queues + 1
-            : base_graphics_queues;
-    release_present_index = graphics_queues > base_graphics_queues ? base_graphics_queues : UINT32_MAX;
+        side_family ? 1u : std::min<u32>(2u, family_properties[queue_family_index].queueCount);
     std::vector<vk::DeviceQueueCreateInfo> queue_infos = {
         vk::DeviceQueueCreateInfo{
             .queueFamilyIndex = queue_family_index,
@@ -539,13 +501,6 @@ bool Instance::CreateDevice() {
         sparse_queue_family_index != side_queue_family_index) {
         queue_infos.push_back(vk::DeviceQueueCreateInfo{
             .queueFamilyIndex = sparse_queue_family_index,
-            .queueCount = 1,
-            .pQueuePriorities = queue_priorities.data(),
-        });
-    }
-    if (release_queue_family_index != UINT32_MAX) {
-        queue_infos.push_back(vk::DeviceQueueCreateInfo{
-            .queueFamilyIndex = release_queue_family_index,
             .queueCount = 1,
             .pQueuePriorities = queue_priorities.data(),
         });
@@ -583,17 +538,6 @@ bool Instance::CreateDevice() {
     void* latency_features =
         LowLatency::PrepareDevice(physical_device, available_extensions, latency_extensions);
     for (const char* name : latency_extensions) {
-        if (std::none_of(enabled_extensions.begin(), enabled_extensions.end(),
-                         [&](const char* e) { return std::string_view{e} == name; }) &&
-            enabled_extensions.size() < enabled_extensions.capacity()) {
-            enabled_extensions.push_back(name);
-        }
-    }
-    // bbport: the FPS counter's VRR indicator (bbport_vrr.h): its present timing source.
-    std::vector<const char*> vrr_extensions;
-    void* vrr_features = BbVrr::PrepareDevice(physical_device, available_extensions, vrr_extensions,
-                                              LowLatency::UsesPresentId());
-    for (const char* name : vrr_extensions) {
         if (std::none_of(enabled_extensions.begin(), enabled_extensions.end(),
                          [&](const char* e) { return std::string_view{e} == name; }) &&
             enabled_extensions.size() < enabled_extensions.capacity()) {
@@ -743,7 +687,6 @@ bool Instance::CreateDevice() {
         },
         vk::PhysicalDeviceShaderClockFeaturesKHR{
             .shaderSubgroupClock = shader_clock_features.shaderSubgroupClock,
-            .shaderDeviceClock = shader_clock_features.shaderDeviceClock,
         },
         vk::PhysicalDeviceComputeShaderDerivativesFeaturesKHR{
             .computeDerivativeGroupQuads =
@@ -838,14 +781,6 @@ bool Instance::CreateDevice() {
         }
         tail->pNext = static_cast<VkBaseOutStructure*>(latency_features);
     }
-    if (vrr_features) {
-        auto* tail = reinterpret_cast<VkBaseOutStructure*>(
-            &device_chain.get<vk::PhysicalDeviceFeatures2>());
-        while (tail->pNext) {
-            tail = tail->pNext;
-        }
-        tail->pNext = static_cast<VkBaseOutStructure*>(vrr_features);
-    }
     // bbport: XeSS enables its features in the chain (and may append structures to its end).
     if (Xess* xess = Xess::Get()) {
         xess->PatchDeviceFeatures(*instance, physical_device,
@@ -860,7 +795,6 @@ bool Instance::CreateDevice() {
 
     VULKAN_HPP_DEFAULT_DISPATCHER.init(*device);
     LowLatency::OnDevice(*device);
-    BbVrr::OnDevice(*device);
     if (Dlss* dlss = Dlss::Get()) {
         dlss->Initialize(*instance, physical_device, *device);
     }
@@ -871,12 +805,6 @@ bool Instance::CreateDevice() {
     graphics_queue = device->getQueue(queue_family_index, 0);
     sparse_queue = device->getQueue(sparse_queue_family_index, 0);
     present_queue = device->getQueue(queue_family_index, 0);
-    if (release_queue_family_index != UINT32_MAX) {
-        release_queue = device->getQueue(release_queue_family_index, 0);
-    }
-    if (release_present_index != UINT32_MAX) {
-        release_present_queue = device->getQueue(queue_family_index, release_present_index);
-    }
     g_crash_queue = graphics_queue;
     if (side_queue_family_index != queue_family_index) {
         side_queue = device->getQueue(side_queue_family_index, 0);
@@ -931,46 +859,7 @@ bool Instance::CreateDevice() {
     return true;
 }
 
-namespace {
-// bbport diagnosis (stall lines, BB_STALL_MS): device memory VMA allocates and frees, by heap kind.
-void VKAPI_PTR CountAllocate(VmaAllocator, uint32_t type, VkDeviceMemory, VkDeviceSize size, void* user) {
-    const bool local = (static_cast<const VkPhysicalDeviceMemoryProperties*>(user)->memoryTypes[type].propertyFlags &
-                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
-    BbStats::vma_allocs[local].fetch_add(1, std::memory_order_relaxed);
-    BbStats::vma_alloc_bytes[local].fetch_add(size, std::memory_order_relaxed);
-    static const bool log_allocs = std::getenv("BB_STALL_MS") != nullptr;
-    if (log_allocs && size >= (16ull << 20)) {
-        // diagnosis: where large device memory comes from (exe offsets for llvm-symbolizer)
-        std::printf("VMA allocation: %.1f MB %s memory (type %u) from", double(size) / 1e6, local ? "video" : "system",
-                    type);
-#ifdef _WIN32
-        void* frames[14]{};
-        const USHORT n = RtlCaptureStackBackTrace(1, 14, frames, nullptr);
-        const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-        for (USHORT i = 0; i < n; ++i) {
-            std::printf(" %#llx", static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(frames[i]) - base));
-        }
-#endif
-        std::printf("\n");
-    }
-    BbStats::vma_last_alloc_ns.store(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count(),
-        std::memory_order_relaxed);
-}
-void VKAPI_PTR CountFree(VmaAllocator, uint32_t type, VkDeviceMemory, VkDeviceSize size, void* user) {
-    const bool local = (static_cast<const VkPhysicalDeviceMemoryProperties*>(user)->memoryTypes[type].propertyFlags &
-                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
-    BbStats::vma_frees[local].fetch_add(1, std::memory_order_relaxed);
-    BbStats::vma_free_bytes[local].fetch_add(size, std::memory_order_relaxed);
-}
-VkPhysicalDeviceMemoryProperties g_count_memory_properties{};
-VmaDeviceMemoryCallbacks g_count_callbacks{};
-} // namespace
-
 void Instance::CreateAllocator() {
-    g_count_memory_properties = memory_properties;
-    g_count_callbacks = {.pfnAllocate = CountAllocate, .pfnFree = CountFree, .pUserData = &g_count_memory_properties};
     const VmaVulkanFunctions functions = {
         .vkGetInstanceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr,
         .vkGetDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
@@ -997,14 +886,7 @@ void Instance::CreateAllocator() {
                  (supports_memory_budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0u),
         .physicalDevice = physical_device,
         .device = *device,
-        .preferredLargeHeapBlockSize = [&]() -> VkDeviceSize {
-            // BB_VMA_BLOCK_MB=<n> (test): VMA's block size on big heaps (default 256 MiB; 64 on small cards)
-            if (const char* env = std::getenv("BB_VMA_BLOCK_MB")) {
-                return VkDeviceSize(std::strtoull(env, nullptr, 10)) << 20;
-            }
-            return small_card ? 64_MB : 0;
-        }(),
-        .pDeviceMemoryCallbacks = &g_count_callbacks,
+        .preferredLargeHeapBlockSize = small_card ? 64_MB : 0,
         .pVulkanFunctions = &functions,
         .instance = *instance,
         .vulkanApiVersion = TargetVulkanApiVersion,

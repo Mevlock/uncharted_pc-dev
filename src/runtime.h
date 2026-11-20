@@ -30,9 +30,6 @@ int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
  * code (TerminateProcess; ExitProcess could hang in libsrt's detach, and exit()'s destructors
  * waited for the GPU). Every exit of the game and every STOP go through it. */
 __attribute__((noreturn)) void runtime_quit(int code);
-/* Windows: waits (at most 2 s) until the console output written so far has reached its destination
- * (probe.c's output writer thread); call before ending the process without runtime_quit. */
-void runtime_output_flush(void);
 /* Fault handler: a fault inside a partial remap in progress waits for it; returns 1 to retry. */
 int runtime_memory_wait_carve(uintptr_t address);
 const char *runtime_import_name(const char *name);
@@ -83,11 +80,6 @@ void runtime_set_guest_fpu(void);
 int32_t runtime_guest_errno(int host_errno);
 void *runtime_low_map(size_t size, int prot);
 void *runtime_image_map(size_t size, int prot);
-/* Windows: one pool of thunk memory within rel32 reach of the image, reserved right after the image
- * is mapped (before the GPU driver takes the space near it); hooks take whole pages from it
- * (zeroed, read/write/execute). NULL elsewhere or once it is used up. */
-void runtime_near_image_reserve(const unsigned char *image, uint64_t size);
-void *runtime_near_image_alloc(size_t size);
 /* The loaded game's image (guest offset 0), or 0 before it is mapped. */
 uintptr_t runtime_image_base(void);
 /* Its size in bytes (0 before it is mapped). */
@@ -165,19 +157,9 @@ void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_eu(uint64_t rdi, uint64
                                                            const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_checkpoint_frame_u2_us(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                            const uint64_t *regs);
-/* runtime_onehit.c: Uncharted 2 damage after Npc::ComputeArmorDamage's armour step (One Hit Kills; BB_ONEHIT_LOG=1
- * prints each attack); runtime_u2_npc_damage notes the attack at the function's start (1.02). */
+/* runtime_onehit.c: Uncharted 2 Npc::ComputeArmorDamage (One Hit Kills; BB_ONEHIT_LOG=1 prints each attack). */
 void __attribute__((ms_abi)) runtime_u2_npc_damage(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                           const uint64_t *regs);
-/* runtime_onehit.c: Uncharted 3 damage after Npc::ComputeArmorDamage's armour step (One Hit Kills vs body armour). */
-void __attribute__((ms_abi)) runtime_u3_armor_damage_102(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
-                                                         const uint64_t *regs);
-void __attribute__((ms_abi)) runtime_u3_armor_damage_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
-                                                         const uint64_t *regs);
-void __attribute__((ms_abi)) runtime_u2_armor_damage_100(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
-                                                         const uint64_t *regs);
-void __attribute__((ms_abi)) runtime_u2_armor_damage_102(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
-                                                         const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_u1_jetski_skill(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
                                                      const uint64_t *regs);
 void __attribute__((ms_abi)) runtime_u1_respond_to_attack(uint64_t rdi, uint64_t rsi, uint64_t image, uint64_t r14,
@@ -217,8 +199,6 @@ float *runtime_callback_xmm(const uint64_t *regs, int x);
 /* BB_PAD_TIMING=1 (diagnosis): blocking waits noted per thread (name, start, duration); the pad
  * read prints the ones since the last read. runtime_wait_begin returns 0 when off. */
 double runtime_wait_begin(void);
-/* BB_LATENCY_TRACE=1: this thread's waits by kind since the last call (seconds), taken and reset; returns the count. */
-int runtime_frame_waits_take(const char **what, double *seconds, int max);
 void runtime_wait_end(const char *what, double start);
 /* Shader preparation page (on by default; BB_PREP_FREEZE=0: off, the game runs behind the page): while it shows, the game's threads stop at their next wait,
  * lock, yield or sound output (runtime_freeze_point; cooperative: never inside a host lock) and all go on together

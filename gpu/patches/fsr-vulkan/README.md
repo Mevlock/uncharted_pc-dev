@@ -10,9 +10,3 @@ patches here to its working tree when they are not applied yet:
 - `0003-...`: FSR 3.1 frame generation tells the bridge its frame and retires it, so the
   constant buffers and descriptor sets allocated per dispatch are freed (they leaked ~2-3 MB of
   video memory a frame until the GPU ran out, in all three games).
-- `0004-...`: the FFX Vulkan backend never picks a protected memory type unless asked for one
-  (from Uncharted-Universal, iannitram). RADV lists device-local protected types after the plain
-  ones on some GPUs (Ryzen Z1 Extreme / Phoenix) and the type search kept the last match: FSR 3.1's
-  resources landed in protected memory, full-screen colour noise.
-
-The patches are LF in every checkout (`.gitattributes`): `git apply` refuses CRLF copies.

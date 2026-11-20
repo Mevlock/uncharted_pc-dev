@@ -11,7 +11,6 @@
 #include "common/logging/log.h"
 #include "sdl_window.h"
 #include "bbport_overlay.h"
-#include "bbport_vrr.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 
 namespace {
@@ -291,7 +290,6 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     if (driver && !std::strcmp(driver, "windows")) {
         window_info.type = WindowSystemType::Windows;
         window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
-        BbVrr::SetWindow(window_info.render_surface); // the FPS counter's VRR indicator
     } else
 #endif
     if (driver && !std::strcmp(driver, "x11")) {

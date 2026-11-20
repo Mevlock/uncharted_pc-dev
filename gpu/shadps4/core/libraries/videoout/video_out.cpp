@@ -187,7 +187,7 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode
               flipArg);
 
     if (bufferIndex != -1) {
-        Vulkan::LowLatency::RenderSubmit(flipArg); // bbport: low latency mode, the game's frame (its number: the flip argument) goes out (before the BB_FRAME_PACE wait)
+        Vulkan::LowLatency::RenderSubmit(); // bbport: low latency mode, the game's frame goes out (before the BB_FRAME_PACE wait)
         PaceGuestFlip(); // bbport: BB_FRAME_PACE
     }
     if (!driver->SubmitFlip(port, bufferIndex, flipArg)) {
@@ -425,21 +425,15 @@ s32 PS4_SYSV_ABI sceVideoOutGetDeviceCapabilityInfo(
     return ORBIS_OK;
 }
 
-extern "C" double runtime_wait_begin(void);
-extern "C" void runtime_wait_end(const char* what, double start);
 s32 PS4_SYSV_ABI sceVideoOutWaitVblank(s32 handle) {
     auto* port = driver->GetPort(handle);
     if (!port) {
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
 
-    const double t0 = runtime_wait_begin(); // bbport: BB_PAD_TIMING / BB_LATENCY_TRACE
-    {
-        std::unique_lock lock{port->vo_mutex};
-        const auto prev_counter = port->vblank_status.count;
-        port->vblank_cv.wait(lock, [&]() { return prev_counter != port->vblank_status.count; });
-    }
-    runtime_wait_end("vblank", t0);
+    std::unique_lock lock{port->vo_mutex};
+    const auto prev_counter = port->vblank_status.count;
+    port->vblank_cv.wait(lock, [&]() { return prev_counter != port->vblank_status.count; });
     return ORBIS_OK;
 }
 
