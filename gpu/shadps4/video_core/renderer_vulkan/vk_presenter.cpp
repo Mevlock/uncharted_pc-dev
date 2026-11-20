@@ -1324,10 +1324,16 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
         }
     };
     // GPU holds: each image is held to its own time on the GPU (the first, which carries the
-    // frame's times, to the target), none on this thread.
-    // (1: a time long passed, so PresentImage takes the ready time only and holds nothing)
+    // frame's times, to the target), none on this thread. A frame that is not held (the GPU-bound
+    // step-aside: no hold end; or its target passed by now) is spaced from now on this thread, as
+    // without holds: else its images went out back to back (shown for almost no time under VRR,
+    // FIFO Relaxed or Mailbox, then a gap). Its images only take their ready times on the GPU
+    // (1: a time long passed, so PresentImage holds nothing).
+    const bool gpu_spaced =
+        gpu_hold && hold_end > std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto space_from = gpu_spaced ? start : std::chrono::steady_clock::now();
     const auto hold_at = [&](u32 index) -> s64 {
-        return !gpu_hold ? 0 : hold_end ? (start + step * index).time_since_epoch().count() : 1;
+        return !gpu_hold ? 0 : gpu_spaced ? (space_from + step * index).time_since_epoch().count() : 1;
     };
     u32 shown = 0;
     for (; shown < generated; ++shown) {
@@ -1335,15 +1341,20 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame,
             if (behind()) {
                 break;
             }
-            if (!gpu_hold) {
-                wait_until(start + step * shown);
+            if (!gpu_spaced) {
+                wait_until(space_from + step * shown);
             }
         }
         PresentImage(frame, frame->generated[shown].image, false, 0, hold_at(shown),
                      shown == 0 ? flip_arg : -1);
+        if (shown == 0 && gpu_hold && !gpu_spaced && !is_reusing_frame && is_game_frame) {
+            // not held: its times are in (the first image); the next frame's GPU work need not wait
+            // at the gate while this thread spaces the rest
+            LowLatency::GatePostSubmitted(flip_arg);
+        }
     }
-    if (shown && !behind() && !gpu_hold) {
-        wait_until(start + step * shown);
+    if (shown && !behind() && !gpu_spaced) {
+        wait_until(space_from + step * shown);
     }
     // bbport: low latency mode: the game's own frame carries its frame id, from the game's frame
     // number (its flip argument; vk_low_latency.h).
