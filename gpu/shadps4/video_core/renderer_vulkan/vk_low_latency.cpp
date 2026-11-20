@@ -288,10 +288,15 @@ const s64 slack_ns = [] {
 /// to its target leaves its spare time unused, so a slow frame after a fast one misses its target.
 /// So it is also on when the holds themselves make frames late: over ~4 s, 5% or more of the
 /// frames (BB_EVEN_GPU_BOUND_LATE, percent) late although they would have been on time without the
-/// delay the last frame's hold put on their GPU work (ready - delay <= target; the delay no more
-/// than the GPU's time after the later of the hold's end and the frame's last work). Off again only
-/// after a stay of 10 s, doubled (to 160 s at most) whenever it comes back within 60 s of going
-/// off: a check that cannot see the cost while nothing is held must not hold and drop by turns.
+/// delay the last frame's hold put on their GPU work (ready - delay <= target), and only frames
+/// whose last work was queued before that hold ended: their GPU time then all came after the hold,
+/// so the GPU, not the CPU, made them miss. A frame whose work came later (the CPU short of the cap:
+/// U2 at 144 on a 9800X3D, 2026-11-20, 26 of 512 such frames turned the holds off at a GPU own time
+/// of 2.6 of 6.9 ms) never counts. GPU-bound that way, the targets lie more than a period plus the
+/// CPU's frame after the slot (the offset learns the GPU's lag), so the next frame's work is all
+/// queued while the hold runs: the laptop case is seen. Off again only after a stay of 10 s,
+/// doubled (to 40 s at most) whenever it comes back within 60 s of going off: a check that cannot
+/// see the cost while nothing is held must not hold and drop by turns.
 const bool gpu_bound_check = [] {
     const char* env = std::getenv("BB_EVEN_GPU_BOUND");
     return !(env && env[0] == '0');
@@ -723,7 +728,10 @@ void GpuTimes(u64 id, s64 ready, s64 release) {
         // of the hold's end and the frame's last submission (a frame whose work came in late, a CPU
         // spike, was not made late by the hold; a GPU that worked through a backlog was)
         const s64 cost = std::min(own_delay, ready - from);
-        hold_cost[gpu_own_count % hold_cost.size()] = cost > 0 && ready > target && ready - cost <= target;
+        // all its work queued before the last hold ended (else the CPU made it late, not the hold)
+        const bool queued_in_time = flip_at[id % Ring].load(std::memory_order_relaxed) < times_release[(id - 1) % Ring];
+        hold_cost[gpu_own_count % hold_cost.size()] =
+            queued_in_time && cost > 0 && ready > target && ready - cost <= target;
         gpu_own[gpu_own_count++ % gpu_own.size()] = ready - from;
         const s64 period = Libraries::VideoOut::FrameCapPeriodNs();
         if (period > 0 && (gpu_own_count & 15) == 0) {
@@ -750,7 +758,7 @@ void GpuTimes(u64 id, s64 ready, s64 release) {
                 if (now_bound) {
                     // back within 60 s of going off: it costs again, so a longer stay
                     bound_stay = bound_left && at - bound_left < 60'000'000'000
-                                     ? std::min<s64>(bound_stay * 2, 160'000'000'000)
+                                     ? std::min<s64>(bound_stay * 2, 40'000'000'000)
                                      : 10'000'000'000;
                     bound_since = at;
                 } else {
