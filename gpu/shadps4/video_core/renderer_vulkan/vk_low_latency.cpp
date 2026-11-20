@@ -208,7 +208,7 @@ s64 last_target = 0; ///< frame thread: the last frame's wake time (BB_LATENCY_T
 std::atomic<u64> paced{0}, unpaced{0}; ///< counts for BB_LATENCY_TRACE
 std::atomic<s64> slept_ns{0};
 
-/// Even presents (BB_EVEN_PRESENT=0: off). On by default in this build (0.3.6.63-test-pacing1) with
+/// Even presents: OFF by default (opt-in: BB_EVEN_PRESENT=1, the launcher's Frame pacing setting), with
 /// the short-spin holds (BB_EVEN_RELEASE=4, vk_present_release.h): the present work is submitted just
 /// before its target, so the GPU spins for well under a millisecond. 0.3.6.60.1 had turned them off:
 /// the GPU hold of 0.3.6.59 (BB_EVEN_RELEASE=1) spun a shader on the GPU until each target, which
@@ -234,7 +234,7 @@ std::atomic<s64> slept_ns{0};
 /// lost FPS to it.
 std::atomic<bool> even{[] {
     const char* env = std::getenv("BB_EVEN_PRESENT");
-    return !(env && env[0] == '0');
+    return env && env[0] == '1';
 }()};
 bool Even() {
     return even.load(std::memory_order_relaxed);
