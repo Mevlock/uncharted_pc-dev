@@ -175,13 +175,14 @@ struct BufferCache::PrefetchBatch {
     bool invalidated = false;
 };
 
-/// bbport: a prefetch batch's copies are in host memory (prefetch_mutex held). Its tick counting
-/// as done on the GPU is not enough: on the U3 horse ride at a 60 cap with combo2's GPU holds (~10 ms
-/// between frames) 12% of the copies served were not there yet although their tick was done (the
-/// staging still held the batch's previous use, 60 submissions older; the copy landed ~15 ms
-/// later, 2026-11-18, BB_PREFETCH_VERIFY diagnosis): the guest got the last frame but one's GPU
-/// bytes of its skinning ring, and single frames had the game's motion blur bursting around Nate.
-/// The GPU writes the batch's tick after its copies; it counts as landed once that is there.
+/// bbport: a prefetch batch's copies are in host memory (prefetch_mutex held): its tick is done on
+/// the GPU, and the batch's tick, written by the GPU after its copies, is there (a safety check).
+/// On the U3 horse ride at a 60 cap with combo2's GPU holds (~10 ms between frames) 12% of the
+/// copies served were not there yet (the staging still held the batch's previous use; the copy
+/// landed ~15 ms later, 2026-11-18, BB_PREFETCH_VERIFY diagnosis): the guest got the last frame but
+/// one's GPU bytes of its skinning ring, and single frames had the game's motion blur bursting
+/// around Nate. The cause was the batch's tick, one submission too early (PrefetchRecurringPages);
+/// the mark stays as a check that a batch is never served before its copies are seen.
 bool BufferCache::PrefetchLanded(PrefetchBatch& batch) {
     if (batch.landed) {
         return true;
@@ -1239,8 +1240,12 @@ void BufferCache::PrefetchRecurringPages() {
     if (prefetch_hits.empty()) {
         return;
     }
-    // The command buffer being submitted signals this tick (the scheduler took the next one).
-    const u64 tick = scheduler.CurrentTick() - 1;
+    // The command buffer being recorded signals this tick: this runs from Rasterizer::OnSubmit,
+    // before the Flush that submits it (SubmitExecution's NextTick returns the current tick, then
+    // moves on). CurrentTick() - 1 was the command buffer before it: its tick counted as done one
+    // submission before the copies ran (the 12% stale serves of 2026-11-18), and pages written in
+    // that one (write tick = this tick) were left for the next batch.
+    const u64 tick = scheduler.CurrentTick();
     if (prefetch_batches.empty()) {
         for (u32 i = 0; i < PrefetchBatch::NumBatches; ++i) {
             prefetch_batches.push_back(std::make_unique<PrefetchBatch>(instance));
