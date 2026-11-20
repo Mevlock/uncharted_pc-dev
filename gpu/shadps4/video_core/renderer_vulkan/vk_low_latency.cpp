@@ -651,9 +651,12 @@ void GateNote(u64 id, s64 period, u64 draw_tick) {
         release_queue.load(std::memory_order_relaxed)) {
         return; // with the release queue nothing on the GPU queue waits for a hold
     }
-    if (now >= HoldEnd(id) || gpu_bound.load(std::memory_order_relaxed)) {
-        return; // done after its hold's end (its GPU work is still being queued), or not held
+    if (now >= HoldEnd(id)) {
+        return; // done after its hold's end (its GPU work is still being queued)
     }
+    // GPU-bound (frames not held) the gate stays: it keeps the blit ahead of the next frame's GPU
+    // work, which it would otherwise wait behind (shown later by that work, the next one sooner);
+    // the wait is the presenter's queueing on a CPU that is not the limit
     const s64 flip = s64(id) - 1;
     std::scoped_lock lk{gate_mutex};
     // deadline: one period after the target (a frame that never comes to the presenter)
