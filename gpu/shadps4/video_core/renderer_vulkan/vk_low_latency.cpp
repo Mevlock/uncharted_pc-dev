@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -367,26 +368,39 @@ void Queued(u64 id) {
 /// The paced clock's time for frames that are not held (2026-11-20, U2 GPU-bound at ~80 FPS under a
 /// 144 cap: the GPU-bound check had the holds off, the world stepped by the targets, i.e. the frame
 /// starts, while the frames were shown when the GPU was done: Nate jerked now and then). Held, the
-/// clock is the target (the frames are shown at it). Not held (GPU-bound), it steps by the frames'
-/// own present interval, smoothed (presenter: the shown frames' intervals, 1/8 a frame), and
-/// follows the targets by 1/8 of its distance to them a frame, so it neither runs away nor jumps;
-/// after a stretch not held it comes back to the targets by 1/8 a frame too.
-std::atomic<s64> shown_interval{0};    ///< presenter -> frame thread: smoothed present interval, not held
+/// clock is the target (the frames are shown at it). Not held, the clock is where the frame will be
+/// shown: the last frame whose showing is known (presenter: shown_id/shown_at) plus the smoothed
+/// present interval per frame since, approached by 1/4 a frame from the last clock plus that
+/// interval (a correction is spread, never a jump; p64c pulled toward the targets instead, which
+/// lie where the frames start, not where they are shown). "Not held" is decided from the frames
+/// before (whether a frame will be held is not known at its start): the GPU-bound step-aside, or
+/// more than 8 of the last 16 shown frames not held (late ones too: in p64c 411 such frames still
+/// stepped by the targets). Coming back to held frames, the rest of the difference to the target
+/// goes by 1/8 a frame.
+std::atomic<s64> shown_interval{0}; ///< presenter -> frame thread: smoothed present interval (all shown frames)
+std::atomic<u64> shown_id{0};       ///< presenter: the last frame whose showing is known
+std::atomic<s64> shown_at{0};       ///< and when it was shown (its release)
+std::atomic<u32> unheld_history{0}; ///< presenter: the last 16 shown frames, bit set = not held
 s64 clock_last = 0, clock_last_raw = 0; ///< frame thread: the last frame's clock and target
 std::array<std::atomic<u64>, Ring> clock_id{};
 std::array<std::atomic<s64>, Ring> clock_at{};
-std::atomic<u64> clock_unheld{0}; ///< frames whose clock stepped by the present interval (for the log)
+std::atomic<u64> clock_unheld{0}; ///< frames whose clock followed the present cadence (for the log)
 
-s64 PacedClock(s64 raw, s64 period) {
+s64 PacedClock(u64 id, s64 raw, s64 period) {
     s64 clock = raw;
     if (clock_last && std::abs(raw - clock_last_raw) < 100'000'000) {
-        if (gpu_bound.load(std::memory_order_relaxed)) {
-            const s64 interval = shown_interval.load(std::memory_order_relaxed);
-            const s64 step = interval > 0 ? interval : std::max<s64>(raw - clock_last_raw, period);
-            const s64 predicted = clock_last + step;
-            // far off (a hitch, a load): the target itself
-            clock = std::abs(raw - predicted) > 50'000'000 ? raw : predicted + (raw - predicted) / 8;
+        const bool unheld = gpu_bound.load(std::memory_order_relaxed) ||
+                            std::popcount(unheld_history.load(std::memory_order_relaxed) & 0xffffu) > 8;
+        const s64 interval = shown_interval.load(std::memory_order_relaxed);
+        const u64 known = shown_id.load(std::memory_order_acquire);
+        if (unheld && interval > 0 && known && known < id && id - known <= 8) {
+            const s64 expected = shown_at.load(std::memory_order_relaxed) + s64(id - known) * interval;
+            const s64 next = clock_last + interval;
+            // far off (a hitch, a load): where it is expected at once
+            clock = std::abs(expected - next) > 50'000'000 ? expected : next + (expected - next) / 4;
             clock_unheld.fetch_add(1, std::memory_order_relaxed);
+        } else if (unheld) {
+            clock = clock_last + std::max<s64>(raw - clock_last_raw, period / 2); // no cadence known yet
         } else {
             // held: the target, after a stretch not held the rest of the difference going by 1/8
             const s64 rest = (clock_last - clock_last_raw) * 7 / 8;
@@ -403,6 +417,8 @@ void Stop() {
     last_wake = 0;
     clock_last = clock_last_raw = 0;
     shown_interval.store(0, std::memory_order_relaxed);
+    shown_id.store(0, std::memory_order_relaxed);
+    unheld_history.store(0, std::memory_order_relaxed);
     gpu_bound.store(false, std::memory_order_relaxed);
     gpu_own_epoch.fetch_add(1, std::memory_order_release);
     current_target.store(0, std::memory_order_relaxed);
@@ -477,7 +493,7 @@ void BeforeFrame(u64 id) {
         entry.target.store(slot + offset, std::memory_order_relaxed);
         entry.id.store(id, std::memory_order_release);
         // the frame clock's time (probe.c): the target, or not held the present cadence (PacedClock)
-        const s64 clock = PacedClock(slot + offset, period);
+        const s64 clock = PacedClock(id, slot + offset, period);
         clock_at[id % Ring].store(clock, std::memory_order_relaxed);
         clock_id[id % Ring].store(id, std::memory_order_release);
         current_target.store(clock, std::memory_order_relaxed);
@@ -729,6 +745,7 @@ void Sample(u64 id, s64 ready) {
 
 /// Every 5 s (presenter): |world step - present interval| per frame, held and not held (us).
 std::vector<float> step_off_held, step_off_unheld;
+u64 step_over_held = 0, step_over_unheld = 0; ///< frames more than 2 ms off (a visible jerk, as a guess)
 s64 step_off_window = 0;
 void StepOffReport() {
     const s64 now = Now();
@@ -755,16 +772,18 @@ void StepOffReport() {
     double hm, hp, um, up;
     stats(step_off_held, hm, hp);
     stats(step_off_unheld, um, up);
-    std::printf("Even presents: world step vs present interval, 5 s (us): held %zu frames mean %.0f p99 %.0f | "
-                "not held %zu frames mean %.0f p99 %.0f (%llu clock steps by the present cadence, shown interval "
-                "%.2f ms)%s\n",
-                step_off_held.size(), hm, hp, step_off_unheld.size(), um, up,
+    std::printf("Even presents: world step vs present interval, 5 s (us): held %zu frames mean %.0f p99 %.0f, %llu "
+                "over 2 ms | not held %zu frames mean %.0f p99 %.0f, %llu over 2 ms (%llu clock steps by the "
+                "present cadence, shown interval %.2f ms)%s\n",
+                step_off_held.size(), hm, hp, static_cast<unsigned long long>(step_over_held),
+                step_off_unheld.size(), um, up, static_cast<unsigned long long>(step_over_unheld),
                 static_cast<unsigned long long>(clock_unheld.exchange(0)),
                 double(shown_interval.load(std::memory_order_relaxed)) / 1e6,
                 gpu_bound.load(std::memory_order_relaxed) ? " GPU-bound" : "");
     std::fflush(stdout);
     step_off_held.clear();
     step_off_unheld.clear();
+    step_over_held = step_over_unheld = 0;
     step_off_window = now;
 }
 
@@ -868,16 +887,21 @@ void GpuTimes(u64 id, s64 ready, s64 release) {
         const s64 interval = release - times_release[(id - 1) % Ring];
         const bool not_held = release - ready < 20'000;
         const s64 period = Libraries::VideoOut::FrameCapPeriodNs();
-        if (not_held && gpu_bound.load(std::memory_order_relaxed) && period > 0 && interval > period / 2 &&
-            interval < 4 * period) {
+        // the present cadence of all shown frames (hitches left out), and which were not held
+        if (period > 0 && interval > period / 4 && interval < 4 * period) {
             const s64 was = shown_interval.load(std::memory_order_relaxed);
             shown_interval.store(was ? was + (interval - was) / 8 : interval, std::memory_order_relaxed);
         }
+        unheld_history.store((unheld_history.load(std::memory_order_relaxed) << 1) | (not_held ? 1u : 0u),
+                             std::memory_order_relaxed);
         if (clock_id[id % Ring].load(std::memory_order_acquire) == id &&
             clock_id[(id - 1) % Ring].load(std::memory_order_acquire) == id - 1) {
             const s64 step = clock_at[id % Ring].load(std::memory_order_relaxed) -
                              clock_at[(id - 1) % Ring].load(std::memory_order_relaxed);
             const float off = float(std::abs(step - interval)) / 1e3f;
+            if (off > 2000.0f) {
+                ++(not_held ? step_over_unheld : step_over_held);
+            }
             if (off < 100'000.0f) {
                 (not_held ? step_off_unheld : step_off_held).push_back(off);
             }
@@ -887,6 +911,8 @@ void GpuTimes(u64 id, s64 ready, s64 release) {
     times_id[id % Ring] = id;
     times_ready[id % Ring] = ready;
     times_release[id % Ring] = release;
+    shown_at.store(release, std::memory_order_relaxed);
+    shown_id.store(id, std::memory_order_release);
     own_delay_ns.fetch_add(own_delay, std::memory_order_relaxed);
     const u64 n = lag_count.load(std::memory_order_relaxed);
     lags[n % Samples].store(ready - slot - own_delay, std::memory_order_relaxed);
