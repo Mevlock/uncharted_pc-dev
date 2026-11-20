@@ -86,6 +86,11 @@ FRAME_RATES = [('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FP
 # A cap on the frames shown per second (BB_FPS_LIMIT), apart from the rate the games run at:
 # 30 or 45 for a slower PC or a laptop on battery, 90 for a 90 Hz screen.
 # The game's idle job threads (BB_JOB_SLEEP): spinning keeps the camera smooth; sleeping saves CPU.
+# Even presents (vk_low_latency.cpp): each frame shown at an even moment, the world stepped by the same
+# steps. Balanced: the port's default (short GPU holds, BB_EVEN_RELEASE=4); Smoothest: the full GPU hold
+# (BB_EVEN_RELEASE=1); Off: BB_EVEN_PRESENT=0. The Environment field still wins over it.
+FRAME_PACING = [('balanced', 'Balanced'), ('smoothest', 'Smoothest (uses more GPU)'), ('off', 'Off')]
+FRAME_PACING_ENV = {'smoothest': ('BB_EVEN_RELEASE', '1'), 'off': ('BB_EVEN_PRESENT', '0')}
 JOB_THREADS = [('auto', 'Automatic (spin on CPUs with more than 8 threads)'), ('spin', 'Spin (smoothest camera)'),
                ('sleep', 'Sleep (saves CPU)')]
 FPS_LIMITS = [('0', 'Off (the frame rate above)'), ('30', '30 FPS'), ('45', '45 FPS'),
@@ -247,7 +252,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'portable': False, 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
+                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'frame_pacing': 'balanced', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
@@ -933,6 +938,9 @@ def game_environment(s, start=None):
     cap = game_frame_cap(s)
     if cap:
         env['BB_FPS_LIMIT'] = str(cap)
+    pacing = FRAME_PACING_ENV.get(str(s.get('frame_pacing') or 'balanced'))
+    if pacing:
+        env[pacing[0]] = pacing[1]
     env['BB_WINDOW_SIZE'] = str(s.get('window_size') or '1920x1080')
     sizes = render_sizes(s, start)
     if sizes:
@@ -1967,6 +1975,11 @@ class Launcher:
                  _('Shows at most this many frames per second, generated frames included. It only '
                    'lowers the rate: a limit at or above what the frame rate (and frame generation) give '
                    'changes nothing. Lower it for a steadier picture on a slower PC or to save power.'))
+        self.row(f, _('Frame pacing'), self.choice(f, 'frame_pacing', FRAME_PACING, 34),
+                 _("Shows each frame at an even moment and moves the game's world by those same steps, for "
+                   "smoother motion. Balanced suits most PCs. Smoothest has the graphics card itself wait for "
+                   "each frame's moment, for the most even timing, but keeps the card busier and can cost frames "
+                   "on a card near its limit. Off shows each frame as soon as it is ready."))
         self.row(f, _('Idle game threads'), self.choice(f, 'job_threads', JOB_THREADS, 34),
                  _('Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them '
                    '(best for 4-8 thread CPUs) and is just as smooth.'))
