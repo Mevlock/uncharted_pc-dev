@@ -26,21 +26,10 @@ jobs:
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
       DLSS_SDK_TAG: v310.9.16  # NVIDIA's DLSS SDK: bridge headers/lib and nvngx_dlss(g).dll
-      REFLEX_SDK_TAG: v1.8  # NVIDIA's Reflex SDK: pclstats.h for the bridge's PC Latency Stats
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      # The FSR-Vulkan patches are LF (.gitattributes) and git apply needs the submodule's files LF too: the
-      # Windows runner's core.autocrlf=true checked them out CRLF ("patch does not apply"). Only that submodule.
-      - name: FSR-Vulkan submodule with LF line endings
-        shell: bash
-        run: |
-          git -C gpu/third_party/fsr-vulkan config core.longpaths true
-          git -C gpu/third_party/fsr-vulkan config core.autocrlf false
-          git -C gpu/third_party/fsr-vulkan rm --cached -r -q .
-          git -C gpu/third_party/fsr-vulkan reset --hard -q
 
       # The runner's own MSYS2 in C:\msys64, where msys2-env.sh and build_dlss.sh look.
       - uses: msys2/setup-msys2@v2
@@ -104,15 +93,6 @@ jobs:
           git -C dlss-sdk sparse-checkout set --no-cone /include/ /lib/Windows_x86_64/x64/ \
               /lib/Windows_x86_64/rel/nvngx_dlss.dll /lib/Windows_x86_64/rel/nvngx_dlssg.dll /LICENSE.txt
 
-      - name: Reflex SDK
-        shell: bash
-        env:
-          MSYS_NO_PATHCONV: 1
-        run: |
-          git clone --depth 1 --branch "$REFLEX_SDK_TAG" --filter=blob:none --sparse \
-              https://github.com/NVIDIA-RTX/REFLEX.git reflex-sdk
-          git -C reflex-sdk sparse-checkout set --no-cone /Reflex_Stats/pclstats.h /license.txt
-
       - name: Build the DLSS bridge
         shell: msys2 {0}
         run: |
@@ -124,8 +104,7 @@ jobs:
           echo "Generator: $DLSS_GENERATOR"
           [[ -n $DLSS_GENERATOR ]]
           unset CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER
-          DLSS_SDK_ROOT="$(cygpath -u "$GITHUB_WORKSPACE")/dlss-sdk" \
-              REFLEX_SDK_ROOT="$(cygpath -u "$GITHUB_WORKSPACE")/reflex-sdk" bash packaging/windows/build_dlss.sh
+          DLSS_SDK_ROOT="$(cygpath -u "$GITHUB_WORKSPACE")/dlss-sdk" bash packaging/windows/build_dlss.sh
 
       - name: Intel XeSS runtime
         shell: msys2 {0}
