@@ -510,6 +510,37 @@ u32 PresentRelease::RecordHold(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until
     return index;
 }
 
+u32 PresentRelease::RecordSpinReady(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns) {
+    if (Part("skip")) {
+        return Slots;
+    }
+    // In a submission of its own, queued at once: a timestamp is only written once its submission
+    // is in, so in the spin's submission (queued just before the target) an early frame's ready
+    // time was that submission's start, not the frame's end (the offset crept up from it, and the
+    // GPU-bound check saw a GPU that fits as late by the holds).
+    const u32 index = RecordHostReady(cmdbuf, flip_arg, until_ns);
+    ss.intended[index] = ss.submitted[index] = 0;
+    return index;
+}
+
+void PresentRelease::RecordSpin(vk::CommandBuffer cmdbuf, u32 slot, s64 until_ns, s64 limit_ns) {
+    if (slot >= Slots) {
+        return;
+    }
+    if (!Part("cal1s") || SteadyNs() - cal_ns > 1'000'000'000) {
+        Calibrate(); // the spin's device clock target from the timestamps: fresh for every spin
+    }
+    // everything before it on the queue done (the frame and its ready time), then the spin (its
+    // start pairs the device clock with the timestamp just before it)
+    const vk::MemoryBarrier before{
+        .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
+        .dstAccessMask = vk::AccessFlagBits::eShaderWrite,
+    };
+    cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands,
+                           {}, before, {}, {});
+    Spin(cmdbuf, slot, until_ns, limit_ns);
+}
+
 void PresentRelease::SubmitWait(u32 slot, s64 until_ns, const std::function<bool()>& frame_done) {
     if (slot >= Slots) {
         return;

@@ -1420,6 +1420,21 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
                 host_release = release->QueueRelease(slot, hold_until, limit);
                 release->RecordHostRelease(scheduler.CommandBuffer(), slot);
                 hold_recorded = host_release != 0; // 0: released for the exit, not held
+            } else if (release->ShortSpin()) {
+                // Short spin (BB_EVEN_RELEASE=4): the frame's ready time in a submission of its
+                // own, queued now (it waits for the frame), so it is when the frame's work ends;
+                // then this one (the spin to the target, the blit) is queued only W before the
+                // target (SubmitWait below).
+                const u32 slot = release->RecordSpinReady(scheduler.CommandBuffer(), hold_flip, hold_until);
+                if (slot < PresentRelease::Slots) {
+                    SubmitInfo ready_info{};
+                    ready_info.AddWait(frame->ready_semaphore, frame->ready_tick);
+                    ready_info.async_up_to = async_up_to;
+                    scheduler.Flush(ready_info);
+                    release->RecordSpin(scheduler.CommandBuffer(), slot, hold_until, limit);
+                    spin_slot = slot;
+                }
+                hold_recorded = true;
             } else {
                 const u32 slot = release->RecordHold(scheduler.CommandBuffer(), hold_flip, hold_until, limit);
                 hold_recorded = true;
@@ -1572,8 +1587,8 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, u64 laten
     }
     info.async_up_to = async_up_to;
     if (spin_slot != ~0u) {
-        // Short spin (BB_EVEN_RELEASE=4): everything is recorded; this submission (the spin to the
-        // target, then the blit) goes to the GPU only W before the target, so the GPU spins for
+        // Short spin (BB_EVEN_RELEASE=4): the ready time's submission is in; this one (the spin to
+        // the target, then the blit) goes to the GPU only W before the target, so the GPU spins for
         // about W. The next frame's GPU work stays behind it as in mode 1: the gate holds that
         // frame's first draw submission until GatePostSubmitted below (deadline: target + a period).
         release->SubmitWait(spin_slot, hold_until, [&] {

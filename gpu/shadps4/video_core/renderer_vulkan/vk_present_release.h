@@ -50,6 +50,9 @@ inline std::mutex g_release_queue_mutex;
 
 class PresentRelease {
 public:
+    /// The holds' query/timestamp slots (RecordHold and RecordSpinReady return this: none).
+    static constexpr u32 Slots = 16;
+
     explicit PresentRelease(const Instance& instance);
     ~PresentRelease();
     PresentRelease(const PresentRelease&) = delete;
@@ -75,14 +78,23 @@ public:
     bool HostTimed() const {
         return host_timed && made;
     }
-    /// Mode 4 and made: the short-spin hybrid. The present work is recorded as for mode 1 (the
-    /// spin to the target, the blit), but submitted only at the target less W (SubmitWait, on the
-    /// presenter thread: a high-resolution timer, then a short CPU spin), so the GPU spins for
+    /// Mode 4 and made: the short-spin hybrid. The present work is queued in two submissions on the
+    /// game's queue: the first only takes the frame's ready time and is submitted at once
+    /// (RecordSpinReady), so that time is when the frame's work really ends; the second (the spin
+    /// to the target, the blit; RecordSpin) is submitted only at the target less W (SubmitWait, on
+    /// the presenter thread: a high-resolution timer, then a short CPU spin), so the GPU spins for
     /// about W instead of the whole wait. W follows the GPU's start after our submission.
     bool ShortSpin() const {
         return short_spin && made;
     }
-    /// Mode 4, right before the present submission of `slot` (RecordHold), held to `until_ns`:
+    /// Mode 4: into the first submission (which waits for the frame): everything before it done,
+    /// then its ready time; returns the slot (Slots: none, BB_HOLD_PART=skip). RecordSpin: first
+    /// in the second submission's command buffer: everything before it done, then the spin to
+    /// `until_ns` (steady clock) but `limit_ns` at most, with its start and release times;
+    /// RecordFence after the blit as for RecordHold.
+    u32 RecordSpinReady(vk::CommandBuffer cmdbuf, s64 flip_arg, s64 until_ns);
+    void RecordSpin(vk::CommandBuffer cmdbuf, u32 slot, s64 until_ns, s64 limit_ns);
+    /// Mode 4, right before the second submission of `slot` (RecordSpin), held to `until_ns`:
     /// waits until until_ns - W (100 ms at most), then `frame_done` says whether the frame's own
     /// GPU work was done by then (the submission's start is then ours, a sample for W).
     void SubmitWait(u32 slot, s64 until_ns, const std::function<bool()>& frame_done);
@@ -158,7 +170,6 @@ private:
         u64 tick = 0;
         bool fenced = false; ///< also a release-queue submission (its fence)
     };
-    static constexpr u32 Slots = 16;
 
     void Calibrate();
     u32 TakeSlot();
