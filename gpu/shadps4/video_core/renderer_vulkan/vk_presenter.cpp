@@ -243,6 +243,14 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
                                                                     : 1)
                                     : 0);
     }
+    // No GPU holds on this device: the presenter thread's hold (mode 0) gates and holds every paced
+    // frame with no GPU-bound step-aside (the old CPU gate's FPS loss), so even presents are off
+    // instead. BB_EVEN_RELEASE=0 asks for that hold on purpose (A/B) and keeps it.
+    if (LowLatency::EvenPresents() && PresentRelease::Mode() != 0 && !(release && release->Ready())) {
+        LowLatency::EvenPresentsOff(release ? "the device clock's calibration failed"
+                                            : "no GPU holds on this device: it lacks the shader device clock, "
+                                              "calibrated timestamps or 64-bit timestamps");
+    }
 }
 
 Presenter::~Presenter() {

@@ -229,10 +229,16 @@ std::atomic<s64> slept_ns{0};
 /// L changes are world steps too, so it moves by at most 0.1 ms per frame up and 10 us per frame
 /// down (only when 1 ms too high); it is learnt again whenever pacing stops (loads, the boot). A
 /// frame later than its target is shown when it is done.
-const bool even = [] {
+/// Turned off for the session when the presenter has no GPU holds on this device (EvenPresentsOff):
+/// the presenter thread's hold had no GPU-bound step-aside, so a GPU that does not fit its frames
+/// lost FPS to it.
+std::atomic<bool> even{[] {
     const char* env = std::getenv("BB_EVEN_PRESENT");
     return !(env && env[0] == '0');
-}();
+}()};
+bool Even() {
+    return even.load(std::memory_order_relaxed);
+}
 constexpr u32 Ring = 256;
 struct FrameSlot {
     std::atomic<u64> id{0};
@@ -485,7 +491,7 @@ void BeforeFrame(u64 id) {
     const s64 wake = std::max(now, slot);
     last_wake = slot;
     last_target = wake;
-    if (even) {
+    if (Even()) {
         UpdateOffset(period, id);
         FrameSlot& entry = frames[id % Ring];
         entry.id.store(0, std::memory_order_relaxed);
@@ -500,6 +506,7 @@ void BeforeFrame(u64 id) {
         last_target = slot + offset; // the trace's target: the present target
         NoteStep(id, clock);
     } else {
+        current_target.store(0, std::memory_order_relaxed); // even presents off (EvenPresentsOff)
         NoteStep(id, wake);
     }
     Libraries::VideoOut::SetStartPaced(true);
@@ -1278,7 +1285,7 @@ void Print(u64 current) {
                       double(Pace::slept_ns.exchange(0)) / 1e6 / double(std::max<u64>(1, n)),
                       static_cast<unsigned long long>(Pace::unpaced.exchange(0)));
     }
-    if (Pace::even && at < sizeof(line)) {
+    if (Pace::Even() && at < sizeof(line)) {
         const u64 h = Pace::held.exchange(0), l = Pace::late.exchange(0);
         at += std::snprintf(line + at, sizeof(line) - at,
                             " | even: offset %.2f, held %llu by %.2f, late %llu by %.2f, gate %llu waits %.2f, %llu timeouts, %llu yields",
@@ -1344,15 +1351,24 @@ bool StartPacingRequested() {
 }
 
 s64 PresentTarget(s64 flip_arg) {
-    return Pace::even && flip_arg >= 0 ? Pace::Target(static_cast<u64>(flip_arg) + 1) : 0;
+    return Pace::Even() && flip_arg >= 0 ? Pace::Target(static_cast<u64>(flip_arg) + 1) : 0;
 }
 
 bool EvenPresents() {
-    return Pace::even && Pace::enabled;
+    return Pace::Even() && Pace::enabled;
+}
+
+void EvenPresentsOff(const char* why) {
+    if (!Pace::even.exchange(false, std::memory_order_relaxed)) {
+        return; // off already (BB_EVEN_PRESENT=0, or said once)
+    }
+    std::printf("Even presents: off (%s): frames are shown as they come, as with BB_EVEN_PRESENT=0\n", why);
+    std::fflush(stdout);
+    Pace::GatePost(Pace::gate_noted_a.load(std::memory_order_acquire)); // nothing waits at the gate any more
 }
 
 s64 PresentHoldEnd(s64 flip_arg) {
-    if (!Pace::even || flip_arg < 0 || Pace::gpu_bound.load(std::memory_order_relaxed)) {
+    if (!Pace::Even() || flip_arg < 0 || Pace::gpu_bound.load(std::memory_order_relaxed)) {
         return 0;
     }
     return Pace::HoldEnd(static_cast<u64>(flip_arg) + 1);
@@ -1389,7 +1405,7 @@ bool GpuRelease() {
 }
 
 void PresentGpuTimes(s64 flip_arg, s64 ready_ns, s64 release_ns) {
-    if (Pace::even && flip_arg >= 0) {
+    if (Pace::Even() && flip_arg >= 0) {
         Pace::GpuTimes(static_cast<u64>(flip_arg) + 1, ready_ns, release_ns);
         if (Trace::on) {
             Trace::StampAt(static_cast<u64>(flip_arg) + 1, Trace::Ready, ready_ns);
@@ -1399,7 +1415,7 @@ void PresentGpuTimes(s64 flip_arg, s64 ready_ns, s64 release_ns) {
 }
 
 void PresentReadyAndWait(s64 flip_arg) {
-    if (Pace::even && flip_arg >= 0 && !Pace::timed.load(std::memory_order_relaxed)) {
+    if (Pace::Even() && flip_arg >= 0 && !Pace::timed.load(std::memory_order_relaxed)) {
         Pace::ReadyAndWait(static_cast<u64>(flip_arg) + 1);
     }
 }
@@ -1408,18 +1424,18 @@ void GateAfterFlip(s64 flip_arg, u64 draw_tick) {
     if (flip_arg >= 0) {
         Pace::gpu_flip_arg.store(flip_arg, std::memory_order_relaxed);
     }
-    if (Pace::even && flip_arg >= 0) {
+    if (Pace::Even() && flip_arg >= 0) {
         Pace::GateNote(static_cast<u64>(flip_arg) + 1, Libraries::VideoOut::FrameCapPeriodNs(),
                        draw_tick);
     }
 }
 
 bool GateNeeded(u64 tick) {
-    return Pace::even && Pace::GateNeeded(tick);
+    return Pace::Even() && Pace::GateNeeded(tick);
 }
 
 void GateBeforeSubmit(u64 tick, bool recorder) {
-    if (Pace::even) {
+    if (Pace::Even()) {
         Pace::GateBeforeSubmit(tick, recorder);
     }
 }
@@ -1433,7 +1449,7 @@ void GateYieldEnd() {
 }
 
 void GatePostSubmitted(s64 flip_arg) {
-    if (Pace::even && flip_arg >= 0) {
+    if (Pace::Even() && flip_arg >= 0) {
         Pace::GatePost(flip_arg);
     }
 }
@@ -1443,13 +1459,13 @@ void SetTimedPresents(bool on) {
 }
 
 void PresentQueued(s64 flip_arg) {
-    if (Pace::even && flip_arg >= 0 && Pace::timed.load(std::memory_order_relaxed)) {
+    if (Pace::Even() && flip_arg >= 0 && Pace::timed.load(std::memory_order_relaxed)) {
         Pace::Sample(static_cast<u64>(flip_arg) + 1, Pace::Now());
     }
 }
 
 void PresentFlipped(s64 flip_arg, s64 flip_ns) {
-    if (!Pace::even || flip_arg < 0) {
+    if (!Pace::Even() || flip_arg < 0) {
         return;
     }
     const u64 id = static_cast<u64>(flip_arg) + 1;

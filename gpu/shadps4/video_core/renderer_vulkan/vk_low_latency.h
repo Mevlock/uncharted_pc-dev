@@ -98,6 +98,11 @@ void GateYieldBegin();
 void GateYieldEnd();
 /// Even presents are on (the frame start paces and BB_EVEN_PRESENT is not 0).
 bool EvenPresents();
+/// The presenter, once: the device cannot hold paced frames on the GPU (no shader device clock,
+/// calibrated timestamps or 64-bit timestamps, or the calibration failed). Even presents are then
+/// off for the session, as with BB_EVEN_PRESENT=0 (the presenter thread's hold has no GPU-bound
+/// step-aside); `why` is logged.
+void EvenPresentsOff(const char* why);
 /// How the presenter holds paced frames (vk_present_release.h): 0 on its thread, 1 on the GPU in the
 /// game's queue, 2 on the release queue, 3 in the game's queue with the GPU idle until our thread
 /// releases them (host-timed; the gate and the GPU-bound check as for 1), 4 as 1 but submitted
