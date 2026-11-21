@@ -503,6 +503,7 @@ class ChangeVersionTests(unittest.TestCase):
         self.launcher.version_button, self.launcher.version_backup_buttons = Widget(), []
         self.launcher.version_note, self.launcher.status = Widget(), Widget()
         self.launcher.update_box, self.launcher.update_button = None, Widget()
+        self.launcher.app, self.launcher.vars = {}, {}
         self.launcher.ui_calls = __import__('queue').Queue()
         self.launcher.messagebox = type('Box', (), {'askyesno': staticmethod(lambda *_a: True),
                                                    'showinfo': staticmethod(lambda *_a: None)})
@@ -534,6 +535,40 @@ class ChangeVersionTests(unittest.TestCase):
         self.assertFalse(self.launcher.closed)
         self.assertFalse(self.launcher.updating)
         self.assertIn('Close the game', self.launcher.version_note.options['text'])
+
+    def test_refused_with_the_saves_folder_inside_the_program_files(self):
+        shown = []
+        self.launcher.messagebox.showinfo = staticmethod(lambda *a: shown.append(a))
+        for inside in (self.port / 'BIN' / 'saves', self.port / 'versions' / 'saves', self.port / 'shaders'):
+            shown.clear()
+            self.launcher.app = {'user_dir': str(inside)}
+            self.change()
+            self.assertEqual(len(shown), 1, inside)
+            self.assertIn(str(inside), shown[0][1])
+            self.assertEqual((self.started, self.launcher.updating), ([], False))
+
+    def test_a_game_folder_set_in_the_window_counts_too(self):
+        shown = []
+        self.launcher.messagebox.showinfo = staticmethod(lambda *a: shown.append(a))
+        self.launcher.vars = {'game_dir_u2': type('Var', (), {'get': lambda _v: str(self.port / 'bin' / 'u2')})()}
+        self.change()
+        self.assertEqual((len(shown), self.started), (1, []))
+
+    def test_saves_next_to_the_launcher_are_fine(self):
+        for fine in (self.port / 'user', self.port / 'saves', self.temp / 'elsewhere'):
+            self.started.clear()
+            self.launcher.app, self.launcher.closed, self.launcher.updating = {'user_dir': str(fine)}, False, False
+            self.change()
+            self.assertEqual(self.started[0][1], '--switch-version', fine)
+
+    def test_remove_backups_refused_with_the_saves_folder_in_versions(self):
+        shown, asked = [], []
+        self.launcher.messagebox.showinfo = staticmethod(lambda *a: shown.append(a))
+        self.launcher.messagebox.askyesno = staticmethod(lambda *a: asked.append(a) or True)
+        self.launcher.app = {'user_dir': str(self.port / 'versions' / 'saves')}
+        with patch.object(LAUNCHER, 'VERSIONS_DIR', self.port / 'versions'):
+            self.launcher.remove_backups()
+        self.assertEqual((len(shown), asked), (1, []))
 
     def test_any_failure_of_the_download_thread_is_shown_and_cleaned_up(self):
         self.change(failure=RuntimeError('something unexpected'))

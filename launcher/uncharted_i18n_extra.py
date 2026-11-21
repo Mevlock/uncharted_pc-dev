@@ -497,6 +497,8 @@ EXTRA_TRANSLATIONS = {
             'Dateien der Version, zu der du wechseln wolltest, in {}: {}',
         'Nothing was deleted. To use version {} again, move its files back into {}.':
             'Es wurde nichts gelöscht. Um Version {} wieder zu verwenden, verschiebe ihre Dateien zurück nach {}.',
+        "This folder is inside the port's program files or its versions folder, which a version change moves and Remove backups deletes: {}. Move it somewhere else and choose it again in the launcher first.":
+            'Dieser Ordner liegt in den Programmdateien des Ports oder in seinem Ordner versions, die ein Versionswechsel verschiebt und „Sicherungen entfernen“ löscht: {}. Verschiebe ihn zuerst an einen anderen Ort und wähle ihn im Launcher neu aus.',
     },
     'it': {
         'Auto (as Windows reports)':
@@ -993,6 +995,8 @@ EXTRA_TRANSLATIONS = {
             'File della versione a cui stavi passando, in {}: {}',
         'Nothing was deleted. To use version {} again, move its files back into {}.':
             'Non è stato eliminato nulla. Per usare di nuovo la versione {}, riporta i suoi file in {}.',
+        "This folder is inside the port's program files or its versions folder, which a version change moves and Remove backups deletes: {}. Move it somewhere else and choose it again in the launcher first.":
+            'Questa cartella si trova tra i file di programma del port o nella sua cartella versions, che un cambio di versione sposta e «Rimuovi i backup» elimina: {}. Prima spostala altrove e sceglila di nuovo nel launcher.',
     },
     'ja': {
         'Auto (as Windows reports)':
@@ -1483,6 +1487,8 @@ EXTRA_TRANSLATIONS = {
             '変更先のバージョンのファイル、{}: {}',
         'Nothing was deleted. To use version {} again, move its files back into {}.':
             '何も削除されていません。バージョン {} を再び使うには、そのファイルを {} に戻してください。',
+        "This folder is inside the port's program files or its versions folder, which a version change moves and Remove backups deletes: {}. Move it somewhere else and choose it again in the launcher first.":
+            'このフォルダーは、バージョン変更で移動され「バックアップを削除」で削除される、移植版のプログラムファイルまたは versions フォルダーの中にあります: {}。先に別の場所へ移動し、ランチャーで選び直してください。',
     },
     'es': {
         'Auto (as Windows reports)':
@@ -1878,6 +1884,8 @@ EXTRA_TRANSLATIONS = {
             'Archivos de la versión a la que cambiabas, en {}: {}',
         'Nothing was deleted. To use version {} again, move its files back into {}.':
             'No se ha borrado nada. Para volver a usar la versión {}, devuelve sus archivos a {}.',
+        "This folder is inside the port's program files or its versions folder, which a version change moves and Remove backups deletes: {}. Move it somewhere else and choose it again in the launcher first.":
+            'Esta carpeta está dentro de los archivos del programa del port o de su carpeta versions, que un cambio de versión mueve y «Quitar copias» borra: {}. Primero muévela a otro sitio y vuelve a elegirla en el launcher.',
     },
     'pt': {
         'Auto (as Windows reports)':
@@ -2274,6 +2282,8 @@ EXTRA_TRANSLATIONS = {
             'Arquivos da versão para a qual você estava mudando, em {}: {}',
         'Nothing was deleted. To use version {} again, move its files back into {}.':
             'Nada foi excluído. Para usar a versão {} de novo, mova os arquivos dela de volta para {}.',
+        "This folder is inside the port's program files or its versions folder, which a version change moves and Remove backups deletes: {}. Move it somewhere else and choose it again in the launcher first.":
+            'Esta pasta está dentro dos arquivos de programa do port ou da pasta versions dele, que uma mudança de versão move e “Remover cópias” exclui: {}. Primeiro mova-a para outro lugar e escolha-a de novo no launcher.',
     },
     'fr': {
         'Auto (as Windows reports)':
@@ -2671,6 +2681,8 @@ EXTRA_TRANSLATIONS = {
             'Fichiers de la version vers laquelle vous passiez, dans {} : {}',
         'Nothing was deleted. To use version {} again, move its files back into {}.':
             "Rien n'a été supprimé. Pour utiliser à nouveau la version {}, remettez ses fichiers dans {}.",
+        "This folder is inside the port's program files or its versions folder, which a version change moves and Remove backups deletes: {}. Move it somewhere else and choose it again in the launcher first.":
+            "Ce dossier se trouve dans les fichiers du programme du port ou dans son dossier versions, qu'un changement de version déplace et que « Supprimer les sauvegardes de version » efface : {}. Déplacez-le d'abord ailleurs, puis choisissez-le à nouveau dans le launcher.",
     },
     # Russian (EU-Russian CUSA02344 players): poncho-ajmv's translation from the upstream port (PR #713)
     # where the English text is the same as ours, the rest translated for this port; the shared
@@ -3141,5 +3153,7 @@ EXTRA_TRANSLATIONS = {
             'Файлы версии, на которую выполнялся переход, в {}: {}',
         'Nothing was deleted. To use version {} again, move its files back into {}.':
             'Ничего не удалено. Чтобы снова пользоваться версией {}, переместите её файлы обратно в {}.',
+        "This folder is inside the port's program files or its versions folder, which a version change moves and Remove backups deletes: {}. Move it somewhere else and choose it again in the launcher first.":
+            'Эта папка находится внутри файлов программы порта или его папки versions, которые смена версии перемещает, а «Удалить резервные копии» удаляет: {}. Сначала переместите её в другое место и снова выберите в лаунчере.',
     },
 }

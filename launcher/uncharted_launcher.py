@@ -83,6 +83,9 @@ PROGRAM_FILES = ('Uncharted.exe', '_internal', 'Play Uncharted.exe', 'bin', 'lau
                  'notes', 'licenses', 'run.py', 'LICENSE', 'README.txt', 'commit.txt')
 # Never moved or replaced by a version switch: the player's files, the backups, the opt-in FSR 4 download.
 SWITCH_KEEP = USER_FILES + ('versions', 'fsr4_shaders')
+# The folders a player chooses (the saves folder with the shader cache, the game folders): never inside what a
+# version switch moves or Remove backups deletes (folders_inside).
+PLAYER_FOLDERS = ('user_dir', 'game_dir', 'game_dir_u1', 'game_dir_u2', 'game_dir_u3')
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -2675,9 +2678,22 @@ class Launcher:
             self.backups_mb = round(folder_size(VERSIONS_DIR) / (1 << 20))
         self.remove_backups_button.configure(text=_('Remove backups ({} MB)').format(self.backups_mb))
 
+    def refuse_player_folders(self, roots):
+        """Whether a player's folder (the saves folder, a game folder; as set in the window now) is in one of roots,
+        said in a message: a version switch would move it into a backup, and a later prune or Remove backups would
+        delete it."""
+        settings = {**self.app, **{key: v.get() for key, v in self.vars.items()}}
+        inside = folders_inside(settings, roots)
+        if inside:
+            self.messagebox.showinfo(NAME, _("This folder is inside the port's program files or its versions folder, "
+                                             'which a version change moves and Remove backups deletes: {}. Move it '
+                                             'somewhere else and choose it again in the launcher first.'
+                                             ).format(inside[0]))
+        return bool(inside)
+
     def remove_backups(self):
         """Deletes versions/ (the kept releases) after a confirmation that says the space it frees."""
-        if self.updating:
+        if self.updating or self.refuse_player_folders([VERSIONS_DIR]):
             return
         if self.backups_mb is None:
             self.backups_mb = round(folder_size(VERSIONS_DIR) / (1 << 20))
@@ -2761,6 +2777,8 @@ class Launcher:
             return
         if not FROZEN:  # a source tree changes versions with git
             webbrowser.open(page or RELEASES_PAGE)
+            return
+        if self.refuse_player_folders([PORT_DIR / name for name in PROGRAM_FILES] + [PORT_DIR / 'versions']):
             return
         question = _('Change to version {}? The launcher closes, changes the version and opens again. Saves, '
                      'settings and the shader cache are kept. Version {} is kept in the versions folder, so you can '
@@ -3875,6 +3893,20 @@ def prune_backups(folder=None, keep=KEEP_BACKUPS):
                 path.unlink(missing_ok=True)
             except OSError:  # a locked or read-only file: left, as remove_tree(ignore_errors) leaves one
                 pass
+
+
+def folders_inside(settings, roots):
+    """The player's folders in settings (PLAYER_FOLDERS) that are one of roots or lie inside one (compared as Windows
+    does: case and / or \\ aside, links followed)."""
+    def norm(path):
+        return Path(os.path.normcase(os.path.realpath(path)))
+    roots = [norm(root) for root in roots]
+    found = []
+    for key in PLAYER_FOLDERS:
+        value = str(settings.get(key) or '').strip()
+        if value and any(norm(value).is_relative_to(root) for root in roots):
+            found.append(value)
+    return found
 
 
 def folder_empty(folder):
