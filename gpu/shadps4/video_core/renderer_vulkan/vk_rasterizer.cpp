@@ -10052,7 +10052,11 @@ void Rasterizer::UpdateDepthStencilState() const {
             .depth_fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zfail_front),
             .compare_op = LiverpoolToVK::CompareOp(regs.depth_control.stencil_ref_func),
         };
-        const StencilOps back_ops = regs.depth_control.backface_enable ? StencilOps{
+        // A rect list has no back face on the GPU, so it always takes the front stencil state.
+        // Its tessellation emulation can come out back-facing on the host.
+        const bool use_back = regs.depth_control.backface_enable &&
+                              regs.primitive_type != AmdGpu::PrimitiveType::RectList;
+        const StencilOps back_ops = use_back ? StencilOps{
             .fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_fail_back),
             .pass_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zpass_back),
             .depth_fail_op = LiverpoolToVK::StencilOp(regs.stencil_control.stencil_zfail_back),
@@ -10062,8 +10066,7 @@ void Rasterizer::UpdateDepthStencilState() const {
 
         const bool stencil_clear = regs.depth_render_control.stencil_clear_enable;
         const auto front = regs.stencil_ref_front;
-        const auto back =
-            regs.depth_control.backface_enable ? regs.stencil_ref_back : regs.stencil_ref_front;
+        const auto back = use_back ? regs.stencil_ref_back : regs.stencil_ref_front;
         // GCN REPLACE_OP writes DB_STENCILREFMASK.STENCILOPVAL, so a face whose stencil ops
         // include ReplaceOp takes its Vulkan reference from op_val.
         const auto& sc = regs.stencil_control;
@@ -10076,15 +10079,14 @@ void Rasterizer::UpdateDepthStencilState() const {
         const bool front_op =
             uses_op_val(sc.stencil_fail_front, sc.stencil_zpass_front, sc.stencil_zfail_front);
         const bool back_op =
-            regs.depth_control.backface_enable
-                ? uses_op_val(sc.stencil_fail_back, sc.stencil_zpass_back, sc.stencil_zfail_back)
-                : front_op;
+            use_back ? uses_op_val(sc.stencil_fail_back, sc.stencil_zpass_back, sc.stencil_zfail_back)
+                     : front_op;
         const auto ref_conflict = [](AmdGpu::CompareFunc func, const AmdGpu::StencilRefMask& ref) {
             return func != AmdGpu::CompareFunc::Always && func != AmdGpu::CompareFunc::Never &&
                    ref.stencil_test_val != ref.stencil_op_val;
         };
         if ((front_op && ref_conflict(regs.depth_control.stencil_ref_func, front)) ||
-            (back_op && regs.depth_control.backface_enable &&
+            (back_op && use_back &&
              ref_conflict(regs.depth_control.stencil_bf_func, back))) {
             LOG_WARNING(Render_Vulkan, "Stencil test requires test_val while ReplaceOp requires "
                                        "op_val; the stencil test will use op_val");
