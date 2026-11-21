@@ -60,6 +60,9 @@ RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
 RELEASES_LIST_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases?per_page=100'
 UPDATES = True
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'uncharted-update'
+# What went wrong after a version switch that worked (the switcher has no window): outside UPDATE_DIR, which the
+# launcher's start clears.
+SWITCH_LOG = Path(tempfile.gettempdir()) / 'uncharted-switch.log'
 # Never copied over an installation by an update (the package does not hold them either).
 USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log', 'launcher_settings.json')
 # Advanced > Version: other releases of the port, none older than OLDEST_SWITCH_VERSION. The release left is kept
@@ -3868,7 +3871,10 @@ def prune_backups(folder=None, keep=KEEP_BACKUPS):
         if path.is_dir():
             remove_tree(path, ignore_errors=True)
         else:
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:  # a locked or read-only file: left, as remove_tree(ignore_errors) leaves one
+                pass
 
 
 def folder_empty(folder):
@@ -4006,7 +4012,10 @@ def switch_files(target, source, backup):
         except OSError:
             pass
         raise
-    os.utime(backup)  # the time version_backups orders the backups by: now, the moment this release was left
+    try:
+        os.utime(backup)  # the time version_backups orders the backups by: now, the moment this release was left
+    except OSError as error:  # the switch itself is done
+        switch_log(f'could not set the time of {backup}: {error}')
     try:
         source.rmdir()
     except OSError:
@@ -4047,11 +4056,32 @@ def switch_version(target, source, version, wait_pid):
         if staged and Path(staged) != Path(source):
             shutil.rmtree(staged, ignore_errors=True)
         ctypes.windll.user32.MessageBoxW(None, _('Could not change the version: {}').format(error), NAME, 0x10)
-        subprocess.Popen([str(target / 'Uncharted.exe')], cwd=str(target))
+        start_launcher(target)
         return 1
-    prune_backups(target / 'versions')
-    subprocess.Popen([str(target / 'Uncharted.exe')], cwd=str(target))
+    # The switch is done: what fails from here on is logged and changes neither the restart nor the result.
+    try:
+        prune_backups(target / 'versions')
+    except OSError as error:
+        switch_log(f'could not remove the older backups: {error}')
+    start_launcher(target)
     return 0
+
+
+def switch_log(text):
+    """A line in SWITCH_LOG."""
+    try:
+        with open(SWITCH_LOG, 'a', encoding='utf-8') as log:
+            log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\n")
+    except OSError:
+        pass
+
+
+def start_launcher(target):
+    """The switcher's last step: the launcher in target started (a failure only logged)."""
+    try:
+        subprocess.Popen([str(target / 'Uncharted.exe')], cwd=str(target))
+    except OSError as error:
+        switch_log(f"could not start {target / 'Uncharted.exe'}: {error}")
 
 
 def incomplete_message(failure, version, target):

@@ -1,6 +1,7 @@
 """Advanced > Version (the release list, the switch's file moves and backups) and the log folder, with temporary
 folders: no window, no download, no game."""
 import importlib.util
+import contextlib
 import io
 import os
 import shutil
@@ -197,11 +198,9 @@ class SwitchFileTests(unittest.TestCase):
         incoming = tree(old)
         backup = self.install / 'versions' / '0.3.6.65'
         rename, tries = self.held_rollback(backup)
-        shown, started = [], []
-        windll = type('Windll', (), {'user32': type('User32', (), {
-            'MessageBoxW': staticmethod(lambda _w, text, _t, _f: shown.append(text))})})
-        with patch.object(LAUNCHER.os, 'rename', rename), patch.object(LAUNCHER.time, 'sleep', lambda _s: None),                 patch.object(LAUNCHER, 'wait_for_process', lambda _pid: None),                 patch.object(LAUNCHER.ctypes, 'windll', windll, create=True),                 patch.object(LAUNCHER.subprocess, 'Popen', lambda args, **_k: started.append(args)):
-            self.assertEqual(LAUNCHER.switch_version(self.install, old, '0.3.6.65', 0), 1)
+        with patch.object(LAUNCHER.os, 'rename', rename), patch.object(LAUNCHER.time, 'sleep', lambda _s: None):
+            result, started, shown, _log = self.switch(old)
+        self.assertEqual(result, 1)
         self.assertEqual(len(tries), 5)  # one switch, not 30
         self.assertEqual((backup / '_internal' / '_internal.txt').read_text(), '_internal 0.3.6.65')
         self.assertEqual(tree(old), incoming)  # the download is kept as well
@@ -209,6 +208,53 @@ class SwitchFileTests(unittest.TestCase):
         self.assertEqual(len(shown), 1)
         self.assertIn(f'{backup}: _internal', shown[0])
         self.assertIn(f'Files of the version you were changing to, in {old}:', shown[0])
+
+    def switch(self, source, **patches):
+        """switch_version to the release in source, with no wait, no window and no launcher started (recorded)."""
+        started, shown, log = [], [], self.temp / 'switch.log'
+        windll = type('Windll', (), {'user32': type('User32', (), {
+            'MessageBoxW': staticmethod(lambda _w, text, _t, _f: shown.append(text))})})
+        popen = patches.pop('popen', lambda args, **_k: started.append(args))
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(LAUNCHER, 'wait_for_process', lambda _pid: None))
+            stack.enter_context(patch.object(LAUNCHER.ctypes, 'windll', windll, create=True))
+            stack.enter_context(patch.object(LAUNCHER, 'SWITCH_LOG', log))
+            stack.enter_context(patch.object(LAUNCHER.subprocess, 'Popen', popen))
+            for name, value in patches.items():
+                stack.enter_context(patch.object(LAUNCHER, name, value))
+            result = LAUNCHER.switch_version(self.install, source, '0.3.6.65', 0)
+        return result, started, shown, log.read_text() if log.exists() else ''
+
+    def test_a_failed_prune_after_the_switch_still_restarts_and_succeeds(self):
+        old = make_release(self.temp / 'download', '0.3.6.64')
+
+        def prune(_folder):
+            raise PermissionError('a locked file')
+        result, started, shown, log = self.switch(old, prune_backups=prune)
+        self.assertEqual((result, shown), (0, []))
+        self.assertEqual(started, [[str(self.install / 'Uncharted.exe')]])
+        self.assertIn('a locked file', log)
+        self.assertEqual((self.install / 'Uncharted.exe').read_text(), 'launcher 0.3.6.64')
+
+    def test_a_failed_time_stamp_of_the_backup_is_no_failed_switch(self):
+        old = make_release(self.temp / 'download', '0.3.6.64')
+
+        def utime(*_a):
+            raise PermissionError('denied')
+        with patch.object(LAUNCHER.os, 'utime', utime):
+            result, started, shown, log = self.switch(old)
+        self.assertEqual((result, shown, len(started)), (0, [], 1))
+        self.assertIn('denied', log)
+        self.assertTrue(LAUNCHER.whole_release(self.install / 'versions' / '0.3.6.65'))
+
+    def test_a_launcher_that_cannot_start_is_logged(self):
+        old = make_release(self.temp / 'download', '0.3.6.64')
+
+        def popen(*_a, **_k):
+            raise FileNotFoundError('no Uncharted.exe')
+        result, _started, shown, log = self.switch(old, popen=popen)
+        self.assertEqual((result, shown), (0, []))
+        self.assertIn('no Uncharted.exe', log)
 
     def test_a_folder_with_a_file_in_use_is_never_copied_and_deleted(self):
         # A file open in _internal (the old launcher or the game still running): the folder cannot be renamed. The
@@ -508,7 +554,8 @@ class ChangeVersionTests(unittest.TestCase):
             raise RuntimeError('something unexpected')
         thread = type('Thread', (), {'__init__': lambda t, target, daemon: setattr(t, 'run', target),
                                      'start': lambda t: t.run()})
-        with patch.object(LAUNCHER, 'FROZEN', True), patch.object(LAUNCHER, 'UPDATE_DIR', self.temp / 'update'),                 patch.object(LAUNCHER, 'download_release', download),                 patch.object(LAUNCHER.threading, 'Thread', thread):
+        with patch.object(LAUNCHER, 'FROZEN', True), patch.object(LAUNCHER, 'UPDATE_DIR', self.temp / 'update'), \
+                patch.object(LAUNCHER, 'download_release', download), patch.object(LAUNCHER.threading, 'Thread', thread):
             self.launcher.install_update('0.3.6.66', 'https://example/v0.3.6.66.zip', 'https://example/p')
             while not self.launcher.ui_calls.empty():
                 self.launcher.ui_calls.get()()
