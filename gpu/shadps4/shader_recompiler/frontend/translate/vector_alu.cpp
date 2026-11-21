@@ -863,8 +863,18 @@ void Translator::V_CVT_PKNORM_I16_F32(const GcnInst& inst) {
 }
 
 void Translator::V_CVT_PKRTZ_F16_F32(const GcnInst& inst) {
-    const IR::Value vec_f32 =
-        ir.CompositeConstruct(GetSrc<IR::F32>(inst.src[0]), GetSrc<IR::F32>(inst.src[1]));
+    // Round toward zero: a finite value past the half range becomes +-65504, never infinity.
+    // The half conversion below (and the FP16 export it may be folded into) rounds to nearest.
+    // Infinities and NaNs pass through unchanged.
+    const auto rtz_saturate = [&](const IR::F32& value) {
+        const IR::U1 overflow{ir.LogicalAnd(ir.FPGreaterThan(ir.FPAbs(value), ir.Imm32(65504.0f)),
+                                            ir.LogicalNot(ir.FPIsInf(value)))};
+        const IR::F32 max{ir.Select(ir.FPLessThan(value, ir.Imm32(0.0f)), ir.Imm32(-65504.0f),
+                                    ir.Imm32(65504.0f))};
+        return IR::F32{ir.Select(overflow, max, value)};
+    };
+    const IR::Value vec_f32 = ir.CompositeConstruct(rtz_saturate(GetSrc<IR::F32>(inst.src[0])),
+                                                    rtz_saturate(GetSrc<IR::F32>(inst.src[1])));
     SetDst(inst.dst[0], ir.Pack2x16(AmdGpu::NumberFormat::Float, vec_f32));
 }
 
