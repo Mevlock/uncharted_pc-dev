@@ -284,3 +284,9 @@ class PillButton:
 
     def lift(self):
         self.canvas.lift()
+
+    def winfo_exists(self):
+        return self.canvas.winfo_exists()
+
+    def destroy(self):
+        self.canvas.destroy()

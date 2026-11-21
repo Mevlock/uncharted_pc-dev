@@ -570,6 +570,18 @@ class ChangeVersionTests(unittest.TestCase):
             self.launcher.remove_backups()
         self.assertEqual((len(shown), asked), (1, []))
 
+    def test_a_failed_change_enables_real_pill_buttons_again(self):
+        # change_version's failed() asks each button winfo_exists(): PillButton had none, so the first button
+        # raised, Change version stayed disabled and the message never showed.
+        from uncharted_widgets import PillButton
+        canvas = type('Canvas', (), {'winfo_exists': lambda _c: 1})()
+        button = PillButton.__new__(PillButton)
+        button.canvas, button.state, button.draw = canvas, 'normal', lambda: None
+        self.launcher.version_button = button
+        self.change(failure=OSError('no network'))
+        self.assertEqual(button.state, 'normal')
+        self.assertIn('no network', self.launcher.version_note.options['text'])
+
     def test_any_failure_of_the_download_thread_is_shown_and_cleaned_up(self):
         self.change(failure=RuntimeError('something unexpected'))
         self.assertFalse(self.launcher.updating)
