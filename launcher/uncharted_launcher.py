@@ -3703,17 +3703,21 @@ def release_notes(limit=5):
 
 
 def github_json(url):
-    """The JSON answer of a GitHub API request."""
+    """The JSON answer of a GitHub API request. A connection that ends partway is an OSError too (http.client's
+    IncompleteRead is not one, and ended the helper thread that asked)."""
     request = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json',
                                                    'User-Agent': 'uncharted-launcher'})
-    with urllib.request.urlopen(request, timeout=15) as response:
-        return json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.load(response)
+    except http.client.HTTPException as error:
+        raise OSError(f'the answer from GitHub stopped partway ({error!r})') from error
 
 
 def release_zip(release):
     """The download URL of a GitHub release's zip (None without one)."""
-    return next((asset['browser_download_url'] for asset in release.get('assets', [])
-                 if asset.get('name', '').lower().endswith('.zip')), None)
+    return next((asset.get('browser_download_url') for asset in release.get('assets') or []
+                 if isinstance(asset, dict) and str(asset.get('name') or '').lower().endswith('.zip')), None)
 
 
 def latest_release():
@@ -3730,7 +3734,9 @@ def release_choices(releases, test_builds=False, oldest=OLDEST_SWITCH_VERSION):
     A release comes before the test builds with the same number."""
     found = []
     for release in releases:
-        tag, url = release.get('tag_name') or '', release_zip(release)
+        if not isinstance(release, dict):
+            continue
+        tag, url = str(release.get('tag_name') or ''), release_zip(release)
         test = bool(release.get('prerelease'))
         if release.get('draft') or not url or version_tuple(tag) < oldest or (test and not test_builds):
             continue

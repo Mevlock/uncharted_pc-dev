@@ -56,6 +56,25 @@ class ReleaseChoiceTests(unittest.TestCase):
         self.assertEqual((name, url, page, test),
                          ('0.3.6.64', 'https://example/v0.3.6.64.zip', 'https://example/releases/v0.3.6.64', False))
 
+    def test_odd_entries_are_left_out(self):
+        odd = [1, None, {'tag_name': None}, {'tag_name': 'v0.3.6.64', 'assets': None},
+               {'tag_name': 'v0.3.6.64', 'assets': [{'name': None}, 'x']}, release('v0.3.6.62')]
+        self.assertEqual([n for n, *_r in LAUNCHER.release_choices(odd)], ['0.3.6.62'])
+
+    def test_a_cut_answer_from_github_is_an_oserror(self):
+        class Cut:
+            def read(self, *_a):
+                raise LAUNCHER.http.client.IncompleteRead(b'[', 5000)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+        with patch.object(LAUNCHER.urllib.request, 'urlopen', lambda *_a, **_k: Cut()):
+            with self.assertRaises(OSError):
+                LAUNCHER.github_json('https://example/releases')
+
     def test_version_ordering_is_numeric(self):
         names = [n for n, *_r in LAUNCHER.release_choices([release('v0.3.6.9'), release('v0.3.6.100'),
                                                             release('v0.3.6.57')], oldest=(0, 3, 6))]
