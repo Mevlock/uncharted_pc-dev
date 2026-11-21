@@ -55,22 +55,22 @@ class ShaderPackTests(unittest.TestCase):
 
     def test_marker_counts_for_its_pack(self):
         write_pack(self.folder, 0xABC)
-        self.marker('1234\npack 0000000000000abc\n')
+        self.marker(f'1234 cache {LAUNCHER.SHADER_CACHE_VERSIONS}\npack 0000000000000abc\n')
         self.assertTrue(LAUNCHER.shaders_prepared({}, 'u3'))
 
     def test_marker_with_clip_jitter_words(self):
         write_pack(self.folder, 0xABC)
-        self.marker('1234 clip-jitter 3\npack 0000000000000abc\n')
+        self.marker(f'1234 clip-jitter 3 cache {LAUNCHER.SHADER_CACHE_VERSIONS}\npack 0000000000000abc\n')
         self.assertTrue(LAUNCHER.shaders_prepared({}, 'u3'))
 
     def test_marker_of_another_pack_does_not_count(self):
         write_pack(self.folder, 0xDEF)  # cleared, or damaged records dropped: a new id
-        self.marker('1234\npack 0000000000000abc\n')
+        self.marker(f'1234 cache {LAUNCHER.SHADER_CACHE_VERSIONS}\npack 0000000000000abc\n')
         self.assertFalse(LAUNCHER.shaders_prepared({}, 'u3'))
 
     def test_marker_of_another_list_does_not_count(self):
         write_pack(self.folder, 0xABC)
-        self.marker('999\npack 0000000000000abc\n')
+        self.marker(f'999 cache {LAUNCHER.SHADER_CACHE_VERSIONS}\npack 0000000000000abc\n')
         self.assertFalse(LAUNCHER.shaders_prepared({}, 'u3'))
 
     def test_folder_cache_before_the_move_counts(self):
@@ -82,6 +82,11 @@ class ShaderPackTests(unittest.TestCase):
         (self.folder / 'profile.bin').write_bytes(b'p')  # left from the move, not yet removed
         write_pack(self.folder, 0xABC)
         self.marker('1234\n')
+        self.assertFalse(LAUNCHER.shaders_prepared({}, 'u3'))
+
+    def test_marker_without_cache_versions_does_not_count(self):
+        write_pack(self.folder, 0xABC)
+        self.marker('1234\npack 0000000000000abc\n')
         self.assertFalse(LAUNCHER.shaders_prepared({}, 'u3'))
 
     def test_no_marker(self):
