@@ -1099,7 +1099,7 @@ void Translator::V_RCP_LEGACY_F32(const GcnInst& inst) {
     const auto result = ir.FPRecip(src0);
     const auto inf = ir.FPIsInf(result);
 
-    const auto raw_result = ir.ConvertFToU(32, result);
+    const auto raw_result = ir.BitCast<IR::U32>(IR::F32{result});
     const auto sign_bit = ir.ShiftRightLogical(raw_result, ir.Imm32(31u));
     const auto sign_bit_set = ir.INotEqual(sign_bit, ir.Imm32(0u));
     const IR::F32 inf_result{ir.Select(sign_bit_set, ir.Imm32(-0.0f), ir.Imm32(0.0f))};
