@@ -263,6 +263,23 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(LAUNCHER.folder_size(self.versions), 0)
         LAUNCHER.remove_backups(self.versions)  # nothing left: no error
 
+    def test_read_only_files_are_removed_too(self):
+        make_release(self.versions / '0.3.6.64', '0.3.6.64')
+        make_release(self.versions / '0.3.6.62', '0.3.6.62')
+        os.utime(self.versions / '0.3.6.62', (time.time() - 100, time.time() - 100))
+        for version in ('0.3.6.64', '0.3.6.62'):
+            os.chmod(self.versions / version / 'bin' / 'bin.txt', 0o444)
+        LAUNCHER.prune_backups(self.versions)
+        self.assertEqual(sorted(p.name for p in self.versions.iterdir()), ['0.3.6.64'])
+        LAUNCHER.remove_backups(self.versions)
+        self.assertFalse(self.versions.exists())
+
+    def test_folder_empty(self):
+        self.assertTrue(LAUNCHER.folder_empty(self.versions))
+        self.assertTrue(LAUNCHER.folder_empty(self.versions / 'missing'))
+        (self.versions / 'half').mkdir()
+        self.assertFalse(LAUNCHER.folder_empty(self.versions))
+
     def test_no_versions_folder(self):
         self.assertEqual(LAUNCHER.version_backups(self.versions / 'missing'), [])
         LAUNCHER.prune_backups(self.versions / 'missing')

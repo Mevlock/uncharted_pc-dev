@@ -19,6 +19,7 @@ import queue
 import re
 import runpy
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -2640,10 +2641,11 @@ class Launcher:
                                           wraplength=self.px(640))
         self.version_note.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(8, 0))
         # Back to <version> for the kept release (not one of the installed version, which an update can leave),
-        # and Remove backups for the whole versions/ folder; neither shows without a backup.
+        # and Remove backups for the whole versions/ folder; neither shows with versions/ empty (Remove backups also
+        # shows for what is left there that is no whole backup).
         kept = version_backups()
         self.version_backup_buttons, self.remove_backups_button = [], None
-        if kept:
+        if kept or not folder_empty(VERSIONS_DIR):
             self.backups_holder = self.tk.Frame(card, bg=CARD)
             self.backups_holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(4, 0))
             for version, path in [(v, b) for v, b in kept if v != backup_folder_name(VERSION)][:KEEP_BACKUPS]:
@@ -3803,9 +3805,29 @@ def prune_backups(folder=None, keep=KEEP_BACKUPS):
         if path in kept:
             continue
         if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
+            remove_tree(path, ignore_errors=True)
         else:
             path.unlink(missing_ok=True)
+
+
+def folder_empty(folder):
+    """Whether folder has nothing in it (or is not there)."""
+    try:
+        return not any(Path(folder).iterdir())
+    except OSError:
+        return True
+
+
+def remove_tree(folder, ignore_errors=False):
+    """shutil.rmtree that also deletes read-only files (shutil.rmtree stops at one with access denied)."""
+    def writable(function, path, _error):
+        os.chmod(path, stat.S_IWRITE)
+        function(path)
+    try:
+        shutil.rmtree(folder, onexc=writable)
+    except OSError:
+        if not ignore_errors:
+            raise
 
 
 def folder_size(folder):
@@ -3824,7 +3846,7 @@ def remove_backups(folder=None):
     """Deletes versions/ with every release kept in it; raises when something in it could not be deleted."""
     folder = Path(folder or VERSIONS_DIR)
     if folder.exists():
-        shutil.rmtree(folder)
+        remove_tree(folder)
 
 
 def same_drive(a, b):
@@ -3845,7 +3867,7 @@ def stage_release(source, versions):
     if same_drive(source, versions):
         return source
     staged = versions / INCOMING_DIR
-    shutil.rmtree(staged, ignore_errors=True)  # what a switch stopped partway left
+    remove_tree(staged, ignore_errors=True)  # what a switch stopped partway left
     try:
         staged.mkdir()
         for entry in source.iterdir():
@@ -3877,7 +3899,7 @@ def switch_files(target, source, backup):
     leaving = sorted((name for name in set(PROGRAM_FILES) | set(incoming)
                       if name not in SWITCH_KEEP and (target / name).exists()), key=last)
     if backup.exists():
-        shutil.rmtree(backup)  # an earlier backup of the same release
+        remove_tree(backup)  # an earlier backup of the same release
     backup.mkdir(parents=True)
     moved, arrived = [], []
     try:
