@@ -1,11 +1,13 @@
 """Advanced > Version (the release list, the switch's file moves and backups) and the log folder, with temporary
 folders: no window, no download, no game."""
 import importlib.util
+import io
 import os
 import shutil
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -287,6 +289,68 @@ class BackupTests(unittest.TestCase):
     def test_backup_folder_names(self):
         self.assertEqual(LAUNCHER.backup_folder_name('0.3.6.58.1-test-reflex'), '0.3.6.58.1-test-reflex')
         self.assertEqual(LAUNCHER.backup_folder_name('0.3.6.65 (local)'), '0.3.6.65__local_')
+
+
+class FakeResponse:
+    """urlopen's answer: body, with a Content-Length of length (the whole body by default)."""
+    def __init__(self, body, length=None):
+        self.body, self.headers = io.BytesIO(body), {'Content-Length': str(len(body) if length is None else length)}
+
+    def read(self, size=-1):
+        return self.body.read(size)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def release_zip_bytes():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as package:
+        package.writestr('uncharted-windows/Uncharted.exe', b'launcher')
+        package.writestr('uncharted-windows/bin/big.dll', os.urandom(1 << 16) + b'x' * (1 << 18))
+    return buffer.getvalue()
+
+
+class DownloadTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.temp, True)
+        self.update_dir = self.temp / 'uncharted-update'
+        patcher = patch.object(LAUNCHER, 'UPDATE_DIR', self.update_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def download(self, response):
+        with patch.object(LAUNCHER.urllib.request, 'urlopen', lambda *_a, **_k: response):
+            return LAUNCHER.download_release('https://example/release.zip', lambda _percent: None)
+
+    def test_a_whole_download(self):
+        new = self.download(FakeResponse(release_zip_bytes()))
+        self.assertEqual((new / 'Uncharted.exe').read_bytes(), b'launcher')
+        self.assertFalse((self.update_dir / 'update.zip').exists())
+
+    def test_a_damaged_zip_is_an_oserror_and_leaves_nothing(self):
+        data = bytearray(release_zip_bytes())
+        start = data.find(b'big.dll') + len(b'big.dll') + 2000
+        data[start:start + 200] = bytes(200)  # deflate data of a member overwritten (zlib.error, not BadZipFile)
+        with self.assertRaises(OSError):
+            self.download(FakeResponse(bytes(data)))
+        self.assertFalse(self.update_dir.exists())
+
+    def test_a_cut_download_says_so_and_leaves_nothing(self):
+        data = release_zip_bytes()
+        with self.assertRaises(OSError) as raised:
+            self.download(FakeResponse(data[:len(data) // 2], length=len(data)))
+        self.assertIn('stopped', str(raised.exception))
+        self.assertFalse(self.update_dir.exists())
+
+    def test_not_a_zip(self):
+        with self.assertRaises(OSError):
+            self.download(FakeResponse(b'<html>rate limited</html>'))
+        self.assertFalse(self.update_dir.exists())
 
 
 class LogLocationTests(unittest.TestCase):

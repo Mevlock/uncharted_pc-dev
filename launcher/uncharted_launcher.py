@@ -12,6 +12,7 @@ needs no Python installation.
 """
 import copy
 import ctypes
+import http.client
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,7 @@ import time
 import urllib.request
 import webbrowser
 import zipfile
+import zlib
 
 FROZEN = getattr(sys, 'frozen', False)
 PORT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
@@ -3738,27 +3740,41 @@ def release_choices(releases, test_builds=False, oldest=OLDEST_SWITCH_VERSION):
 
 def download_release(url, progress):
     """Downloads a release's zip into UPDATE_DIR and unpacks it there; returns the folder that holds its
-    Uncharted.exe. progress(percent) is called on this thread as the download goes on."""
+    Uncharted.exe. progress(percent) is called on this thread as the download goes on. Every failure is an OSError
+    (a cut connection, a damaged zip: zlib.error, EOFError and http.client errors are not) and leaves nothing in
+    UPDATE_DIR."""
     shutil.rmtree(UPDATE_DIR, ignore_errors=True)
-    UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-    archive = UPDATE_DIR / 'update.zip'
-    request = urllib.request.Request(url, headers={'User-Agent': 'uncharted-launcher'})
-    with urllib.request.urlopen(request, timeout=60) as response, open(archive, 'wb') as out:
-        total, done, shown = int(response.headers.get('Content-Length') or 0), 0, -1
-        while chunk := response.read(1 << 20):
-            out.write(chunk)
-            done += len(chunk)
-            percent = done * 100 // total if total else 0
-            if percent != shown:
-                shown = percent
-                progress(percent)
-    with zipfile.ZipFile(archive) as package:
-        package.extractall(UPDATE_DIR / 'new')
-    archive.unlink()
-    new = next((p.parent for p in (UPDATE_DIR / 'new').rglob('Uncharted.exe')), None)
-    if not new:
-        raise OSError('Uncharted.exe is missing from the download')
-    return new
+    try:
+        UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+        archive = UPDATE_DIR / 'update.zip'
+        request = urllib.request.Request(url, headers={'User-Agent': 'uncharted-launcher'})
+        with urllib.request.urlopen(request, timeout=60) as response, open(archive, 'wb') as out:
+            total, done, shown = int(response.headers.get('Content-Length') or 0), 0, -1
+            while chunk := response.read(1 << 20):
+                out.write(chunk)
+                done += len(chunk)
+                percent = done * 100 // total if total else 0
+                if percent != shown:
+                    shown = percent
+                    progress(percent)
+        if total and done != total:  # the connection ended early (read returns no error for that)
+            raise OSError(f'the download stopped after {done >> 20} of {total >> 20} MB')
+        try:
+            with zipfile.ZipFile(archive) as package:
+                package.extractall(UPDATE_DIR / 'new')
+        except (zipfile.BadZipFile, zlib.error, EOFError, ValueError) as error:
+            raise OSError(f'the download is damaged ({error})') from error
+        archive.unlink()
+        new = next((p.parent for p in (UPDATE_DIR / 'new').rglob('Uncharted.exe')), None)
+        if not new:
+            raise OSError('Uncharted.exe is missing from the download')
+        return new
+    except http.client.HTTPException as error:
+        shutil.rmtree(UPDATE_DIR, ignore_errors=True)
+        raise OSError(f'the download stopped ({error!r})') from error
+    except BaseException:
+        shutil.rmtree(UPDATE_DIR, ignore_errors=True)
+        raise
 
 
 def wait_for_process(pid):
