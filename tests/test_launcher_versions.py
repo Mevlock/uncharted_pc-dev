@@ -443,5 +443,15 @@ class LogLocationTests(unittest.TestCase):
             self.assertEqual(LAUNCHER.log_location({}), (self.temp / 'user', self.temp / 'user' / 'last_run.log'))
 
 
+    def test_open_log_folder_on_a_missing_drive_says_why(self):
+        shown = []
+        launcher = LAUNCHER.Launcher.__new__(LAUNCHER.Launcher)
+        launcher.messagebox = type('Box', (), {'showerror': staticmethod(lambda *a: shown.append(a))})
+        missing = self.temp / 'file'
+        missing.write_text('a file, not a folder')
+        launcher.app = {'user_dir': str(missing / 'saves')}  # mkdir fails as on a drive that is not there
+        launcher.open_log_folder()
+        self.assertEqual(len(shown), 1)
+
 if __name__ == '__main__':
     unittest.main()

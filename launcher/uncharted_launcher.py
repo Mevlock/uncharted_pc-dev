@@ -3362,11 +3362,14 @@ class Launcher:
     def open_log_folder(self):
         """The folder of last_run.log in Explorer, the log selected when there is one."""
         folder, log = log_location(self.app)
-        if log:
-            subprocess.Popen(f'explorer /select,"{log.resolve()}"')
-        else:
-            folder.mkdir(parents=True, exist_ok=True)
-            os.startfile(str(folder))
+        try:
+            if log:
+                subprocess.Popen(f'explorer /select,"{log.resolve()}"')
+            else:
+                folder.mkdir(parents=True, exist_ok=True)
+                os.startfile(str(folder))
+        except OSError as error:  # a saves folder on a drive that is not there (an unplugged USB drive)
+            self.messagebox.showerror(NAME, str(error))
 
     def copy_log(self):
         self.root.clipboard_clear()
