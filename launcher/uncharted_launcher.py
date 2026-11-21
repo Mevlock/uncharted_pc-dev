@@ -1979,10 +1979,9 @@ class Launcher:
                    'lowers the rate: a limit at or above what the frame rate (and frame generation) give '
                    'changes nothing. Lower it for a steadier picture on a slower PC or to save power.'))
         self.row(f, _('Frame pacing'), self.choice(f, 'frame_pacing', FRAME_PACING, 34),
-                 _("Shows each frame at an even moment and moves the game's world by those same steps, for "
-                   "smoother motion. Balanced suits most PCs. Smoothest has the graphics card itself wait for "
-                   "each frame's moment, for the most even timing, but keeps the card busier and can cost frames "
-                   "on a card near its limit. Off shows each frame as soon as it is ready."))
+                 _("Shows frames at even intervals for smoother motion. Off: as before. Balanced: a small extra "
+                   "GPU load. Smoothest: the smoothest, but keeps the GPU busy and uses more power; best on "
+                   "desktop PCs."))
         self.row(f, _('Idle game threads'), self.choice(f, 'job_threads', JOB_THREADS, 34),
                  _('Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them '
                    '(best for 4-8 thread CPUs) and is just as smooth.'))

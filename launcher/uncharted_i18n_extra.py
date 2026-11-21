@@ -327,8 +327,8 @@ EXTRA_TRANSLATIONS = {
         'Frame pacing': 'Bildtaktung',
         'Balanced': 'Ausgewogen',
         'Smoothest (uses more GPU)': 'Am gleichmäßigsten (mehr GPU-Last)',
-        "Shows each frame at an even moment and moves the game's world by those same steps, for smoother motion. Balanced suits most PCs. Smoothest has the graphics card itself wait for each frame's moment, for the most even timing, but keeps the card busier and can cost frames on a card near its limit. Off shows each frame as soon as it is ready.":
-            'Zeigt jedes Bild zu einem gleichmäßigen Zeitpunkt und bewegt die Spielwelt in denselben Schritten, für flüssigere Bewegungen. Ausgewogen passt für die meisten PCs. Am gleichmäßigsten lässt die Grafikkarte selbst auf den Zeitpunkt jedes Bildes warten, für den gleichmäßigsten Takt, hält die Karte aber stärker beschäftigt und kann auf einer Karte an ihrer Grenze Bilder kosten. Aus zeigt jedes Bild, sobald es fertig ist.',
+        "Shows frames at even intervals for smoother motion. Off: as before. Balanced: a small extra GPU load. Smoothest: the smoothest, but keeps the GPU busy and uses more power; best on desktop PCs.":
+            'Zeigt die Bilder in gleichmäßigen Abständen für flüssigere Bewegungen. Aus: wie bisher. Ausgewogen: etwas mehr GPU-Last. Am gleichmäßigsten: am flüssigsten, hält die GPU aber beschäftigt und braucht mehr Strom; am besten auf Desktop-PCs.',
         "1920 × 1080 (the games' own)": '1920 × 1080 (Original der Spiele)',
         "1920 × 1080 (the game's own)": '1920 × 1080 (Original des Spiels)',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': 'Automatisch (nativ; 1920 × 1080 bei Karten mit 6 GB oder weniger)',
@@ -775,8 +775,8 @@ EXTRA_TRANSLATIONS = {
         'Frame pacing': 'Cadenza dei fotogrammi',
         'Balanced': 'Bilanciata',
         'Smoothest (uses more GPU)': 'La più fluida (usa più GPU)',
-        "Shows each frame at an even moment and moves the game's world by those same steps, for smoother motion. Balanced suits most PCs. Smoothest has the graphics card itself wait for each frame's moment, for the most even timing, but keeps the card busier and can cost frames on a card near its limit. Off shows each frame as soon as it is ready.":
-            'Mostra ogni fotogramma a intervalli regolari e muove il mondo di gioco con gli stessi passi, per un movimento più fluido. Bilanciata va bene per la maggior parte dei PC. La più fluida fa attendere alla scheda grafica stessa il momento di ogni fotogramma, per la cadenza più regolare, ma la tiene più occupata e può costare fotogrammi su una scheda al suo limite. Disattivo mostra ogni fotogramma appena è pronto.',
+        "Shows frames at even intervals for smoother motion. Off: as before. Balanced: a small extra GPU load. Smoothest: the smoothest, but keeps the GPU busy and uses more power; best on desktop PCs.":
+            'Mostra i fotogrammi a intervalli regolari per un movimento più fluido. Disattivata: come prima. Bilanciata: un piccolo carico in più sulla GPU. La più fluida: la più fluida, ma tiene occupata la GPU e consuma più energia; ideale sui PC desktop.',
         "1920 × 1080 (the games' own)": '1920 × 1080 (originale dei giochi)',
         "1920 × 1080 (the game's own)": '1920 × 1080 (originale del gioco)',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': 'Automatica (nativa; 1920 × 1080 su schede con 6 GB o meno)',
@@ -1217,8 +1217,8 @@ EXTRA_TRANSLATIONS = {
         'Frame pacing': 'フレームペーシング',
         'Balanced': 'バランス',
         'Smoothest (uses more GPU)': '最もなめらか（GPU 負荷が増える）',
-        "Shows each frame at an even moment and moves the game's world by those same steps, for smoother motion. Balanced suits most PCs. Smoothest has the graphics card itself wait for each frame's moment, for the most even timing, but keeps the card busier and can cost frames on a card near its limit. Off shows each frame as soon as it is ready.":
-            '各フレームを均等なタイミングで表示し、ゲームの世界も同じ間隔で進めるため、動きがなめらかになります。ほとんどの PC にはバランスが適しています。最もなめらかはグラフィックカード自体に各フレームのタイミングまで待たせるため最も均等になりますが、カードの負荷が増え、限界に近いカードではフレームレートが下がることがあります。オフでは各フレームを準備でき次第表示します。',
+        "Shows frames at even intervals for smoother motion. Off: as before. Balanced: a small extra GPU load. Smoothest: the smoothest, but keeps the GPU busy and uses more power; best on desktop PCs.":
+            'フレームを等間隔で表示し、動きをなめらかにします。オフ：従来どおり。バランス：GPU 負荷がわずかに増えます。最もなめらか：最もなめらかですが、GPU が常に稼働し消費電力が増えます。デスクトップ PC 向け。',
         "1920 × 1080 (the games' own)": '1920 × 1080（ゲーム本来）',
         "1920 × 1080 (the game's own)": '1920 × 1080（ゲーム本来）',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': '自動（ネイティブ、6 GB 以下のグラフィックカードでは 1920 × 1080）',
@@ -1564,8 +1564,8 @@ EXTRA_TRANSLATIONS = {
         'Frame pacing': 'Ritmo de fotogramas',
         'Balanced': 'Equilibrado',
         'Smoothest (uses more GPU)': 'Lo más fluido (usa más GPU)',
-        "Shows each frame at an even moment and moves the game's world by those same steps, for smoother motion. Balanced suits most PCs. Smoothest has the graphics card itself wait for each frame's moment, for the most even timing, but keeps the card busier and can cost frames on a card near its limit. Off shows each frame as soon as it is ready.":
-            'Muestra cada fotograma en un momento regular y mueve el mundo del juego con esos mismos pasos, para un movimiento más fluido. Equilibrado va bien en la mayoría de los PC. Lo más fluido hace que la propia tarjeta gráfica espere el momento de cada fotograma, para el ritmo más regular, pero la mantiene más ocupada y puede costar fotogramas en una tarjeta al límite. Desactivado muestra cada fotograma en cuanto está listo.',
+        "Shows frames at even intervals for smoother motion. Off: as before. Balanced: a small extra GPU load. Smoothest: the smoothest, but keeps the GPU busy and uses more power; best on desktop PCs.":
+            'Muestra los fotogramas a intervalos regulares para un movimiento más fluido. Desactivado: como antes. Equilibrado: un poco más de carga en la GPU. Lo más fluido: lo más fluido, pero mantiene ocupada la GPU y consume más energía; ideal en PC de escritorio.',
         "1920 × 1080 (the games' own)": '1920 × 1080 (original de los juegos)',
         "1920 × 1080 (the game's own)": '1920 × 1080 (original del juego)',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': 'Automática (nativa; 1920 × 1080 en tarjetas con 6 GB o menos)',
@@ -1912,8 +1912,8 @@ EXTRA_TRANSLATIONS = {
         'Frame pacing': 'Ritmo de quadros',
         'Balanced': 'Equilibrado',
         'Smoothest (uses more GPU)': 'Mais suave (usa mais GPU)',
-        "Shows each frame at an even moment and moves the game's world by those same steps, for smoother motion. Balanced suits most PCs. Smoothest has the graphics card itself wait for each frame's moment, for the most even timing, but keeps the card busier and can cost frames on a card near its limit. Off shows each frame as soon as it is ready.":
-            'Mostra cada quadro num momento regular e move o mundo do jogo com esses mesmos passos, para um movimento mais suave. Equilibrado serve para a maioria dos PCs. Mais suave faz a própria placa de vídeo esperar o momento de cada quadro, para o ritmo mais regular, mas a deixa mais ocupada e pode custar quadros numa placa no limite. Desligado mostra cada quadro assim que fica pronto.',
+        "Shows frames at even intervals for smoother motion. Off: as before. Balanced: a small extra GPU load. Smoothest: the smoothest, but keeps the GPU busy and uses more power; best on desktop PCs.":
+            'Mostra os quadros em intervalos regulares para um movimento mais suave. Desligado: como antes. Equilibrado: um pouco mais de carga na GPU. Mais suave: o mais suave, mas mantém a GPU ocupada e consome mais energia; ideal em PCs de mesa.',
         "1920 × 1080 (the games' own)": '1920 × 1080 (original dos jogos)',
         "1920 × 1080 (the game's own)": '1920 × 1080 (original do jogo)',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': 'Automática (nativa; 1920 × 1080 em placas com 6 GB ou menos)',
@@ -2261,8 +2261,8 @@ EXTRA_TRANSLATIONS = {
         'Frame pacing': 'Cadence des images',
         'Balanced': 'Équilibrée',
         'Smoothest (uses more GPU)': 'La plus fluide (sollicite plus le GPU)',
-        "Shows each frame at an even moment and moves the game's world by those same steps, for smoother motion. Balanced suits most PCs. Smoothest has the graphics card itself wait for each frame's moment, for the most even timing, but keeps the card busier and can cost frames on a card near its limit. Off shows each frame as soon as it is ready.":
-            "Affiche chaque image à un moment régulier et fait avancer le monde du jeu par ces mêmes pas, pour un mouvement plus fluide. Équilibrée convient à la plupart des PC. La plus fluide fait attendre la carte graphique elle-même jusqu'au moment de chaque image, pour la cadence la plus régulière, mais la sollicite davantage et peut coûter des images sur une carte à sa limite. Désactivé affiche chaque image dès qu'elle est prête.",
+        "Shows frames at even intervals for smoother motion. Off: as before. Balanced: a small extra GPU load. Smoothest: the smoothest, but keeps the GPU busy and uses more power; best on desktop PCs.":
+            'Affiche les images à intervalles réguliers pour un mouvement plus fluide. Désactivée : comme avant. Équilibrée : une petite charge GPU en plus. La plus fluide : la plus fluide, mais occupe le GPU en permanence et consomme plus ; idéale sur PC de bureau.',
         "1920 × 1080 (the games' own)": '1920 × 1080 (d’origine)',
         "1920 × 1080 (the game's own)": '1920 × 1080 (d’origine)',
         'Automatic (native; 1920 × 1080 on cards with 6 GB or less)': 'Automatique (native ; 1920 × 1080 sur les cartes de 6 Go ou moins)',
@@ -2749,8 +2749,8 @@ EXTRA_TRANSLATIONS = {
         'Frame pacing': 'Равномерность кадров',
         'Balanced': 'Сбалансированно',
         'Smoothest (uses more GPU)': 'Максимально плавно (больше нагрузка на GPU)',
-        "Shows each frame at an even moment and moves the game's world by those same steps, for smoother motion. Balanced suits most PCs. Smoothest has the graphics card itself wait for each frame's moment, for the most even timing, but keeps the card busier and can cost frames on a card near its limit. Off shows each frame as soon as it is ready.":
-            'Показывает каждый кадр в равномерный момент и двигает игровой мир теми же шагами, чтобы движение было плавнее. «Сбалансированно» подходит для большинства ПК. «Максимально плавно» заставляет саму видеокарту ждать момента каждого кадра — так ритм ровнее всего, но видеокарта загружена сильнее и на карте у своего предела может терять кадры. «Выкл.» показывает каждый кадр, как только он готов.',
+        "Shows frames at even intervals for smoother motion. Off: as before. Balanced: a small extra GPU load. Smoothest: the smoothest, but keeps the GPU busy and uses more power; best on desktop PCs.":
+            'Показывает кадры через равные промежутки для более плавного движения. Выкл.: как раньше. Сбалансированно: небольшая дополнительная нагрузка на GPU. Максимально плавно: самое плавное, но GPU всё время занят и потребляет больше энергии; лучше для настольных ПК.',
         'Speed': 'Скорость',
         'Spin (smoothest camera)': 'Ожидание в цикле (самая плавная камера)',
         'Spinning keeps several CPU cores busy while the game waits for work. Sleeping saves them (best for 4-8 thread CPUs) and is just as smooth.': 'Ожидание в цикле занимает несколько ядер процессора, пока игра ждёт работы. Сон экономит их (лучше всего для процессоров с 4-8 потоками) и так же плавен.',
