@@ -469,9 +469,11 @@ def shader_cache_dirs(s, key):
 
 def shaders_prepared(s, key):
     """True when the game left a marker for the current list (its size in it), False when not, None with no list.
-    The marker's line may go on after the size: AMD and Intel graphics write '<size> clip-jitter <version>' (the
-    upscaler jitter in the vertex shaders changes their pipelines). Comparing the whole line, the launcher said 'not
-    prepared yet' on those cards after every preparation while the game itself found the marker."""
+    The marker's line goes on after the size: '[clip-jitter <version>] cache <shader cache versions>' (AMD and Intel
+    graphics put the upscaler jitter into the vertex shaders, which changes their pipelines; a new cache version makes
+    the stored shaders unusable). The game compares the whole line and prepares again once on the page when it
+    differs; the launcher compares the size only (comparing the whole line, it said 'not prepared yet' on AMD and
+    Intel cards after every preparation while the game itself found the marker)."""
     lists = shader_list(key)
     if not lists:
         return None
