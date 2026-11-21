@@ -282,6 +282,12 @@ class PillButton:
     def grid(self, **kw):
         self.canvas.grid(**kw)
 
+    def pack_forget(self):
+        self.canvas.pack_forget()
+
+    def grid_remove(self):
+        self.canvas.grid_remove()
+
     def lift(self):
         self.canvas.lift()
 
