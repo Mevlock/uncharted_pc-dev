@@ -1715,6 +1715,11 @@ void PipelineCache::WarmUpThread() {
         if (Shader::ClipJitter::enabled) {
             prepared_stamp += " clip-jitter " + std::to_string(Shader::ClipJitter::Version);
         }
+        // A new shader cache version makes every stored shader or pipeline key unusable: a cache prepared with
+        // another version is prepared again once, on the page, instead of behind the game.
+        prepared_stamp += " cache " + std::to_string(Serialization::ShaderBinaryVersion) + "." +
+                          std::to_string(Serialization::ShaderMetaVersion) + "." +
+                          std::to_string(Serialization::PipelineKeyVersion);
     }
     // BB_PREPARE_ONLY=1 (the launcher's Prepare shaders button): no window and no game, the progress goes to the
     // launcher (PrepareShadersWithoutWindow); preparation runs at full speed as on the page.
