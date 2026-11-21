@@ -185,6 +185,33 @@ class SwitchFileTests(unittest.TestCase):
         self.assertEqual({k: v for k, v in tree(self.install).items()}, original)
         self.assertFalse((self.install / 'versions' / LAUNCHER.INCOMING_DIR).exists())
 
+    def test_a_half_deleted_backup_is_no_backup_and_is_refused(self):
+        backup = make_release(self.install / 'versions' / '0.3.6.64', '0.3.6.64')
+        shutil.rmtree(backup / '_internal')  # Uncharted.exe is there, but it cannot start
+        self.assertEqual(LAUNCHER.version_backups(self.install / 'versions'), [])
+        original = tree(self.install)
+        with self.assertRaises(OSError):
+            LAUNCHER.switch_files(self.install, backup, self.install / 'versions' / '0.3.6.65')
+        self.assertEqual(tree(self.install), original)
+
+    def test_a_switch_stopped_partway_leaves_no_backup_that_counts(self):
+        old = make_release(self.temp / 'download', '0.3.6.64')
+        real_rename, calls = os.rename, []
+
+        class Stopped(BaseException):  # the process ended: no rollback
+            pass
+
+        def stopping(src, dst):
+            calls.append(src)
+            if Path(src).name == 'Uncharted.exe':
+                raise Stopped
+            return real_rename(src, dst)
+        with patch.object(LAUNCHER.os, 'rename', stopping), self.assertRaises(Stopped):
+            LAUNCHER.switch_files(self.install, old, self.install / 'versions' / '0.3.6.65')
+        self.assertEqual(Path(calls[-1]).name, 'Uncharted.exe')
+        self.assertTrue((self.install / 'versions' / '0.3.6.65' / '_internal').is_dir())  # all else moved first
+        self.assertEqual(LAUNCHER.version_backups(self.install / 'versions'), [])
+
     def test_a_source_without_the_launcher_is_refused(self):
         empty = self.temp / 'empty'
         (empty / 'bin').mkdir(parents=True)

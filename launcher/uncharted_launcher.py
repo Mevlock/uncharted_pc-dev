@@ -66,6 +66,8 @@ OLDEST_SWITCH_VERSION = (0, 3, 6, 57)
 VERSIONS_DIR = PORT_DIR / 'versions'
 # versions/.incoming: a downloaded release copied to the installation's drive before a switch (%TEMP% on another).
 INCOMING_DIR = '.incoming'
+# What a release needs to start (every package has them): a kept backup or a source without one of them is not whole.
+WHOLE_RELEASE = ('Uncharted.exe', '_internal', 'bin')
 KEEP_BACKUPS = 1
 # The first release with Advanced > Version: an older one comes back to the newest through its Update button.
 FIRST_SWITCH_VERSION = (0, 3, 6, 65)
@@ -3772,15 +3774,21 @@ def backup_folder_name(version):
 
 
 def version_backups(folder=None):
-    """[(version, path)] of the releases kept in versions/, the most recently left first. Only a folder that holds
-    an Uncharted.exe counts (not one a failed switch left half made)."""
+    """[(version, path)] of the releases kept in versions/, the most recently left first. Only a whole one counts
+    (whole_release: not one a stopped switch or a deletion left half made)."""
     folder = Path(folder or VERSIONS_DIR)
     try:
-        found = [p for p in folder.iterdir() if p.is_dir() and p.name != INCOMING_DIR
-                 and (p / 'Uncharted.exe').is_file()]
+        found = [p for p in folder.iterdir() if p.is_dir() and p.name != INCOMING_DIR and whole_release(p)]
     except OSError:
         return []
     return [(p.name, p) for p in sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)]
+
+
+def whole_release(folder):
+    """Whether folder holds what a release needs to start (WHOLE_RELEASE). switch_files moves Uncharted.exe last,
+    so a backup it stopped making partway has none."""
+    folder = Path(folder)
+    return (folder / 'Uncharted.exe').is_file() and all((folder / name).is_dir() for name in WHOLE_RELEASE[1:])
 
 
 def prune_backups(folder=None, keep=KEEP_BACKUPS):
@@ -3860,11 +3868,14 @@ def switch_files(target, source, backup):
     use, and then deleted it from target partway). On a failure every moved entry goes back where it was and the error
     is raised, so target holds one whole release either way. source is removed once empty."""
     target, source, backup = Path(target), Path(source), Path(backup)
-    incoming = sorted(p.name for p in source.iterdir() if p.name not in SWITCH_KEEP)
-    if 'Uncharted.exe' not in incoming:
-        raise OSError(f'Uncharted.exe is missing from {source}')
-    leaving = sorted(name for name in set(PROGRAM_FILES) | set(incoming)
-                     if name not in SWITCH_KEEP and (target / name).exists())
+    if not whole_release(source):
+        missing = [name for name in WHOLE_RELEASE if not (source / name).exists()]
+        raise OSError(f"{', '.join(missing) or 'Uncharted.exe'} is missing from {source}")
+    # Uncharted.exe moves last: a backup a stopped switch left half made has none (whole_release).
+    last = lambda name: (name == 'Uncharted.exe', name)  # noqa: E731
+    incoming = sorted((p.name for p in source.iterdir() if p.name not in SWITCH_KEEP), key=last)
+    leaving = sorted((name for name in set(PROGRAM_FILES) | set(incoming)
+                      if name not in SWITCH_KEEP and (target / name).exists()), key=last)
     if backup.exists():
         shutil.rmtree(backup)  # an earlier backup of the same release
     backup.mkdir(parents=True)
