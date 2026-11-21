@@ -119,8 +119,9 @@ FRAME_RATES = [('60', '60 FPS (as on PS4)'), ('120', '120 FPS'), ('144', '144 FP
 # 30 or 45 for a slower PC or a laptop on battery, 90 for a 90 Hz screen.
 # The game's idle job threads (BB_JOB_SLEEP): spinning keeps the camera smooth; sleeping saves CPU.
 # Even presents (vk_low_latency.cpp): each frame shown at an even moment, the world stepped by the same
-# steps. Balanced: the port's default (short GPU holds, BB_EVEN_RELEASE=4); Smoothest: the full GPU hold
-# (BB_EVEN_RELEASE=1); Off: BB_EVEN_PRESENT=0. The Environment field still wins over it.
+# steps. Off (the default setting): BB_EVEN_PRESENT=0, each frame shown as soon as it is ready; Balanced:
+# BB_EVEN_PRESENT=1 with the game's short GPU holds (BB_EVEN_RELEASE=4 when unset); Smoothest: also the full GPU
+# hold (BB_EVEN_RELEASE=1). Every choice sets BB_EVEN_PRESENT; the Environment field still wins over it.
 FRAME_PACING = [('balanced', 'Balanced'), ('smoothest', 'Smoothest (uses more GPU)'), ('off', 'Off')]
 # Even presents are off in the game unless BB_EVEN_PRESENT=1 (opt-in); Smoothest adds the full GPU hold.
 FRAME_PACING_ENV = {'balanced': (('BB_EVEN_PRESENT', '1'),),
@@ -3902,7 +3903,13 @@ def version_backups(folder=None):
         found = [p for p in folder.iterdir() if p.is_dir() and p.name != INCOMING_DIR and whole_release(p)]
     except OSError:
         return []
-    return [(release_name(p) or p.name, p) for p in sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)]
+
+    def left(path):  # one deleted since the listing sorts last (version_backups runs while the page is built)
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0
+    return [(release_name(p) or p.name, p) for p in sorted(found, key=left, reverse=True)]
 
 
 def whole_release(folder):
