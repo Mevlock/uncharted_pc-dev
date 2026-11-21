@@ -53,10 +53,25 @@ VERSION = '0.3.6.65'  # fork: upstream 0.3.6 + this fork's changes
 # Fork: updates come from this fork's own releases (the latest one; -pre tags are published as normal releases).
 RELEASES_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases/latest'
 RELEASES_PAGE = 'https://github.com/Mevlock/uncharted_pc-dev/releases/latest'
+# Every release (Advanced > Version): the same repository's list, newest 100.
+RELEASES_LIST_API = 'https://api.github.com/repos/Mevlock/uncharted_pc-dev/releases?per_page=100'
 UPDATES = True
 UPDATE_DIR = Path(tempfile.gettempdir()) / 'uncharted-update'
 # Never copied over an installation by an update (the package does not hold them either).
 USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log', 'launcher_settings.json')
+# Advanced > Version: other releases of the port, none older than OLDEST_SWITCH_VERSION. The release left is kept
+# in versions/<version> next to the launcher (the KEEP_BACKUPS most recent), for a switch back without a download.
+OLDEST_SWITCH_VERSION = (0, 3, 6, 57)
+VERSIONS_DIR = PORT_DIR / 'versions'
+KEEP_BACKUPS = 2
+# The first release with Advanced > Version: an older one comes back to the newest through its Update button.
+FIRST_SWITCH_VERSION = (0, 3, 6, 65)
+# The top-level entries of the Windows package (packaging/windows/package.sh): what a version switch moves into
+# the backup, together with whatever else the incoming release ships.
+PROGRAM_FILES = ('Uncharted.exe', '_internal', 'Play Uncharted.exe', 'bin', 'launcher', 'scripts', 'shaders',
+                 'notes', 'licenses', 'run.py', 'LICENSE', 'README.txt', 'commit.txt')
+# Never moved or replaced by a version switch: the player's files, the backups, the opt-in FSR 4 download.
+SWITCH_KEEP = USER_FILES + ('versions', 'fsr4_shaders')
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 
@@ -262,7 +277,7 @@ APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '2.8', 'mouse_invert_y': False,
                 'mouse_aim_sensitivity': '0.6', 'mouse_vertical': '1.0', 'mouse_camera_vertical': '2.0',
-                'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '65', 'button_prompts': 'auto', 'xbox_style': 'antik', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'notes_hide_after_update': False,
+                'pad_invert_y': False, 'pad_background': False, 'pad_vibration': True, 'pad_vibration_strength': '100', 'walk_speed': '65', 'button_prompts': 'auto', 'xbox_style': 'antik', 'key_bindings': {}, 'pad_bindings': {}, 'check_updates': True, 'show_test_builds': False, 'notes_hide_after_update': False,
                 'trophy_game': 'u1', 'art_banner': '', 'art_u1': '', 'art_u2': '', 'art_u3': '', 'art_crops': {},
                 **{f'{game}_infinite_{cheat}': False for game, _t, _s, _e in GAMES for cheat in ('health', 'ammo')},
                 **{f'{game}_devmode': False for game, _t, _s, _e in GAMES},
@@ -1119,6 +1134,7 @@ class Launcher:
         self.update_box = None
         self.update_offer = self.update_text = None  # shown again after a language change
         self.updating = False
+        self.releases, self.releases_loading = None, False  # GitHub's release list (Advanced > Version), once loaded
         self.reader = None
         self.closed = False
         root.title(f'{NAME} — The Nathan Drake Collection for Windows · by {AUTHOR}')
@@ -1578,6 +1594,9 @@ class Launcher:
             self.trophy_info.clear()  # the game folder or the language may have changed
             self.trophy_state = None
             self.render_trophies()
+        elif name == 'advanced' and UPDATES and self.releases is None and not self.releases_loading:
+            self.releases_loading = True
+            threading.Thread(target=self.load_releases, daemon=True).start()
 
     def build_play(self):
         tk, ttk = self.tk, self.ttk
@@ -2573,6 +2592,8 @@ class Launcher:
                           justify='left').pack(anchor='w')
             self.pill(holder, _('Official releases'), lambda: webbrowser.open(RELEASES_PAGE)
                       ).pack(anchor='w', pady=(8, 0))
+        if UPDATES:
+            self.build_versions(f)
         self.section(f, _('Reset'))
         self.note(f, _('Puts every display, controls, cheats, game and advanced option back to its default. The '
                        'game folders, the saves folder, the console and launcher languages, the player name and '
@@ -2586,6 +2607,156 @@ class Launcher:
                       font=self.font_ui).pack(side='left')
         self.pill(self.reset_confirm, _('Reset'), self.reset_all).pack(side='left', padx=(12, 0))
         self.pill(self.reset_confirm, _('Cancel'), self.cancel_reset).pack(side='left', padx=(8, 0))
+
+    def build_versions(self, f):
+        """Advanced > Updates: the Version row (another release of the port, chosen from GitHub's list), the test
+        builds switch, a line for what the switch does or how far it is, and a button per release kept in versions/."""
+        card = self.target(f)
+        holder = self.tk.Frame(card, bg=CARD)
+        self.version_box = self.ttk.Combobox(holder, state='readonly', width=34, values=[])
+        self.version_box.set(f"{VERSION} {_('(installed)')}")
+        self.version_box.pack(side='left')
+        self.version_box.bind('<<ComboboxSelected>>', lambda _e: self.version_selected())
+        self.version_button = self.pill(holder, _('Change version'), self.change_to_selected, padding=(14, 6))
+        self.version_button.pack(side='left', padx=(8, 0))
+        self.row(f, _('Version'), holder,
+                 _('Installed: {}. Another release of the port: go back to an earlier one if this one has a problem, '
+                   'and forward again. Saves, settings and the shader cache stay as they are.').format(VERSION))
+        self.check(f, 'show_test_builds', _('Show test builds (pre-releases)'))
+        self.var('show_test_builds').trace_add('write', lambda *_a: self.show_versions())
+        card = self.target(f)
+        self.version_note = self.tk.Label(card, text='', bg=CARD, fg=GOLD, font=self.font_ui, justify='left',
+                                          wraplength=self.px(640))
+        self.version_note.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(8, 0))
+        backups = [(v, path) for v, path in version_backups() if v != backup_folder_name(VERSION)][:KEEP_BACKUPS]
+        if backups:
+            holder = self.tk.Frame(card, bg=CARD)
+            holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(4, 0))
+            self.version_backup_buttons = []
+            for version, path in backups:
+                button = self.pill(holder, _('Back to {}').format(version),
+                                   lambda v=version, b=path: self.change_version(v, backup=b), padding=(14, 6))
+                button.pack(side='left', padx=(0, 8))
+                self.version_backup_buttons.append(button)
+        else:
+            self.version_backup_buttons = []
+        self.version_list = []
+        if self.releases is not None:
+            self.show_versions()
+
+    def load_releases(self):
+        """Helper thread: GitHub's release list for Advanced > Version (once a session)."""
+        try:
+            releases = github_json(RELEASES_LIST_API)
+            if not isinstance(releases, list):
+                raise ValueError('unexpected answer from GitHub')
+        except (OSError, ValueError) as failure:
+            def failed(error=failure):
+                self.releases_loading = False  # opening the page again tries again
+                if self.version_note.winfo_exists():
+                    self.version_note.configure(text=_('Could not load the list of versions: {}').format(error),
+                                                fg=MUTED)
+            self.ui_calls.put(failed)
+            return
+        self.releases = releases
+        self.ui_calls.put(self.show_versions)
+
+    def show_versions(self):
+        """The Version drop-down filled from the release list (test builds with the switch on), the installed one
+        selected."""
+        if self.releases is None or not self.version_box.winfo_exists():
+            return
+        self.version_list = release_choices(self.releases, bool(self.var('show_test_builds').get()))
+        labels = []
+        for name, _url, _page, test in self.version_list:
+            label = f"{name} {_('(installed)')}" if name == VERSION else name
+            labels.append(f"{label} {_('(test build)')}" if test else label)
+        self.version_box.configure(values=labels)
+        installed = [i for i, entry in enumerate(self.version_list) if entry[0] == VERSION]
+        if installed:
+            self.version_box.current(installed[0])
+        else:
+            self.version_box.set(f"{VERSION} {_('(installed)')}")
+        self.version_selected()
+
+    def version_selected(self):
+        """The line under the Version row: what a switch to the chosen release means."""
+        if self.updating:
+            return
+        index = self.version_box.current()
+        chosen = self.version_list[index][0] if 0 <= index < len(self.version_list) else VERSION
+        # The shader cache version of another release is not known here: the line says it may prepare again.
+        self.version_note.configure(text='' if chosen == VERSION else
+                                    _('This version may prepare its shaders once more.'), fg=GOLD)
+
+    def change_to_selected(self):
+        index = self.version_box.current()
+        if not 0 <= index < len(self.version_list) or self.version_list[index][0] == VERSION:
+            self.version_note.configure(text=_('Choose another version in the list first.'), fg=MUTED)
+            return
+        name, url, page, _test = self.version_list[index]
+        # A release kept in versions/ comes back from there, without a download.
+        backup = next((path for v, path in version_backups() if v == backup_folder_name(name)), None)
+        self.change_version(name, url, page, backup)
+
+    def change_version(self, version, url=None, page=None, backup=None):
+        """Changes the installed release to version: downloaded from url (as an update is), or moved back from
+        backup (a release kept in versions/). A copy of this launcher in UPDATE_DIR does the switch once this window
+        has closed (switch_version): this release goes into versions/<VERSION>, the other one in, and it starts."""
+        if self.process:
+            self.messagebox.showinfo(NAME, _('Close the game before changing the version.'))
+            return
+        if self.updating:
+            return
+        if not FROZEN:  # a source tree changes versions with git
+            webbrowser.open(page or RELEASES_PAGE)
+            return
+        question = _('Change to version {}? The launcher closes, changes the version and opens again. Saves, '
+                     'settings and the shader cache are kept. Version {} is kept in the versions folder, so you can '
+                     'come back to it.').format(version, VERSION)
+        question += '\n\n' + _('This version may prepare its shaders once more.')
+        if version_tuple(version) < FIRST_SWITCH_VERSION:
+            question += '\n\n' + _('Version {} has no version choice: its Update button brings you back to the newest '
+                                    'version.').format(version)
+        if not self.messagebox.askyesno(NAME, question):
+            return
+        self.updating = True
+        buttons = [self.version_button, *self.version_backup_buttons]
+        for button in buttons:
+            button.configure(state='disabled')
+
+        def progress(percent):
+            text = _('Downloading version {}… {}%').format(version, percent)
+            if self.version_note.winfo_exists():
+                self.version_note.configure(text=text, fg=GOLD)
+            self.status.configure(text=text, fg=GOLD)
+
+        def work():
+            try:
+                source = backup or download_release(url, lambda percent: self.ui_calls.put(lambda p=percent: progress(p)))
+                # The switch runs from a copy of this launcher outside the installation: it moves this
+                # installation's files, which a launcher running from them could not.
+                helper = UPDATE_DIR / 'switcher'
+                shutil.rmtree(helper, ignore_errors=True)
+                helper.mkdir(parents=True)
+                shutil.copy2(PORT_DIR / 'Uncharted.exe', helper / 'Uncharted.exe')
+                if (PORT_DIR / '_internal').is_dir():
+                    shutil.copytree(PORT_DIR / '_internal', helper / '_internal')
+                subprocess.Popen([str(helper / 'Uncharted.exe'), '--switch-version', str(PORT_DIR), str(source), VERSION,
+                                  str(os.getpid())], cwd=str(helper), stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+                self.ui_calls.put(self.close)
+            except (OSError, zipfile.BadZipFile) as failure:
+                def failed(error=failure):
+                    self.updating = False
+                    for button in buttons:
+                        if button.winfo_exists():
+                            button.configure(state='normal')
+                    if self.version_note.winfo_exists():
+                        self.version_note.configure(text=_('Could not change the version: {}').format(error),
+                                                    fg='#e07a4f')
+                    self.status.configure(text='', fg=MUTED)
+                self.ui_calls.put(failed)
+        threading.Thread(target=work, daemon=True).start()
 
     def build_log(self):
         tk = self.tk
@@ -3302,25 +3473,7 @@ class Launcher:
 
         def work():
             try:
-                shutil.rmtree(UPDATE_DIR, ignore_errors=True)
-                UPDATE_DIR.mkdir(parents=True, exist_ok=True)
-                archive = UPDATE_DIR / 'update.zip'
-                request = urllib.request.Request(url, headers={'User-Agent': 'uncharted-launcher'})
-                with urllib.request.urlopen(request, timeout=60) as response, open(archive, 'wb') as out:
-                    total, done, shown = int(response.headers.get('Content-Length') or 0), 0, -1
-                    while chunk := response.read(1 << 20):
-                        out.write(chunk)
-                        done += len(chunk)
-                        percent = done * 100 // total if total else 0
-                        if percent != shown:
-                            shown = percent
-                            self.ui_calls.put(lambda p=percent: progress(p))
-                with zipfile.ZipFile(archive) as package:
-                    package.extractall(UPDATE_DIR / 'new')
-                archive.unlink()
-                new = next((p.parent for p in (UPDATE_DIR / 'new').rglob('Uncharted.exe')), None)
-                if not new:
-                    raise OSError('Uncharted.exe is missing from the download')
+                new = download_release(url, lambda percent: self.ui_calls.put(lambda p=percent: progress(p)))
                 # The new launcher copies itself over this installation once this one has closed.
                 subprocess.Popen([str(new / 'Uncharted.exe'), '--install-update', str(PORT_DIR), str(os.getpid())],
                                  cwd=str(new), stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
@@ -3489,16 +3642,171 @@ def release_notes(limit=5):
     return notes
 
 
+def github_json(url):
+    """The JSON answer of a GitHub API request."""
+    request = urllib.request.Request(url, headers={'Accept': 'application/vnd.github+json',
+                                                   'User-Agent': 'uncharted-launcher'})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return json.load(response)
+
+
+def release_zip(release):
+    """The download URL of a GitHub release's zip (None without one)."""
+    return next((asset['browser_download_url'] for asset in release.get('assets', [])
+                 if asset.get('name', '').lower().endswith('.zip')), None)
+
+
 def latest_release():
     """(version, zip URL, page URL, release notes) of the newest GitHub release."""
-    request = urllib.request.Request(RELEASES_API, headers={'Accept': 'application/vnd.github+json',
-                                                            'User-Agent': 'uncharted-launcher'})
-    with urllib.request.urlopen(request, timeout=15) as response:
-        release = json.load(response)
+    release = github_json(RELEASES_API)
     version = '.'.join(re.findall(r'\d+', release['tag_name']))
-    url = next((asset['browser_download_url'] for asset in release.get('assets', [])
-                if asset.get('name', '').lower().endswith('.zip')), None)
-    return version, url, release.get('html_url') or RELEASES_PAGE, release.get('body') or ''
+    return version, release_zip(release), release.get('html_url') or RELEASES_PAGE, release.get('body') or ''
+
+
+def release_choices(releases, test_builds=False, oldest=OLDEST_SWITCH_VERSION):
+    """The releases Advanced > Version offers, from GitHub's release list: [(name, zip URL, page URL, test build)],
+    newest first. name is the tag without its 'v' (a test build keeps its suffix: 0.3.6.58.1-test-reflex). Left out:
+    drafts, releases without a zip, ones older than oldest, and test builds (GitHub pre-releases) unless test_builds.
+    A release comes before the test builds with the same number."""
+    found = []
+    for release in releases:
+        tag, url = release.get('tag_name') or '', release_zip(release)
+        test = bool(release.get('prerelease'))
+        if release.get('draft') or not url or version_tuple(tag) < oldest or (test and not test_builds):
+            continue
+        found.append((tag[1:] if tag[:1] in 'vV' else tag, url, release.get('html_url') or RELEASES_PAGE, test))
+    return sorted(found, key=lambda r: (version_tuple(r[0]), not r[3]), reverse=True)
+
+
+def download_release(url, progress):
+    """Downloads a release's zip into UPDATE_DIR and unpacks it there; returns the folder that holds its
+    Uncharted.exe. progress(percent) is called on this thread as the download goes on."""
+    shutil.rmtree(UPDATE_DIR, ignore_errors=True)
+    UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+    archive = UPDATE_DIR / 'update.zip'
+    request = urllib.request.Request(url, headers={'User-Agent': 'uncharted-launcher'})
+    with urllib.request.urlopen(request, timeout=60) as response, open(archive, 'wb') as out:
+        total, done, shown = int(response.headers.get('Content-Length') or 0), 0, -1
+        while chunk := response.read(1 << 20):
+            out.write(chunk)
+            done += len(chunk)
+            percent = done * 100 // total if total else 0
+            if percent != shown:
+                shown = percent
+                progress(percent)
+    with zipfile.ZipFile(archive) as package:
+        package.extractall(UPDATE_DIR / 'new')
+    archive.unlink()
+    new = next((p.parent for p in (UPDATE_DIR / 'new').rglob('Uncharted.exe')), None)
+    if not new:
+        raise OSError('Uncharted.exe is missing from the download')
+    return new
+
+
+def wait_for_process(pid):
+    """Waits (up to a minute) for the process pid to end."""
+    kernel = ctypes.windll.kernel32
+    handle = kernel.OpenProcess(0x00100000, False, int(pid))  # SYNCHRONIZE
+    if handle:
+        kernel.WaitForSingleObject(handle, 60000)
+        kernel.CloseHandle(handle)
+
+
+def backup_folder_name(version):
+    """The folder in versions/ that keeps a release: its name, with anything a folder name cannot hold replaced."""
+    return re.sub(r'[^0-9A-Za-z._-]', '_', version) or 'unknown'
+
+
+def version_backups(folder=None):
+    """[(version, path)] of the releases kept in versions/, the most recently left first. Only a folder that holds
+    an Uncharted.exe counts (not one a failed switch left half made)."""
+    folder = Path(folder or VERSIONS_DIR)
+    try:
+        found = [p for p in folder.iterdir() if p.is_dir() and (p / 'Uncharted.exe').is_file()]
+    except OSError:
+        return []
+    return [(p.name, p) for p in sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)]
+
+
+def prune_backups(folder=None, keep=KEEP_BACKUPS):
+    """Deletes all but the keep most recent backups in versions/, and anything else in it that is no backup."""
+    folder = Path(folder or VERSIONS_DIR)
+    kept = {path for _v, path in version_backups(folder)[:keep]}
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return
+    for path in entries:
+        if path in kept:
+            continue
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+
+
+def switch_files(target, source, backup):
+    """Moves the release installed in target (its program files, never SWITCH_KEEP) into backup, then moves the
+    release in source (a download or an earlier backup) into target. On a failure every moved entry goes back where
+    it was and the error is raised, so target holds one whole release either way. source is removed once empty."""
+    target, source, backup = Path(target), Path(source), Path(backup)
+    incoming = sorted(p.name for p in source.iterdir() if p.name not in SWITCH_KEEP)
+    if 'Uncharted.exe' not in incoming:
+        raise OSError(f'Uncharted.exe is missing from {source}')
+    leaving = sorted(name for name in set(PROGRAM_FILES) | set(incoming)
+                     if name not in SWITCH_KEEP and (target / name).exists())
+    if backup.exists():
+        shutil.rmtree(backup)  # an earlier backup of the same release
+    backup.mkdir(parents=True)
+    moved, arrived = [], []
+    try:
+        for name in leaving:
+            shutil.move(str(target / name), str(backup / name))
+            moved.append(name)
+        for name in incoming:
+            shutil.move(str(source / name), str(target / name))
+            arrived.append(name)
+    except OSError:
+        for name in reversed(arrived):
+            shutil.move(str(target / name), str(source / name))
+        for name in reversed(moved):
+            shutil.move(str(backup / name), str(target / name))
+        shutil.rmtree(backup, ignore_errors=True)
+        raise
+    os.utime(backup)  # the time version_backups orders the backups by: now, the moment this release was left
+    try:
+        source.rmdir()
+    except OSError:
+        pass
+
+
+def switch_version(target, source, version, wait_pid):
+    """--switch-version TARGET SOURCE VERSION PID, run by a copy of the launcher in UPDATE_DIR (none of its own files
+    are in TARGET): waits for the launcher to close, moves the installed release VERSION into
+    TARGET/versions/VERSION and the one in SOURCE into TARGET (switch_files), keeps the most recent backups and starts
+    the launcher in TARGET. The saves, settings and shader cache are not touched."""
+    target = Path(target)
+    wait_for_process(wait_pid)
+    backup = target / 'versions' / backup_folder_name(version)
+    error = None
+    for _attempt in range(30):
+        try:
+            switch_files(target, source, backup)
+            error = None
+            break
+        except PermissionError as failure:  # a file still in use (the launcher is closing): tried again
+            error = failure
+            time.sleep(1)
+        except OSError as failure:  # anything else (a full disk): not tried again
+            error = failure
+            break
+    if error:
+        ctypes.windll.user32.MessageBoxW(None, _('Could not change the version: {}').format(error), NAME, 0x10)
+        subprocess.Popen([str(target / 'Uncharted.exe')], cwd=str(target))
+        return 1
+    prune_backups(target / 'versions')
+    subprocess.Popen([str(target / 'Uncharted.exe')], cwd=str(target))
+    return 0
 
 
 def install_update(target, wait_pid):
@@ -3506,11 +3814,7 @@ def install_update(target, wait_pid):
     waits for the old launcher to close, copies this version over TARGET (never the saves,
     settings or art) and starts it."""
     target = Path(target)
-    kernel = ctypes.windll.kernel32
-    handle = kernel.OpenProcess(0x00100000, False, int(wait_pid))  # SYNCHRONIZE
-    if handle:
-        kernel.WaitForSingleObject(handle, 60000)
-        kernel.CloseHandle(handle)
+    wait_for_process(wait_pid)
     ignore = shutil.ignore_patterns(*USER_FILES)
     for attempt in range(30):
         try:
@@ -3593,6 +3897,8 @@ def main():
         sys.exit(run_role(args))
     if args[:1] == ['--install-update'] and len(args) == 3:
         sys.exit(install_update(args[1], args[2]))
+    if args[:1] == ['--switch-version'] and len(args) == 5:
+        sys.exit(switch_version(*args[1:]))
     if FROZEN and UPDATE_DIR not in PORT_DIR.parents:
         shutil.rmtree(UPDATE_DIR, ignore_errors=True)  # what a finished update left behind
     settings = load_settings()

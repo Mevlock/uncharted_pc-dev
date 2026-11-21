@@ -40,6 +40,8 @@ out/pyenv/Scripts/python.exe -m PyInstaller --noconfirm --clean --log-level WARN
 
 # The package is assembled in a fresh staging folder and zipped from there; dist/uncharted-windows
 # (a playable copy that may hold saves and settings) is only refreshed afterwards.
+# The top-level entries placed here are listed in PROGRAM_FILES (launcher/uncharted_launcher.py): what the
+# launcher's version switch moves out when it changes the installed release.
 dest=out/stage/uncharted-windows
 rm -rf -- out/stage
 mkdir -p "$dest/bin" "$dest/launcher" "$dest/scripts"

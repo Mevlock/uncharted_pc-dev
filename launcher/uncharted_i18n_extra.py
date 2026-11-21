@@ -449,6 +449,34 @@ EXTRA_TRANSLATIONS = {
         '{} shader files were not saved; they are built again when needed.': '{} Shader-Dateien wurden nicht gespeichert; sie werden bei Bedarf neu erstellt.',
         '{}: prepared; the shaders are still being saved while you play.': '{}: vorbereitet; die Shader werden noch während des Spielens gespeichert.',
         'Saving the prepared shaders before the game ends: {} left': 'Die vorbereiteten Shader werden vor dem Spielende gespeichert: noch {}',
+        'Version':
+            'Version',
+        '(installed)':
+            '(installiert)',
+        '(test build)':
+            '(Testversion)',
+        'Change version':
+            'Version wechseln',
+        'Installed: {}. Another release of the port: go back to an earlier one if this one has a problem, and forward again. Saves, settings and the shader cache stay as they are.':
+            'Installiert: {}. Eine andere Version des Ports: geh zu einer früheren zurück, wenn diese ein Problem hat, und später wieder vor. Spielstände, Einstellungen und der Shader-Cache bleiben, wie sie sind.',
+        'Show test builds (pre-releases)':
+            'Testversionen anzeigen (Vorabversionen)',
+        'Back to {}':
+            'Zurück zu {}',
+        'Could not load the list of versions: {}':
+            'Die Liste der Versionen konnte nicht geladen werden: {}',
+        'This version may prepare its shaders once more.':
+            'Diese Version bereitet ihre Shader eventuell noch einmal vor.',
+        'Choose another version in the list first.':
+            'Wähle zuerst eine andere Version in der Liste.',
+        'Close the game before changing the version.':
+            'Schließe das Spiel, bevor du die Version wechselst.',
+        'Change to version {}? The launcher closes, changes the version and opens again. Saves, settings and the shader cache are kept. Version {} is kept in the versions folder, so you can come back to it.':
+            'Zu Version {} wechseln? Der Launcher schließt sich, wechselt die Version und öffnet sich wieder. Spielstände, Einstellungen und der Shader-Cache bleiben erhalten. Version {} wird im Ordner versions aufbewahrt, sodass du zu ihr zurückkehren kannst.',
+        'Version {} has no version choice: its Update button brings you back to the newest version.':
+            'Version {} hat keine Versionsauswahl: Ihre Schaltfläche „Aktualisieren“ bringt dich zur neuesten Version zurück.',
+        'Could not change the version: {}':
+            'Die Version konnte nicht gewechselt werden: {}',
     },
     'it': {
         'Auto (as Windows reports)':
@@ -897,6 +925,34 @@ EXTRA_TRANSLATIONS = {
         '{} shader files were not saved; they are built again when needed.': '{} file di shader non sono stati salvati; vengono ricreati quando servono.',
         '{}: prepared; the shaders are still being saved while you play.': '{}: preparato; gli shader vengono ancora salvati mentre giochi.',
         'Saving the prepared shaders before the game ends: {} left': 'Salvataggio degli shader preparati prima della chiusura del gioco: ne mancano {}',
+        'Version':
+            'Versione',
+        '(installed)':
+            '(installata)',
+        '(test build)':
+            '(versione di prova)',
+        'Change version':
+            'Cambia versione',
+        'Installed: {}. Another release of the port: go back to an earlier one if this one has a problem, and forward again. Saves, settings and the shader cache stay as they are.':
+            'Installata: {}. Un’altra release del port: torna a una precedente se questa ha un problema, e poi di nuovo avanti. Salvataggi, impostazioni e cache degli shader restano come sono.',
+        'Show test builds (pre-releases)':
+            'Mostra le versioni di prova (pre-release)',
+        'Back to {}':
+            'Torna a {}',
+        'Could not load the list of versions: {}':
+            'Impossibile caricare l’elenco delle versioni: {}',
+        'This version may prepare its shaders once more.':
+            'Questa versione potrebbe preparare di nuovo i suoi shader.',
+        'Choose another version in the list first.':
+            'Scegli prima un’altra versione nell’elenco.',
+        'Close the game before changing the version.':
+            'Chiudi il gioco prima di cambiare versione.',
+        'Change to version {}? The launcher closes, changes the version and opens again. Saves, settings and the shader cache are kept. Version {} is kept in the versions folder, so you can come back to it.':
+            'Passare alla versione {}? Il launcher si chiude, cambia versione e si riapre. Salvataggi, impostazioni e cache degli shader vengono mantenuti. La versione {} resta nella cartella versions, così puoi tornarci.',
+        'Version {} has no version choice: its Update button brings you back to the newest version.':
+            'La versione {} non ha la scelta della versione: il suo pulsante «Aggiorna» ti riporta alla versione più recente.',
+        'Could not change the version: {}':
+            'Impossibile cambiare versione: {}',
     },
     'ja': {
         'Auto (as Windows reports)':
@@ -1339,6 +1395,34 @@ EXTRA_TRANSLATIONS = {
         '{} shader files were not saved; they are built again when needed.': 'シェーダーファイル {} 個が保存されませんでした。必要なときに再度作成されます。',
         '{}: prepared; the shaders are still being saved while you play.': '{}: 準備完了。シェーダーはプレイ中も保存されています。',
         'Saving the prepared shaders before the game ends: {} left': 'ゲーム終了前に準備したシェーダーを保存しています: 残り {}',
+        'Version':
+            'バージョン',
+        '(installed)':
+            '(インストール済み)',
+        '(test build)':
+            '(テスト版)',
+        'Change version':
+            'バージョンを変更',
+        'Installed: {}. Another release of the port: go back to an earlier one if this one has a problem, and forward again. Saves, settings and the shader cache stay as they are.':
+            'インストール済み: {}。移植版の別のリリースです。このリリースに問題があれば以前のものに戻し、あとで再び新しいものに進めます。セーブ、設定、シェーダーキャッシュはそのまま残ります。',
+        'Show test builds (pre-releases)':
+            'テスト版を表示 (プレリリース)',
+        'Back to {}':
+            '{} に戻す',
+        'Could not load the list of versions: {}':
+            'バージョンの一覧を読み込めませんでした: {}',
+        'This version may prepare its shaders once more.':
+            'このバージョンではシェーダーの準備がもう一度行われる場合があります。',
+        'Choose another version in the list first.':
+            '先に一覧から別のバージョンを選んでください。',
+        'Close the game before changing the version.':
+            'バージョンを変更する前にゲームを閉じてください。',
+        'Change to version {}? The launcher closes, changes the version and opens again. Saves, settings and the shader cache are kept. Version {} is kept in the versions folder, so you can come back to it.':
+            'バージョン {} に変更しますか? ランチャーが閉じ、バージョンを変更してから再び開きます。セーブ、設定、シェーダーキャッシュは保持されます。バージョン {} は versions フォルダーに残るので、あとで戻せます。',
+        'Version {} has no version choice: its Update button brings you back to the newest version.':
+            'バージョン {} にはバージョンの選択がありません。その「更新」ボタンで最新バージョンに戻れます。',
+        'Could not change the version: {}':
+            'バージョンを変更できませんでした: {}',
     },
     'es': {
         'Auto (as Windows reports)':
@@ -1686,6 +1770,34 @@ EXTRA_TRANSLATIONS = {
         '{} shader files were not saved; they are built again when needed.': '{} archivos de shaders no se guardaron; se vuelven a crear cuando hacen falta.',
         '{}: prepared; the shaders are still being saved while you play.': '{}: preparado; los shaders se siguen guardando mientras juegas.',
         'Saving the prepared shaders before the game ends: {} left': 'Guardando los shaders preparados antes de que termine el juego: quedan {}',
+        'Version':
+            'Versión',
+        '(installed)':
+            '(instalada)',
+        '(test build)':
+            '(versión de prueba)',
+        'Change version':
+            'Cambiar versión',
+        'Installed: {}. Another release of the port: go back to an earlier one if this one has a problem, and forward again. Saves, settings and the shader cache stay as they are.':
+            'Instalada: {}. Otra versión del port: vuelve a una anterior si esta tiene un problema, y después avanza de nuevo. Las partidas, los ajustes y la caché de shaders se quedan como están.',
+        'Show test builds (pre-releases)':
+            'Mostrar versiones de prueba (preliminares)',
+        'Back to {}':
+            'Volver a {}',
+        'Could not load the list of versions: {}':
+            'No se pudo cargar la lista de versiones: {}',
+        'This version may prepare its shaders once more.':
+            'Puede que esta versión vuelva a preparar sus shaders.',
+        'Choose another version in the list first.':
+            'Elige primero otra versión de la lista.',
+        'Close the game before changing the version.':
+            'Cierra el juego antes de cambiar de versión.',
+        'Change to version {}? The launcher closes, changes the version and opens again. Saves, settings and the shader cache are kept. Version {} is kept in the versions folder, so you can come back to it.':
+            '¿Cambiar a la versión {}? El launcher se cierra, cambia la versión y se vuelve a abrir. Se conservan las partidas, los ajustes y la caché de shaders. La versión {} se guarda en la carpeta versions, para que puedas volver a ella.',
+        'Version {} has no version choice: its Update button brings you back to the newest version.':
+            'La versión {} no tiene selector de versión: su botón «Actualizar» te lleva de vuelta a la versión más reciente.',
+        'Could not change the version: {}':
+            'No se pudo cambiar la versión: {}',
     },
     'pt': {
         'Auto (as Windows reports)':
@@ -2034,6 +2146,34 @@ EXTRA_TRANSLATIONS = {
         '{} shader files were not saved; they are built again when needed.': '{} arquivos de shaders não foram salvos; eles são criados de novo quando necessário.',
         '{}: prepared; the shaders are still being saved while you play.': '{}: preparado; os shaders ainda estão sendo salvos enquanto você joga.',
         'Saving the prepared shaders before the game ends: {} left': 'Salvando os shaders preparados antes de o jogo fechar: faltam {}',
+        'Version':
+            'Versão',
+        '(installed)':
+            '(instalada)',
+        '(test build)':
+            '(versão de teste)',
+        'Change version':
+            'Mudar versão',
+        'Installed: {}. Another release of the port: go back to an earlier one if this one has a problem, and forward again. Saves, settings and the shader cache stay as they are.':
+            'Instalada: {}. Outra versão do port: volte a uma anterior se esta tiver um problema, e depois avance de novo. Os jogos salvos, as configurações e o cache de shaders ficam como estão.',
+        'Show test builds (pre-releases)':
+            'Mostrar versões de teste (pré-lançamentos)',
+        'Back to {}':
+            'Voltar para {}',
+        'Could not load the list of versions: {}':
+            'Não foi possível carregar a lista de versões: {}',
+        'This version may prepare its shaders once more.':
+            'Esta versão pode preparar os shaders mais uma vez.',
+        'Choose another version in the list first.':
+            'Escolha primeiro outra versão na lista.',
+        'Close the game before changing the version.':
+            'Feche o jogo antes de mudar de versão.',
+        'Change to version {}? The launcher closes, changes the version and opens again. Saves, settings and the shader cache are kept. Version {} is kept in the versions folder, so you can come back to it.':
+            'Mudar para a versão {}? O launcher fecha, muda a versão e abre de novo. Os jogos salvos, as configurações e o cache de shaders são mantidos. A versão {} fica guardada na pasta versions, para que você possa voltar a ela.',
+        'Version {} has no version choice: its Update button brings you back to the newest version.':
+            'A versão {} não tem escolha de versão: o botão «Atualizar» dela leva você de volta à versão mais recente.',
+        'Could not change the version: {}':
+            'Não foi possível mudar a versão: {}',
     },
     'fr': {
         'Auto (as Windows reports)':
@@ -2383,6 +2523,34 @@ EXTRA_TRANSLATIONS = {
         '{} shader files were not saved; they are built again when needed.': "{} fichiers de shaders n'ont pas été enregistrés ; ils sont recréés au besoin.",
         '{}: prepared; the shaders are still being saved while you play.': '{} : préparé ; les shaders sont encore enregistrés pendant que vous jouez.',
         'Saving the prepared shaders before the game ends: {} left': 'Enregistrement des shaders préparés avant la fermeture du jeu : encore {}',
+        'Version':
+            'Version',
+        '(installed)':
+            '(installée)',
+        '(test build)':
+            '(version de test)',
+        'Change version':
+            'Changer de version',
+        'Installed: {}. Another release of the port: go back to an earlier one if this one has a problem, and forward again. Saves, settings and the shader cache stay as they are.':
+            'Installée : {}. Une autre version du portage : revenez à une version antérieure si celle-ci pose un problème, puis repassez à la suivante. Les sauvegardes, les réglages et le cache des shaders restent tels quels.',
+        'Show test builds (pre-releases)':
+            'Afficher les versions de test (préversions)',
+        'Back to {}':
+            'Revenir à {}',
+        'Could not load the list of versions: {}':
+            'Impossible de charger la liste des versions : {}',
+        'This version may prepare its shaders once more.':
+            'Cette version préparera peut-être ses shaders une nouvelle fois.',
+        'Choose another version in the list first.':
+            'Choisissez d’abord une autre version dans la liste.',
+        'Close the game before changing the version.':
+            'Fermez le jeu avant de changer de version.',
+        'Change to version {}? The launcher closes, changes the version and opens again. Saves, settings and the shader cache are kept. Version {} is kept in the versions folder, so you can come back to it.':
+            'Passer à la version {} ? Le launcher se ferme, change de version et se rouvre. Les sauvegardes, les réglages et le cache des shaders sont conservés. La version {} est gardée dans le dossier versions, pour que vous puissiez y revenir.',
+        'Version {} has no version choice: its Update button brings you back to the newest version.':
+            'La version {} n’a pas de choix de version : son bouton « Mettre à jour » vous ramène à la version la plus récente.',
+        'Could not change the version: {}':
+            'Impossible de changer de version : {}',
     },
     # Russian (EU-Russian CUSA02344 players): poncho-ajmv's translation from the upstream port (PR #713)
     # where the English text is the same as ours, the rest translated for this port; the shared
@@ -2805,5 +2973,33 @@ EXTRA_TRANSLATIONS = {
         '{} shader files were not saved; they are built again when needed.': '{} файлов шейдеров не сохранено; при необходимости они будут созданы заново.',
         '{}: prepared; the shaders are still being saved while you play.': '{}: подготовлено; шейдеры ещё сохраняются во время игры.',
         'Saving the prepared shaders before the game ends: {} left': 'Сохранение подготовленных шейдеров перед закрытием игры: осталось {}',
+        'Version':
+            'Версия',
+        '(installed)':
+            '(установлена)',
+        '(test build)':
+            '(тестовая сборка)',
+        'Change version':
+            'Сменить версию',
+        'Installed: {}. Another release of the port: go back to an earlier one if this one has a problem, and forward again. Saves, settings and the shader cache stay as they are.':
+            'Установлена: {}. Другая версия порта: вернитесь к более ранней, если с этой что-то не так, а потом снова перейдите на новую. Сохранения, настройки и кэш шейдеров остаются как есть.',
+        'Show test builds (pre-releases)':
+            'Показывать тестовые сборки (предварительные версии)',
+        'Back to {}':
+            'Вернуться к {}',
+        'Could not load the list of versions: {}':
+            'Не удалось загрузить список версий: {}',
+        'This version may prepare its shaders once more.':
+            'Возможно, эта версия ещё раз подготовит шейдеры.',
+        'Choose another version in the list first.':
+            'Сначала выберите в списке другую версию.',
+        'Close the game before changing the version.':
+            'Закройте игру перед сменой версии.',
+        'Change to version {}? The launcher closes, changes the version and opens again. Saves, settings and the shader cache are kept. Version {} is kept in the versions folder, so you can come back to it.':
+            'Перейти на версию {}? Лаунчер закроется, сменит версию и откроется снова. Сохранения, настройки и кэш шейдеров сохраняются. Версия {} остаётся в папке versions, так что к ней можно вернуться.',
+        'Version {} has no version choice: its Update button brings you back to the newest version.':
+            'В версии {} нет выбора версии: её кнопка «Обновление» вернёт вас к самой новой версии.',
+        'Could not change the version: {}':
+            'Не удалось сменить версию: {}',
     },
 }
