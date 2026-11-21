@@ -766,9 +766,18 @@ void RunReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     }
 }
 
+void NoteDmaStencilWrite(const PM4DmaData* dma_data) {
+    if (dma_data->dst_sel == DmaDataDst::Memory || dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
+        VideoCore::StencilClearLog::NoteWrite(
+            VideoCore::StencilClearLog::Path::DmaWrite, dma_data->DstAddress<VAddr>(),
+            dma_data->NumBytes(), dma_data->src_sel == DmaDataSrc::Data ? dma_data->data : ~u64{0});
+    }
+}
+
 void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto* dma_data = reinterpret_cast<const PM4DmaData*>(data);
     ASSERT(dma_data->command.das == 0);
+    NoteDmaStencilWrite(dma_data);
     if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
         rasterizer.FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(),
                                dma_data->data, true);
@@ -2514,6 +2523,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 break;
             }
             ASSERT(dma_data->command.das == 0);
+            NoteDmaStencilWrite(dma_data);
             if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                 rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(), dma_data->data,
                                        true);

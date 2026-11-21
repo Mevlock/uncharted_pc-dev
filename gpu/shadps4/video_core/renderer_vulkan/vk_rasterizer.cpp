@@ -7976,6 +7976,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     checkpoint_buffers[num_checkpoint_buffers++] = {
                         vsharp.base_address, static_cast<u32>(size), desc.is_written};
                 }
+                if (desc.is_written) {
+                    VideoCore::StencilClearLog::NoteWrite(
+                        VideoCore::StencilClearLog::Path::ShaderWrite, vsharp.base_address, size,
+                        stage.pgm_hash);
+                }
                 if (desc.is_written && !(in_written && SpanInvalidate())) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     const u64 t_inv = StageBStats() ? __rdtsc() : 0;
@@ -9052,6 +9057,11 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             attachment.depth_clear = is_depth_clear;
         }
         if (regs.depth_buffer.StencilValid()) {
+            if (is_stencil_clear) {
+                VideoCore::StencilClearLog::NoteWrite(VideoCore::StencilClearLog::Path::DbClear,
+                                                      regs.depth_buffer.StencilWriteAddress(), 1,
+                                                      regs.stencil_clear);
+            }
             attachment.clear_value[1] = is_stencil_clear ? regs.stencil_clear : 0u;
             attachment.has_stencil = true;
             attachment.stencil_clear = is_stencil_clear;
