@@ -2660,6 +2660,7 @@ class Launcher:
                 button = self.pill(self.backups_holder, _('Back to {}').format(version),
                                    lambda v=version, b=path: self.change_version(v, backup=b), padding=(14, 6))
                 button.pack(side='left', padx=(0, 8))
+                button.backup = path
                 self.version_backup_buttons.append(button)
             self.remove_backups_button = self.pill(self.backups_holder, _('Remove backups'), self.remove_backups,
                                                    kind='ghost', padding=(12, 6))
@@ -2705,11 +2706,22 @@ class Launcher:
             remove_backups(VERSIONS_DIR)
         except OSError as error:
             self.version_note.configure(text=_('Could not remove the backups: {}').format(error), fg='#e07a4f')
+            self.refresh_backups()
             return
         self.backups_holder.grid_remove()
         self.version_backup_buttons, self.remove_backups_button = [], None
         self.version_note.configure(text=_('Backups removed: {} MB freed.').format(self.backups_mb), fg=MUTED)
         self.backups_mb = 0
+
+    def refresh_backups(self):
+        """The Back to buttons and the size on Remove backups from versions/ as it is now: after a Remove backups that
+        failed partway, a backup it half deleted is no longer offered."""
+        whole = {path for _v, path in version_backups()}
+        for button in [b for b in self.version_backup_buttons if b.backup not in whole]:
+            button.destroy()
+            self.version_backup_buttons.remove(button)
+        self.backups_mb = None
+        self.show_backups_size()
 
     def load_releases(self):
         """Helper thread: GitHub's release list for Advanced > Version (once a session)."""

@@ -491,6 +491,9 @@ class Widget:
     def winfo_exists(self):
         return True
 
+    def destroy(self):
+        self.options['destroyed'] = True
+
 
 class ChangeVersionTests(unittest.TestCase):
     """Launcher.change_version without a window: the download done at once, the window's calls run in order."""
@@ -581,6 +584,24 @@ class ChangeVersionTests(unittest.TestCase):
         self.change(failure=OSError('no network'))
         self.assertEqual(button.state, 'normal')
         self.assertIn('no network', self.launcher.version_note.options['text'])
+
+    def test_a_remove_backups_that_fails_partway_drops_the_half_deleted_backup(self):
+        versions = self.port / 'versions'
+        kept = make_release(versions / '0.3.6.64', '0.3.6.64')
+        back, remove = Widget(), Widget()
+        back.backup = kept
+        self.launcher.version_backup_buttons, self.launcher.remove_backups_button = [back], remove
+        self.launcher.backups_mb = 1
+
+        def partway(_folder):
+            shutil.rmtree(kept / '_internal')
+            raise PermissionError('a file in use')
+        with patch.object(LAUNCHER, 'VERSIONS_DIR', versions), patch.object(LAUNCHER, 'remove_backups', partway):
+            self.launcher.remove_backups()
+        self.assertTrue(back.options.get('destroyed'))
+        self.assertEqual(self.launcher.version_backup_buttons, [])
+        self.assertIn('a file in use', self.launcher.version_note.options['text'])
+        self.assertIn('0 MB', remove.options['text'])  # measured again
 
     def test_any_failure_of_the_download_thread_is_shown_and_cleaned_up(self):
         self.change(failure=RuntimeError('something unexpected'))
