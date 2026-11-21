@@ -46,6 +46,7 @@ namespace Vulkan {
 
 /// bbport diagnosis (BB_VS_CHECK): prints the vertex shaders that output bad positions.
 void VertexCheckPoll();
+void LoopCountPoll(); ///< BB_LOOP_COUNT: names the shaders that recorded a long loop
 
 class Instance;
 class Scheduler;

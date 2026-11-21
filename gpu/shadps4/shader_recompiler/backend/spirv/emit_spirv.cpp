@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -152,8 +153,35 @@ Id TypeId(const EmitContext& ctx, IR::Type type) {
     }
 }
 
+/// BB_LOOP_COUNT (runtime_info.h LoopCount): this shader's record, at the next slot.
+void EmitLoopCountRecord(EmitContext& ctx) {
+    const Id u32_type = ctx.U32[1];
+    const Id scalar_ptr = ctx.TypePointer(spv::StorageClass::PhysicalStorageBuffer, u32_type);
+    const Id scope = ctx.ConstU32(static_cast<u32>(spv::Scope::Device));
+    const Id counter = ctx.OpConvertUToPtr(scalar_ptr, ctx.Constant(ctx.U64, LoopCount::Placeholder));
+    const Id index = ctx.OpAtomicIAdd(u32_type, counter, scope, ctx.u32_zero_value, ctx.ConstU32(1u));
+    const Id slot = ctx.OpBitwiseAnd(u32_type, index, ctx.ConstU32(LoopCount::Slots - 1));
+    const Id record = ctx.OpIAdd(
+        ctx.U64, ctx.Constant(ctx.U64, LoopCount::Placeholder + 16),
+        ctx.OpIMul(ctx.U64, ctx.OpUConvert(ctx.U64, slot),
+                   ctx.Constant(ctx.U64, u64(4 * LoopCount::RecordWords))));
+    const auto store = [&](u32 word, Id value) {
+        const Id address = ctx.OpIAdd(ctx.U64, record, ctx.Constant(ctx.U64, u64(word * 4)));
+        ctx.OpAtomicStore(ctx.OpConvertUToPtr(scalar_ptr, address), scope, ctx.u32_zero_value, value);
+    };
+    store(0, ctx.ConstU32(static_cast<u32>(ctx.info.pgm_hash)));
+    store(1, ctx.ConstU32(static_cast<u32>(ctx.info.sw_stage)));
+}
+
 void Traverse(EmitContext& ctx, const IR::Program& program) {
     IR::Block* current_block{};
+    // BB_LOOP_COUNT: the back edges this invocation took, in a function variable of the entry block.
+    const bool count_loops =
+        ctx.LoopCount() &&
+        std::ranges::any_of(program.syntax_list, [](const IR::AbstractSyntaxNode& node) {
+            return node.type == IR::AbstractSyntaxNode::Type::Repeat;
+        });
+    Id loop_counter{};
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
         case IR::AbstractSyntaxNode::Type::Block: {
@@ -163,6 +191,11 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             }
             current_block = node.data.block;
             ctx.AddLabel(label);
+            if (count_loops && !Sirit::ValidId(loop_counter)) {
+                loop_counter = ctx.AddLocalVariable(
+                    ctx.TypePointer(spv::StorageClass::Function, ctx.U32[1]),
+                    spv::StorageClass::Function, ctx.u32_zero_value);
+            }
             for (IR::Inst& inst : node.data.block->Instructions()) {
                 EmitInst(ctx, &inst);
             }
@@ -200,6 +233,29 @@ void Traverse(EmitContext& ctx, const IR::Program& program) {
             Id cond{ctx.Def(node.data.repeat.cond)};
             const Id loop_header_label{node.data.repeat.loop_header->Definition<Id>()};
             const Id merge_label{node.data.repeat.merge->Definition<Id>()};
+            if (Sirit::ValidId(loop_counter) && current_block) {
+                // Count the back edge; the invocation that reaches the threshold records the
+                // shader once. The back edge then leaves from the record's merge block, which
+                // the phis of the loop header and merge name as this block's last label.
+                const Id u32_type = ctx.U32[1];
+                const Id bool_type = ctx.U1[1];
+                const Id count = ctx.OpIAdd(
+                    u32_type, ctx.OpLoad(u32_type, loop_counter),
+                    ctx.OpSelect(u32_type, cond, ctx.ConstU32(1u), ctx.u32_zero_value));
+                ctx.OpStore(loop_counter, count);
+                const Id reached = ctx.OpLogicalAnd(
+                    bool_type, cond,
+                    ctx.OpIEqual(bool_type, count, ctx.ConstU32(LoopCount::Threshold)));
+                const Id record_label = ctx.OpLabel();
+                const Id back_edge_label = ctx.OpLabel();
+                ctx.OpSelectionMerge(back_edge_label, spv::SelectionControlMask::MaskNone);
+                ctx.OpBranchConditional(reached, record_label, back_edge_label);
+                ctx.AddLabel(record_label);
+                EmitLoopCountRecord(ctx);
+                ctx.OpBranch(back_edge_label);
+                ctx.AddLabel(back_edge_label);
+                ctx.first_to_last_label_map[current_block->Definition<Id>().value] = back_edge_label;
+            }
             ctx.OpBranchConditional(cond, loop_header_label, merge_label);
             break;
         }
@@ -363,7 +419,7 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     } else if (stage == SwStage::Geometry && info.stores.GetAny(IR::Attribute::ViewportIndex)) {
         ctx.AddCapability(spv::Capability::MultiViewport);
     }
-    if (info.uses_dma || ctx.VertexMotion() || ctx.VertexCheck()) {
+    if (info.uses_dma || ctx.VertexMotion() || ctx.VertexCheck() || ctx.LoopCount()) {
         ctx.AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         ctx.AddExtension("SPV_KHR_physical_storage_buffer");
     }

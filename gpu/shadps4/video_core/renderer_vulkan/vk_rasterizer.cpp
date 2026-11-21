@@ -9531,6 +9531,7 @@ void Rasterizer::OnGuestFlip() {
     g_flips.store(flips, std::memory_order_relaxed);
     BbTrace::OnFlip();
     VertexCheckPoll();
+    LoopCountPoll();
     DrawLog::Flip(flips);
     PoolCheck::Flip();
     // The age of GPU data in the buffer cache's pages (BufferCache::InvalidateMemory).

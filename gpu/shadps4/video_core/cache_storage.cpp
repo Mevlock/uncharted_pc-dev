@@ -7,6 +7,7 @@
 #include "common/thread.h"
 #include "core/emulator_settings.h"
 #include "bbport_nan_guard.h"
+#include "shader_recompiler/runtime_info.h"
 
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -223,11 +224,13 @@ void DataBase::Open() {
     // Offline perf build (feature/native-batch): its own cache. Its shader profile differs from
     // the release builds', so sharing one cache made each build clear the other's at every start.
     const std::string perf_suffix = "-perf";
+    // BB_LOOP_COUNT's instrumented shaders are cached apart (Shader::LoopCount).
+    const std::string loop_suffix = Shader::LoopCount::address ? "-loops" : "";
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         mz_zip_zero_struct(&zip_ar);
 
         cache_path = GetUserPath(PathType::CacheDir) /
-                     std::filesystem::path{std::string{game_info.GameSerial()} + BbNanGuard::ShaderCacheSuffix() + perf_suffix}.replace_extension(".zip");
+                     std::filesystem::path{std::string{game_info.GameSerial()} + BbNanGuard::ShaderCacheSuffix() + loop_suffix + perf_suffix}.replace_extension(".zip");
 
         if (!mz_zip_reader_init_file(&zip_ar, cache_path.string().c_str(),
                                      MZ_ZIP_FLAG_READ_ALLOW_WRITING) ||
@@ -239,7 +242,7 @@ void DataBase::Open() {
         }
     } else {
         cache_path = GetUserPath(PathType::CacheDir) /
-                     (std::string{game_info.GameSerial()} + BbNanGuard::ShaderCacheSuffix() + perf_suffix);
+                     (std::string{game_info.GameSerial()} + BbNanGuard::ShaderCacheSuffix() + loop_suffix + perf_suffix);
         if (!std::filesystem::exists(cache_path)) {
             std::filesystem::create_directories(cache_path);
         }

@@ -10,9 +10,11 @@
 
 namespace Vulkan {
 
-// bbport: swaps the object motion address stand-ins in a vertex shader (runtime_info.h,
-// MotionVectors) for the session's buffer addresses. The cache stores the stand-ins.
-static void PatchMotionAddresses(std::vector<u32>& code) {
+// bbport: swaps the buffer address stand-ins (runtime_info.h: MotionVectors in vertex shaders,
+// LoopCount in every shader under BB_LOOP_COUNT) for the session's buffer addresses. The cache
+// stores the stand-ins.
+static void PatchAddresses(std::vector<u32>& code) {
+    using Shader::LoopCount;
     using Shader::MotionVectors;
     constexpr u32 OpConstant = 43;
     for (size_t at = 5; at < code.size();) {
@@ -24,10 +26,13 @@ static void PatchMotionAddresses(std::vector<u32>& code) {
         if (op == OpConstant && words == 5) {
             const u64 value = u64(code[at + 3]) | u64(code[at + 4]) << 32;
             u64 patched = value;
-            if (value - MotionVectors::ParamsPlaceholder <= 16) {
+            const bool motion = MotionVectors::positions_address != 0;
+            if (motion && value - MotionVectors::ParamsPlaceholder <= 16) {
                 patched = MotionVectors::params_address + (value - MotionVectors::ParamsPlaceholder);
-            } else if (value == MotionVectors::PositionsPlaceholder) {
+            } else if (motion && value == MotionVectors::PositionsPlaceholder) {
                 patched = MotionVectors::positions_address;
+            } else if (LoopCount::address && value - LoopCount::Placeholder <= 16) {
+                patched = LoopCount::address + (value - LoopCount::Placeholder);
             }
             if (patched != value) {
                 code[at + 3] = u32(patched);
@@ -43,16 +48,22 @@ vk::ShaderModule CompileSPV(std::span<const u32> code, vk::Device device) {
     // driver's own on-disk shader cache cannot hit (a cold-driver measurement on a used PC).
     static const char* salt_env = std::getenv("BB_TEST_SPV_SALT");
     std::vector<u32> patched;
-    if (Shader::MotionVectors::positions_address != 0 && code.size() > 5) {
-        // Cheap pre-check: only vertex shaders with the motion path contain the stand-ins.
-        bool has_placeholder = false;
-        for (size_t i = 5; i + 1 < code.size() && !has_placeholder; ++i) {
-            has_placeholder = code[i + 1] == u32(Shader::MotionVectors::ParamsPlaceholder >> 32) &&
-                              code[i] == u32(Shader::MotionVectors::ParamsPlaceholder);
-        }
-        if (has_placeholder) {
+    if ((Shader::MotionVectors::positions_address != 0 || Shader::LoopCount::address != 0) &&
+        code.size() > 5) {
+        // Cheap pre-check: only shaders with the motion path or the loop count hold stand-ins.
+        const auto holds = [&](u64 placeholder) {
+            for (size_t i = 5; i + 1 < code.size(); ++i) {
+                if (code[i + 1] == u32(placeholder >> 32) && code[i] == u32(placeholder)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        if ((Shader::MotionVectors::positions_address != 0 &&
+             holds(Shader::MotionVectors::ParamsPlaceholder)) ||
+            (Shader::LoopCount::address != 0 && holds(Shader::LoopCount::Placeholder))) {
             patched.assign(code.begin(), code.end());
-            PatchMotionAddresses(patched);
+            PatchAddresses(patched);
             code = patched;
         }
     }
