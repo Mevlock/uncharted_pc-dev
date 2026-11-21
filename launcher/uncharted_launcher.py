@@ -64,6 +64,8 @@ USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log', '
 # download; Remove backups deletes versions/.
 OLDEST_SWITCH_VERSION = (0, 3, 6, 57)
 VERSIONS_DIR = PORT_DIR / 'versions'
+# versions/.incoming: a downloaded release copied to the installation's drive before a switch (%TEMP% on another).
+INCOMING_DIR = '.incoming'
 KEEP_BACKUPS = 1
 # The first release with Advanced > Version: an older one comes back to the newest through its Update button.
 FIRST_SWITCH_VERSION = (0, 3, 6, 65)
@@ -3774,7 +3776,8 @@ def version_backups(folder=None):
     an Uncharted.exe counts (not one a failed switch left half made)."""
     folder = Path(folder or VERSIONS_DIR)
     try:
-        found = [p for p in folder.iterdir() if p.is_dir() and (p / 'Uncharted.exe').is_file()]
+        found = [p for p in folder.iterdir() if p.is_dir() and p.name != INCOMING_DIR
+                 and (p / 'Uncharted.exe').is_file()]
     except OSError:
         return []
     return [(p.name, p) for p in sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)]
@@ -3816,10 +3819,46 @@ def remove_backups(folder=None):
         shutil.rmtree(folder)
 
 
+def same_drive(a, b):
+    """Whether a and b are on one volume, so that a rename between them moves nothing."""
+    try:
+        return os.stat(a).st_dev == os.stat(b).st_dev
+    except OSError:
+        return False
+
+
+def stage_release(source, versions):
+    """The release in source on the installation's drive, for switch_files (which only renames): source itself when
+    it is there already (a kept backup, a download with %TEMP% on the same drive), else a copy of its program files in
+    versions/INCOMING_DIR (%TEMP% on C:, the port on D:). A failed copy is removed and raised; the installation is not
+    touched either way."""
+    source, versions = Path(source), Path(versions)
+    versions.mkdir(parents=True, exist_ok=True)
+    if same_drive(source, versions):
+        return source
+    staged = versions / INCOMING_DIR
+    shutil.rmtree(staged, ignore_errors=True)  # what a switch stopped partway left
+    try:
+        staged.mkdir()
+        for entry in source.iterdir():
+            if entry.name in SWITCH_KEEP:
+                continue
+            if entry.is_dir():
+                shutil.copytree(entry, staged / entry.name)
+            else:
+                shutil.copy2(entry, staged / entry.name)
+    except OSError:
+        shutil.rmtree(staged, ignore_errors=True)
+        raise
+    return staged
+
+
 def switch_files(target, source, backup):
     """Moves the release installed in target (its program files, never SWITCH_KEEP) into backup, then moves the
-    release in source (a download or an earlier backup) into target. On a failure every moved entry goes back where
-    it was and the error is raised, so target holds one whole release either way. source is removed once empty."""
+    release in source (a kept backup or stage_release's folder, on target's drive) into target. Every move is a rename
+    (os.rename: all or nothing, never a copy; shutil.move copied a folder it could not rename, as one with a file in
+    use, and then deleted it from target partway). On a failure every moved entry goes back where it was and the error
+    is raised, so target holds one whole release either way. source is removed once empty."""
     target, source, backup = Path(target), Path(source), Path(backup)
     incoming = sorted(p.name for p in source.iterdir() if p.name not in SWITCH_KEEP)
     if 'Uncharted.exe' not in incoming:
@@ -3832,16 +3871,16 @@ def switch_files(target, source, backup):
     moved, arrived = [], []
     try:
         for name in leaving:
-            shutil.move(str(target / name), str(backup / name))
+            os.rename(target / name, backup / name)
             moved.append(name)
         for name in incoming:
-            shutil.move(str(source / name), str(target / name))
+            os.rename(source / name, target / name)
             arrived.append(name)
     except OSError:
         for name in reversed(arrived):
-            shutil.move(str(target / name), str(source / name))
+            os.rename(target / name, source / name)
         for name in reversed(moved):
-            shutil.move(str(backup / name), str(target / name))
+            os.rename(backup / name, target / name)
         shutil.rmtree(backup, ignore_errors=True)
         raise
     os.utime(backup)  # the time version_backups orders the backups by: now, the moment this release was left
@@ -3855,15 +3894,22 @@ def switch_version(target, source, version, wait_pid):
     """--switch-version TARGET SOURCE VERSION PID, run by a copy of the launcher in UPDATE_DIR (none of its own files
     are in TARGET): waits for the launcher to close, moves the installed release VERSION into
     TARGET/versions/VERSION and the one in SOURCE into TARGET (switch_files), keeps the most recent backup and starts
-    the launcher in TARGET. The saves, settings and shader cache are not touched."""
+    the launcher in TARGET. The saves, settings and shader cache are not touched. A download on another drive is
+    copied next to the installation first (stage_release), so that the switch itself only renames."""
     target = Path(target)
     wait_for_process(wait_pid)
     backup = target / 'versions' / backup_folder_name(version)
     error = None
-    for _attempt in range(30):
+    try:
+        staged = stage_release(source, target / 'versions')
+    except OSError as failure:  # the copy to the installation's drive (a full disk): nothing was changed
+        staged, error = None, failure
+    for _attempt in range(30 if staged else 0):
         try:
-            switch_files(target, source, backup)
+            switch_files(target, staged, backup)
             error = None
+            if Path(staged) != Path(source):
+                shutil.rmtree(source, ignore_errors=True)  # the download, copied in
             break
         except PermissionError as failure:  # a file still in use (the launcher is closing): tried again
             error = failure
@@ -3872,6 +3918,8 @@ def switch_version(target, source, version, wait_pid):
             error = failure
             break
     if error:
+        if staged and Path(staged) != Path(source):
+            shutil.rmtree(staged, ignore_errors=True)
         ctypes.windll.user32.MessageBoxW(None, _('Could not change the version: {}').format(error), NAME, 0x10)
         subprocess.Popen([str(target / 'Uncharted.exe')], cwd=str(target))
         return 1

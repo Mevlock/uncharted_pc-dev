@@ -125,19 +125,65 @@ class SwitchFileTests(unittest.TestCase):
         original = tree(self.install)
         old = make_release(self.temp / 'download', '0.3.6.64')
         incoming = tree(old)
-        real_move, calls = shutil.move, []
+        real_rename, calls = os.rename, []
 
         def failing(src, dst):
             calls.append(src)
             if len(calls) == 12:  # partway through moving the new release in
                 raise PermissionError('in use')
-            return real_move(src, dst)
-        with patch.object(LAUNCHER.shutil, 'move', failing):
+            return real_rename(src, dst)
+        with patch.object(LAUNCHER.os, 'rename', failing):
             with self.assertRaises(OSError):
                 LAUNCHER.switch_files(self.install, old, self.install / 'versions' / '0.3.6.65')
         self.assertEqual(tree(self.install), original)
         self.assertEqual(tree(old), incoming)
         self.assertFalse((self.install / 'versions' / '0.3.6.65').exists())
+
+    def test_a_folder_with_a_file_in_use_is_never_copied_and_deleted(self):
+        # A file open in _internal (the old launcher or the game still running): the folder cannot be renamed. The
+        # switch fails and the installation is whole; shutil.move copied the folder instead and then deleted most
+        # of _internal before it reached the open file.
+        original = tree(self.install)
+        old = make_release(self.temp / 'download', '0.3.6.64')
+        with open(self.install / '_internal' / '_internal.txt', 'rb'):
+            with self.assertRaises(PermissionError):
+                LAUNCHER.switch_files(self.install, old, self.install / 'versions' / '0.3.6.65')
+        self.assertEqual(tree(self.install), original)
+        self.assertFalse((self.install / 'versions' / '0.3.6.65').exists())
+
+    def test_a_download_on_another_drive_is_staged_first(self):
+        old = make_release(self.temp / 'download', '0.3.6.64')
+        (old / 'user').mkdir()
+        (old / 'user' / 'stray.txt').write_text('from the zip')
+        versions = self.install / 'versions'
+        with patch.object(LAUNCHER, 'same_drive', lambda a, b: False):
+            staged = LAUNCHER.stage_release(old, versions)
+        self.assertEqual(staged, versions / LAUNCHER.INCOMING_DIR)
+        self.assertEqual(tree(staged), {k: v for k, v in tree(old).items() if not k.startswith('user/')})
+        self.assertEqual(LAUNCHER.version_backups(versions), [])  # a staged release is no backup
+        LAUNCHER.switch_files(self.install, staged, versions / '0.3.6.65')
+        self.assertEqual((self.install / 'commit.txt').read_text(), '0.3.6.64')
+        self.assertFalse(staged.exists())
+        with patch.object(LAUNCHER, 'same_drive', lambda a, b: True):
+            self.assertEqual(LAUNCHER.stage_release(old, versions), old)
+
+    def test_a_failed_copy_to_the_drive_changes_nothing(self):
+        original = tree(self.install)
+        old = make_release(self.temp / 'download', '0.3.6.64')
+        real_copy2, calls = shutil.copy2, []
+
+        def full_disk(src, dst, *args, **kwargs):
+            calls.append(src)
+            if len(calls) == 4:
+                raise OSError(28, 'No space left on device')
+            return real_copy2(src, dst, *args, **kwargs)
+        real_copytree = shutil.copytree
+        with patch.object(LAUNCHER, 'same_drive', lambda a, b: False),                 patch.object(LAUNCHER.shutil, 'copy2', full_disk),                 patch.object(LAUNCHER.shutil, 'copytree',
+                             lambda s, d, **k: real_copytree(s, d, copy_function=full_disk, **k)):
+            with self.assertRaises(OSError):
+                LAUNCHER.stage_release(old, self.install / 'versions')
+        self.assertEqual({k: v for k, v in tree(self.install).items()}, original)
+        self.assertFalse((self.install / 'versions' / LAUNCHER.INCOMING_DIR).exists())
 
     def test_a_source_without_the_launcher_is_refused(self):
         empty = self.temp / 'empty'
