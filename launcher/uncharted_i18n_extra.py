@@ -479,6 +479,16 @@ EXTRA_TRANSLATIONS = {
             'Die Version konnte nicht gewechselt werden: {}',
         'Open log folder':
             'Protokollordner öffnen',
+        'Remove backups':
+            'Sicherungen entfernen',
+        'Remove backups ({} MB)':
+            'Sicherungen entfernen ({} MB)',
+        'Delete the kept versions? This frees {} MB. The installed version stays as it is; going back to another one then needs a download.':
+            'Die aufbewahrten Versionen löschen? Das gibt {} MB frei. Die installierte Version bleibt, wie sie ist; zurück zu einer anderen geht es dann nur mit einem Download.',
+        'Could not remove the backups: {}':
+            'Die Sicherungen konnten nicht entfernt werden: {}',
+        'Backups removed: {} MB freed.':
+            'Sicherungen entfernt: {} MB freigegeben.',
     },
     'it': {
         'Auto (as Windows reports)':
@@ -957,6 +967,16 @@ EXTRA_TRANSLATIONS = {
             'Impossibile cambiare versione: {}',
         'Open log folder':
             'Apri la cartella del registro',
+        'Remove backups':
+            'Rimuovi i backup',
+        'Remove backups ({} MB)':
+            'Rimuovi i backup ({} MB)',
+        'Delete the kept versions? This frees {} MB. The installed version stays as it is; going back to another one then needs a download.':
+            'Eliminare le versioni conservate? Si liberano {} MB. La versione installata resta com’è; per tornare a un’altra servirà poi un download.',
+        'Could not remove the backups: {}':
+            'Impossibile rimuovere i backup: {}',
+        'Backups removed: {} MB freed.':
+            'Backup rimossi: {} MB liberati.',
     },
     'ja': {
         'Auto (as Windows reports)':
@@ -1429,6 +1449,16 @@ EXTRA_TRANSLATIONS = {
             'バージョンを変更できませんでした: {}',
         'Open log folder':
             'ログのフォルダーを開く',
+        'Remove backups':
+            'バックアップを削除',
+        'Remove backups ({} MB)':
+            'バックアップを削除 ({} MB)',
+        'Delete the kept versions? This frees {} MB. The installed version stays as it is; going back to another one then needs a download.':
+            '保管しているバージョンを削除しますか? {} MB が空きます。インストール済みのバージョンはそのままです。ほかのバージョンに戻すには、その後はダウンロードが必要になります。',
+        'Could not remove the backups: {}':
+            'バックアップを削除できませんでした: {}',
+        'Backups removed: {} MB freed.':
+            'バックアップを削除しました: {} MB が空きました。',
     },
     'es': {
         'Auto (as Windows reports)':
@@ -1806,6 +1836,16 @@ EXTRA_TRANSLATIONS = {
             'No se pudo cambiar la versión: {}',
         'Open log folder':
             'Abrir carpeta del registro',
+        'Remove backups':
+            'Quitar copias',
+        'Remove backups ({} MB)':
+            'Quitar copias ({} MB)',
+        'Delete the kept versions? This frees {} MB. The installed version stays as it is; going back to another one then needs a download.':
+            '¿Borrar las versiones guardadas? Se liberan {} MB. La versión instalada se queda como está; para volver a otra hará falta entonces una descarga.',
+        'Could not remove the backups: {}':
+            'No se pudieron quitar las copias: {}',
+        'Backups removed: {} MB freed.':
+            'Copias quitadas: {} MB liberados.',
     },
     'pt': {
         'Auto (as Windows reports)':
@@ -2184,6 +2224,16 @@ EXTRA_TRANSLATIONS = {
             'Não foi possível mudar a versão: {}',
         'Open log folder':
             'Abrir pasta do registro',
+        'Remove backups':
+            'Remover cópias',
+        'Remove backups ({} MB)':
+            'Remover cópias ({} MB)',
+        'Delete the kept versions? This frees {} MB. The installed version stays as it is; going back to another one then needs a download.':
+            'Apagar as versões guardadas? Isso libera {} MB. A versão instalada fica como está; para voltar a outra será preciso então um download.',
+        'Could not remove the backups: {}':
+            'Não foi possível remover as cópias: {}',
+        'Backups removed: {} MB freed.':
+            'Cópias removidas: {} MB liberados.',
     },
     'fr': {
         'Auto (as Windows reports)':
@@ -2563,6 +2613,16 @@ EXTRA_TRANSLATIONS = {
             'Impossible de changer de version : {}',
         'Open log folder':
             'Ouvrir le dossier du journal',
+        'Remove backups':
+            'Supprimer les sauvegardes de version',
+        'Remove backups ({} MB)':
+            'Supprimer les sauvegardes de version ({} Mo)',
+        'Delete the kept versions? This frees {} MB. The installed version stays as it is; going back to another one then needs a download.':
+            'Supprimer les versions conservées ? Cela libère {} Mo. La version installée reste telle quelle ; revenir à une autre demandera alors un téléchargement.',
+        'Could not remove the backups: {}':
+            'Impossible de supprimer les sauvegardes de version : {}',
+        'Backups removed: {} MB freed.':
+            'Sauvegardes de version supprimées : {} Mo libérés.',
     },
     # Russian (EU-Russian CUSA02344 players): poncho-ajmv's translation from the upstream port (PR #713)
     # where the English text is the same as ours, the rest translated for this port; the shared
@@ -3015,5 +3075,15 @@ EXTRA_TRANSLATIONS = {
             'Не удалось сменить версию: {}',
         'Open log folder':
             'Открыть папку журнала',
+        'Remove backups':
+            'Удалить резервные копии',
+        'Remove backups ({} MB)':
+            'Удалить резервные копии ({} МБ)',
+        'Delete the kept versions? This frees {} MB. The installed version stays as it is; going back to another one then needs a download.':
+            'Удалить сохранённые версии? Освободится {} МБ. Установленная версия останется как есть; чтобы вернуться к другой, потом понадобится загрузка.',
+        'Could not remove the backups: {}':
+            'Не удалось удалить резервные копии: {}',
+        'Backups removed: {} MB freed.':
+            'Резервные копии удалены: освобождено {} МБ.',
     },
 }

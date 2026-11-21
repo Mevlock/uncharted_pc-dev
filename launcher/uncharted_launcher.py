@@ -60,10 +60,11 @@ UPDATE_DIR = Path(tempfile.gettempdir()) / 'uncharted-update'
 # Never copied over an installation by an update (the package does not hold them either).
 USER_FILES = ('user', 'out', 'art', 'bbport.ini', 'input.ini', 'last_run.log', 'launcher_settings.json')
 # Advanced > Version: other releases of the port, none older than OLDEST_SWITCH_VERSION. The release left is kept
-# in versions/<version> next to the launcher (the KEEP_BACKUPS most recent), for a switch back without a download.
+# in versions/<version> next to the launcher (only the most recent one, about 390 MB), for a switch back without a
+# download; Remove backups deletes versions/.
 OLDEST_SWITCH_VERSION = (0, 3, 6, 57)
 VERSIONS_DIR = PORT_DIR / 'versions'
-KEEP_BACKUPS = 2
+KEEP_BACKUPS = 1
 # The first release with Advanced > Version: an older one comes back to the newest through its Update button.
 FIRST_SWITCH_VERSION = (0, 3, 6, 65)
 # The top-level entries of the Windows package (packaging/windows/package.sh): what a version switch moves into
@@ -1135,6 +1136,7 @@ class Launcher:
         self.update_offer = self.update_text = None  # shown again after a language change
         self.updating = False
         self.releases, self.releases_loading = None, False  # GitHub's release list (Advanced > Version), once loaded
+        self.backups_mb = None  # the size of versions/ in MB, measured when the Advanced page first shows
         self.reader = None
         self.closed = False
         root.title(f'{NAME} — The Nathan Drake Collection for Windows · by {AUTHOR}')
@@ -1597,9 +1599,11 @@ class Launcher:
             self.trophy_info.clear()  # the game folder or the language may have changed
             self.trophy_state = None
             self.render_trophies()
-        elif name == 'advanced' and UPDATES and self.releases is None and not self.releases_loading:
-            self.releases_loading = True
-            threading.Thread(target=self.load_releases, daemon=True).start()
+        elif name == 'advanced' and UPDATES:
+            if self.releases is None and not self.releases_loading:
+                self.releases_loading = True
+                threading.Thread(target=self.load_releases, daemon=True).start()
+            self.show_backups_size()
 
     def build_play(self):
         tk, ttk = self.tk, self.ttk
@@ -2631,21 +2635,54 @@ class Launcher:
         self.version_note = self.tk.Label(card, text='', bg=CARD, fg=GOLD, font=self.font_ui, justify='left',
                                           wraplength=self.px(640))
         self.version_note.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(8, 0))
-        backups = [(v, path) for v, path in version_backups() if v != backup_folder_name(VERSION)][:KEEP_BACKUPS]
-        if backups:
-            holder = self.tk.Frame(card, bg=CARD)
-            holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(4, 0))
-            self.version_backup_buttons = []
-            for version, path in backups:
-                button = self.pill(holder, _('Back to {}').format(version),
+        # Back to <version> for the kept release (not one of the installed version, which an update can leave),
+        # and Remove backups for the whole versions/ folder; neither shows without a backup.
+        kept = version_backups()
+        self.version_backup_buttons, self.remove_backups_button = [], None
+        if kept:
+            self.backups_holder = self.tk.Frame(card, bg=CARD)
+            self.backups_holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(4, 0))
+            for version, path in [(v, b) for v, b in kept if v != backup_folder_name(VERSION)][:KEEP_BACKUPS]:
+                button = self.pill(self.backups_holder, _('Back to {}').format(version),
                                    lambda v=version, b=path: self.change_version(v, backup=b), padding=(14, 6))
                 button.pack(side='left', padx=(0, 8))
                 self.version_backup_buttons.append(button)
-        else:
-            self.version_backup_buttons = []
+            self.remove_backups_button = self.pill(self.backups_holder, _('Remove backups'), self.remove_backups,
+                                                   kind='ghost', padding=(12, 6))
+            self.remove_backups_button.pack(side='left')
+            if self.backups_mb is not None:
+                self.remove_backups_button.configure(text=_('Remove backups ({} MB)').format(self.backups_mb))
         self.version_list = []
         if self.releases is not None:
             self.show_versions()
+
+    def show_backups_size(self):
+        """Remove backups (<size>): versions/ measured once, the first time the Advanced page shows."""
+        if not self.remove_backups_button:
+            return
+        if self.backups_mb is None:
+            self.backups_mb = round(folder_size(VERSIONS_DIR) / (1 << 20))
+        self.remove_backups_button.configure(text=_('Remove backups ({} MB)').format(self.backups_mb))
+
+    def remove_backups(self):
+        """Deletes versions/ (the kept releases) after a confirmation that says the space it frees."""
+        if self.updating:
+            return
+        if self.backups_mb is None:
+            self.backups_mb = round(folder_size(VERSIONS_DIR) / (1 << 20))
+        if not self.messagebox.askyesno(NAME, _('Delete the kept versions? This frees {} MB. The installed version '
+                                                'stays as it is; going back to another one then needs a '
+                                                'download.').format(self.backups_mb)):
+            return
+        try:
+            remove_backups(VERSIONS_DIR)
+        except OSError as error:
+            self.version_note.configure(text=_('Could not remove the backups: {}').format(error), fg='#e07a4f')
+            return
+        self.backups_holder.grid_remove()
+        self.version_backup_buttons, self.remove_backups_button = [], None
+        self.version_note.configure(text=_('Backups removed: {} MB freed.').format(self.backups_mb), fg=MUTED)
+        self.backups_mb = 0
 
     def load_releases(self):
         """Helper thread: GitHub's release list for Advanced > Version (once a session)."""
@@ -3760,6 +3797,25 @@ def prune_backups(folder=None, keep=KEEP_BACKUPS):
             path.unlink(missing_ok=True)
 
 
+def folder_size(folder):
+    """The bytes of every file under folder (0 without it)."""
+    total = 0
+    for root, _dirs, files in os.walk(folder):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def remove_backups(folder=None):
+    """Deletes versions/ with every release kept in it; raises when something in it could not be deleted."""
+    folder = Path(folder or VERSIONS_DIR)
+    if folder.exists():
+        shutil.rmtree(folder)
+
+
 def switch_files(target, source, backup):
     """Moves the release installed in target (its program files, never SWITCH_KEEP) into backup, then moves the
     release in source (a download or an earlier backup) into target. On a failure every moved entry goes back where
@@ -3798,7 +3854,7 @@ def switch_files(target, source, backup):
 def switch_version(target, source, version, wait_pid):
     """--switch-version TARGET SOURCE VERSION PID, run by a copy of the launcher in UPDATE_DIR (none of its own files
     are in TARGET): waits for the launcher to close, moves the installed release VERSION into
-    TARGET/versions/VERSION and the one in SOURCE into TARGET (switch_files), keeps the most recent backups and starts
+    TARGET/versions/VERSION and the one in SOURCE into TARGET (switch_files), keeps the most recent backup and starts
     the launcher in TARGET. The saves, settings and shader cache are not touched."""
     target = Path(target)
     wait_for_process(wait_pid)

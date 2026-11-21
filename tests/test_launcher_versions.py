@@ -170,14 +170,25 @@ class BackupTests(unittest.TestCase):
         (self.versions / 'half').mkdir()
         self.assertEqual([v for v, _p in LAUNCHER.version_backups(self.versions)], ['0.3.6.63', '0.3.6.64', '0.3.6.62'])
 
-    def test_prune_keeps_the_two_most_recent(self):
+    def test_prune_keeps_the_most_recent(self):
         for n, version in enumerate(('0.3.6.62', '0.3.6.64', '0.3.6.63')):
             make_release(self.versions / version, version)
             stamp = time.time() - 100 + n
             os.utime(self.versions / version, (stamp, stamp))
         (self.versions / 'half').mkdir()
         LAUNCHER.prune_backups(self.versions)
-        self.assertEqual(sorted(p.name for p in self.versions.iterdir()), ['0.3.6.63', '0.3.6.64'])
+        self.assertEqual(sorted(p.name for p in self.versions.iterdir()), ['0.3.6.63'])
+
+    def test_size_and_removal(self):
+        make_release(self.versions / '0.3.6.64', '0.3.6.64')
+        (self.versions / '0.3.6.64' / 'bin' / 'big.dll').write_bytes(b'x' * 3 * (1 << 20))
+        size = LAUNCHER.folder_size(self.versions)
+        self.assertEqual(size, sum(p.stat().st_size for p in self.versions.rglob('*') if p.is_file()))
+        self.assertEqual(round(size / (1 << 20)), 3)
+        LAUNCHER.remove_backups(self.versions)
+        self.assertFalse(self.versions.exists())
+        self.assertEqual(LAUNCHER.folder_size(self.versions), 0)
+        LAUNCHER.remove_backups(self.versions)  # nothing left: no error
 
     def test_no_versions_folder(self):
         self.assertEqual(LAUNCHER.version_backups(self.versions / 'missing'), [])
