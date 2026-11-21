@@ -160,6 +160,56 @@ class SwitchFileTests(unittest.TestCase):
         self.assertEqual(tree(old), incoming)
         self.assertFalse((self.install / 'versions' / '0.3.6.65').exists())
 
+    def held_rollback(self, backup):
+        """os.rename for a switch whose move of bin into backup fails, and whose move of _internal back out of backup
+        fails every time (the backup copy held, as by an antivirus scan). Returns it and the list of those tries."""
+        real_rename, tries = os.rename, []
+
+        def rename(src, dst):
+            src, dst = Path(src), Path(dst)
+            if src == self.install / 'bin' and dst.parent == backup:
+                raise PermissionError('in use')
+            if src == backup / '_internal':
+                tries.append(src)
+                raise PermissionError('held by a scan')
+            return real_rename(src, dst)
+        return rename, tries
+
+    def test_a_rollback_that_fails_keeps_every_file_and_says_where(self):
+        old = make_release(self.temp / 'download', '0.3.6.64')
+        incoming = tree(old)
+        backup = self.install / 'versions' / '0.3.6.65'
+        rename, tries = self.held_rollback(backup)
+        with patch.object(LAUNCHER.os, 'rename', rename), patch.object(LAUNCHER.time, 'sleep', lambda _s: None):
+            with self.assertRaises(LAUNCHER.SwitchIncomplete) as caught:
+                LAUNCHER.switch_files(self.install, old, backup)
+        self.assertNotIsInstance(caught.exception, PermissionError)  # switch_version retries those
+        self.assertEqual(len(tries), 5)  # the move back was tried again for a moment
+        self.assertEqual((backup / '_internal' / '_internal.txt').read_text(), '_internal 0.3.6.65')
+        self.assertEqual(tree(old), incoming)
+        self.assertEqual(caught.exception.old[backup], ['_internal'])
+        self.assertNotIn('_internal', caught.exception.old[self.install])
+        self.assertIn('Uncharted.exe', caught.exception.old[self.install])
+        self.assertEqual(list(caught.exception.new), [old])
+
+    def test_switch_version_does_not_retry_a_failed_rollback_or_delete_anything(self):
+        old = make_release(self.temp / 'download', '0.3.6.64')
+        incoming = tree(old)
+        backup = self.install / 'versions' / '0.3.6.65'
+        rename, tries = self.held_rollback(backup)
+        shown, started = [], []
+        windll = type('Windll', (), {'user32': type('User32', (), {
+            'MessageBoxW': staticmethod(lambda _w, text, _t, _f: shown.append(text))})})
+        with patch.object(LAUNCHER.os, 'rename', rename), patch.object(LAUNCHER.time, 'sleep', lambda _s: None),                 patch.object(LAUNCHER, 'wait_for_process', lambda _pid: None),                 patch.object(LAUNCHER.ctypes, 'windll', windll, create=True),                 patch.object(LAUNCHER.subprocess, 'Popen', lambda args, **_k: started.append(args)):
+            self.assertEqual(LAUNCHER.switch_version(self.install, old, '0.3.6.65', 0), 1)
+        self.assertEqual(len(tries), 5)  # one switch, not 30
+        self.assertEqual((backup / '_internal' / '_internal.txt').read_text(), '_internal 0.3.6.65')
+        self.assertEqual(tree(old), incoming)  # the download is kept as well
+        self.assertEqual(started, [])  # no launcher started from a split installation
+        self.assertEqual(len(shown), 1)
+        self.assertIn(f'{backup}: _internal', shown[0])
+        self.assertIn(f'Files of the version you were changing to, in {old}:', shown[0])
+
     def test_a_folder_with_a_file_in_use_is_never_copied_and_deleted(self):
         # A file open in _internal (the old launcher or the game still running): the folder cannot be renamed. The
         # switch fails and the installation is whole; shutil.move copied the folder instead and then deleted most

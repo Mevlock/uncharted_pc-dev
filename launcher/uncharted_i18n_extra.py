@@ -489,6 +489,14 @@ EXTRA_TRANSLATIONS = {
             'Die Sicherungen konnten nicht entfernt werden: {}',
         'Backups removed: {} MB freed.':
             'Sicherungen entfernt: {} MB freigegeben.',
+        'Could not change the version, and not every file could be moved back: {}':
+            'Die Version konnte nicht gewechselt werden, und nicht alle Dateien ließen sich zurückverschieben: {}',
+        'Files of version {} (the one installed before), in {}: {}':
+            'Dateien von Version {} (der zuvor installierten), in {}: {}',
+        'Files of the version you were changing to, in {}: {}':
+            'Dateien der Version, zu der du wechseln wolltest, in {}: {}',
+        'Nothing was deleted. To use version {} again, move its files back into {}.':
+            'Es wurde nichts gelöscht. Um Version {} wieder zu verwenden, verschiebe ihre Dateien zurück nach {}.',
     },
     'it': {
         'Auto (as Windows reports)':
@@ -977,6 +985,14 @@ EXTRA_TRANSLATIONS = {
             'Impossibile rimuovere i backup: {}',
         'Backups removed: {} MB freed.':
             'Backup rimossi: {} MB liberati.',
+        'Could not change the version, and not every file could be moved back: {}':
+            'Impossibile cambiare versione, e non tutti i file sono stati riportati al loro posto: {}',
+        'Files of version {} (the one installed before), in {}: {}':
+            'File della versione {} (quella installata prima), in {}: {}',
+        'Files of the version you were changing to, in {}: {}':
+            'File della versione a cui stavi passando, in {}: {}',
+        'Nothing was deleted. To use version {} again, move its files back into {}.':
+            'Non è stato eliminato nulla. Per usare di nuovo la versione {}, riporta i suoi file in {}.',
     },
     'ja': {
         'Auto (as Windows reports)':
@@ -1459,6 +1475,14 @@ EXTRA_TRANSLATIONS = {
             'バックアップを削除できませんでした: {}',
         'Backups removed: {} MB freed.':
             'バックアップを削除しました: {} MB が空きました。',
+        'Could not change the version, and not every file could be moved back: {}':
+            'バージョンを変更できず、一部のファイルを元に戻せませんでした: {}',
+        'Files of version {} (the one installed before), in {}: {}':
+            'バージョン {}（以前インストールされていたもの）のファイル、{}: {}',
+        'Files of the version you were changing to, in {}: {}':
+            '変更先のバージョンのファイル、{}: {}',
+        'Nothing was deleted. To use version {} again, move its files back into {}.':
+            '何も削除されていません。バージョン {} を再び使うには、そのファイルを {} に戻してください。',
     },
     'es': {
         'Auto (as Windows reports)':
@@ -1846,6 +1870,14 @@ EXTRA_TRANSLATIONS = {
             'No se pudieron quitar las copias: {}',
         'Backups removed: {} MB freed.':
             'Copias quitadas: {} MB liberados.',
+        'Could not change the version, and not every file could be moved back: {}':
+            'No se pudo cambiar la versión y no todos los archivos pudieron volver a su sitio: {}',
+        'Files of version {} (the one installed before), in {}: {}':
+            'Archivos de la versión {} (la instalada antes), en {}: {}',
+        'Files of the version you were changing to, in {}: {}':
+            'Archivos de la versión a la que cambiabas, en {}: {}',
+        'Nothing was deleted. To use version {} again, move its files back into {}.':
+            'No se ha borrado nada. Para volver a usar la versión {}, devuelve sus archivos a {}.',
     },
     'pt': {
         'Auto (as Windows reports)':
@@ -2234,6 +2266,14 @@ EXTRA_TRANSLATIONS = {
             'Não foi possível remover as cópias: {}',
         'Backups removed: {} MB freed.':
             'Cópias removidas: {} MB liberados.',
+        'Could not change the version, and not every file could be moved back: {}':
+            'Não foi possível mudar a versão, e nem todos os arquivos puderam voltar para o lugar: {}',
+        'Files of version {} (the one installed before), in {}: {}':
+            'Arquivos da versão {} (a instalada antes), em {}: {}',
+        'Files of the version you were changing to, in {}: {}':
+            'Arquivos da versão para a qual você estava mudando, em {}: {}',
+        'Nothing was deleted. To use version {} again, move its files back into {}.':
+            'Nada foi excluído. Para usar a versão {} de novo, mova os arquivos dela de volta para {}.',
     },
     'fr': {
         'Auto (as Windows reports)':
@@ -2623,6 +2663,14 @@ EXTRA_TRANSLATIONS = {
             'Impossible de supprimer les sauvegardes de version : {}',
         'Backups removed: {} MB freed.':
             'Sauvegardes de version supprimées : {} Mo libérés.',
+        'Could not change the version, and not every file could be moved back: {}':
+            "Impossible de changer de version, et certains fichiers n'ont pas pu être remis en place : {}",
+        'Files of version {} (the one installed before), in {}: {}':
+            'Fichiers de la version {} (celle installée avant), dans {} : {}',
+        'Files of the version you were changing to, in {}: {}':
+            'Fichiers de la version vers laquelle vous passiez, dans {} : {}',
+        'Nothing was deleted. To use version {} again, move its files back into {}.':
+            "Rien n'a été supprimé. Pour utiliser à nouveau la version {}, remettez ses fichiers dans {}.",
     },
     # Russian (EU-Russian CUSA02344 players): poncho-ajmv's translation from the upstream port (PR #713)
     # where the English text is the same as ours, the rest translated for this port; the shared
@@ -3085,5 +3133,13 @@ EXTRA_TRANSLATIONS = {
             'Не удалось удалить резервные копии: {}',
         'Backups removed: {} MB freed.':
             'Резервные копии удалены: освобождено {} МБ.',
+        'Could not change the version, and not every file could be moved back: {}':
+            'Не удалось сменить версию, и не все файлы удалось вернуть на место: {}',
+        'Files of version {} (the one installed before), in {}: {}':
+            'Файлы версии {} (установленной ранее), в {}: {}',
+        'Files of the version you were changing to, in {}: {}':
+            'Файлы версии, на которую выполнялся переход, в {}: {}',
+        'Nothing was deleted. To use version {} again, move its files back into {}.':
+            'Ничего не удалено. Чтобы снова пользоваться версией {}, переместите её файлы обратно в {}.',
     },
 }

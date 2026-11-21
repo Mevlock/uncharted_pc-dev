@@ -3940,12 +3940,35 @@ def stage_release(source, versions):
     return staged
 
 
+class SwitchIncomplete(OSError):
+    """A switch that failed and could not move every file back: the files of the release that was installed
+    (old) and of the one coming in (new) are split over folders, {folder: [names]} each. Never tried again, and
+    nothing of it is deleted (a second attempt would delete the backup, the only copy of what stayed in it)."""
+    def __init__(self, cause, old, new):
+        super().__init__(f'{cause}; not every file could be moved back')
+        self.cause, self.old, self.new = cause, old, new
+
+
+def rename_retried(source, destination, tries=5):
+    """os.rename, tried again for a moment (tries x 0.2 s) while a file in it is held, as by an antivirus scan of a
+    folder just renamed. Returns whether it moved."""
+    for attempt in range(tries):
+        try:
+            os.rename(source, destination)
+            return True
+        except OSError:
+            if attempt + 1 < tries:
+                time.sleep(0.2)
+    return False
+
+
 def switch_files(target, source, backup):
     """Moves the release installed in target (its program files, never SWITCH_KEEP) into backup, then moves the
     release in source (a kept backup or stage_release's folder, on target's drive) into target. Every move is a rename
     (os.rename: all or nothing, never a copy; shutil.move copied a folder it could not rename, as one with a file in
     use, and then deleted it from target partway). On a failure every moved entry goes back where it was and the error
-    is raised, so target holds one whole release either way. source is removed once empty."""
+    is raised, so target holds one whole release either way; when a move back fails too, SwitchIncomplete says where
+    each release's files are, and nothing is deleted. source is removed once empty."""
     target, source, backup = Path(target), Path(source), Path(backup)
     if not whole_release(source):
         missing = [name for name in WHOLE_RELEASE if not (source / name).exists()]
@@ -3966,12 +3989,18 @@ def switch_files(target, source, backup):
         for name in incoming:
             os.rename(source / name, target / name)
             arrived.append(name)
-    except OSError:
-        for name in reversed(arrived):
-            os.rename(target / name, source / name)
-        for name in reversed(moved):
-            os.rename(backup / name, target / name)
-        shutil.rmtree(backup, ignore_errors=True)
+    except OSError as failure:
+        new_stuck = [name for name in reversed(arrived) if not rename_retried(target / name, source / name)]
+        old_stuck = [name for name in reversed(moved) if not rename_retried(backup / name, target / name)]
+        if new_stuck or old_stuck:
+            old = {target: [name for name in leaving if name not in old_stuck], backup: old_stuck}
+            new = {target: new_stuck, source: [name for name in incoming if name not in new_stuck]}
+            raise SwitchIncomplete(failure, *({folder: sorted(names) for folder, names in where.items() if names}
+                                              for where in (old, new))) from failure
+        try:
+            backup.rmdir()  # empty again (never rmtree: it held the release a moment ago)
+        except OSError:
+            pass
         raise
     os.utime(backup)  # the time version_backups orders the backups by: now, the moment this release was left
     try:
@@ -4001,6 +4030,9 @@ def switch_version(target, source, version, wait_pid):
             if Path(staged) != Path(source):
                 shutil.rmtree(source, ignore_errors=True)  # the download, copied in
             break
+        except SwitchIncomplete as failure:  # the files are split: not tried again, nothing deleted, nothing started
+            ctypes.windll.user32.MessageBoxW(None, incomplete_message(failure, version, target), NAME, 0x10)
+            return 1
         except PermissionError as failure:  # a file still in use (the launcher is closing): tried again
             error = failure
             time.sleep(1)
@@ -4016,6 +4048,17 @@ def switch_version(target, source, version, wait_pid):
     prune_backups(target / 'versions')
     subprocess.Popen([str(target / 'Uncharted.exe')], cwd=str(target))
     return 0
+
+
+def incomplete_message(failure, version, target):
+    """The switcher's message for SwitchIncomplete: which folder holds which release's files."""
+    lines = [_('Could not change the version, and not every file could be moved back: {}').format(failure.cause), '']
+    lines += [_('Files of version {} (the one installed before), in {}: {}').format(version, folder, ', '.join(names))
+              for folder, names in failure.old.items()]
+    lines += [_('Files of the version you were changing to, in {}: {}').format(folder, ', '.join(names))
+              for folder, names in failure.new.items()]
+    return '\n'.join(lines + ['', _('Nothing was deleted. To use version {} again, move its files back into {}.'
+                                    ).format(version, target)])
 
 
 def install_update(target, wait_pid):
