@@ -654,6 +654,59 @@ class ChangeVersionTests(unittest.TestCase):
         self.assertEqual((asked, self.started, self.launcher.closed), ([], [], False))
 
 
+class ReleaseMarkerTests(unittest.TestCase):
+    """RELEASE_FILE: the exact release of a package and of a backup (a test build has the release's number)."""
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.temp, True)
+        self.versions = self.temp / 'port' / 'versions'
+
+    def backup(self, folder, tag=None):
+        made = make_release(self.versions / folder, folder)
+        if tag:
+            (made / LAUNCHER.RELEASE_FILE).write_text(tag + '\n')
+        return made
+
+    def test_the_installed_release_from_its_marker(self):
+        port = self.temp / 'port'
+        port.mkdir()
+        with patch.object(LAUNCHER, 'PORT_DIR', port), patch.object(LAUNCHER, 'VERSION', '0.3.6.65.1'):
+            self.assertEqual(LAUNCHER.installed_release(), '0.3.6.65.1')  # no marker: a build made without a tag
+            (port / 'release.txt').write_text('v0.3.6.65.1-test\n')
+            self.assertEqual(LAUNCHER.installed_release(), '0.3.6.65.1-test')
+            (port / 'release.txt').write_text('v0.3.6.64')  # stale: another number
+            self.assertEqual(LAUNCHER.installed_release(), '0.3.6.65.1')
+
+    def test_a_switch_takes_the_marker_into_the_backup(self):
+        install = make_release(self.temp / 'port', '0.3.6.65.1')
+        (install / 'release.txt').write_text('v0.3.6.65.1-test')
+        LAUNCHER.switch_files(install, make_release(self.temp / 'download', '0.3.6.64'),
+                              self.versions / '0.3.6.65.1-test')
+        self.assertFalse((install / 'release.txt').exists())  # 0.3.6.64 has none
+        self.assertEqual(LAUNCHER.version_backups(self.versions)[0][0], '0.3.6.65.1-test')
+
+    def choose(self, name):
+        """change_to_selected with name chosen in the list: the backup change_version gets."""
+        launcher, chosen = LAUNCHER.Launcher.__new__(LAUNCHER.Launcher), []
+        launcher.version_box = type('Box', (), {'current': lambda _b: 0})()
+        launcher.version_list = [(name, f'https://example/v{name}.zip', 'https://example/p', False)]
+        launcher.change_version = lambda version, url, page, backup: chosen.append(backup)
+        with patch.object(LAUNCHER, 'VERSIONS_DIR', self.versions):
+            launcher.change_to_selected()
+        return chosen[0]
+
+    def test_a_test_build_backup_is_not_taken_for_the_release(self):
+        test = self.backup('0.3.6.65.1-test', 'v0.3.6.65.1-test')
+        self.assertIsNone(self.choose('0.3.6.65.1'))  # downloaded
+        self.assertEqual(self.choose('0.3.6.65.1-test'), test)
+
+    def test_a_backup_without_a_marker_is_downloaded_again(self):
+        self.backup('0.3.6.65.1')  # from a build without RELEASE_FILE: it could be the test build
+        self.assertIsNone(self.choose('0.3.6.65.1'))
+        marked = self.backup('0.3.6.64', 'v0.3.6.64')
+        self.assertEqual(self.choose('0.3.6.64'), marked)
+
+
 class LogLocationTests(unittest.TestCase):
     def setUp(self):
         self.temp = Path(tempfile.mkdtemp())

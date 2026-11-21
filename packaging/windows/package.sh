@@ -64,6 +64,11 @@ cp run.py LICENSE "$dest/"
 cp -r shaders "$dest/"
 # The commit this build is made from: the launcher writes it at the top of last_run.log.
 git rev-parse --short HEAD > "$dest/commit.txt" 2>/dev/null || rm -f "$dest/commit.txt"
+# The exact release of a build made for a tag (GitHub Actions, as v0.3.6.65.1-test): the launcher's version switch
+# tells a test build's backup from the release with the same number by it (RELEASE_FILE).
+if [ "${GITHUB_REF_TYPE:-}" = tag ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
+    printf '%s\n' "$GITHUB_REF_NAME" > "$dest/release.txt"
+fi
 cp packaging/windows/README-Uncharted.txt "$dest/README.txt"
 # The newest release notes (the launcher's What's new window): the five newest docs/releases/v*.md.
 mkdir -p "$dest/notes"

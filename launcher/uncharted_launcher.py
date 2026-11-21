@@ -74,13 +74,16 @@ VERSIONS_DIR = PORT_DIR / 'versions'
 INCOMING_DIR = '.incoming'
 # What a release needs to start (every package has them): a kept backup or a source without one of them is not whole.
 WHOLE_RELEASE = ('Uncharted.exe', '_internal', 'bin')
+# The exact release of a package (its tag, as v0.3.6.65.1-test), written by a release build (package.sh): VERSION has
+# no tag suffix, so a test build's backup would otherwise pass for the release with the same number.
+RELEASE_FILE = 'release.txt'
 KEEP_BACKUPS = 1
 # The first release with Advanced > Version: an older one comes back to the newest through its Update button.
 FIRST_SWITCH_VERSION = (0, 3, 6, 65)
 # The top-level entries of the Windows package (packaging/windows/package.sh): what a version switch moves into
 # the backup, together with whatever else the incoming release ships.
 PROGRAM_FILES = ('Uncharted.exe', '_internal', 'Play Uncharted.exe', 'bin', 'launcher', 'scripts', 'shaders',
-                 'notes', 'licenses', 'run.py', 'LICENSE', 'README.txt', 'commit.txt')
+                 'notes', 'licenses', 'run.py', 'LICENSE', 'README.txt', 'commit.txt', RELEASE_FILE)
 # Never moved or replaced by a version switch: the player's files, the backups, the opt-in FSR 4 download.
 SWITCH_KEEP = USER_FILES + ('versions', 'fsr4_shaders')
 # The folders a player chooses (the saves folder with the shader cache, the game folders): never inside what a
@@ -2656,7 +2659,9 @@ class Launcher:
         if kept or not folder_empty(VERSIONS_DIR):
             self.backups_holder = self.tk.Frame(card, bg=CARD)
             self.backups_holder.grid(row=self.next_row(card), column=0, columnspan=2, sticky='w', pady=(4, 0))
-            for version, path in [(v, b) for v, b in kept if v != backup_folder_name(VERSION)][:KEEP_BACKUPS]:
+            installed = installed_release()
+            for version, path in [(v, b) for v, b in kept
+                                  if v not in (installed, backup_folder_name(installed))][:KEEP_BACKUPS]:
                 button = self.pill(self.backups_holder, _('Back to {}').format(version),
                                    lambda v=version, b=path: self.change_version(v, backup=b), padding=(14, 6))
                 button.pack(side='left', padx=(0, 8))
@@ -2746,16 +2751,16 @@ class Launcher:
         if self.releases is None or not self.version_box.winfo_exists():
             return
         self.version_list = release_choices(self.releases, bool(self.var('show_test_builds').get()))
-        labels = []
+        labels, current = [], installed_release()
         for name, _url, _page, test in self.version_list:
-            label = f"{name} {_('(installed)')}" if name == VERSION else name
+            label = f"{name} {_('(installed)')}" if name == current else name
             labels.append(f"{label} {_('(test build)')}" if test else label)
         self.version_box.configure(values=labels)
-        installed = [i for i, entry in enumerate(self.version_list) if entry[0] == VERSION]
+        installed = [i for i, entry in enumerate(self.version_list) if entry[0] == current]
         if installed:
             self.version_box.current(installed[0])
         else:
-            self.version_box.set(f"{VERSION} {_('(installed)')}")
+            self.version_box.set(f"{current} {_('(installed)')}")
         self.version_selected()
 
     def version_selected(self):
@@ -2763,19 +2768,21 @@ class Launcher:
         if self.updating:
             return
         index = self.version_box.current()
-        chosen = self.version_list[index][0] if 0 <= index < len(self.version_list) else VERSION
+        current = installed_release()
+        chosen = self.version_list[index][0] if 0 <= index < len(self.version_list) else current
         # The shader cache version of another release is not known here: the line says it may prepare again.
-        self.version_note.configure(text='' if chosen == VERSION else
+        self.version_note.configure(text='' if chosen == current else
                                     _('This version may prepare its shaders once more.'), fg=GOLD)
 
     def change_to_selected(self):
         index = self.version_box.current()
-        if not 0 <= index < len(self.version_list) or self.version_list[index][0] == VERSION:
+        if not 0 <= index < len(self.version_list) or self.version_list[index][0] == installed_release():
             self.version_note.configure(text=_('Choose another version in the list first.'), fg=MUTED)
             return
         name, url, page, _test = self.version_list[index]
-        # A release kept in versions/ comes back from there, without a download.
-        backup = next((path for v, path in version_backups() if v == backup_folder_name(name)), None)
+        # A release kept in versions/ comes back from there, without a download: only one that says it is this
+        # release (RELEASE_FILE; the backup of a test build has the number of the release without its suffix).
+        backup = next((path for _v, path in version_backups() if release_name(path) == name), None)
         self.change_version(name, url, page, backup)
 
     def change_version(self, version, url=None, page=None, backup=None):
@@ -2794,7 +2801,7 @@ class Launcher:
             return
         question = _('Change to version {}? The launcher closes, changes the version and opens again. Saves, '
                      'settings and the shader cache are kept. Version {} is kept in the versions folder, so you can '
-                     'come back to it.').format(version, VERSION)
+                     'come back to it.').format(version, installed_release())
         question += '\n\n' + _('This version may prepare its shaders once more.')
         if version_tuple(version) < FIRST_SWITCH_VERSION:
             question += '\n\n' + _('Version {} has no version choice: its Update button brings you back to the newest '
@@ -2832,7 +2839,7 @@ class Launcher:
                 return
             try:
                 subprocess.Popen([str(helper / 'Uncharted.exe'), '--switch-version', str(PORT_DIR), str(source),
-                                  VERSION, str(os.getpid())], cwd=str(helper), stdin=subprocess.DEVNULL,
+                                  installed_release(), str(os.getpid())], cwd=str(helper), stdin=subprocess.DEVNULL,
                                  creationflags=NO_WINDOW)
             except OSError as error:
                 failed(error)
@@ -3864,20 +3871,38 @@ def wait_for_process(pid):
         kernel.CloseHandle(handle)
 
 
+def release_name(folder):
+    """The exact release the package in folder is, from its RELEASE_FILE (the tag without its 'v', as
+    0.3.6.65.1-test); None without one."""
+    try:
+        tag = (Path(folder) / RELEASE_FILE).read_text(encoding='utf-8').strip()
+    except (OSError, ValueError):
+        return None
+    return (tag[1:] if tag[:1] in 'vV' else tag) or None
+
+
+def installed_release():
+    """The exact release installed: release_name(PORT_DIR) when it is one of VERSION (a release or a test build of
+    that number), else VERSION (a build made without a tag)."""
+    name = release_name(PORT_DIR)
+    return name if name and (name == VERSION or name.startswith(VERSION + '-')) else VERSION
+
+
 def backup_folder_name(version):
     """The folder in versions/ that keeps a release: its name, with anything a folder name cannot hold replaced."""
     return re.sub(r'[^0-9A-Za-z._-]', '_', version) or 'unknown'
 
 
 def version_backups(folder=None):
-    """[(version, path)] of the releases kept in versions/, the most recently left first. Only a whole one counts
+    """[(version, path)] of the releases kept in versions/, the most recently left first (version: the exact release
+    from its RELEASE_FILE, else the folder's name). Only a whole one counts
     (whole_release: not one a stopped switch or a deletion left half made)."""
     folder = Path(folder or VERSIONS_DIR)
     try:
         found = [p for p in folder.iterdir() if p.is_dir() and p.name != INCOMING_DIR and whole_release(p)]
     except OSError:
         return []
-    return [(p.name, p) for p in sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)]
+    return [(release_name(p) or p.name, p) for p in sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)]
 
 
 def whole_release(folder):
@@ -4146,6 +4171,11 @@ def install_update(target, wait_pid):
     target = Path(target)
     wait_for_process(wait_pid)
     ignore = shutil.ignore_patterns(*USER_FILES)
+    if not (PORT_DIR / RELEASE_FILE).exists():  # the copy-over would leave the old release's one
+        try:
+            (target / RELEASE_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass  # installed_release() still checks it against VERSION
     for attempt in range(30):
         try:
             shutil.copytree(PORT_DIR, target, dirs_exist_ok=True, ignore=ignore)
