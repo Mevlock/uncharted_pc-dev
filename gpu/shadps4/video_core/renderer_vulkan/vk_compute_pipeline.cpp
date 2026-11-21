@@ -29,8 +29,9 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     const auto debug_str = GetDebugString();
 
     // 64 lanes where the device has them, else the device's own size where the driver could pick another one (Intel).
-    const u32 subgroup_size =
-        instance.IsSubgroupSize64Supported() ? 64 : instance.FixedComputeSubgroupSize();
+    const u32 subgroup_size = instance.CanRequireSubgroupSize64(vk::ShaderStageFlagBits::eCompute)
+                                  ? 64
+                                  : instance.FixedComputeSubgroupSize();
     const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
         .requiredSubgroupSize = subgroup_size,
     };
