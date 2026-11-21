@@ -8,7 +8,16 @@
 #include <errno.h>
 #include <time.h>
 typedef struct { int type; } GuestAttr;
-typedef struct { pthread_mutex_t native; } GuestMutex;
+/* The game's libc writes into the mutex object itself after scePthreadMutexInit
+ * (`or dword [handle+0x20], 0x100`, the PS4 private-mutex flag), so the handle
+ * points at a zeroed block the size of a PS4 mutex object, not just at the host
+ * mutex. */
+#define GUEST_MUTEX_BYTES 0x100
+typedef struct {
+    pthread_mutex_t native;
+    unsigned char ps4_fields[GUEST_MUTEX_BYTES - sizeof(pthread_mutex_t)];
+} GuestMutex;
+_Static_assert(sizeof(GuestMutex) == GUEST_MUTEX_BYTES, "GuestMutex must cover the PS4 mutex object");
 static size_t created, locks, unlocks;
 static int32_t orbis_error(int e) {
     if (!e) return 0;
@@ -48,7 +57,7 @@ static ABI int32_t mutex_init(GuestMutex **out, GuestAttr **attr, const char *na
     if (!out || (attr && !*attr)) return orbis_error(EINVAL);
     int type = attr ? (*attr)->type : 1;
     if (type < 1 || type > 4) return orbis_error(EINVAL);
-    GuestMutex *mutex = malloc(sizeof(*mutex));
+    GuestMutex *mutex = calloc(1, sizeof(*mutex));
     if (!mutex) return orbis_error(ENOMEM);
     pthread_mutexattr_t native_attr;
     int e = pthread_mutexattr_init(&native_attr);
