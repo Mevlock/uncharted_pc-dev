@@ -372,6 +372,57 @@ class DownloadTests(unittest.TestCase):
         self.assertFalse(self.update_dir.exists())
 
 
+class Widget:
+    def __init__(self):
+        self.options = {}
+
+    def configure(self, **options):
+        self.options.update(options)
+
+    def winfo_exists(self):
+        return True
+
+
+class ChangeVersionTests(unittest.TestCase):
+    """Launcher.change_version without a window: the download done at once, the window's calls run in order."""
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.temp, True)
+        self.port = make_release(self.temp / 'port', '0.3.6.65')
+        self.launcher = LAUNCHER.Launcher.__new__(LAUNCHER.Launcher)
+        self.launcher.process, self.launcher.updating, self.launcher.closed = None, False, False
+        self.launcher.version_button, self.launcher.version_backup_buttons = Widget(), []
+        self.launcher.version_note, self.launcher.status = Widget(), Widget()
+        self.launcher.ui_calls = __import__('queue').Queue()
+        self.launcher.messagebox = type('Box', (), {'askyesno': staticmethod(lambda *_a: True),
+                                                   'showinfo': staticmethod(lambda *_a: None)})
+        self.launcher.close = lambda: setattr(self.launcher, 'closed', True)
+        self.started = []
+
+    def change(self, during_download=lambda: None):
+        def download(_url, _progress):
+            during_download()
+            return make_release(self.temp / 'update' / 'new', '0.3.6.64')
+        thread = type('Thread', (), {'__init__': lambda t, target, daemon: setattr(t, 'run', target),
+                                     'start': lambda t: t.run()})
+        with patch.object(LAUNCHER, 'FROZEN', True), patch.object(LAUNCHER, 'PORT_DIR', self.port),                 patch.object(LAUNCHER, 'UPDATE_DIR', self.temp / 'update'),                 patch.object(LAUNCHER, 'download_release', download),                 patch.object(LAUNCHER.threading, 'Thread', thread),                 patch.object(LAUNCHER.subprocess, 'Popen', lambda args, **_k: self.started.append(args)):
+            self.launcher.change_version('0.3.6.64', 'https://example/v0.3.6.64.zip')
+            while not self.launcher.ui_calls.empty():
+                self.launcher.ui_calls.get()()
+
+    def test_the_switcher_starts_and_the_window_closes(self):
+        self.change()
+        self.assertEqual(self.started[0][1], '--switch-version')
+        self.assertTrue(self.launcher.closed)
+
+    def test_not_when_the_game_was_started_during_the_download(self):
+        self.change(during_download=lambda: setattr(self.launcher, 'process', object()))
+        self.assertEqual(self.started, [])
+        self.assertFalse(self.launcher.closed)
+        self.assertFalse(self.launcher.updating)
+        self.assertIn('Close the game', self.launcher.version_note.options['text'])
+
+
 class LogLocationTests(unittest.TestCase):
     def setUp(self):
         self.temp = Path(tempfile.mkdtemp())

@@ -2779,6 +2779,30 @@ class Launcher:
                 self.version_note.configure(text=text, fg=GOLD)
             self.status.configure(text=text, fg=GOLD)
 
+        def failed(error):
+            self.updating = False
+            for button in buttons:
+                if button.winfo_exists():
+                    button.configure(state='normal')
+            if self.version_note.winfo_exists():
+                self.version_note.configure(text=_('Could not change the version: {}').format(error), fg='#e07a4f')
+            self.status.configure(text='', fg=MUTED)
+
+        def start(helper, source):
+            """On the window's thread: the game started during the download (Play stays usable) would hold the
+            installation's files, and this launcher would stay open for it, so the switcher would wait in vain."""
+            if self.process:
+                failed(_('Close the game before changing the version.'))
+                return
+            try:
+                subprocess.Popen([str(helper / 'Uncharted.exe'), '--switch-version', str(PORT_DIR), str(source),
+                                  VERSION, str(os.getpid())], cwd=str(helper), stdin=subprocess.DEVNULL,
+                                 creationflags=NO_WINDOW)
+            except OSError as error:
+                failed(error)
+                return
+            self.close()
+
         def work():
             try:
                 source = backup or download_release(url, lambda percent: self.ui_calls.put(lambda p=percent: progress(p)))
@@ -2790,20 +2814,10 @@ class Launcher:
                 shutil.copy2(PORT_DIR / 'Uncharted.exe', helper / 'Uncharted.exe')
                 if (PORT_DIR / '_internal').is_dir():
                     shutil.copytree(PORT_DIR / '_internal', helper / '_internal')
-                subprocess.Popen([str(helper / 'Uncharted.exe'), '--switch-version', str(PORT_DIR), str(source), VERSION,
-                                  str(os.getpid())], cwd=str(helper), stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
-                self.ui_calls.put(self.close)
             except (OSError, zipfile.BadZipFile) as failure:
-                def failed(error=failure):
-                    self.updating = False
-                    for button in buttons:
-                        if button.winfo_exists():
-                            button.configure(state='normal')
-                    if self.version_note.winfo_exists():
-                        self.version_note.configure(text=_('Could not change the version: {}').format(error),
-                                                    fg='#e07a4f')
-                    self.status.configure(text='', fg=MUTED)
-                self.ui_calls.put(failed)
+                self.ui_calls.put(lambda error=failure: failed(error))
+                return
+            self.ui_calls.put(lambda: start(helper, source))
         threading.Thread(target=work, daemon=True).start()
 
     def build_log(self):
@@ -3531,20 +3545,33 @@ class Launcher:
             self.update_text = _('Downloading version {}… {}%').format(version, percent)
             self.update_label.configure(text=self.update_text)
 
+        def failed(error):
+            self.updating, self.update_text = False, None
+            self.update_button.configure(state='normal')
+            self.update_label.configure(text=_('Version {} is available.').format(version))
+            self.messagebox.showerror(NAME, _('Update failed: {}').format(error))
+
+        def start(new):
+            """On the window's thread: not over a game started during the download (as in change_version)."""
+            if self.process:
+                failed(_('Close the game before updating.'))
+                return
+            # The new launcher copies itself over this installation once this one has closed.
+            try:
+                subprocess.Popen([str(new / 'Uncharted.exe'), '--install-update', str(PORT_DIR), str(os.getpid())],
+                                 cwd=str(new), stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+            except OSError as error:
+                failed(error)
+                return
+            self.close()
+
         def work():
             try:
                 new = download_release(url, lambda percent: self.ui_calls.put(lambda p=percent: progress(p)))
-                # The new launcher copies itself over this installation once this one has closed.
-                subprocess.Popen([str(new / 'Uncharted.exe'), '--install-update', str(PORT_DIR), str(os.getpid())],
-                                 cwd=str(new), stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
-                self.ui_calls.put(self.close)
             except (OSError, zipfile.BadZipFile) as failure:
-                def failed(error=failure):
-                    self.updating, self.update_text = False, None
-                    self.update_button.configure(state='normal')
-                    self.update_label.configure(text=_('Version {} is available.').format(version))
-                    self.messagebox.showerror(NAME, _('Update failed: {}').format(error))
-                self.ui_calls.put(failed)
+                self.ui_calls.put(lambda error=failure: failed(error))
+                return
+            self.ui_calls.put(lambda: start(new))
         threading.Thread(target=work, daemon=True).start()
 
     def clear_cache(self):
