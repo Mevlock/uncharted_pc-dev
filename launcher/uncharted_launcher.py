@@ -467,13 +467,18 @@ def shader_cache_dirs(s, key):
     return [p for p in root.glob(f"{info['id']}*") if p.is_dir() and '.' not in p.name]
 
 
+# The game's shader cache versions (ShaderBinaryVersion.ShaderMetaVersion.PipelineKeyVersion in
+# vk_pipeline_serialization.cpp); tests/test_shader_cache_version.py fails when they differ.
+SHADER_CACHE_VERSIONS = '24.16.8'
+
+
 def shaders_prepared(s, key):
-    """True when the game left a marker for the current list (its size in it), False when not, None with no list.
-    The marker's line goes on after the size: '[clip-jitter <version>] cache <shader cache versions>' (AMD and Intel
-    graphics put the upscaler jitter into the vertex shaders, which changes their pipelines; a new cache version makes
-    the stored shaders unusable). The game compares the whole line and prepares again once on the page when it
-    differs; the launcher compares the size only (comparing the whole line, it said 'not prepared yet' on AMD and
-    Intel cards after every preparation while the game itself found the marker)."""
+    """True when the game left a marker for the current list and the current shader cache versions, False when not,
+    None with no list. The marker's line is '<list size> [clip-jitter <version>] cache <shader cache versions>'.
+    The clip-jitter part is left out of the comparison: AMD and Intel graphics write it (the upscaler jitter in the
+    vertex shaders changes their pipelines), and comparing it the launcher said 'not prepared yet' on those cards after
+    every preparation while the game itself found the marker. A marker without the cache versions, or with others,
+    was written for shaders the game can no longer use: the game prepares again once on the page."""
     lists = shader_list(key)
     if not lists:
         return None
@@ -481,10 +486,12 @@ def shaders_prepared(s, key):
     for folder in shader_cache_dirs(s, key):
         try:
             words = (folder / f'prepared_{lists[0].stem}').read_text().split('\n')[0].split()
-            if words and words[0] == stamp:
-                return True
         except OSError:
-            pass
+            continue
+        if not words or words[0] != stamp:
+            continue
+        if 'cache' in words[:-1] and words[words.index('cache') + 1] == SHADER_CACHE_VERSIONS:
+            return True
     return False
 
 
