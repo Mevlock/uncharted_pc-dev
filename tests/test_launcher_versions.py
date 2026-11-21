@@ -421,6 +421,19 @@ class DownloadTests(unittest.TestCase):
             self.download(FakeResponse(b'<html>rate limited</html>'))
         self.assertFalse(self.update_dir.exists())
 
+    def test_a_malformed_size_still_downloads(self):
+        new = self.download(FakeResponse(release_zip_bytes(), length='12 MB'))
+        self.assertEqual((new / 'Uncharted.exe').read_bytes(), b'launcher')
+
+    def test_an_unsupported_zip_is_an_oserror_and_leaves_nothing(self):
+        def unsupported(*_a, **_k):
+            raise NotImplementedError('That compression method is not supported')
+        with patch.object(LAUNCHER.zipfile.ZipFile, 'extractall', unsupported):
+            with self.assertRaises(OSError) as raised:
+                self.download(FakeResponse(release_zip_bytes()))
+        self.assertIn('damaged', str(raised.exception))
+        self.assertFalse(self.update_dir.exists())
+
 
 class Widget:
     def __init__(self):
@@ -450,10 +463,13 @@ class ChangeVersionTests(unittest.TestCase):
         self.launcher.close = lambda: setattr(self.launcher, 'closed', True)
         self.started = []
 
-    def change(self, during_download=lambda: None):
+    def change(self, during_download=lambda: None, failure=None):
         def download(_url, _progress):
             during_download()
-            return make_release(self.temp / 'update' / 'new', '0.3.6.64')
+            made = make_release(self.temp / 'update' / 'new', '0.3.6.64')
+            if failure:
+                raise failure
+            return made
         thread = type('Thread', (), {'__init__': lambda t, target, daemon: setattr(t, 'run', target),
                                      'start': lambda t: t.run()})
         with patch.object(LAUNCHER, 'FROZEN', True), patch.object(LAUNCHER, 'PORT_DIR', self.port),                 patch.object(LAUNCHER, 'UPDATE_DIR', self.temp / 'update'),                 patch.object(LAUNCHER, 'download_release', download),                 patch.object(LAUNCHER.threading, 'Thread', thread),                 patch.object(LAUNCHER.subprocess, 'Popen', lambda args, **_k: self.started.append(args)):
@@ -472,6 +488,35 @@ class ChangeVersionTests(unittest.TestCase):
         self.assertFalse(self.launcher.closed)
         self.assertFalse(self.launcher.updating)
         self.assertIn('Close the game', self.launcher.version_note.options['text'])
+
+    def test_any_failure_of_the_download_thread_is_shown_and_cleaned_up(self):
+        self.change(failure=RuntimeError('something unexpected'))
+        self.assertFalse(self.launcher.updating)
+        self.assertEqual(self.launcher.version_button.options['state'], 'normal')
+        self.assertIn('something unexpected', self.launcher.version_note.options['text'])
+        self.assertFalse((self.temp / 'update').exists())
+        self.assertEqual(self.started, [])
+
+    def test_any_failure_of_the_update_thread_is_shown_and_cleaned_up(self):
+        shown = []
+        self.launcher.update_label = Widget()
+        self.launcher.update_text = None
+        self.launcher.messagebox.showerror = staticmethod(lambda *a: shown.append(a))
+
+        def download(_url, _progress):
+            make_release(self.temp / 'update' / 'new', '0.3.6.66')
+            raise RuntimeError('something unexpected')
+        thread = type('Thread', (), {'__init__': lambda t, target, daemon: setattr(t, 'run', target),
+                                     'start': lambda t: t.run()})
+        with patch.object(LAUNCHER, 'FROZEN', True), patch.object(LAUNCHER, 'UPDATE_DIR', self.temp / 'update'),                 patch.object(LAUNCHER, 'download_release', download),                 patch.object(LAUNCHER.threading, 'Thread', thread):
+            self.launcher.install_update('0.3.6.66', 'https://example/v0.3.6.66.zip', 'https://example/p')
+            while not self.launcher.ui_calls.empty():
+                self.launcher.ui_calls.get()()
+        self.assertFalse(self.launcher.updating)
+        self.assertEqual(self.launcher.update_button.options['state'], 'normal')
+        self.assertEqual(len(shown), 1)
+        self.assertIn('something unexpected', shown[0][1])
+        self.assertFalse((self.temp / 'update').exists())
 
     def test_update_is_disabled_and_refused_during_a_version_change(self):
         self.launcher.update_box = Widget()

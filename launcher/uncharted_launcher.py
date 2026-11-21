@@ -2817,7 +2817,8 @@ class Launcher:
                 shutil.copy2(PORT_DIR / 'Uncharted.exe', helper / 'Uncharted.exe')
                 if (PORT_DIR / '_internal').is_dir():
                     shutil.copytree(PORT_DIR / '_internal', helper / '_internal')
-            except (OSError, zipfile.BadZipFile) as failure:
+            except Exception as failure:  # every failure, not only an OSError: never a thread ending in silence
+                shutil.rmtree(UPDATE_DIR, ignore_errors=True)  # the download and the switcher copy
                 self.ui_calls.put(lambda error=failure: failed(error))
                 return
             self.ui_calls.put(lambda: start(helper, source))
@@ -3576,7 +3577,8 @@ class Launcher:
         def work():
             try:
                 new = download_release(url, lambda percent: self.ui_calls.put(lambda p=percent: progress(p)))
-            except (OSError, zipfile.BadZipFile) as failure:
+            except Exception as failure:  # every failure, not only an OSError (as in change_version)
+                shutil.rmtree(UPDATE_DIR, ignore_errors=True)
                 self.ui_calls.put(lambda error=failure: failed(error))
                 return
             self.ui_calls.put(lambda: start(new))
@@ -3790,7 +3792,8 @@ def download_release(url, progress):
         archive = UPDATE_DIR / 'update.zip'
         request = urllib.request.Request(url, headers={'User-Agent': 'uncharted-launcher'})
         with urllib.request.urlopen(request, timeout=60) as response, open(archive, 'wb') as out:
-            total, done, shown = int(response.headers.get('Content-Length') or 0), 0, -1
+            length = str(response.headers.get('Content-Length') or '')
+            total, done, shown = int(length) if length.isdigit() else 0, 0, -1  # a malformed size: no percentage
             while chunk := response.read(1 << 20):
                 out.write(chunk)
                 done += len(chunk)
@@ -3803,7 +3806,8 @@ def download_release(url, progress):
         try:
             with zipfile.ZipFile(archive) as package:
                 package.extractall(UPDATE_DIR / 'new')
-        except (zipfile.BadZipFile, zlib.error, EOFError, ValueError) as error:
+        except (zipfile.BadZipFile, zlib.error, EOFError, ValueError, NotImplementedError, RuntimeError) as error:
+            # NotImplementedError: a compression method zipfile has not; RuntimeError: an encrypted member
             raise OSError(f'the download is damaged ({error})') from error
         archive.unlink()
         new = next((p.parent for p in (UPDATE_DIR / 'new').rglob('Uncharted.exe')), None)
