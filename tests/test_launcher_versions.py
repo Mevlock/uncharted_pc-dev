@@ -1,5 +1,5 @@
-"""Advanced > Version (the release list, the switch's file moves and backups), with temporary folders: no window,
-no download, no game."""
+"""Advanced > Version (the release list, the switch's file moves and backups) and the log folder, with temporary
+folders: no window, no download, no game."""
 import importlib.util
 import os
 import shutil
@@ -186,6 +186,26 @@ class BackupTests(unittest.TestCase):
     def test_backup_folder_names(self):
         self.assertEqual(LAUNCHER.backup_folder_name('0.3.6.58.1-test-reflex'), '0.3.6.58.1-test-reflex')
         self.assertEqual(LAUNCHER.backup_folder_name('0.3.6.65 (local)'), '0.3.6.65__local_')
+
+
+class LogLocationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.temp, True)
+
+    def test_the_saves_folder_holds_the_log(self):
+        saves = self.temp / 'saves'
+        saves.mkdir()
+        self.assertEqual(LAUNCHER.log_location({'user_dir': str(saves)}), (saves, None))
+        (saves / 'last_run.log').write_text('log')
+        self.assertEqual(LAUNCHER.log_location({'user_dir': str(saves)}), (saves, saves / 'last_run.log'))
+
+    def test_without_a_saves_folder_user_next_to_the_launcher(self):
+        with patch.object(LAUNCHER, 'DATA_DIR', self.temp):
+            self.assertEqual(LAUNCHER.log_location({'user_dir': ''}), (self.temp / 'user', None))
+            (self.temp / 'user').mkdir()
+            (self.temp / 'user' / 'last_run.log').write_text('log')
+            self.assertEqual(LAUNCHER.log_location({}), (self.temp / 'user', self.temp / 'user' / 'last_run.log'))
 
 
 if __name__ == '__main__':

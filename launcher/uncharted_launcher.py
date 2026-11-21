@@ -1533,6 +1533,9 @@ class Launcher:
         dock.pack(fill='both', expand=True)
         self.status = tk.Label(dock, text='', bg=PANEL, fg=MUTED, font=('Segoe UI', 10), anchor='w', justify='left')
         self.status.pack(side='left', padx=24, pady=14)
+        # Beside the status after the game stopped with an error (drain_once), hidden again at the next start.
+        self.crash_log_button = self.pill(dock, _('Open log folder'), self.open_log_folder, background=PANEL,
+                                          padding=(16, 6))
         self.play_button = self.pill(dock, _('Play'), self.play, kind='primary', background=PANEL,
                                      padding=(30, 9), icon='\ue768' if self.font_icon else None)
         self.play_button.pack(side='right', padx=(10, 22), pady=12)
@@ -2768,6 +2771,8 @@ class Launcher:
         head.pack(fill='x', padx=self.px(26), pady=(self.px(18), self.px(14)))
         tk.Label(head, text=_('Log'), bg=SURFACE, fg=TEXT, font=self.font_title).pack(side='left')
         self.pill(head, _('Copy'), self.copy_log, background=SURFACE, padding=(16, 6)).pack(side='right')
+        self.pill(head, _('Open log folder'), self.open_log_folder, background=SURFACE, padding=(16, 6)).pack(
+            side='right', padx=(0, self.px(8)))
         body = tk.Frame(shell, bg=SURFACE)
         body.pack(fill='both', expand=True, padx=self.px(26), pady=(0, self.px(8)))
         self.log = tk.Text(body, bg=CARD, fg='#e3d6bd', insertbackground=TEXT, font=('Cascadia Mono', 9), wrap='none',
@@ -3051,6 +3056,7 @@ class Launcher:
             self.messagebox.showerror(NAME, _('This game is not in the chosen folder.'))
             return
         self.set_log('')
+        self.crash_log_button.pack_forget()
         env = game_environment(self.app)
         if collection:
             env.pop('BB_SKIP_COLLECTION_MENU', None)
@@ -3067,7 +3073,7 @@ class Launcher:
         output, log = subprocess.PIPE, None
         if closing:
             try:
-                log = open_run_log(Path(self.app.get('user_dir') or DATA_DIR / 'user'))
+                log = open_run_log(log_location(self.app)[0])
                 log.write(log_header(self.app))
                 log.flush()
                 output = log
@@ -3112,8 +3118,7 @@ class Launcher:
         header = log_header(self.app)
         self.output.put(header)  # also on the Log page: copied logs name the build too
         try:
-            log_dir = Path(self.app.get('user_dir') or DATA_DIR / 'user')
-            log = open_run_log(log_dir)
+            log = open_run_log(log_location(self.app)[0])
             log.write(header)
         except OSError:
             pass
@@ -3170,6 +3175,7 @@ class Launcher:
                         reason = self.last_problem or _('see the Log page')
                         self.status.configure(text=_('The game stopped: {}').format(reason[:110]),
                                               fg='#e07a4f')
+                        self.crash_log_button.pack(side='left', pady=12)
                         self.show('log')
                     # It crashed (not Stop, not closing the window): say why, also with files left unsaved.
                     if not self.stopping and code != 0:
@@ -3293,6 +3299,15 @@ class Launcher:
         self.log.delete('1.0', 'end')
         self.log.insert('end', text)
         self.log.configure(state='disabled')
+
+    def open_log_folder(self):
+        """The folder of last_run.log in Explorer, the log selected when there is one."""
+        folder, log = log_location(self.app)
+        if log:
+            subprocess.Popen(f'explorer /select,"{log.resolve()}"')
+        else:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(folder))
 
     def copy_log(self):
         self.root.clipboard_clear()
@@ -3856,6 +3871,14 @@ def log_header(settings, start=None):
             f'Folders: saves {saves}, shader cache {DATA_DIR / "user" / "cache"}\n{game}\n')
 
 
+def log_location(settings):
+    """(folder, file) of last_run.log: the folder is the saves folder (Game page), else user/ next to the
+    launcher; file is its last_run.log, None while there is none yet."""
+    folder = Path(settings.get('user_dir') or DATA_DIR / 'user')
+    log = folder / 'last_run.log'
+    return folder, log if log.is_file() else None
+
+
 def open_run_log(log_dir, keep=5):
     """last_run.log for a new run; the previous ones move to last_run.1.log ... last_run.<keep-1>.log
     (a restart after a problem no longer overwrites the log that shows it)."""
@@ -3874,8 +3897,7 @@ def play_without_window(settings):
     """--play [u1|u2|u3]: the game with the saved settings (shortcuts, Steam); output to the console
     when there is one and to <saves folder>/last_run.log."""
     attach_stdio()
-    log_dir = Path(settings.get('user_dir') or DATA_DIR / 'user')
-    with open_run_log(log_dir) as log:
+    with open_run_log(log_location(settings)[0]) as log:
         log.write(log_header(settings))
         process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=game_environment(settings),
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

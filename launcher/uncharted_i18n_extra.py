@@ -477,6 +477,8 @@ EXTRA_TRANSLATIONS = {
             'Version {} hat keine Versionsauswahl: Ihre Schaltfläche „Aktualisieren“ bringt dich zur neuesten Version zurück.',
         'Could not change the version: {}':
             'Die Version konnte nicht gewechselt werden: {}',
+        'Open log folder':
+            'Protokollordner öffnen',
     },
     'it': {
         'Auto (as Windows reports)':
@@ -953,6 +955,8 @@ EXTRA_TRANSLATIONS = {
             'La versione {} non ha la scelta della versione: il suo pulsante «Aggiorna» ti riporta alla versione più recente.',
         'Could not change the version: {}':
             'Impossibile cambiare versione: {}',
+        'Open log folder':
+            'Apri la cartella del registro',
     },
     'ja': {
         'Auto (as Windows reports)':
@@ -1423,6 +1427,8 @@ EXTRA_TRANSLATIONS = {
             'バージョン {} にはバージョンの選択がありません。その「更新」ボタンで最新バージョンに戻れます。',
         'Could not change the version: {}':
             'バージョンを変更できませんでした: {}',
+        'Open log folder':
+            'ログのフォルダーを開く',
     },
     'es': {
         'Auto (as Windows reports)':
@@ -1798,6 +1804,8 @@ EXTRA_TRANSLATIONS = {
             'La versión {} no tiene selector de versión: su botón «Actualizar» te lleva de vuelta a la versión más reciente.',
         'Could not change the version: {}':
             'No se pudo cambiar la versión: {}',
+        'Open log folder':
+            'Abrir carpeta del registro',
     },
     'pt': {
         'Auto (as Windows reports)':
@@ -2174,6 +2182,8 @@ EXTRA_TRANSLATIONS = {
             'A versão {} não tem escolha de versão: o botão «Atualizar» dela leva você de volta à versão mais recente.',
         'Could not change the version: {}':
             'Não foi possível mudar a versão: {}',
+        'Open log folder':
+            'Abrir pasta do registro',
     },
     'fr': {
         'Auto (as Windows reports)':
@@ -2551,6 +2561,8 @@ EXTRA_TRANSLATIONS = {
             'La version {} n’a pas de choix de version : son bouton « Mettre à jour » vous ramène à la version la plus récente.',
         'Could not change the version: {}':
             'Impossible de changer de version : {}',
+        'Open log folder':
+            'Ouvrir le dossier du journal',
     },
     # Russian (EU-Russian CUSA02344 players): poncho-ajmv's translation from the upstream port (PR #713)
     # where the English text is the same as ours, the rest translated for this port; the shared
@@ -3001,5 +3013,7 @@ EXTRA_TRANSLATIONS = {
             'В версии {} нет выбора версии: её кнопка «Обновление» вернёт вас к самой новой версии.',
         'Could not change the version: {}':
             'Не удалось сменить версию: {}',
+        'Open log folder':
+            'Открыть папку журнала',
     },
 }
