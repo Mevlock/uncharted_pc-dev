@@ -393,6 +393,7 @@ class ChangeVersionTests(unittest.TestCase):
         self.launcher.process, self.launcher.updating, self.launcher.closed = None, False, False
         self.launcher.version_button, self.launcher.version_backup_buttons = Widget(), []
         self.launcher.version_note, self.launcher.status = Widget(), Widget()
+        self.launcher.update_box, self.launcher.update_button = None, Widget()
         self.launcher.ui_calls = __import__('queue').Queue()
         self.launcher.messagebox = type('Box', (), {'askyesno': staticmethod(lambda *_a: True),
                                                    'showinfo': staticmethod(lambda *_a: None)})
@@ -421,6 +422,26 @@ class ChangeVersionTests(unittest.TestCase):
         self.assertFalse(self.launcher.closed)
         self.assertFalse(self.launcher.updating)
         self.assertIn('Close the game', self.launcher.version_note.options['text'])
+
+    def test_update_is_disabled_and_refused_during_a_version_change(self):
+        self.launcher.update_box = Widget()
+        seen, asked = [], []
+        self.launcher.messagebox.askyesno = staticmethod(lambda *_a: asked.append(_a) or True)
+
+        def click_update():
+            seen.append(self.launcher.update_button.options.get('state'))
+            self.launcher.install_update('0.3.6.66', 'https://example/v0.3.6.66.zip', 'https://example/p')
+        self.change(during_download=click_update)
+        self.assertEqual(seen, ['disabled'])
+        self.assertEqual(len(asked), 1)  # only the version change's own question: no second download
+        self.assertEqual([args[1] for args in self.started], ['--switch-version'])
+
+    def test_no_version_change_while_an_update_downloads(self):
+        self.launcher.updating = True
+        asked = []
+        self.launcher.messagebox.askyesno = staticmethod(lambda *_a: asked.append(_a) or True)
+        self.change()
+        self.assertEqual((asked, self.started, self.launcher.closed), ([], [], False))
 
 
 class LogLocationTests(unittest.TestCase):

@@ -2769,7 +2769,10 @@ class Launcher:
         if not self.messagebox.askyesno(NAME, question):
             return
         self.updating = True
+        # Update too: a second download would share UPDATE_DIR with this one.
         buttons = [self.version_button, *self.version_backup_buttons]
+        if self.update_box and self.update_box.winfo_exists():
+            buttons.append(self.update_button)
         for button in buttons:
             button.configure(state='disabled')
 
@@ -3531,6 +3534,8 @@ class Launcher:
             self.status.configure(text=_('Version {} is available.').format(version), fg=GOLD)
 
     def install_update(self, version, url, page):
+        if self.updating:  # a version change (or this update) is downloading into UPDATE_DIR
+            return
         if self.process:
             self.messagebox.showinfo(NAME, _('Close the game before updating.'))
             return
