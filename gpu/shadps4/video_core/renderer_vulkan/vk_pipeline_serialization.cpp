@@ -2684,6 +2684,40 @@ void PipelineCache::WarmUpThread() {
     // The hold below lasts until the listed variants are built too (step 5b), so no shader work is left behind the game.
     bool held = false, held_page = false;
     std::chrono::steady_clock::time_point held_since{};
+    // bbport: one page judge for the whole hold: the stored phase (the cache's own keys and the compute keys) and the
+    // variant ship's (the list's graphics keys, which wait for it). Each key counts once, in the phase that builds it;
+    // the projection is the time per key so far times the keys left in both. A start whose keys are mostly the list's
+    // (Uncharted 3 on AMD: ~9,500 of ~12,000 built in the ship phase) froze ~11 s without the page: the stored phase
+    // counted the waiting list keys as done and projected under 3 s.
+    struct HoldJudge {
+        bool on = false; ///< the game is held and the page is allowed
+        std::chrono::steady_clock::time_point start{};
+        std::atomic<u32> done{0};
+        std::atomic<bool> raised{false};
+    } judge;
+    const auto judge_counted = [&](size_t i, bool ship_phase) {
+        const bool list_key = i >= names.size() && !stored[i].compute;
+        return ship_phase ? list_key : !(ship_active && list_key);
+    };
+    const auto judge_note = [&](size_t i, bool ship_phase) {
+        if (!judge.on || !judge_counted(i, ship_phase)) {
+            return;
+        }
+        const u32 done = judge.done.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (judge.raised.load(std::memory_order_relaxed) || done % 64 != 0 || done >= stored.size()) {
+            return;
+        }
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - judge.start).count();
+        const double left_ms = ms / done * double(stored.size() - done);
+        if (ms > 1000.0 && left_ms > 3000.0 && !judge.raised.exchange(true)) {
+            std::printf("Preparation: the graphics driver compiles the shaders again (%u of %zu pipelines in %.0f ms, "
+                        "about %.0f s left%s): the page shows\n",
+                        done, stored.size(), ms, left_ms / 1000.0, ship_phase ? ", in the listed variants' phase" : "");
+            BbOverlay::SetPreparationRebuild(true);
+            BbOverlay::SetPreparationScreen(true);
+        }
+    };
     // bbport: a large cache (a prepared list) shows the same "Preparing pipelines" progress as the list build.
     if (stored.size() >= 500) {
         // A later launch (no page) builds these behind the game. With the graphics driver's own cache warm that takes
@@ -2715,30 +2749,19 @@ void PipelineCache::WarmUpThread() {
             runtime_freeze_guest(1);
         }
         const auto hold_start = std::chrono::steady_clock::now();
-        std::atomic<bool> page_raised{false};
+        judge.on = hold && page_allowed;
+        judge.start = hold_start;
         BbOverlay::SetShaderPreparation(2, 0, u32(stored.size()));
         std::atomic<u32> stored_done{0};
         ParallelFor(stored.size(), threads, [&](size_t i) {
             build_stored(i);
             const u32 done = stored_done.fetch_add(1, std::memory_order_relaxed) + 1;
             BbOverlay::SetShaderPreparation(2, done, u32(stored.size()));
-            if (hold && page_allowed && !page_raised.load(std::memory_order_relaxed) && done % 64 == 0) {
-                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                                            hold_start)
-                                      .count();
-                const double left_ms = ms / done * double(stored.size() - done);
-                if (ms > 1000.0 && left_ms > 3000.0 && !page_raised.exchange(true)) {
-                    std::printf("Preparation: the graphics driver compiles the shaders again (%u of %zu pipelines in "
-                                "%.0f ms, about %.0f s left): the page shows\n",
-                                done, stored.size(), ms, left_ms / 1000.0);
-                    BbOverlay::SetPreparationRebuild(true);
-                    BbOverlay::SetPreparationScreen(true);
-                }
-            }
+            judge_note(i, false);
         });
         BbOverlay::SetShaderPreparation(0, 0, 0);
         held = hold;
-        held_page = page_raised.load();
+        held_page = judge.raised.load();
         held_since = hold_start;
     } else {
         ParallelFor(stored.size(), threads, build_stored);
@@ -2998,8 +3021,10 @@ void PipelineCache::WarmUpThread() {
             build_stored(i);
             BbOverlay::SetShaderPreparation(2, pipelines_done.fetch_add(1, std::memory_order_relaxed) + 1,
                                             u32(stored.size()));
+            judge_note(i, true);
         });
         BbOverlay::SetShaderPreparation(0, 0, 0);
+        held_page = held && judge.raised.load(); // raised in either phase: released by the page, as in the stored one
         std::printf("Variant ship: %zu listed variants not in the cache; code read in %.0f ms; built %u (%u taken by "
                     "the game first, %u failed, %u without code) in %.0f ms; then %u pipelines in %.0f ms\n",
                     listed.size(), t_read - t_ship, built.load(), taken.load(), failed.load(), no_code.load(),
