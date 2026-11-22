@@ -83,6 +83,13 @@ public:
     /// bbport (pack cache): the pack's id (16 hex digits; new on every clear and when damage lost records), which a
     /// prepared marker names; empty when there is none or this game found damage it could not repair.
     [[nodiscard]] std::string PackIdText() const;
+    /// bbport (pack cache): old cache files (one per blob, an earlier build's folder cache) still to be moved into the
+    /// pack; 0: none.
+    [[nodiscard]] u32 FolderCacheToMove() const;
+    /// bbport (pack cache): moves them (read, appended, read back from the disk; the old files are then removed
+    /// behind the game). `progress(done, total)` from the reading threads; (0, 0) at the end. False: the old files
+    /// are kept (the next start tries again).
+    bool MoveFolderCache(const std::function<void(u32 done, u32 total)>& progress);
 
 private:
     std::jthread io_worker{}; ///< the one writer thread (appends to the pack in order)

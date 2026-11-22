@@ -3396,15 +3396,17 @@ class Launcher:
                      2: _('Step 2 of 3: compiling them for your graphics card'), 3: _('Finishing…'),
                      4: _('Step 3 of 3: saving the prepared shaders'),
                      5: _('Step 1 of 3: finding the shaders in your game files (only this once)')}
+            steps[6] = _('Moving the shader cache into one file (only this once)')
         else:
             steps = {0: _('Starting…'), 1: _('Step 1 of 2: reading the shaders'),
                      2: _('Step 2 of 2: compiling them for your graphics card'), 3: _('Finishing…'),
                      4: _('Saving the prepared shaders'),
                      5: _('Step 1 of 2: finding the shaders in your game files (only this once)')}
+            steps[6] = _('Moving the shader cache into one file (only this once)')
         text = f'{steps.get(step, "")}   {percent} %'
         if step == 5 and total:
             text += f'   ({done / 1024:.1f} / {total / 1024:.1f} GB)'  # the scan counts MiB
-        elif step in (1, 2, 4) and total:
+        elif step in (1, 2, 4, 6) and total:  # 6: an earlier build's cache files moved into one file
             text += f'   ({done} / {total})'
         if left.strip():
             text += f' · {left.strip()}'

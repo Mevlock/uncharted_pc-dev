@@ -248,24 +248,26 @@ static void TieMarkersToPack(const std::filesystem::path& folder) {
     }
 }
 
-/// bbport (pack cache): a folder cache of an earlier build (one file per blob) moves into the pack: every blob file is
-/// read and appended (unless the pack already holds the same), the pack is flushed and opened again from the disk,
-/// and only when every moved blob reads back from it are the old files removed (behind the game). The time of the
-/// move is kept in the pack: a later start removes leftover files no newer than it whose blob the pack holds without
-/// reading them; any other (an earlier build run on this folder since, a copied-in old cache) is moved in again.
-static void MoveFolderCacheIntoPack(const std::filesystem::path& folder) {
+/// bbport (pack cache): the old cache files found by DataBase::Open (moved by DataBase::MoveFolderCache).
+struct LooseFile {
+    std::filesystem::path path;
+    int type;  ///< BlobType, or -1 for an earlier build's unfinished write
+    bool fold; ///< read and moved in (else a leftover of an earlier move, removed unread)
+};
+std::vector<LooseFile> loose_files;
+u32 loose_to_fold = 0;
+
+/// Lists the folder cache of an earlier build (one file per blob) beside the pack. The time of an earlier move is kept
+/// in the pack: leftover files no newer than it whose blob the pack holds are removed without reading them; any other
+/// (an earlier build run on this folder since, a copied-in old cache) is moved in again.
+static void ListFolderCache(const std::filesystem::path& folder) {
     namespace fs = std::filesystem;
-    const auto t0 = std::chrono::steady_clock::now();
+    loose_files.clear();
+    loose_to_fold = 0;
     fs::file_time_type::rep folded_at = 0;
     if (std::vector<u8> data; pack.Get(InternalType, FoldedName, data) && data.size() == sizeof(folded_at)) {
         std::memcpy(&folded_at, data.data(), sizeof(folded_at));
     }
-    struct Loose {
-        fs::path path;
-        int type;
-        bool fold;
-    };
-    std::vector<Loose> files;
     std::error_code ec;
     for (const auto& entry : fs::directory_iterator(folder, ec)) {
         if (!entry.is_regular_file(ec)) {
@@ -278,30 +280,82 @@ static void MoveFolderCacheIntoPack(const std::filesystem::path& folder) {
         }
         if (const int type = LooseBlobType(path); type >= 0) {
             const auto written = entry.last_write_time(ec).time_since_epoch().count();
-            // A leftover of the move (no newer than it, its blob in the pack) goes unread; anything else moves in.
             const bool leftover = folded_at != 0 && written <= folded_at &&
                                   pack.Find(PackType(BlobType(type)), path.stem().string(), nullptr, nullptr);
-            files.push_back({path, type, !leftover});
+            loose_files.push_back({path, type, !leftover});
+            loose_to_fold += leftover ? 0 : 1;
         } else if (path.extension() == ".tmp" && !name.starts_with("prepared_")) {
-            files.push_back({path, -1, false}); // an earlier build's unfinished write
+            loose_files.push_back({path, -1, false});
         }
     }
-    if (files.empty()) {
-        return;
+}
+
+/// Removes the old files behind the game, at low priority (a later start removes what is left).
+static void RemoveLooseFilesBehindTheGame() {
+    std::vector<std::filesystem::path> paths;
+    paths.reserve(loose_files.size());
+    for (auto& f : loose_files) {
+        paths.push_back(std::move(f.path));
     }
+    loose_files.clear();
+    loose_to_fold = 0;
+    cleanup_thread = std::jthread{[paths = std::move(paths)](std::stop_token stoken) {
+        Common::SetCurrentThreadName("bb:CacheCleanup");
+        BbThreads::MakeBelowNormal();
+        const auto start = std::chrono::steady_clock::now();
+        size_t removed = 0;
+        for (const auto& path : paths) {
+            if (stoken.stop_requested()) {
+                break;
+            }
+            std::error_code error;
+            removed += std::filesystem::remove(path, error) ? 1 : 0;
+        }
+        std::printf("Shader cache: %zu of %zu old cache files removed in %.1f s%s\n", removed, paths.size(),
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                    removed < paths.size() ? " (the rest at the next start)" : "");
+    }};
+}
+
+u32 DataBase::FolderCacheToMove() const {
+    return loose_to_fold;
+}
+
+/// bbport (pack cache): the folder cache of an earlier build moves into the pack: every blob file is read and
+/// appended (unless the pack already holds the same), the pack is flushed, then opened a second time from the disk
+/// (every record read and checked) and each moved blob looked up there; only then is the move's time recorded, the
+/// old prepared markers tied to the pack, and the old files removed (behind the game). Anything short of that keeps
+/// the old files (the next start tries again).
+bool DataBase::MoveFolderCache(const std::function<void(u32 done, u32 total)>& progress) {
+    namespace fs = std::filesystem;
+    if (!opened || !pack.IsWriter() || loose_files.empty()) {
+        return true;
+    }
+    if (loose_to_fold == 0) {
+        std::printf("Shader cache: %zu old cache files left from the move into %s: removed behind the game\n",
+                    loose_files.size(), PackName);
+        RemoveLooseFilesBehindTheGame();
+        return true;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
     const auto start_time = fs::file_time_type::clock::now().time_since_epoch().count();
     std::vector<size_t> to_fold;
-    for (size_t i = 0; i < files.size(); ++i) {
-        if (files[i].fold) {
+    for (size_t i = 0; i < loose_files.size(); ++i) {
+        if (loose_files[i].fold) {
             to_fold.push_back(i);
         }
     }
+    const u32 total = u32(to_fold.size());
+    std::printf("Shader cache: moving %u cache files of an earlier build into %s (only this once)\n", total,
+                PackName);
+    std::fflush(stdout);
     std::atomic<u64> moved{0}, same{0}, unreadable{0}, failed{0}, bytes{0};
-    std::vector<u64> hashes(files.size(), 0);
-    if (to_fold.empty()) {
-        std::printf("Shader cache: %zu old cache files left from the move into %s: removed behind the game\n",
-                    files.size(), PackName);
-    } else {
+    std::atomic<u32> done{0};
+    std::vector<u64> hashes(loose_files.size(), 0);
+    if (progress) {
+        progress(0, total);
+    }
+    {
         // Read in parallel (as the preload read them), appended in whatever order they come.
         const u32 threads = std::clamp<u32>(BbThreads::Available() > 2 ? BbThreads::Available() - 2 : 1, 1, 16);
         std::atomic<size_t> next{0};
@@ -309,7 +363,18 @@ static void MoveFolderCacheIntoPack(const std::filesystem::path& folder) {
         for (u32 t = 0; t < threads; ++t) {
             pool.emplace_back([&] {
                 for (size_t k; (k = next.fetch_add(1)) < to_fold.size();) {
-                    auto& file = files[to_fold[k]];
+                    struct Count {
+                        std::atomic<u32>& n;
+                        const std::function<void(u32, u32)>& progress;
+                        u32 total;
+                        ~Count() {
+                            const u32 now = n.fetch_add(1, std::memory_order_relaxed) + 1;
+                            if (progress) {
+                                progress(now, total);
+                            }
+                        }
+                    } count{done, progress, total};
+                    auto& file = loose_files[to_fold[k]];
                     std::vector<u8> data;
                     {
                         const Common::FS::IOFile in{file.path, Common::FS::FileAccessMode::Read};
@@ -341,69 +406,53 @@ static void MoveFolderCacheIntoPack(const std::filesystem::path& folder) {
                 }
             });
         }
-        pool.clear(); // joins
+    } // joins
+    if (progress) {
+        progress(0, 0); // the move is over
     }
     if (failed || unreadable) {
-        // Not all of them are in the pack: the old files stay (the next start tries again).
         std::printf("Shader cache: moving the old cache files into %s: %llu could not be saved, %llu not read: the "
                     "old files are kept\n",
                     PackName, static_cast<unsigned long long>(failed.load()),
                     static_cast<unsigned long long>(unreadable.load()));
-        return;
+        return false;
     }
-    // Verified from the disk: flushed, opened again (every record read and checked), each moved blob found.
-    const auto pack_path = pack.Path();
-    if (!to_fold.empty()) {
-        if (!pack.Sync()) {
-            std::printf("Shader cache: %s could not be flushed: the old cache files are kept\n", PackName);
-            return;
-        }
-        pack.Close();
-        const auto reopened = pack.Open(pack_path, true, false);
-        bool verified = reopened.ok && reopened.writer && reopened.bad_records == 0 && reopened.torn_bytes == 0;
+    if (!pack.Sync()) {
+        std::printf("Shader cache: %s could not be flushed: the old cache files are kept\n", PackName);
+        return false;
+    }
+    {
+        // A second, read-only open of the pack from the disk (this game keeps its own open, for the queued writes).
+        Pack::PackFile check;
+        const auto st = check.Open(pack.Path(), false);
+        bool verified = st.ok && st.bad_records == 0 && st.torn_bytes == 0;
         for (const size_t i : to_fold) {
             if (!verified) {
                 break;
             }
             u64 hash = 0;
-            verified = pack.Find(PackType(BlobType(files[i].type)), files[i].path.stem().string(), nullptr, &hash) &&
+            verified = check.Find(PackType(BlobType(loose_files[i].type)), loose_files[i].path.stem().string(),
+                                  nullptr, &hash) &&
                        hash == hashes[i];
         }
         if (!verified) {
-            std::printf("Shader cache: %s did not read back after the move: the old cache files are kept\n", PackName);
-            return;
+            std::printf("Shader cache: %s did not read back after the move: the old cache files are kept\n",
+                        PackName);
+            return false;
         }
-        if (!pack.Put(InternalType, FoldedName, &start_time, sizeof(start_time)) || !pack.Sync()) {
-            return;
-        }
-        TieMarkersToPack(folder);
-        std::printf("Shader cache: moved %llu cache files (%s) into %s in %.1f s (%llu were in it already); the %zu "
-                    "old files are removed behind the game\n",
-                    static_cast<unsigned long long>(moved.load()), MB(bytes.load()).c_str(), PackName,
-                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
-                    static_cast<unsigned long long>(same.load()), files.size());
     }
-    std::vector<fs::path> paths;
-    paths.reserve(files.size());
-    for (auto& f : files) {
-        paths.push_back(std::move(f.path));
+    if (!pack.Put(InternalType, FoldedName, &start_time, sizeof(start_time)) || !pack.Sync()) {
+        std::printf("Shader cache: %s could not be written after the move: the old cache files are kept\n", PackName);
+        return false;
     }
-    cleanup_thread = std::jthread{[paths = std::move(paths)](std::stop_token stoken) {
-        Common::SetCurrentThreadName("bb:CacheCleanup");
-        BbThreads::MakeBelowNormal();
-        const auto start = std::chrono::steady_clock::now();
-        size_t removed = 0;
-        for (const auto& path : paths) {
-            if (stoken.stop_requested()) {
-                break;
-            }
-            std::error_code error;
-            removed += std::filesystem::remove(path, error) ? 1 : 0;
-        }
-        std::printf("Shader cache: %zu of %zu old cache files removed in %.1f s%s\n", removed, paths.size(),
-                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
-                    removed < paths.size() ? " (the rest at the next start)" : "");
-    }};
+    TieMarkersToPack(directory);
+    std::printf("Shader cache: moved %llu cache files (%s) into %s in %.1f s (%llu were in it already); the %zu old "
+                "files are removed behind the game\n",
+                static_cast<unsigned long long>(moved.load()), MB(bytes.load()).c_str(), PackName,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                static_cast<unsigned long long>(same.load()), loose_files.size());
+    RemoveLooseFilesBehindTheGame();
+    return true;
 }
 
 void DataBase::Open() {
@@ -459,7 +508,7 @@ void DataBase::Open() {
         } else {
             std::error_code rm;
             std::filesystem::remove(cache_path / (std::string{PackName} + ".tmp"), rm);
-            MoveFolderCacheIntoPack(cache_path);
+            ListFolderCache(cache_path); // moved by MoveFolderCache, with the preparation page
         }
     }
 

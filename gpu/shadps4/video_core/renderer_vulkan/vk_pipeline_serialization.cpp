@@ -1670,6 +1670,22 @@ void PipelineCache::WarmUpThread() {
             .count();
     };
 
+    // bbport (pack cache): the first start after the update moves an earlier build's folder cache (one file per blob)
+    // into the pack, before anything reads the cache or its prepared markers (the move ties them to the pack). On a PC
+    // where each file is slow to open (an antivirus) that takes as long as that build's starts did, once: it shows on
+    // the preparation page (files moved, time left) and the launcher's bar, as the scan of the game files does.
+    {
+        const char* prepare_only_env = std::getenv("BB_PREPARE_ONLY");
+        const bool page = db.FolderCacheToMove() > 0 && !(prepare_only_env && prepare_only_env[0] == '1');
+        if (page) {
+            BbOverlay::SetPreparationScreen(true);
+        }
+        db.MoveFolderCache([](u32 done, u32 total) { BbOverlay::SetMoveProgress(done, total); });
+        if (page) {
+            BbOverlay::SetPreparationScreen(false);
+        }
+    }
+
     // bbport: the full-screen preparation page before the game starts (BbOverlay::SetPreparationScreen): on for a
     // first launch with a variant list (no matching "prepared_<list>" marker in the cache yet: a changed list, as an
     // update brings, is prepared again), BB_PREP_SCREEN=1/0 forces it. It is turned off however this thread ends
