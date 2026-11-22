@@ -294,23 +294,31 @@ static bool IsOurOldMarker(const std::filesystem::path& file) {
 
 /// bbport (pack cache): an earlier build's folder cache (one file per blob) in this folder is OBVIOUSLY this port's
 /// when the folder holds tiling_pipelines.txt (written only by this port, since 0.3.6.30; upstream and plain shadPS4
-/// builds never write it) and every "prepared_*" file in it is of this port's marker format (IsOurOldMarker). Only
-/// then are its files moved into the pack (or, of other versions, removed). Anything else is not provably ours: left
-/// exactly as it is (not read, moved, renamed or removed). Forks of this port that keep its file names and formats
-/// cannot be told apart by any file they write.
+/// builds never write it), at least one prepared marker of an earlier build ("prepared_<list>", which this build never
+/// writes: a folder this build alone has used never passes), and every "prepared_*" file in it is of this port's
+/// marker format (IsOurOldMarker). Only then are its files moved into the pack (or, of other versions, removed).
+/// Anything else is not provably ours: left exactly as it is (not read, moved, renamed or removed). Forks of this port
+/// that keep its file names and formats cannot be told apart by any file they write.
 static bool FolderCacheIsOurs(const std::filesystem::path& folder, std::string* why) {
     std::error_code ec;
     if (!std::filesystem::is_regular_file(folder / "tiling_pipelines.txt", ec)) {
         *why = "no tiling_pipelines.txt, which every build of this port since 0.3.6.30 writes there";
         return false;
     }
+    u32 markers = 0;
     for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
         const auto name = entry.path().filename().string();
-        if (name.starts_with("prepared_") && !name.ends_with(".tmp") && entry.is_regular_file(ec) &&
-            !IsOurOldMarker(entry.path())) {
-            *why = name + " is not in this port's marker format";
-            return false;
+        if (name.starts_with("prepared_") && !name.ends_with(".tmp") && entry.is_regular_file(ec)) {
+            if (!IsOurOldMarker(entry.path())) {
+                *why = name + " is not in this port's marker format";
+                return false;
+            }
+            ++markers;
         }
+    }
+    if (markers == 0) {
+        *why = "no prepared marker of an earlier build of this port";
+        return false;
     }
     return true;
 }
@@ -394,11 +402,14 @@ static void ListFolderCache(const std::filesystem::path& folder) {
             loose_files.push_back({path, -1, false});
         }
     }
-    if (std::string why; !loose_files.empty() && !FolderCacheIsOurs(folder, &why)) {
+    // Leftovers of this build's own move (no newer than its recorded time, held by the pack) are ours whatever else is
+    // in the folder; every other file only when the folder cache is obviously this port's.
+    if (std::string why; loose_to_fold > 0 && !FolderCacheIsOurs(folder, &why)) {
+        const size_t before = loose_files.size();
+        std::erase_if(loose_files, [](const LooseFile& f) { return f.fold || f.type < 0; });
         std::printf("Shader cache: %zu cache files of another build in this folder (%s): left in place, not read, "
                     "moved or removed; this build uses only %s\n",
-                    loose_files.size(), why.c_str(), PackName);
-        loose_files.clear();
+                    before - loose_files.size(), why.c_str(), PackName);
         loose_to_fold = 0;
     }
 }
