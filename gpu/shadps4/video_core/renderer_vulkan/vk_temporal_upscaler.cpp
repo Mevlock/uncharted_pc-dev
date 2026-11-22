@@ -3254,8 +3254,11 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
         static bool noted = false;
         if (!noted) {
             noted = true;
-            std::printf("HDR: FSR 3 upscales the 8-bit frame: no scene HDR with it (DLSS, FSR 4, "
-                        "XeSS or TAA have it)\n");
+            // FSR quality fix 5: FSR 3.1 has scene HDR where it runs before the post-processing
+            // (HdrEarlyFrame), its default at every mode since fix 1; only this old order lacks it.
+            std::printf("HDR: FSR 3 after the post-processing (BB_SCALED_BEFORE_POST=0) upscales the "
+                        "8-bit frame: no scene HDR on this order (before the post-processing, its "
+                        "default, it has it)\n");
         }
     }
     tone_shadow.drawn = scene_shadow.drawn = blur1_shadow.drawn = blur2_shadow.drawn = false;
