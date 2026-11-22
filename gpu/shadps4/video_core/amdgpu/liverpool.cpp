@@ -766,9 +766,18 @@ void RunReleaseMem(Vulkan::Rasterizer& rasterizer, const u8* data) {
     }
 }
 
+void NoteDmaStencilWrite(const PM4DmaData* dma_data) {
+    if (dma_data->dst_sel == DmaDataDst::Memory || dma_data->dst_sel == DmaDataDst::MemoryUsingL2) {
+        VideoCore::StencilClearLog::NoteWrite(
+            VideoCore::StencilClearLog::Path::DmaWrite, dma_data->DstAddress<VAddr>(),
+            dma_data->NumBytes(), dma_data->src_sel == DmaDataSrc::Data ? dma_data->data : ~u64{0});
+    }
+}
+
 void RunDmaData(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto* dma_data = reinterpret_cast<const PM4DmaData*>(data);
     ASSERT(dma_data->command.das == 0);
+    NoteDmaStencilWrite(dma_data);
     if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
         rasterizer.FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(),
                                dma_data->data, true);
@@ -1352,6 +1361,51 @@ void NoteGuestSyncPacket(Vulkan::Rasterizer* rasterizer, PM4ItOpcode opcode, con
         rasterizer->RunInOrder(&RunGuestSyncPoint, &kind, sizeof(kind));
     }
 }
+
+/// Diagnostic: when the command processor starts on a top-level graphics buffer, its words should
+/// still be the ones submitted (the draw preparation's copy, taken at submit). A change before a
+/// Rewind packet means the game rewrote the buffer before the GPU had read any of it (words after
+/// a Rewind are the game's to fill until it marks the rewind valid). One submission in 64 is
+/// compared; the first change is logged, nothing else is done about it.
+void CheckRewrittenCommands(std::span<const u32> submitted, const u32* guest) {
+    static std::atomic<u32> sample{0};
+    static std::atomic<bool> reported{false};
+    if (submitted.empty() || reported.load(std::memory_order_relaxed) ||
+        (sample.fetch_add(1, std::memory_order_relaxed) & 63) != 0) {
+        return;
+    }
+    const u64 bytes = submitted.size_bytes();
+    if (submitted.data() == guest ||
+        Core::Memory::Instance()->ClampRangeSize(reinterpret_cast<VAddr>(guest), bytes) != bytes ||
+        std::memcmp(submitted.data(), guest, bytes) == 0) {
+        return;
+    }
+    size_t first = 0;
+    while (first < submitted.size() && submitted[first] == guest[first]) {
+        ++first;
+    }
+    for (size_t at = 0; at < first;) {
+        const auto* header = reinterpret_cast<const PM4Header*>(submitted.data() + at);
+        if (header->type == 2) {
+            ++at;
+            continue;
+        }
+        if (header->type != 3) {
+            break;
+        }
+        if (header->type3.opcode == PM4ItOpcode::Rewind) {
+            return;
+        }
+        at += header->type3.NumWords() + 1;
+    }
+    if (reported.exchange(true, std::memory_order_relaxed)) {
+        return;
+    }
+    std::printf("GPU: a submitted command buffer changed before the GPU started on it (%zu dwords at %p, first "
+                "change at dword %zu: %08x -> %08x; 1 in 64 submissions checked, only the first is logged)\n",
+                submitted.size(), static_cast<const void*>(guest), first, submitted[first], guest[first]);
+    std::fflush(stdout);
+}
 } // namespace
 
 Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<const u32> ccb,
@@ -1369,6 +1423,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         seq != NoSeq && rasterizer ? &rasterizer->GetDrawPreparation() : nullptr;
     if (draw_prep) {
         draw_prep->BeginSubmission(seq, regs, gfx_reg_checksum, mapped_queues[GfxQueueId].cs_state);
+        CheckRewrittenCommands(draw_prep->CurrentCommands(), dcb.data());
     }
     static const bool dcb_stats = EmulatorSettingsImpl::Flag("BB_DCB_STATS", false);
     const int dcb_depth = g_dcb_depth;
@@ -2468,6 +2523,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 break;
             }
             ASSERT(dma_data->command.das == 0);
+            NoteDmaStencilWrite(dma_data);
             if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
                 rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(), dma_data->data,
                                        true);

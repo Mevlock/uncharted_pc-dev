@@ -143,6 +143,78 @@ void SetupVertexCheck(const Instance& instance) {
 }
 } // namespace
 
+// bbport diagnosis: BB_LOOP_COUNT=1: shaders record their hash when one invocation takes
+// Shader::LoopCount::Threshold loop back edges; LoopCountPoll names each such shader once.
+namespace {
+u32* loop_count_mapped = nullptr;
+
+void SetupLoopCount(const Instance& instance) {
+    const char* env = std::getenv("BB_LOOP_COUNT");
+    if (!env || env[0] != '1' || Shader::LoopCount::address) {
+        return;
+    }
+    const auto features = instance.GetPhysicalDevice().getFeatures();
+    if (!features.vertexPipelineStoresAndAtomics || !features.fragmentStoresAndAtomics) {
+        std::printf("Loop count: stores from vertex or pixel shaders unsupported, off\n");
+        return;
+    }
+    const VkDeviceSize size = 16 + Shader::LoopCount::Slots * Shader::LoopCount::RecordWords * 4;
+    const VkBufferCreateInfo buffer_ci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+    };
+    const VmaAllocationCreateInfo alloc_ci{
+        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                 VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    };
+    VkBuffer buffer{};
+    VmaAllocation allocation{};
+    VmaAllocationInfo info{};
+    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer, &allocation,
+                        &info) != VK_SUCCESS || !info.pMappedData) {
+        std::printf("Loop count: buffer creation failed, off\n");
+        return;
+    }
+    loop_count_mapped = static_cast<u32*>(info.pMappedData);
+    std::memset(loop_count_mapped, 0, size);
+    Shader::LoopCount::address = instance.GetDevice().getBufferAddress({.buffer = buffer});
+    std::printf("Loop count: on (shaders cached apart, '-loops' folder); a shader is named once when one "
+                "invocation takes %u loop back edges\n", Shader::LoopCount::Threshold);
+}
+} // namespace
+
+void LoopCountPoll() {
+    if (!loop_count_mapped) {
+        return;
+    }
+    const u32 count = __atomic_load_n(&loop_count_mapped[0], __ATOMIC_ACQUIRE);
+    if (!count) {
+        return;
+    }
+    __atomic_store_n(&loop_count_mapped[0], 0u, __ATOMIC_RELEASE);
+    static std::map<std::pair<u32, u32>, u64> hits; // (hash, stage) -> invocations so far
+    static u64 total = 0;
+    total += count;
+    std::map<std::pair<u32, u32>, u32> now;
+    for (u32 i = 0; i < std::min(count, Shader::LoopCount::Slots); ++i) {
+        const u32* record = &loop_count_mapped[4 + i * Shader::LoopCount::RecordWords];
+        ++now[{record[0], record[1]}];
+    }
+    static constexpr const char* stages[] = {"pixel", "hull", "domain", "vertex", "geometry", "compute"};
+    for (const auto& [key, n] : now) {
+        if (hits[key]++ == 0) {
+            std::printf("Loop count: %s shader %08x took %u loop back edges in one invocation "
+                        "(%u invocations this flip; %llu in all so far)\n",
+                        key.second < std::size(stages) ? stages[key.second] : "?", key.first,
+                        Shader::LoopCount::Threshold, n, static_cast<unsigned long long>(total));
+        }
+        hits[key] += n - 1;
+    }
+}
+
 void VertexCheckPoll() {
     if (!vertex_check_mapped) {
         return;
@@ -476,6 +548,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     SetupVertexCheck(instance);
+    SetupLoopCount(instance);
     sel.regs = &liverpool->regs;
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{

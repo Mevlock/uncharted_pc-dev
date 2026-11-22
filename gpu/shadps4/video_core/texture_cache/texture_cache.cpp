@@ -37,6 +37,85 @@
 
 namespace VideoCore {
 
+namespace StencilClearLog {
+namespace {
+struct Plane {
+    std::atomic<VAddr> address{0};
+    std::atomic<u32> size{0};
+    std::atomic<u32> logged{0}; ///< bit per Path
+};
+constexpr u32 MaxPlanes = 16;
+std::array<Plane, MaxPlanes> planes;
+std::atomic<u32> num_planes{0};
+std::mutex plane_mutex;
+} // namespace
+
+void NotePlane(VAddr address, u32 size) {
+    if (!address || !size || num_planes.load(std::memory_order_acquire) >= MaxPlanes) {
+        return;
+    }
+    std::scoped_lock lk{plane_mutex};
+    const u32 n = num_planes.load(std::memory_order_relaxed);
+    for (u32 i = 0; i < n; ++i) {
+        if (planes[i].address.load(std::memory_order_relaxed) == address) {
+            planes[i].size.store(std::max(size, planes[i].size.load(std::memory_order_relaxed)),
+                                 std::memory_order_relaxed);
+            return;
+        }
+    }
+    if (n >= MaxPlanes) {
+        return;
+    }
+    planes[n].address.store(address, std::memory_order_relaxed);
+    planes[n].size.store(size, std::memory_order_relaxed);
+    num_planes.store(n + 1, std::memory_order_release);
+}
+
+void NoteWrite(Path path, VAddr address, u64 size, u64 detail) {
+    const u32 n = num_planes.load(std::memory_order_acquire);
+    for (u32 i = 0; i < n; ++i) {
+        Plane& plane = planes[i];
+        const VAddr base = plane.address.load(std::memory_order_relaxed);
+        const u64 plane_size = plane.size.load(std::memory_order_relaxed);
+        if (address >= base + plane_size || address + std::max<u64>(size, 1) <= base) {
+            continue;
+        }
+        const u32 bit = 1u << static_cast<u32>(path);
+        if (plane.logged.fetch_or(bit, std::memory_order_relaxed) & bit) {
+            continue;
+        }
+        switch (path) {
+        case Path::DbClear:
+            std::printf("Stencil clear log: plane %#llx (%llu bytes) cleared by the depth block "
+                        "(stencil clear enable, value %#llx)\n",
+                        static_cast<unsigned long long>(base),
+                        static_cast<unsigned long long>(plane_size),
+                        static_cast<unsigned long long>(detail));
+            break;
+        case Path::ShaderWrite:
+            std::printf("Stencil clear log: plane %#llx (%llu bytes) written by shader %016llx "
+                        "(%#llx+%#llx; the host stencil is not changed by it)\n",
+                        static_cast<unsigned long long>(base),
+                        static_cast<unsigned long long>(plane_size),
+                        static_cast<unsigned long long>(detail),
+                        static_cast<unsigned long long>(address),
+                        static_cast<unsigned long long>(size));
+            break;
+        case Path::DmaWrite:
+            std::printf("Stencil clear log: plane %#llx (%llu bytes) written by a CP DMA "
+                        "(%#llx+%#llx, %s %#llx; the host stencil is not changed by it)\n",
+                        static_cast<unsigned long long>(base),
+                        static_cast<unsigned long long>(plane_size),
+                        static_cast<unsigned long long>(address),
+                        static_cast<unsigned long long>(size),
+                        detail == ~u64{0} ? "copy" : "fill", static_cast<unsigned long long>(detail));
+            break;
+        }
+        std::fflush(stdout);
+    }
+}
+} // namespace StencilClearLog
+
 static constexpr u64 PageShift = 12;
 static constexpr u64 NumFramesBeforeRemoval = 32;
 
@@ -1454,6 +1533,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
         }
         Image& stencil_image = slot_images[stencil_id];
         TouchImage(stencil_image);
+        StencilClearLog::NotePlane(desc.info.stencil_addr, desc.info.stencil_size);
         // bbport (upstream PR #742): the insert above can move every image, so image is looked
         // up again.
         stencil_image.AssociateDepth(image_id, slot_images[image_id].image_uid);

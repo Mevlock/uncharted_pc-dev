@@ -112,6 +112,19 @@ struct VertexCheck {
     static constexpr u32 RecordWords = 8;
 };
 
+/// bbport diagnosis (BB_LOOP_COUNT=1): every shader counts the loop back edges each invocation takes,
+/// and an invocation that reaches Threshold records its program hash and stage once at the buffer
+/// device address (u32 count, then two-word records from +16). Nothing is limited. The shaders hold
+/// Placeholder (CompileSPV puts the session's address in), so they are cached as usual, in a shader
+/// cache folder of their own.
+struct LoopCount {
+    static constexpr u64 Placeholder = 0x5EC0E00000000000ull;
+    static inline u64 address = 0; ///< 0: off
+    static constexpr u32 Threshold = 1u << 16;
+    static constexpr u32 Slots = 1024;
+    static constexpr u32 RecordWords = 2;
+};
+
 /// bbport (from eFMann's shadPS4 Bloodborne fork, 2.1.0-pre.4): the temporal upscaler's jitter added
 /// to the vertex shader's clip position (push data xoffset / yoffset, in NDC, times w) instead of
 /// offsetting the viewport. With a fractional viewport edge AMD's drivers leave out the last column
