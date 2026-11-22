@@ -644,10 +644,23 @@ void CheckpointsPage() {
                                   ImGui::GetTextLineHeightWithSpacing() * 8.0f);
     if (ImGui::BeginChild("##checkpoints", ImVec2(0.0f, list_h),
                           ImGuiChildFlags_Borders)) {
+        // Entering the list with the pad (focus coming from outside it) lands on its first checkpoint, not on the one
+        // ImGui's nearest-item search finds: the focus is seen on another item, and the next frame puts it on the
+        // first one. A click is left alone.
+        static bool list_had_focus = false;
+        static bool focus_first = false;
+        bool list_has_focus = false;
+        bool first_item = true;
         for (int i = 0; i < static_cast<int>(list.size()); ++i) {
             const auto& c = list[i];
             if (c.chapter != chapter) {
                 continue;
+            }
+            const bool is_first = first_item;
+            first_item = false;
+            if (is_first && focus_first) {
+                focus_first = false;
+                ImGui::SetKeyboardFocusHere();
             }
             const bool is_current = i == current;
             const std::string label = (is_current ? std::string("> ") : std::string("   ")) + std::to_string(c.number) +
@@ -690,6 +703,13 @@ void CheckpointsPage() {
                     }
                 }
             }
+            if (ImGui::IsItemFocused()) {
+                list_has_focus = true;
+                if (!list_had_focus && !is_first && !ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                    !ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    focus_first = true;
+                }
+            }
             if (is_current) {
                 ImGui::PopStyleColor(3);
                 if (scroll_to_current) {
@@ -697,6 +717,7 @@ void CheckpointsPage() {
                 }
             }
         }
+        list_had_focus = list_has_focus || focus_first;
     }
     ImGui::EndChild();
     const bool already_here = picked >= 0 && now.known && list[picked].task == now.task;
