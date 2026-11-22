@@ -1676,16 +1676,11 @@ void PipelineCache::WarmUpThread() {
     Common::SetCurrentThreadName("bb:PipelineWarm");
     BbThreads::MakeBelowNormal();
     auto& db = Storage::DataBase::Instance();
-    const auto t0 = std::chrono::steady_clock::now();
-    const auto elapsed_ms = [&] {
-        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
-            .count();
-    };
-
     // bbport (pack cache): the first start after the update moves an earlier build's folder cache (one file per blob)
     // into the pack, before anything reads the cache or its prepared markers (the move ties them to the pack). On a PC
     // where each file is slow to open (an antivirus) that takes as long as that build's starts did, once: it shows on
     // the preparation page (files moved, time left) and the launcher's bar, as the scan of the game files does.
+    // Before the preload's clock starts (t0): its phase times leave the move out.
     {
         const char* prepare_only_env = std::getenv("BB_PREPARE_ONLY");
         const bool page = db.FolderCacheToMove() > 0 && !(prepare_only_env && prepare_only_env[0] == '1');
@@ -1718,6 +1713,12 @@ void PipelineCache::WarmUpThread() {
             BbOverlay::SetPreparationScreen(false);
         }
     }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto elapsed_ms = [&] {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+            .count();
+    };
 
     // bbport: the full-screen preparation page before the game starts (BbOverlay::SetPreparationScreen): on for a
     // first launch with a variant list (no matching "prepared_<list>" marker in the cache yet: a changed list, as an
