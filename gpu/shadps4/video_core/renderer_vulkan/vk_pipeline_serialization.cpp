@@ -47,7 +47,7 @@ extern "C" void runtime_freeze_guest(int on); // runtime.h: the game's threads w
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 24u; // bbport: wave64 ballot slot pair; PKRTZ saturate; RCP_LEGACY sign; SAMPLE_CD derivatives; object-motion atomic stores; ReadConst windows sized by their offsets' range (srt.h); shadPS4 #5447, #5427, #5364, #5365 (CFG fallthrough), #5429 (LDS barriers); page table watch bit; WorkgroupSplit (Umar-Qayyum-dev)
-static constexpr u32 ShaderMetaVersion = 17u; // bbport: exact variant key (StageSpecialization::DropUnreadState: coherent only on written buffers, step rates only when read); Info::vs_step_rate_inputs/reads
+static constexpr u32 ShaderMetaVersion = 17u; // bbport: exact variant key (StageSpecialization::DropUnreadState: coherent only on written buffers, step rates only when read); Info::vs_step_rate_inputs/reads; Info and PersistentSrtInfo written field by field (deterministic metas)
 static constexpr u32 PipelineKeyVersion = 8u; // bbport: GraphicsPipelineKey::split_sets; Info layout (cs_split_eligible)
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
@@ -351,7 +351,9 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     }
 
     spec.Deserialize(ar);
-    info.Deserialize(ar);
+    if (meta_version < 17 ? !info.DeserializeRaw(ar) : !info.Deserialize(ar)) {
+        return false;
+    }
     u32 has_inputs{};
     if (meta_version >= 14) {
         meta.Read(has_inputs);
@@ -1314,8 +1316,7 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
         u32 version{}, binary_version{};
         r.Read(version);
         r.Read(binary_version);
-        // 16 (Info::cs_split_eligible, in former padding) reads like 15, 17 (Info::vs_step_rate_*, in former
-        // padding) like 16.
+        // 16 (Info::cs_split_eligible, in former padding) reads like 15; from 17 Info is written field by field.
         if (version < 13 || version > Serialization::ShaderMetaVersion) {
             return;
         }
@@ -1327,13 +1328,13 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
         Shader::StageSpecialization spec;
         spec.Deserialize(ar);
         Shader::Info info;
-        info.Deserialize(ar);
-        // The exact variant key (DropUnreadState) on what earlier versions stored: their Info has no step rate
-        // record (that former padding is not read), so only what the code alone leaves out is dropped there.
         if (version < 17) {
-            info.vs_step_rate_inputs = 0;
-            info.vs_step_rate_reads = 0;
+            info.DeserializeRaw(ar);
+        } else {
+            info.Deserialize(ar);
         }
+        // The exact variant key (DropUnreadState) on what earlier versions stored: their Info has no step rate
+        // record, so there only what the code alone leaves out is dropped.
         spec.DropUnreadState(info);
         u32 reads = 0;
         if (version >= 14) {
@@ -3306,10 +3307,89 @@ void PipelineCache::Sync() {
 
 namespace Shader {
 
+// bbport: InfoPersistent field by field. Written as raw memory (sizeof(InfoPersistent)) it carried the unused
+// capacity of the resource lists and the padding of every element and field: uninitialised memory, so two
+// preparations by the same build wrote different metas for the same translation (12,927 of 12,929 in one test),
+// and a save of a meta the cache already held never matched. `io` reads or writes the bytes of one field.
+// A new InfoPersistent field has to be added here (the size checks below fail until it is).
+static_assert(sizeof(InfoPersistent) == 6368, "InfoPersistent changed: update PersistentFields");
+static_assert(sizeof(BufferResource) == 40 && sizeof(ImageResource) == 64 && sizeof(SamplerResource) == 36 &&
+                  sizeof(FMaskResource) == 2,
+              "a resource changed: update PersistentFields");
+
+template <bool reading, typename Io>
+static bool PersistentFields(InfoPersistent& p, Io&& io) {
+    const auto fetch = [&](auto& f) {
+        io(f.immediates);
+        io(f.offsets);
+        io(f.load_mask);
+    };
+    bool ok = true;
+    const auto list = [&](auto& v, auto&& element) {
+        u32 n = u32(v.size());
+        io(n);
+        if constexpr (reading) {
+            if (n > v.capacity()) {
+                ok = false;
+                return;
+            }
+            v.resize(n);
+        }
+        for (auto& e : v) {
+            element(e);
+        }
+    };
+    list(p.buffers, [&](BufferResource& b) {
+        fetch(b.sharp_fetch);
+        io(b.used_types);
+        io(b.buffer_type);
+        io(b.is_written);
+        io(b.is_formatted);
+        io(b.post_op);
+        io(b.post_op_dw1_mask);
+    });
+    list(p.images, [&](ImageResource& m) {
+        fetch(m.sharp_fetch);
+        io(m.is_depth);
+        io(m.is_atomic);
+        io(m.is_array);
+        io(m.is_written);
+        io(m.is_r128);
+        io(m.needs_native);
+        io(m.constant_mip_index);
+        io(m.mip_fallback_mode);
+        io(m.post_op);
+    });
+    list(p.samplers, [&](SamplerResource& s) {
+        fetch(s.sharp_fetch);
+        io(s.post_op);
+        io(s.post_op_tsharp_dw3_off);
+        io(s.is_depth);
+    });
+    list(p.fmasks, [&](FMaskResource& f) { io(f.sharp_idx); });
+    io(p.ud_mask.mask);
+    io(p.fetch_shader_sgpr_base);
+    io(p.shared_memory_scratch_size);
+    io(p.pgm_hash);
+    io(p.tess_consts_dword_offset);
+    io(p.tess_consts_ptr_base);
+    io(p.hw_stage);
+    io(p.sw_stage);
+    io(p.mrt_mask);
+    io(p.has_fetch_shader);
+    io(p.has_bitwise_xor);
+    io(p.uses_dma);
+    io(p.cs_split_eligible);
+    io(p.vs_step_rate_inputs);
+    io(p.vs_step_rate_reads);
+    return ok;
+}
+
 void Info::Serialize(Serialization::Archive& ar) const {
     Serialization::Writer info{ar};
 
-    info.Write(this, sizeof(InfoPersistent));
+    PersistentFields<false>(const_cast<Info&>(*this),
+                            [&](const auto& field) { info.Write(&field, sizeof(field)); });
     info.Write(flattened_ud_buf);
     srt_info.Serialize(ar);
 }
@@ -3317,10 +3397,24 @@ void Info::Serialize(Serialization::Archive& ar) const {
 bool Info::Deserialize(Serialization::Archive& ar) {
     Serialization::Reader info{ar};
 
-    info.Read(this, sizeof(Shader::InfoPersistent));
+    if (!PersistentFields<true>(*this, [&](auto& field) { info.Read(&field, sizeof(field)); })) {
+        return false;
+    }
     info.Read(flattened_ud_buf);
 
     return srt_info.Deserialize(ar);
+}
+
+bool Info::DeserializeRaw(Serialization::Archive& ar) {
+    Serialization::Reader info{ar};
+
+    info.Read(this, sizeof(Shader::InfoPersistent));
+    // Earlier versions had no step rate record (that byte pair was padding: anything).
+    vs_step_rate_inputs = 0;
+    vs_step_rate_reads = 0;
+    info.Read(flattened_ud_buf);
+
+    return srt_info.DeserializeRaw(ar);
 }
 
 void Gcn::FetchShaderData::Serialize(Serialization::Archive& ar) const {
@@ -3347,7 +3441,9 @@ bool Gcn::FetchShaderData::Deserialize(Serialization::Archive& ar) {
 void PersistentSrtInfo::Serialize(Serialization::Archive& ar) const {
     Serialization::Writer srt{ar};
 
-    srt.Write(this, sizeof(*this));
+    // bbport: not the walker's address (this session's JIT memory) nor the struct's padding.
+    srt.Write(walker_func_size);
+    srt.Write(flattened_bufsize_dw);
     if (walker_func_size) {
         srt.Write(reinterpret_cast<void*>(walker_func), walker_func_size);
     }
@@ -3356,8 +3452,22 @@ void PersistentSrtInfo::Serialize(Serialization::Archive& ar) const {
 bool PersistentSrtInfo::Deserialize(Serialization::Archive& ar) {
     Serialization::Reader srt{ar};
 
-    srt.Read(this, sizeof(*this));
+    srt.Read(walker_func_size);
+    srt.Read(flattened_bufsize_dw);
+    walker_func = nullptr;
+    if (walker_func_size) {
+        walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
+        ar.Advance(walker_func_size);
+    }
 
+    return true;
+}
+
+bool PersistentSrtInfo::DeserializeRaw(Serialization::Archive& ar) {
+    Serialization::Reader srt{ar};
+
+    srt.Read(this, sizeof(*this));
+    walker_func = nullptr;
     if (walker_func_size) {
         walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
         ar.Advance(walker_func_size);

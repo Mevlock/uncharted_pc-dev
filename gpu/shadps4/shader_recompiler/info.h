@@ -81,8 +81,8 @@ struct InfoPersistent {
     bool cs_split_eligible{};
     /// bbport (exact variant key, StageSpecialization::DropUnreadState): vertex shaders: bit k is set
     /// when the translation made input VGPR v1+k (the instance ID over VGT_INSTANCE_STEP_RATE_k);
-    /// in vs_step_rate_reads when the program reads it (LowerInstanceStepRatePass). Both fill
-    /// former padding: metas of earlier versions read 0 there (nothing known, nothing dropped).
+    /// in vs_step_rate_reads when the program reads it (LowerInstanceStepRatePass). Both sit in
+    /// former padding (the size is unchanged); metas of earlier versions read 0 (DeserializeRaw).
     u8 vs_step_rate_inputs{};
     u8 vs_step_rate_reads{};
 
@@ -363,8 +363,13 @@ struct Info : InfoPersistent {
                sizeof(tess_constants));
     }
 
+    /// bbport: field by field (the resource lists' used elements only, no padding), so the same
+    /// translation always gives the same bytes (shader meta version 17 on).
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);
+    /// Metas before version 17 (BB_SPEC_DUMP of older caches): InfoPersistent and PersistentSrtInfo
+    /// were written as raw memory.
+    bool DeserializeRaw(Serialization::Archive& ar);
 };
 DECLARE_ENUM_FLAG_OPERATORS(Info::ReadConstType);
 
