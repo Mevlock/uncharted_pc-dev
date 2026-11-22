@@ -1247,6 +1247,7 @@ struct StoredPipeline {
     bool parsed = false;
     bool compute = false;
     bool renumbered = false; ///< a shipped list's key rewritten to this cache's variant numbers
+    bool built = false;      ///< preloaded (the variant ship's pass over every key skips it)
     GraphicsPipelineKey gkey{};
     GraphicsPipeline::SerializationSupport gsdata{};
     ComputePipelineKey ckey{};
@@ -2537,6 +2538,11 @@ void PipelineCache::WarmUpThread() {
         if (i >= names.size() && !entry.compute && defer_list_keys.load(std::memory_order_relaxed)) {
             return;
         }
+        // bbport: the variant ship's pass goes over every key again (the cache's keys naming a listed variant are
+        // built then); one the stored phase preloaded was counted "built by the game first" there.
+        if (entry.built) {
+            return;
+        }
         if (entry.compute) {
             const auto it = by_hash.find(entry.ckey.value);
             if (it == by_hash.end() || !it->second->ready) {
@@ -2566,6 +2572,7 @@ void PipelineCache::WarmUpThread() {
             std::unique_lock lock{pipelines_mutex};
             const bool added = compute_pipelines.try_emplace(entry.ckey, std::move(pipeline)).second;
             num_pipelines += added;
+            entry.built = added;
             lock.unlock();
             if (added && entry.renumbered) {
                 RegisterPipelineData(entry.ckey, entry.csdata);
@@ -2675,6 +2682,7 @@ void PipelineCache::WarmUpThread() {
             std::unique_lock lock{pipelines_mutex};
             added = graphics_pipelines.try_emplace(entry.gkey, std::move(pipeline)).second;
             num_pipelines += added;
+            entry.built = added;
         }
         // A list key in this cache's numbers is saved as the cache's own: the next launch loads the variants it names
         // (the cache loads the variants its keys name) and needs no rebuild.
