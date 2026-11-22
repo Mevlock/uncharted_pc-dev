@@ -575,14 +575,15 @@ bool TemporalUpscaler::OnFrameStart() {
     if (static bool checked = false; !checked && runtime_uncharted_game != 0) {
         checked = true;
         const char* env = std::getenv("BB_NATIVE_BEFORE_POST");
-        // FSR quality fix 1 (2026-11-22): FSR 3.1 / FSR 4 started in Uncharted 1 at Native take the scene
-        // before the post-processing too (the softness above was measured with DLSS; on the finished 8-bit frame
-        // FSR drops its history in motion). BB_FSR_U1_NATIVE_BEFORE_POST=0: the finished frame, as before.
+        // FSR quality (2026-11-22): BB_FSR_U1_NATIVE_BEFORE_POST=1 lets FSR 3.1 / FSR 4 started in Uncharted 1
+        // at Native take the scene before the post-processing. Off by default: the U1 jungle still view measured
+        // softer and less steady before the post (FSR 3.1 edge 271 vs 279, temporal std p99 5.8 vs 4.7; FSR 4
+        // p99 8.5 vs 5.2), as DLSS did. The scaled modes take the scene before the post in U1 too (fix 1).
         const int start_upscaler = BbSettings::Get().startup_upscaler;
         const bool fsr_start =
             start_upscaler == BbSettings::UpscalerFsr3 || BbSettings::IsFsr4(start_upscaler);
         const char* fsr_env = std::getenv("BB_FSR_U1_NATIVE_BEFORE_POST");
-        const bool fsr_before = fsr_start && !(fsr_env && fsr_env[0] == '0') && !(env && env[0]);
+        const bool fsr_before = fsr_start && fsr_env && fsr_env[0] == '1' && !(env && env[0]);
         if (runtime_uncharted_game == 1 && early_native && !EarlyScaled() && fsr_before) {
             std::printf("Upscaler: Uncharted 1: native before post-processing on for FSR "
                         "(BB_FSR_U1_NATIVE_BEFORE_POST=0: on the finished frame)\n");
