@@ -132,25 +132,14 @@ void Translator::EmitPrologue(IR::Block* first_block) {
                 ++dst_vreg;
             }
         } else {
-            // v1: instance ID, step rate 0
+            // v1: instance ID, step rate 0; v2: instance ID, step rate 1. Placeholders until
+            // LowerInstanceStepRatePass (after the SSA rewrite), which records whether the program
+            // reads them: a step rate it does not read is left out of its variant key.
             if (runtime_info.props.num_input_vgprs > 0) {
-                if (runtime_info.sw.vs.step_rate_0 != 0) {
-                    ir.SetVectorReg(dst_vreg++,
-                                    ir.IDiv(ir.GetAttributeU32(IR::Attribute::InstanceId),
-                                            ir.Imm32(runtime_info.sw.vs.step_rate_0)));
-                } else {
-                    ir.SetVectorReg(dst_vreg++, ir.Imm32(0));
-                }
+                ir.SetVectorReg(dst_vreg++, ir.GetAttributeU32(IR::Attribute::InstanceIdStepRate0));
             }
-            // v2: instance ID, step rate 1
             if (runtime_info.props.num_input_vgprs > 1) {
-                if (runtime_info.sw.vs.step_rate_1 != 0) {
-                    ir.SetVectorReg(dst_vreg++,
-                                    ir.IDiv(ir.GetAttributeU32(IR::Attribute::InstanceId),
-                                            ir.Imm32(runtime_info.sw.vs.step_rate_1)));
-                } else {
-                    ir.SetVectorReg(dst_vreg++, ir.Imm32(0));
-                }
+                ir.SetVectorReg(dst_vreg++, ir.GetAttributeU32(IR::Attribute::InstanceIdStepRate1));
             }
         }
 

@@ -47,7 +47,7 @@ extern "C" void runtime_freeze_guest(int on); // runtime.h: the game's threads w
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
 static constexpr u32 ShaderBinaryVersion = 24u; // bbport: wave64 ballot slot pair; PKRTZ saturate; RCP_LEGACY sign; SAMPLE_CD derivatives; object-motion atomic stores; ReadConst windows sized by their offsets' range (srt.h); shadPS4 #5447, #5427, #5364, #5365 (CFG fallthrough), #5429 (LDS barriers); page table watch bit; WorkgroupSplit (Umar-Qayyum-dev)
-static constexpr u32 ShaderMetaVersion = 16u; // bbport: BufferSpecialization::coherent; Info::cs_split_eligible
+static constexpr u32 ShaderMetaVersion = 17u; // bbport: exact variant key (StageSpecialization::DropUnreadState: coherent only on written buffers, step rates only when read); Info::vs_step_rate_inputs/reads
 static constexpr u32 PipelineKeyVersion = 8u; // bbport: GraphicsPipelineKey::split_sets; Info layout (cs_split_eligible)
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
@@ -1261,7 +1261,8 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
         u32 version{}, binary_version{};
         r.Read(version);
         r.Read(binary_version);
-        // 16 (Info::cs_split_eligible, in former padding) reads like 15.
+        // 16 (Info::cs_split_eligible, in former padding) reads like 15, 17 (Info::vs_step_rate_*, in former
+        // padding) like 16.
         if (version < 13 || version > Serialization::ShaderMetaVersion) {
             return;
         }
@@ -1274,6 +1275,13 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
         spec.Deserialize(ar);
         Shader::Info info;
         info.Deserialize(ar);
+        // The exact variant key (DropUnreadState) on what earlier versions stored: their Info has no step rate
+        // record (that former padding is not read), so only what the code alone leaves out is dropped there.
+        if (version < 17) {
+            info.vs_step_rate_inputs = 0;
+            info.vs_step_rate_reads = 0;
+        }
+        spec.DropUnreadState(info);
         u32 reads = 0;
         if (version >= 14) {
             u32 has_inputs{};
@@ -2329,15 +2337,19 @@ void PipelineCache::WarmUpThread() {
             }
             const auto& draw = v.spec.runtime_info;
             const u64 sum = BinaryChecksum(spv);
-            // BB_VARIANT_LIST_SUMS=<file>: each built line's binary checksum (offline scoring of predictions).
+            // BB_VARIANT_LIST_SUMS=<file>: each built line's binary checksum (offline scoring of predictions), then the
+            // line of the specialization the game computes for it, without perm= and ck=: lines of one shader with the
+            // same specialization must have the same binary (the exact variant key's twin check).
             static std::FILE* sums = [] {
                 const char* path = std::getenv("BB_VARIANT_LIST_SUMS");
                 return path ? std::fopen(path, "w") : nullptr;
             }();
             if (sums) {
+                const std::string built_line = ListLineBody(VariantLine(v.hash, v.perm, 0, built_spec));
                 std::scoped_lock lk{shown_mutex};
-                std::fprintf(sums, "%016llx %u %zu %016llx\n", (unsigned long long)v.hash, u32(v.spec.runtime_info.hw_stage),
-                             v.perm, (unsigned long long)sum);
+                std::fprintf(sums, "%016llx %u %zu %016llx\t%s\n", (unsigned long long)v.hash,
+                             u32(v.spec.runtime_info.hw_stage), v.perm, (unsigned long long)sum,
+                             built_line.c_str());
                 std::fflush(sums);
             }
             const auto ref = stored_checksums.find(v.hash);

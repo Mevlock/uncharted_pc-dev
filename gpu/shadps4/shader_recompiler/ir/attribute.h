@@ -95,6 +95,10 @@ enum class Attribute : u64 {
     BaseVertex = 98,
     BaseInstance = 99,
     IsHelperInvocation = 100,
+    // bbport: a vertex shader's instance ID divided by VGT_INSTANCE_STEP_RATE_0 / _1 (input
+    // VGPRs v1 and v2). Translation placeholders only: LowerInstanceStepRatePass replaces them.
+    InstanceIdStepRate0 = 101,
+    InstanceIdStepRate1 = 102,
     Max,
 };
 

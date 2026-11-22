@@ -79,6 +79,12 @@ struct InfoPersistent {
     /// bbport: a compute shader whose workgroups may run as smaller ones (no shared memory, no
     /// workgroup barriers, no workgroup index); see WorkgroupSplit in runtime_info.h.
     bool cs_split_eligible{};
+    /// bbport (exact variant key, StageSpecialization::DropUnreadState): vertex shaders: bit k is set
+    /// when the translation made input VGPR v1+k (the instance ID over VGT_INSTANCE_STEP_RATE_k);
+    /// in vs_step_rate_reads when the program reads it (LowerInstanceStepRatePass). Both fill
+    /// former padding: metas of earlier versions read 0 there (nothing known, nothing dropped).
+    u8 vs_step_rate_inputs{};
+    u8 vs_step_rate_reads{};
 
     InfoPersistent() = default;
     InfoPersistent(HwStage hw_stage_, SwStage sw_stage_, u64 pgm_hash_)

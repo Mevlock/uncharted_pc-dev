@@ -471,7 +471,7 @@ SHADER_PACK = 'shaders.pack'  # the game's shader cache file in each cache folde
 
 # The game's shader cache versions (ShaderBinaryVersion.ShaderMetaVersion.PipelineKeyVersion in
 # vk_pipeline_serialization.cpp); tests/test_shader_cache_version.py fails when they differ.
-SHADER_CACHE_VERSIONS = '24.16.8'
+SHADER_CACHE_VERSIONS = '24.17.8'
 
 
 def shader_pack_id(folder):

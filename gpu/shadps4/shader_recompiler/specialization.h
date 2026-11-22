@@ -34,7 +34,8 @@ struct BufferSpecialization {
     u32 num_format : 4;
     u32 index_stride : 2;
     u32 element_size : 2;
-    /// bbport: memory type 3: the emitter declares the buffer Coherent, so it changes the binary.
+    /// bbport: memory type 3 on a buffer the shader writes: the emitter declares it Coherent, so it
+    /// changes the binary (a read-only buffer is NonWritable whatever its memory type: 0 here).
     u32 coherent : 1;
     AmdGpu::CompMapping dst_select{};
     AmdGpu::NumberConversion num_conversion{};
@@ -164,12 +165,43 @@ struct StageSpecialization {
                          spec.force_degamma = sharp.force_degamma;
                      });
 
+        DropUnreadState(info_);
+
         // Initialize runtime_info fields that rely on analysis in tessellation passes
         if (info->sw_stage == SwStage::TessellationControl ||
             info->sw_stage == SwStage::TessellationEval) {
             TessellationDataConstantBuffer tess_constants{};
             info->ReadTessConstantBuffer(tess_constants);
             runtime_info.InitFromTessConstants(tess_constants);
+        }
+    }
+
+    /// bbport (exact variant key): clears what cannot change the compiled code, so two draws whose
+    /// state differs only there share one permutation (each used to be a binary twin of the other):
+    /// - a buffer's coherent bit unless the shader writes it (the emitter decorates written buffers only);
+    /// - a vertex shader's step rate 0 / 1 unless the program reads input VGPR v1 / v2 (the instance
+    ///   ID over it; translate.cpp's prologue is its only use, LowerInstanceStepRatePass records the
+    ///   reads in `info_`). With no record (no such input, or a meta of an earlier version) the step
+    ///   rate is kept, except where the prologue makes no such input: a local shader, or too few input
+    ///   VGPRs. The vertex attributes' divisors (vs_attribs, the pipeline's vertex input) stay.
+    void DropUnreadState(const Info& info_) {
+        for (size_t i = 0; i < buffers.size() && i < info_.buffers.size(); ++i) {
+            if (!info_.buffers[i].is_written) {
+                buffers[i].coherent = 0;
+            }
+        }
+        if (info_.sw_stage != SwStage::Vertex) {
+            return;
+        }
+        auto& vs = runtime_info.sw.vs;
+        for (u32 k = 0; k < 2; ++k) {
+            const bool input =
+                info_.hw_stage != HwStage::Local && runtime_info.props.num_input_vgprs > k;
+            const bool known = (info_.vs_step_rate_inputs >> k) & 1;
+            const bool read = (info_.vs_step_rate_reads >> k) & 1;
+            if (!input || (known && !read)) {
+                (k == 0 ? vs.step_rate_0 : vs.step_rate_1) = 0;
+            }
         }
     }
 
