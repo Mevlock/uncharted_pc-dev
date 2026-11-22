@@ -2268,21 +2268,35 @@ static void cf_snap(CfEntry *e, uint64_t c, int skip) {
  * than slots, nothing passes: a worker not seen may hold a job taken before the free. */
 /* 1: it may be freed; 2: a running job's record names it (the game freed a counter its own running job will still
  * lower: it waits on the named list until no job names it); 0: a worker is in a code-free window (wait). */
+/* A worker's job record (manager+0x180+index*0x100): 1 a job's code runs and its completion is not this counter, 2 it
+ * is this counter, 0 no job code runs (a code-free window). +0x1c0 (the job's affinity, never 0) is written after the
+ * completion and cleared before it: non-zero and unchanged around the reads, the entry and completion read are the
+ * running job's own (a 0 completion too). */
+static int cf_record(uint64_t m, uint64_t i, uint64_t c) {
+    const volatile uint64_t *r=(const volatile uint64_t *)(uintptr_t)(m+0x180+i*0x100);
+    const uint64_t a1=r[8], e1=r[0], done=r[2], a2=r[8], e2=r[0];
+    if (!a1 || a1!=a2 || !e1 || e1!=e2) return 0;
+    return done && done==c ? 2 : 1;
+}
 static int cf_quiet(uint64_t m, const CfEntry *e) {
     const int nw=__atomic_load_n(&cf_nw,__ATOMIC_ACQUIRE);
     const uint64_t workers=*(const volatile uint64_t *)(uintptr_t)(m+0x100);
-    if ((uint64_t)nw<workers || nw>CFL_WORKERS) return 0;
+    if (nw>CFL_WORKERS || workers>CFL_WORKERS) return 0;
+    uint64_t seen=0;   /* the game's worker indices that have registered (made a job-free point) */
+    for (int w=0;w<nw;++w) { const int64_t i=cf_w[w].widx; if (i>=0 && (uint64_t)i<workers) seen|=UINT64_C(1)<<i; }
     for (int w=0;w<e->nsnap;++w) {
         if (w==e->skip) continue;
         if (__atomic_load_n(&cf_w[w].epoch,__ATOMIC_ACQUIRE)!=e->snap[w]) continue;
         const int64_t i=cf_w[w].widx;
         if (i<0 || (uint64_t)i>=workers) return 0;
-        const volatile uint64_t *r=(const volatile uint64_t *)(uintptr_t)(m+0x180+(uint64_t)i*0x100);
-        /* +0x1c0 (the job's affinity, never 0) is written after the completion and cleared before it: non-zero and
-         * unchanged around the reads, the entry and completion read are the running job's own (a 0 completion too) */
-        const uint64_t a1=r[8], e1=r[0], done=r[2], a2=r[8], e2=r[0];
-        if (!a1 || a1!=a2 || !e1 || e1!=e2) return 0;   /* no job code running: a code-free window */
-        if (done && done==e->counter) return 2;
+        const int k=cf_record(m,(uint64_t)i,e->counter);
+        if (k!=1) return k;
+    }
+    /* a worker not registered yet (no job-free point since it started) holds at most the job its record shows */
+    for (uint64_t i=0;i<workers;++i) {
+        if (seen>>i&1) continue;
+        const int k=cf_record(m,i,e->counter);
+        if (k!=1) return k;
     }
     return 1;
 }
@@ -2599,6 +2613,7 @@ static void install_counter_free(uint64_t image_size) {
     }
     if (tls_n!=1) { printf("Job counters: freed at once (%d worker index globals found, 1 expected)\n",tls_n); return; }
     cf_tls_var=tls;
+    for (int w=0;w<CFL_WORKERS;++w) cf_w[w].widx=-1;   /* a slot taken but not yet filled counts as no worker */
     /* the completion's release site */
     int64_t comp=-1;
     for (int n=0;n<2;++n) {
