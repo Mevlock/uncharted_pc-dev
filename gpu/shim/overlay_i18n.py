@@ -464,10 +464,13 @@ TRANSLATIONS = {
     'Chapter': L('Capítulo', 'Capítulo', 'Chapitre', 'Kapitel', 'Capitolo', 'チャプター'),
     '(now)': L('(ahora)', '(agora)', '(actuel)', '(jetzt)', '(ora)', '(現在)'),
     'Go there': L('Ir allí', 'Ir para lá', 'Y aller', 'Dorthin springen', 'Vai lì', 'ジャンプ'),
-    'Or double-click a checkpoint in the list.': L(
-        'O haz doble clic en un punto de control de la lista.', 'Ou clique duas vezes em um checkpoint da lista.',
-        'Ou double-cliquez sur un point de contrôle de la liste.', 'Oder doppelklicke auf einen Checkpoint in der Liste.',
-        'Oppure fai doppio clic su un checkpoint nella lista.', 'またはリストのチェックポイントをダブルクリックします。'),
+    'Or double-click a checkpoint in the list, or press A (Cross) twice on it.': L(
+        'O haz doble clic en un punto de control de la lista, o pulsa A (Cruz) dos veces sobre él.',
+        'Ou clique duas vezes em um checkpoint da lista, ou pressione A (Cruz) duas vezes nele.',
+        'Ou double-cliquez sur un point de contrôle de la liste, ou appuyez deux fois sur A (Croix) dessus.',
+        'Oder doppelklicke auf einen Checkpoint in der Liste, oder drücke A (Kreuz) zweimal darauf.',
+        'Oppure fai doppio clic su un checkpoint nella lista, o premi A (Croce) due volte su di esso.',
+        'またはリストのチェックポイントをダブルクリックするか、コントローラーのAボタン（PlayStationではバツ）を2回続けて押します。'),
 
     # ---- Save slots page -----------------------------------------------------------------------------------------
     'Story save': L('Partida de la historia', 'Jogo salvo da história', 'Sauvegarde de l’histoire',

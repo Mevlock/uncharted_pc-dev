@@ -661,10 +661,28 @@ void CheckpointsPage() {
             if (ImGui::Selectable(label.c_str(), i == picked || (is_current && picked < 0),
                                   ImGuiSelectableFlags_AllowDoubleClick)) {
                 picked = i;
-                // A double click goes there at once (the same as picking it and pressing Go there), but never to the
+                // A double click with the mouse, or the confirm button (A / Cross) pressed twice quickly on the same
+                // checkpoint, goes there at once (the same as picking it and pressing Go there), but never to the
                 // checkpoint the player is at (from El Dorado, michelle: the game's task reset there leaves the scene
                 // without its characters).
-                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !(now.known && list[i].task == now.task)) {
+                bool double_pick = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+                // The pad: a fresh press of the confirm button (not a held one) twice on the same item within the
+                // mouse's double-click time.
+                static int pad_item = -1;
+                static double pad_time = 0.0;
+                if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false)) {
+                    const double t = ImGui::GetTime();
+                    if (pad_item == i && t - pad_time <= ImGui::GetIO().MouseDoubleClickTime) {
+                        double_pick = true;
+                        pad_item = -1;
+                    } else {
+                        pad_item = i;
+                        pad_time = t;
+                    }
+                } else if (!double_pick) {
+                    pad_item = -1;
+                }
+                if (double_pick && !(now.known && list[i].task == now.task)) {
                     // A jump that starts closes the menu, so the game is in view at once; a refused one keeps it
                     // open with its message.
                     if (BbSaves::Jump(list[i], message)) {
@@ -687,7 +705,7 @@ void CheckpointsPage() {
         BbSaves::Jump(list[picked], message);
     }
     ImGui::EndDisabled();
-    Hint(T("Or double-click a checkpoint in the list."));
+    Hint(T("Or double-click a checkpoint in the list, or press A (Cross) twice on it."));
     if (!message.empty()) {
         ImGui::SameLine();
         ImGui::TextWrapped("%s", message.c_str());
