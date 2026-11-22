@@ -3830,6 +3830,22 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
     // Same jitter convention as FSR 3; the menu (or toggle 1 << 26) flips it for tests.
     const float sign =
         BbToggle::Disabled(1u << 26) != settings.fsr4_invert_jitter.load() ? -1.0f : 1.0f;
+    // FSR quality fix 7 (2026-11-22): the model by the real upscale ratio. In velocity mode (Uncharted)
+    // applied_preset is always 0 (the render size is a start-up patch), so every scaled mode ran FSR 4's
+    // Native AA model ("FSR 4 v07 INT8 native model" at Quality 2288x960 -> 3440x1440). Ratios between AMD's
+    // presets (1.0 / 1.5 / 1.7 / 2.0 / 3.0) take the nearer one. BB_FSR4_MODEL_BY_RATIO=0: the preset, as before.
+    static const bool by_ratio = [] {
+        const char* env = std::getenv("BB_FSR4_MODEL_BY_RATIO");
+        const bool v = !(env && env[0] == '0');
+        std::printf("Upscaler: FSR 4 model %s (BB_FSR4_MODEL_BY_RATIO)\n",
+                    v ? "by the render / output ratio" : "by the preset");
+        return v;
+    }();
+    int model_preset = applied_preset;
+    if (by_ratio && w > 0 && h > 0) {
+        const float ratio = std::max(float(ow) / float(w), float(oh) / float(h));
+        model_preset = ratio < 1.25f ? 0 : ratio < 1.6f ? 1 : ratio < 1.85f ? 2 : ratio < 2.5f ? 3 : 4;
+    }
     const bool ok = fsr4->Record({
         .cmdbuf = cmdbuf,
         .color = color,
@@ -3838,7 +3854,7 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
         .output = {vk::Image(output_image), *output_view, ow, oh},
         .render_width = w,
         .render_height = h,
-        .preset = applied_preset,
+        .preset = model_preset,
         .jitter = {sign * jitter[0], sign * jitter[1]},
         .frame_ms = frame_ms,
         .near_plane = camera_motion.Near(),
