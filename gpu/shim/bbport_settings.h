@@ -62,6 +62,10 @@ struct Values {
     std::atomic<int> preset{NativeAA};
     std::atomic<bool> sharpen{true};
     std::atomic<float> sharpness{0.3f};
+    /// FSR quality fix 4 (2026-11-22): sharpness "auto" (the launcher's Default, BB_FSR_SHARPNESS=auto):
+    /// the renderer sets `sharpness` each frame to the upscaler's default (AutoSharpness); a value from
+    /// the menu's slider ends it.
+    std::atomic<bool> sharpness_auto{false};
     std::atomic<bool> jitter{true};
     /// FSR quality fix 2 (2026-11-22): on by default (FSR 3.1 only: ReactiveOn). Saved as reactive_mask;
     /// the old key `reactive=0` was the default every menu save wrote, so only `reactive=1` is read.
@@ -177,6 +181,8 @@ bool SetHdrKey(const std::string& key, const std::string& value, std::string& ap
 float PresetScale(int preset);
 const char* PresetName(int preset);
 const char* UpscalerName(int upscaler);
+/// The sharpness "auto" gives this upscaler (FSR quality fix 4).
+float AutoSharpness(int upscaler);
 const char* FrameGenName(int frame_gen);
 
 } // namespace BbSettings

@@ -206,7 +206,9 @@ XESS = ('xess', 'Intel XeSS (Native AA, any GPU)')
 # L and M are the DLSS 4.5 models.
 DLSS_MODELS = [('default', "Driver default (K, DLSS 4)"), ('K', 'K (DLSS 4)'),
                ('L', 'L (DLSS 4.5)'), ('M', 'M (DLSS 4.5)')]
-AA_SHARPNESS = [('0', 'Off'), ('0.2', 'Low'), ('0.4', 'Medium'), ('0.7', 'High'), ('1.0', 'Very high'),
+# 'auto' (FSR quality fix 4): the port picks the upscaler's own default (BbSettings::AutoSharpness: FSR 3.1 near
+# AMD's sample value, the others Low); a level chosen here is kept as it is.
+AA_SHARPNESS = [('auto', 'Default (per anti-aliasing)'), ('0', 'Off'), ('0.2', 'Low'), ('0.4', 'Medium'), ('0.7', 'High'), ('1.0', 'Very high'),
                 ('1.5', 'Maximum')]
 # Frames generated between two of the game's (BB_FRAME_GEN, BB_FRAME_GEN_MULTIPLIER).
 FRAME_GENERATION = [('off', 'Off'), ('fsr3', 'AMD FSR 3 Frame Generation (any GPU)'),
@@ -290,7 +292,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'portable': False, 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
                 'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'frame_pacing': 'off', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
-                'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': '0.2', 'frame_generation': 'off', 'low_latency': '0',
+                'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': 'auto', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
                 'shader_preparation': 'before', 'preparation_speed': 'all',
                 'mouse_look': True, 'mouse_sensitivity': '2.8', 'mouse_invert_y': False,

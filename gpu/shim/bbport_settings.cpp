@@ -85,7 +85,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "sharpen") {
         v.sharpen = i != 0;
     } else if (key == "sharpness") {
-        v.sharpness = Clamp(f, 0.0f, 2.0f);
+        v.sharpness_auto = value == "auto";
+        v.sharpness = v.sharpness_auto ? AutoSharpness(v.upscaler) : Clamp(f, 0.0f, 2.0f);
     } else if (key == "jitter") {
         v.jitter = i != 0;
     } else if (key == "reactive") {
@@ -314,13 +315,19 @@ void Save() {
         std::printf("Settings: cannot write %s\n", Path());
         return;
     }
+    char sharpness[16];
+    if (v.sharpness_auto) {
+        std::snprintf(sharpness, sizeof(sharpness), "auto");
+    } else {
+        std::snprintf(sharpness, sizeof(sharpness), "%.2f", v.sharpness.load());
+    }
     std::fprintf(file,
                  "# bbport settings (in-game menu: Insert / L3+R3)\n"
-                 "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"
+                 "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%s\njitter=%d\n"
                  "reactive_mask=%d\nobject_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\nreactive_max=%.2f\n"
                  "debug_view=%d\nshow_fps=%d\nshow_fps_graph=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n",
                  UpscalerName(v.upscaler), v.preset.load(), int(v.sharpen.load()),
-                 v.sharpness.load(), int(v.jitter.load()), int(v.reactive.load()),
+                 sharpness, int(v.jitter.load()), int(v.reactive.load()),
                  int(v.object_motion.load()),
                  v.reactive_scale.load(), v.reactive_threshold.load(), v.reactive_max.load(),
                  v.debug_view.load(), int(v.show_fps.load()), int(v.show_fps_graph.load()),
@@ -459,6 +466,21 @@ const char* PresetName(int preset) {
 const char* UpscalerName(int upscaler) {
     static constexpr const char* names[UpscalerCount] = {"off", "fsr3", "fsr4", "fsr411", "taa", "dlss", "xess"};
     return names[std::clamp(upscaler, 0, UpscalerCount - 1)];
+}
+
+float AutoSharpness(int upscaler) {
+    // FSR 3.1: near AMD's sample (0.8, RCAS) and judged on the U3 horse ride (fsrq report): its own
+    // RCAS works up to 1, the port's pass adds the rest. The others keep the launcher's old default
+    // (Low, 0.2), which DLSS was tuned with. BB_AUTO_SHARPNESS_FSR3 / _FSR4 override for tests.
+    static const float fsr3 = [] {
+        const char* env = std::getenv("BB_AUTO_SHARPNESS_FSR3");
+        return env && env[0] ? Clamp(float(std::atof(env)), 0.0f, 2.0f) : 0.8f;
+    }();
+    static const float fsr4 = [] {
+        const char* env = std::getenv("BB_AUTO_SHARPNESS_FSR4");
+        return env && env[0] ? Clamp(float(std::atof(env)), 0.0f, 2.0f) : 0.2f;
+    }();
+    return upscaler == UpscalerFsr3 ? fsr3 : IsFsr4(upscaler) ? fsr4 : 0.2f;
 }
 
 const char* FrameGenName(int frame_gen) {

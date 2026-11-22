@@ -410,10 +410,11 @@ void Checkbox(const char* label, std::atomic<bool>& value) {
     Store(value, v, changed);
 }
 
-void Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
+bool Slider(const char* label, std::atomic<float>& value, float lo, float hi) {
     float v = value;
     const bool changed = ImGui::SliderFloat(label, &v, lo, hi, "%.2f");
     Store(value, v, changed);
+    return changed;
 }
 
 // A slider kept in its range when a value is typed (Ctrl+click).
@@ -1282,7 +1283,10 @@ void Menu() {
            "resolution it also rebuilds the full size. DLSS needs a GeForce RTX card."));
     const bool upscaler_on = s.upscaler != BbSettings::UpscalerOff;
     ImGui::BeginDisabled(!upscaler_on || !s.sharpen);
-    Slider(TI("Sharpness"), s.sharpness, 0.0f, 2.0f);
+    {
+        // FSR quality fix 4: a value set here ends the launcher's Default (sharpness_auto).
+        if (Slider(TI("Sharpness"), s.sharpness, 0.0f, 2.0f)) s.sharpness_auto = false;
+    }
     ImGui::EndDisabled();
     Hint(T("Sharpens the anti-aliased picture (AMD RCAS, also with DLSS). 0 is off; the launcher's "
            "Low, Medium and High are 0.2, 0.4 and 0.7. Ctrl+click to type a value."));

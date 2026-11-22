@@ -596,6 +596,21 @@ bool TemporalUpscaler::OnFrameStart() {
         }
     }
     const auto& settings = BbSettings::Get();
+    // FSR quality fix 4: the launcher's Default sharpness follows the upscaler in use (also after a
+    // switch in the menu). A value the player chose (launcher or menu slider) is kept as it is.
+    if (settings.sharpness_auto) {
+        const int upscaler_now = settings.upscaler.load();
+        const float wanted = BbSettings::AutoSharpness(upscaler_now);
+        if (BbSettings::Get().sharpness.load() != wanted) {
+            BbSettings::Get().sharpness.store(wanted);
+        }
+        static int noted = -1;
+        if (noted != upscaler_now) {
+            noted = upscaler_now;
+            std::printf("Upscaler: sharpness %.2f, the default for %s (anti-aliasing sharpness Default)\n",
+                        wanted, BbSettings::UpscalerName(upscaler_now));
+        }
+    }
     // The guest's startup resolution patch remains in effect until restart. Keep the FSR
     // model at the applied preset while the menu saves the requested one for run.sh.
     // Velocity mode (Uncharted) runs at the game's own size: anti-aliasing (Native AA) only.
