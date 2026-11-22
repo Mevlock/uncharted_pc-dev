@@ -2162,6 +2162,11 @@ static long cf_alloc_waits;
 static uintptr_t cf_lock_fn, cf_unlock_fn;
 static struct { volatile uint64_t epoch; int64_t widx; char pad[48]; } cf_w[CFL_WORKERS];
 static uint64_t cf_tls_var;   /* the game's global holding the TLS offset of the current worker's index */
+/* The GPU's counter signals (corelib GpuJobSystemCounterSync): slots {counter +0, op dword +8} 16 bytes apart, labels at
+ * [+0x200], pending bits at +0x208. The GfxEop handler lowers or sets a slot's counter (lock xadd / xchg), calls
+ * CounterChanged, and only then clears the slot and its pending bit, so a pending slot names its counter from the
+ * signal's registration until after its decrement and release. 0: not found (then nothing GPU-side is checked). */
+static uint64_t cf_gpu_table;
 /* The game's own worker index of this thread (corelib GetCurrentWorkerThreadIndex: the TLS word v, v^0x8000 when bit
  * 15 is set, else no worker): -1 when it is none. */
 static int64_t cf_worker_index(void) {
@@ -2241,6 +2246,13 @@ static int cf_referenced(uint64_t m, uint64_t c) {
         /* a running job's record (see cf_quiet) */
         const volatile uint64_t *r=(const volatile uint64_t *)(uintptr_t)(m+0x180+w*0x100);
         if (r[0] && r[2]==c) return 1;
+    }
+    if (cf_gpu_table) {   /* a GPU signal still pending on it */
+        const uint64_t pend=*(const volatile uint64_t *)(uintptr_t)(cf_gpu_table+0x208);
+        for (uint64_t b=pend;b;b&=b-1) {
+            const int k=__builtin_ctzll(b);
+            if (*(const volatile uint64_t *)(uintptr_t)(cf_gpu_table+(uint64_t)k*16)==c) return 1;
+        }
     }
     uint64_t node=*(const volatile uint64_t *)(uintptr_t)(m+0x4ed0);
     for (int k=0;k<1024 && node;++k) {
@@ -2613,6 +2625,46 @@ static void install_counter_free(uint64_t image_size) {
     }
     if (tls_n!=1) { printf("Job counters: freed at once (%d worker index globals found, 1 expected)\n",tls_n); return; }
     cf_tls_var=tls;
+    /* the GPU signal table: the slot processing (mov reg,[base+0x208] ... mov reg,[base+0x200] ... two lock xadd and an
+     * xchg within 0x140 bytes), and next to it (within 0x2000 bytes) the one function naming +0x2e0 (the table's spin
+     * lock) whose callers enter it with lea rdi,[table]: all of them the same table, or none is used */
+    {
+        uint64_t table=0; int bad=0, proc=0;
+        for (uint64_t i=0;i+0x140<=image_size && !bad;++i) {
+            const unsigned char *x=image+i;
+            if (!((x[0]&0xf0)==0x40 && x[1]==0x8b && (x[2]&0xc0)==0x80 && x[3]==0x08 && x[4]==0x02 && !x[5] && !x[6])) continue;
+            int has200=0, xadds=0, xchg=0;
+            for (int k=0;k+7<0x140;++k) {
+                const unsigned char *y=x+k;
+                if ((y[0]&0xf0)==0x40 && y[1]==0x8b && (y[2]&0xc0)==0x80 && y[3]==0x00 && y[4]==0x02 && !y[5] && !y[6]) has200=1;
+                if (y[0]==0xf0 && y[1]==0x48 && y[2]==0x0f && y[3]==0xc1) ++xadds;
+                if (y[0]==0x48 && y[1]==0x87) xchg=1;
+            }
+            if (!has200 || xadds<2 || !xchg) continue;
+            ++proc;
+            for (uint64_t a=i>0x2000 ? i-0x2000 : 0;a+4<=i+0x2000 && a+4<=image_size;++a) {
+                if (memcmp(image+a,"\xe0\x02\x00\x00",4)) continue;
+                int64_t f=-1;
+                for (int64_t k=(int64_t)a-1;k>(int64_t)a-0x200 && k>=0;--k) if (!memcmp(image+k,"\x55\x48\x89\xe5",4)) { f=k; break; }
+                if (f<0) continue;
+                for (uint64_t s=5;s+5<=image_size;++s) {
+                    if (image[s]!=0xe8) continue;
+                    int32_t d; memcpy(&d,image+s+1,4);
+                    if ((int64_t)s+5+d!=f) continue;
+                    for (int64_t k=(int64_t)s-1;k>(int64_t)s-0x40 && k>=0;--k)
+                        if (image[k]==0x48 && image[k+1]==0x8d && image[k+2]==0x3d) {
+                            int32_t e; memcpy(&e,image+k+3,4);
+                            const uint64_t t=(uint64_t)(uintptr_t)(image+k+7+e);
+                            if (table && t!=table) bad=1;
+                            table=t; break;
+                        }
+                }
+            }
+        }
+        if (proc==1 && !bad && table) cf_gpu_table=table;
+        printf("Job counters: GPU counter signals %s (table %#llx, %d slot processing sites)\n",cf_gpu_table ? "checked" : "NOT checked",
+               (unsigned long long)(table ? table-(uint64_t)(uintptr_t)image : 0),proc);
+    }
     for (int w=0;w<CFL_WORKERS;++w) cf_w[w].widx=-1;   /* a slot taken but not yet filled counts as no worker */
     /* the completion's release site */
     int64_t comp=-1;
