@@ -467,10 +467,11 @@ def shader_cache_dirs(s, key):
     return [p for p in root.glob(f"{info['id']}*") if p.is_dir() and '.' not in p.name]
 
 
+SHADER_PACK = 'shaders.pack'  # the game's shader cache file in each cache folder (gpu .../cache_pack.h)
+
 # The game's shader cache versions (ShaderBinaryVersion.ShaderMetaVersion.PipelineKeyVersion in
 # vk_pipeline_serialization.cpp); tests/test_shader_cache_version.py fails when they differ.
-SHADER_CACHE_VERSIONS = '23.16.8'
-SHADER_PACK = 'shaders.pack'  # the game's shader cache file in each cache folder (gpu .../cache_pack.h)
+SHADER_CACHE_VERSIONS = '24.16.8'
 
 
 def shader_pack_id(folder):
@@ -487,16 +488,16 @@ def shader_pack_id(folder):
 
 
 def shaders_prepared(s, key):
-    """True when the game left a marker for the current list and the current shader cache versions, False when not,
-    None with no list. The marker's first line is '<list size> [clip-jitter <version>] cache <shader cache
-    versions>'; its second line names the shader pack it was written for ('pack <id>').
+    """True when the game left a marker for the current list, the current shader cache versions and the cache
+    folder's shaders.pack, False when not, None with no list. The marker, as the game writes it:
+        <list size> [clip-jitter <version>] cache <shader cache versions>
+        pack <id>
     The clip-jitter part is left out of the comparison: AMD and Intel graphics write it (the upscaler jitter in the
     vertex shaders changes their pipelines), and comparing it the launcher said 'not prepared yet' on those cards after
     every preparation while the game itself found the marker. A marker without the cache versions, or with others,
-    was written for shaders the game can no longer use; one of a cleared or damaged pack (a new id) does not count
-    either: the game prepares again once on the page. A one-line marker of an earlier build's folder cache (no pack
-    yet) counts: the game's next start moves that cache into a pack and ties the marker to it (or, when the cache
-    is of other versions, starts an empty pack and prepares)."""
+    was written for shaders the game can no longer use, and one naming another pack (cleared, or damaged records
+    dropped: a new id) for a cache that is gone: the game prepares again once on the page. Markers of the folder
+    caches before shaders.pack carry no cache versions, so they never count either."""
     lists = shader_list(key)
     if not lists:
         return None
@@ -509,10 +510,6 @@ def shaders_prepared(s, key):
         words = lines[0].split()
         if not words or words[0] != stamp:
             continue
-        # A folder cache of an earlier build, not moved into a pack yet (see above).
-        if not (folder / SHADER_PACK).exists() and (folder / 'profile.bin').is_file() and \
-                not (len(lines) > 1 and lines[1].strip()):
-            return True
         if not ('cache' in words[:-1] and words[words.index('cache') + 1] == SHADER_CACHE_VERSIONS):
             continue
         pack_id = shader_pack_id(folder)

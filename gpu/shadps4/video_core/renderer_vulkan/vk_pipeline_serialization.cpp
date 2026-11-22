@@ -46,7 +46,7 @@ extern "C" void runtime_freeze_guest(int on); // runtime.h: the game's threads w
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 23u; // bbport: ReadConst windows sized by their offsets' range (srt.h); shadPS4 #5447, #5427, #5364, #5365 (CFG fallthrough), #5429 (LDS barriers); page table watch bit; WorkgroupSplit (Umar-Qayyum-dev)
+static constexpr u32 ShaderBinaryVersion = 24u; // bbport: wave64 ballot slot pair; PKRTZ saturate; RCP_LEGACY sign; SAMPLE_CD derivatives; object-motion atomic stores; ReadConst windows sized by their offsets' range (srt.h); shadPS4 #5447, #5427, #5364, #5365 (CFG fallthrough), #5429 (LDS barriers); page table watch bit; WorkgroupSplit (Umar-Qayyum-dev)
 static constexpr u32 ShaderMetaVersion = 16u; // bbport: BufferSpecialization::coherent; Info::cs_split_eligible
 static constexpr u32 PipelineKeyVersion = 8u; // bbport: GraphicsPipelineKey::split_sets; Info layout (cs_split_eligible)
 // bbport: translator options that change the shaders it produces are part of the stored version,
