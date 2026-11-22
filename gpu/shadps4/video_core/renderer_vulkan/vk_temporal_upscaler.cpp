@@ -2120,7 +2120,29 @@ float TemporalUpscaler::SceneMipBias() const {
         std::printf("Upscaler: DLSS extra mip bias %.2f (BB_DLSS_MIP_BIAS)\n", v);
         return std::clamp(v, -3.0f, 1.0f);
     }();
-    return ratio + (UseDlss() ? dlss_extra : 0.0f);
+    // FSR quality fix 3 (2026-11-22): AMD's FSR integration guide asks for log2(render/display) - 1
+    // (Quality -1.58, Performance -2, Native AA -1); FSR had the ratio only, a mip level softer than
+    // that. BB_FSR_MIP_BIAS (FSR 3.1) and BB_FSR4_MIP_BIAS (FSR 4, which AMD documents with the same
+    // formula) = the extra levels, default -1; 0 = as before.
+    static const auto fsr_extra = [](const char* name) {
+        const char* env = std::getenv(name);
+        const float v = env && env[0] ? static_cast<float>(std::atof(env)) : -1.0f;
+        std::printf("Upscaler: %s extra mip bias %.2f (%s)\n",
+                    std::strcmp(name, "BB_FSR4_MIP_BIAS") == 0 ? "FSR 4" : "FSR 3.1", v, name);
+        return std::clamp(v, -3.0f, 1.0f);
+    };
+    if (UseDlss()) {
+        return ratio + dlss_extra;
+    }
+    if (UseFsr4()) {
+        static const float fsr4_extra = fsr_extra("BB_FSR4_MIP_BIAS");
+        return ratio + fsr4_extra;
+    }
+    if (BbSettings::Get().upscaler == BbSettings::UpscalerFsr3) {
+        static const float fsr3_extra = fsr_extra("BB_FSR_MIP_BIAS");
+        return ratio + fsr3_extra;
+    }
+    return ratio;
 }
 
 bool TemporalUpscaler::ProjectionJitterOn() noexcept {
