@@ -2157,7 +2157,8 @@ enum { CFL_WORKERS=64 };
 /* A deferred free: the counter, each worker's job-free point count when it was taken (snap), the thread that freed it
  * when that is a worker in a job (skip: it holds no other job), whether a job the manager holds named it then. */
 typedef struct { uint64_t counter; uint64_t snap[CFL_WORKERS]; int nsnap, skip; } CfEntry;
-static uint64_t cf_free_fn, cf_wait_fn, cf_completion_ret;
+static uint64_t cf_free_fn, cf_wait_fn, cf_completion_ret, cf_alloc_fn;
+static long cf_alloc_waits;
 static uintptr_t cf_lock_fn, cf_unlock_fn;
 static struct { volatile uint64_t epoch; int64_t widx; char pad[48]; } cf_w[CFL_WORKERS];
 static uint64_t cf_tls_var;   /* the game's global holding the TLS offset of the current worker's index */
@@ -2347,6 +2348,34 @@ static __attribute__((noinline)) void cf_free_deferred(uint64_t c) {
     ((MutexOp)cf_unlock_fn)(m+0xd50);
 }
 static ABI void cf_free_hook(uint64_t c) { cf_free_deferred(c); }
+/* AllocateCounter (its call sites): the game's own; when the pool has no free slot while deferred frees still wait, the
+ * slots are on their way back: drain (under the manager lock) and try again until a slot comes or nothing waits any
+ * more (then the game's own result, as without the deferral). What a deferred free waits for is a worker between taking
+ * a job and its record, holding a null job, or between a job's code and its completion: places with no game code, so
+ * the allocating thread is never one of them. */
+static ABI uint64_t cf_alloc_hook(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    typedef uint64_t (ABI *Alloc)(uint64_t, uint64_t, uint64_t, uint64_t);
+    typedef int32_t (ABI *MutexOp)(uint64_t);
+    uint64_t r=((Alloc)(uintptr_t)cf_alloc_fn)(a,b,c,d);
+    if (r) return r;
+    const uint64_t m=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
+    for (int first=1;m;first=0) {
+        ((MutexOp)cf_lock_fn)(m+0xd50);
+        cf_drain(m);
+        const int waiting=cf_head!=cf_tail || cf_named_n;
+        ((MutexOp)cf_unlock_fn)(m+0xd50);
+        r=((Alloc)(uintptr_t)cf_alloc_fn)(a,b,c,d);
+        if (r || !waiting) break;
+        if (first) { const long n=__atomic_add_fetch(&cf_alloc_waits,1,__ATOMIC_RELAXED);
+                     if (n<=20) { printf("Job counters: the pool is full while frees wait: waiting for them (%ld)\n",n); fflush(stdout); } }
+#ifdef _WIN32
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
+    }
+    return r;
+}
 /* WaitForCounterAndFree: the game's wait, then the deferred free (the game's own body frees at once). The wait may
  * suspend this job and resume it on another worker: nothing thread-local is kept across it. */
 static ABI void cf_wait_free_hook(uint64_t c, uint64_t a, uint64_t b) {
@@ -2592,19 +2621,31 @@ static void install_counter_free(uint64_t image_size) {
     if (lock_t<0 || unlock_t<0) { printf("Job counters: freed at once (the manager lock +0xd50 not found at the completion)\n"); return; }
     unsigned char *t=near_image_memory(64);
     if (!t) { printf("Job counters: freed at once (no thunk memory)\n"); return; }
-    const uintptr_t h1=(uintptr_t)cf_free_hook, h2=(uintptr_t)cf_wait_free_hook;
+    const uintptr_t h1=(uintptr_t)cf_free_hook, h2=(uintptr_t)cf_wait_free_hook, h3=(uintptr_t)cf_alloc_hook;
+    /* AllocateCounter: the function that stamps a new counter's +0x18 with rdtsc (rdtsc; shl rdx,0x20; or rdx,rax;
+     * mov [rbx+0x18],rdx), within 0x180 bytes of its push rbp; mov rbp,rsp; exactly one. */
+    int64_t al=-1; int nal=0;
+    for (uint64_t i=0x180;i+13<=image_size;++i) {
+        if (memcmp(image+i,"\x0f\x31\x48\xc1\xe2\x20\x48\x09\xc2\x48\x89\x53\x18",13)) continue;
+        int64_t p=-1;
+        for (int64_t k=(int64_t)i-4;k>(int64_t)i-0x180;--k) if (!memcmp(image+k,"\x55\x48\x89\xe5",4)) { p=k; break; }
+        if (p>=0 && p!=al) { al=p; ++nal; }
+    }
+    if (nal!=1) { printf("Job counters: freed at once (%d counter allocators found, 1 expected)\n",nal); return; }
+    cf_alloc_fn=(uint64_t)(uintptr_t)(image+al);
     t[0]=0x48; t[1]=0xb8; memcpy(t+2,&h1,8); t[10]=0xff; t[11]=0xe0;          /* movabs rax, cf_free_hook; jmp rax */
     t[16]=0x48; t[17]=0xb8; memcpy(t+18,&h2,8); t[26]=0xff; t[27]=0xe0;       /* movabs rax, cf_wait_free_hook; jmp rax */
+    t[32]=0x48; t[33]=0xb8; memcpy(t+34,&h3,8); t[42]=0xff; t[43]=0xe0;       /* movabs rax, cf_alloc_hook; jmp rax */
     cf_free_fn=(uint64_t)(uintptr_t)(image+fr);
     cf_wait_fn=(uint64_t)(uintptr_t)(image+wait);
     cf_completion_ret=(uint64_t)(uintptr_t)(image+comp+5);
     cf_lock_fn=(uintptr_t)(image+lock_t); cf_unlock_fn=(uintptr_t)(image+unlock_t);
-    int sites[2]={0,0};
+    int sites[3]={0,0,0};
     for (uint64_t i=0;i+5<=image_size;++i) {
         if (image[i]!=0xe8 && image[i]!=0xe9) continue;
         int32_t d; memcpy(&d,image+i+1,4);
         const int64_t to=(int64_t)i+5+d;
-        int which=to==fr ? 0 : to==wfr ? 1 : -1;
+        int which=to==fr ? 0 : to==wfr ? 1 : to==al ? 2 : -1;
         if (which<0) continue;
         const int32_t nd=(int32_t)((int64_t)(uintptr_t)(t+16*which)-(int64_t)(uintptr_t)(image+i+5));
         memcpy(image+i+1,&nd,4);
@@ -2612,8 +2653,8 @@ static void install_counter_free(uint64_t image_size) {
     }
     cf_on=1;
     printf("Job counters: freed once no job can still lower them (FreeCounter %#" PRIx64 " %d sites, WaitForCounterAndFree %#"
-           PRIx64 " %d sites, completion release %#" PRIx64 "; BB_COUNTER_FREE=0: off)\n",
-           (uint64_t)fr,sites[0],(uint64_t)wfr,sites[1],(uint64_t)comp);
+           PRIx64 " %d sites, AllocateCounter %#" PRIx64 " %d sites, completion release %#" PRIx64 "; BB_COUNTER_FREE=0: off)\n",
+           (uint64_t)fr,sites[0],(uint64_t)wfr,sites[1],(uint64_t)al,sites[2],(uint64_t)comp);
 }
 /* The job system's counter wait (corelib job scheduling: until [counter+0x20] == or <= a target):
  * a job worker that finds the counter not there yet suspends its job (SuspendJob) and retries when
