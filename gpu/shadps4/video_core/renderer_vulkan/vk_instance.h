@@ -247,6 +247,12 @@ public:
         return vertex_input_dynamic_state;
     }
 
+    /// bbport: VK_KHR_pipeline_binary is enabled: the game's pipelines are kept as the driver's own binaries in the
+    /// shader pack (vk_pipeline_binary.h; off on NVIDIA, see CreateDevice; BB_PIPELINE_BINARY=0/1 overrides).
+    bool IsPipelineBinaryEnabled() const {
+        return pipeline_binary;
+    }
+
     /// bbport: VK_EXT_hdr_metadata is enabled.
     bool IsHdrMetadataSupported() const {
         return hdr_metadata;
@@ -722,6 +728,7 @@ private:
     bool shader_atomic_float2{};
     bool workgroup_memory_explicit_layout{};
     bool maintenance_5{};
+    bool pipeline_binary{}; ///< bbport: VK_KHR_pipeline_binary enabled (IsPipelineBinaryEnabled)
     bool maintenance_8{};
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};

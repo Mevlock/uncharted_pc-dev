@@ -7,6 +7,7 @@
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
@@ -117,10 +118,8 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .stage = shader_ci,
         .layout = *pipeline_layout,
     };
-    std::shared_lock cache_use{PipelineCacheUse()};
-    auto [pipeline_result, pipe] =
-        instance.GetDevice().createComputePipelineUnique(pipeline_cache, compute_pipeline_ci);
-    cache_use.unlock();
+    // bbport: through the pipeline binaries (vk_pipeline_binary.h; off: in the pipeline cache as before).
+    auto [pipeline_result, pipe] = PipelineBinaries::CreateCompute(instance, pipeline_cache, compute_pipeline_ci, preloading);
     // bbport: as for graphics pipelines, a driver failure skips its dispatches. From SuperMedo's
     // ab12fa37, via drakolordx7's community fork.
     if (pipeline_result != vk::Result::eSuccess) {

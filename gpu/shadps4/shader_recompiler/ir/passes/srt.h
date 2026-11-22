@@ -117,8 +117,12 @@ struct PersistentSrtInfo {
     size_t walker_func_size{};
     u32 flattened_bufsize_dw = 16; // NumUserDataRegs
 
+    /// bbport: the walker's size, the buffer size and the walker's code; not the walker's address in
+    /// this session (Deserialize registers the code anew).
     void Serialize(Serialization::Archive& ar) const;
     bool Deserialize(Serialization::Archive& ar);
+    /// Metas before version 17: the struct as raw memory (its pointer and padding included).
+    bool DeserializeRaw(Serialization::Archive& ar);
 };
 
 } // namespace Shader
