@@ -2775,8 +2775,8 @@ void PipelineCache::WarmUpThread() {
         const double t_ship = elapsed_ms();
         BbOverlay::SetShaderPreparation(1, 0, 0);
         // Behind the game: half the warm-up threads (BB_SHIP_THREADS), so play keeps its share of the CPU; all of
-        // them while the full-screen page holds the game.
-        u32 ship_threads = full_preparation ? threads : std::max<u32>(1, threads / 2);
+        // them while the full-screen page or the start-up hold holds the game (it needs no share then).
+        u32 ship_threads = (full_preparation || held) ? threads : std::max<u32>(1, threads / 2);
         if (const char* env = std::getenv("BB_SHIP_THREADS")) {
             ship_threads = std::clamp<u32>(u32(std::atoi(env)), 1, 64);
         }
