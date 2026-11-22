@@ -2358,7 +2358,8 @@ static __attribute__((noinline)) void cf_free_deferred(uint64_t c) {
         CfEntry e; cf_snap(&e,c,self);
         cf_push(&e);
     }
-    cf_drain(m);
+    /* drain at most about every 25 us, as the release does: the manager lock is held a moment, not a ring walk per free */
+    if (__builtin_ia32_rdtsc()-cf_last_drain>100000) cf_drain(m);
     ((MutexOp)cf_unlock_fn)(m+0xd50);
 }
 static ABI void cf_free_hook(uint64_t c) { cf_free_deferred(c); }
