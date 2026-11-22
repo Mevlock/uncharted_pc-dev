@@ -916,6 +916,14 @@ static void SaveShaderLocations(const std::filesystem::path& path, const ShaderL
 static std::mutex g_shader_types_mutex;
 static std::unordered_map<u64, u32> g_shader_types;
 
+/// The binary info type of a hardware stage (99: none of the three).
+static u32 ShaderTypeOf(Shader::HwStage stage) {
+    return stage == Shader::HwStage::Fragment ? 0
+           : stage == Shader::HwStage::Vertex ? 1
+           : stage == Shader::HwStage::Compute ? 4
+                                               : 99;
+}
+
 static std::optional<std::vector<u32>> ReadShaderCodeAt(std::FILE* f, u64 at, u64 hash, u32 length,
                                                        std::vector<u32>* registers = nullptr) {
     if (at < 8 || length < 8 || length >= (1u << 22)) {
@@ -1071,10 +1079,16 @@ static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u6
 }
 
 /// The code of the given shaders, from their saved locations; a scan of the game's files finds (and saves) the
-/// locations when one is missing or no longer right.
+/// locations when one is missing or no longer right. wanted_types (binary info type per hash, ShaderTypeOf): the
+/// shader read for a hash must be of that type; when the first copy found is another one, the copies under other top
+/// folders are read in turn. Two different shaders can share a hash: U2's pixel shader and U3's vertex shader
+/// 000000008e11813d (EU and US, 1.00 and 1.02); the first found was U2's, so U3's listed vertex variant was never
+/// built. (A scan notes one copy per top folder, so two shaders of one hash under the same top folder are still
+/// one location.)
 static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(
     const std::set<u64>& wanted, u64* files_scanned,
-    std::unordered_map<u64, std::vector<u32>>* registers = nullptr) {
+    std::unordered_map<u64, std::vector<u32>>* registers = nullptr,
+    const std::unordered_map<u64, u32>* wanted_types = nullptr) {
     std::unordered_map<u64, std::vector<u32>> found;
     const char* app0_env = std::getenv("BB_APP0_DIR");
     if (!app0_env || wanted.empty()) {
@@ -1114,6 +1128,45 @@ static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(
                 }
             }
             std::fclose(f);
+        }
+        if (!wanted_types) {
+            return;
+        }
+        // A hash whose shader read is not of the wanted type: its copies, in turn, until one is.
+        for (const auto& [hash, loc] : locations.copies) {
+            const auto type = wanted_types->find(hash);
+            if (type == wanted_types->end() || !wanted.contains(hash)) {
+                continue;
+            }
+            {
+                std::scoped_lock lk{g_shader_types_mutex};
+                const auto read = g_shader_types.find(hash);
+                if (found.contains(hash) && read != g_shader_types.end() && read->second == type->second) {
+                    continue;
+                }
+            }
+            std::FILE* f = _wfopen((app0 / locations.files[loc.file]).c_str(), L"rb");
+            if (!f) {
+                continue;
+            }
+            std::vector<u32> regs;
+            auto code = ReadShaderCodeAt(f, loc.at, hash, loc.length, registers ? &regs : nullptr);
+            std::fclose(f);
+            bool right;
+            {
+                std::scoped_lock lk{g_shader_types_mutex};
+                right = code && g_shader_types[hash] == type->second;
+            }
+            if (!right) {
+                continue;
+            }
+            if (registers) {
+                (*registers)[hash] = std::move(regs);
+            }
+            found.insert_or_assign(hash, std::move(*code));
+            std::printf("Shader locations: %016llx read from its copy in %s (the first copy found is another "
+                        "stage's shader with the same hash)\n",
+                        static_cast<unsigned long long>(hash), locations.files[loc.file].c_str());
         }
     };
     // The saved locations come from a scan of every game file: a shader missing there is not in the game files. Only
@@ -1461,11 +1514,7 @@ vk::ShaderModule PipelineCache::BuildListedVariant(const ListedVariant& v, std::
     {
         std::scoped_lock lk{g_shader_types_mutex};
         const auto it = g_shader_types.find(v.hash);
-        const u32 want = draw.hw_stage == Shader::HwStage::Fragment ? 0
-                         : draw.hw_stage == Shader::HwStage::Vertex ? 1
-                         : draw.hw_stage == Shader::HwStage::Compute ? 4
-                                                                     : 99;
-        if (it == g_shader_types.end() || it->second != want) {
+        if (it == g_shader_types.end() || it->second != ShaderTypeOf(draw.hw_stage)) {
             trace_line("wrong-stage");
             info_out.reset();
             return {};
@@ -2221,12 +2270,14 @@ void PipelineCache::WarmUpThread() {
             }
         }
         std::set<u64> wanted;
+        std::unordered_map<u64, u32> wanted_types; // a hash's first listed stage
         for (const auto& v : listed) {
             wanted.insert(v.hash);
+            wanted_types.try_emplace(v.hash, ShaderTypeOf(v.spec.runtime_info.hw_stage));
         }
         u64 scanned = 0;
         std::unordered_map<u64, std::vector<u32>> registers;
-        const auto code = ReadGameShaderCode(wanted, &scanned, &registers);
+        const auto code = ReadGameShaderCode(wanted, &scanned, &registers, &wanted_types);
         std::atomic<u32> same{0}, differ{0}, no_reference{0}, no_code{0}, failed{0};
         std::mutex shown_mutex;
         u32 shown = 0;
@@ -2687,12 +2738,14 @@ void PipelineCache::WarmUpThread() {
             std::fclose(f);
         }
         std::set<u64> wanted;
+        std::unordered_map<u64, u32> wanted_types; // a hash's first listed stage
         for (const auto& v : listed) {
             wanted.insert(v.hash);
+            wanted_types.try_emplace(v.hash, ShaderTypeOf(v.spec.runtime_info.hw_stage));
         }
         u64 scanned = 0;
         std::unordered_map<u64, std::vector<u32>> registers;
-        const auto code = ReadGameShaderCode(wanted, &scanned, &registers);
+        const auto code = ReadGameShaderCode(wanted, &scanned, &registers, &wanted_types);
         const double t_read = elapsed_ms();
         std::atomic<u32> built{0}, taken{0}, failed{0}, no_code{0}, progress{0};
         std::mutex shipped_mutex;
