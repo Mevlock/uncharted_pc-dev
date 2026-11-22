@@ -869,6 +869,14 @@ std::vector<std::string> DataBase::ListBlobNames(BlobType type) {
     return pack.Names(PackType(type));
 }
 
+u64 DataBase::BlobSize(BlobType type, const std::string& name) {
+    u64 size = 0;
+    if (!opened || !pack.Find(PackType(type), name, &size, nullptr)) {
+        return 0;
+    }
+    return size;
+}
+
 u32 DataBase::PendingWrites() const {
     return num_requests.load();
 }

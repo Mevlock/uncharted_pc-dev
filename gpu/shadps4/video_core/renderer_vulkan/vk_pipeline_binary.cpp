@@ -41,9 +41,52 @@ bool load_stored = false; ///< the stored binaries are of this driver (the tag m
 bool can_save = false;    ///< this game writes the pack (else: the plain path for anything not stored)
 u64 stored_at_start = 0;
 
+// Size guard, driver-neutral: AMD's binaries are ~4.5 KB a pipeline stored (RX 7800 XT); NVIDIA's, forced on, were
+// ~1.2 MB (4024 pipelines of Uncharted 2 = 5 GB). Binaries that large would grow the pack by gigabytes: past either limit
+// nothing more is captured this session (the plain path in the VkPipelineCache), and at the start the stored ones are
+// all dropped (the pack compacts the dead bytes). BB_PIPELINE_BINARY_MAX_KB / _MAX_MB override (tests).
+constexpr u64 GuardMinCount = 100; ///< the average counts from this many binaries on
+u64 MaxAverageBytes() {
+    static const u64 v = [] {
+        const char* env = std::getenv("BB_PIPELINE_BINARY_MAX_KB");
+        return (env ? std::strtoull(env, nullptr, 10) : 64ull) * 1024;
+    }();
+    return v;
+}
+u64 MaxTotalBytes() {
+    static const u64 v = [] {
+        const char* env = std::getenv("BB_PIPELINE_BINARY_MAX_MB");
+        return (env ? std::strtoull(env, nullptr, 10) : 1024ull) << 20;
+    }();
+    return v;
+}
+std::atomic<bool> capture_on{false};
+u64 stored_bytes_at_start = 0;
+std::atomic<u64> session_count{0}, session_bytes{0};
+
+/// True when one more capture keeps the binaries within the guard; logs once when it stops them.
+bool WithinGuard(u64 count, u64 bytes) {
+    const bool too_big = count >= GuardMinCount && bytes / count > MaxAverageBytes();
+    const bool too_much = stored_bytes_at_start + bytes > MaxTotalBytes();
+    if (!too_big && !too_much) {
+        return true;
+    }
+    if (capture_on.exchange(false)) {
+        std::printf("Pipeline binaries: capturing stopped for this session: %s (%llu binaries, %.1f MB, %.1f KB each; "
+                    "limits %llu KB each, %llu MB in all): the rest is built in the pipeline cache\n",
+                    too_big ? "the driver's binaries are too large" : "the stored binaries reached the size limit",
+                    static_cast<unsigned long long>(count), double(bytes) / (1024.0 * 1024.0),
+                    count ? double(bytes) / count / 1024.0 : 0.0,
+                    static_cast<unsigned long long>(MaxAverageBytes() / 1024),
+                    static_cast<unsigned long long>(MaxTotalBytes() >> 20));
+        std::fflush(stdout);
+    }
+    return false;
+}
+
 // Per creation path: [0] the preload (stored and listed keys), [1] the game (draw-preparation workers, GPU thread).
 struct PathCounts {
-    std::atomic<u64> used{0}, captured{0}, refused{0}, capture_failed{0}, no_key{0}, plain{0};
+    std::atomic<u64> used{0}, captured{0}, refused{0}, capture_failed{0}, no_key{0}, plain{0}, not_captured{0};
 };
 PathCounts counts[2];
 std::atomic<u64> captured_bytes{0}, captured_raw_bytes{0}, cache_misses{0};
@@ -268,6 +311,12 @@ void Capture(vk::Device device, VkPipeline pipeline, const std::string& name, Pa
         return;
     }
     const u64 bytes = blob.size();
+    const u64 n = session_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    const u64 total = session_bytes.fetch_add(bytes, std::memory_order_relaxed) + bytes;
+    if (!WithinGuard(n, total)) {
+        count.not_captured.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     if (Storage::DataBase::Instance().Save(BlobType::PipelineBinary, name, std::move(blob))) {
         count.captured.fetch_add(1, std::memory_order_relaxed);
         captured_bytes.fetch_add(bytes, std::memory_order_relaxed);
@@ -325,6 +374,10 @@ Created Create(const Instance& instance, vk::PipelineCache cache, const Info& in
     if (!can_save) {
         count.plain.fetch_add(1, std::memory_order_relaxed);
         return CreatePlain(device, cache, info); // nothing could be saved: as before
+    }
+    if (!capture_on.load(std::memory_order_relaxed)) {
+        count.not_captured.fetch_add(1, std::memory_order_relaxed);
+        return CreatePlain(device, cache, info); // the size guard stopped capturing: as before
     }
     // Compiled with the capture flag: no pipeline cache (VUID-...-pNext-09617).
     auto created = CreateIn(device, VK_NULL_HANDLE, capture);
@@ -385,10 +438,37 @@ void Setup(const Instance& instance) {
     db.Load(BlobType::PipelineBinary, TagName, stored_tag);
     auto names = db.ListBlobNames(BlobType::PipelineBinary);
     std::erase(names, std::string{TagName});
+    u64 stored_bytes = 0;
+    for (const auto& name : names) {
+        stored_bytes += db.BlobSize(BlobType::PipelineBinary, name);
+    }
+    const bool oversized = (names.size() >= GuardMinCount && stored_bytes / names.size() > MaxAverageBytes()) ||
+                           stored_bytes > MaxTotalBytes();
+    if (stored_tag == tag && oversized) {
+        // Over the size guard (an earlier build without it, or BB_PIPELINE_BINARY=1 on a driver with large binaries):
+        // all dropped, the pack compacts them; nothing is captured this session.
+        std::printf("Pipeline binaries: %zu stored binaries take %.1f MB (%.1f KB each), over the limits (%llu KB each, "
+                    "%llu MB in all): %s, none captured this session\n",
+                    names.size(), double(stored_bytes) / (1024.0 * 1024.0),
+                    names.empty() ? 0.0 : double(stored_bytes) / names.size() / 1024.0,
+                    static_cast<unsigned long long>(MaxAverageBytes() / 1024),
+                    static_cast<unsigned long long>(MaxTotalBytes() >> 20),
+                    can_save ? "dropped" : "not used (this game only reads the cache)");
+        if (can_save) {
+            for (const auto& name : names) {
+                db.Remove(BlobType::PipelineBinary, name);
+            }
+        }
+        active = true;
+        capture_on = false;
+        return;
+    }
     if (stored_tag == tag) {
         load_stored = true;
         stored_at_start = names.size();
-        std::printf("Pipeline binaries: %zu stored for this driver\n", names.size());
+        stored_bytes_at_start = stored_bytes;
+        std::printf("Pipeline binaries: %zu stored for this driver (%.1f MB)\n", names.size(),
+                    double(stored_bytes) / (1024.0 * 1024.0));
     } else {
         if (!names.empty()) {
             u32 old_version = 0;
@@ -412,6 +492,7 @@ void Setup(const Instance& instance) {
         }
     }
     active = true;
+    capture_on = can_save;
 }
 
 bool Active() {
@@ -441,13 +522,14 @@ void PrintStats(const char* when) {
     const auto& g = counts[1];
     std::printf("Pipeline binaries (%s): %llu used (preload %llu, game %llu), %llu captured (preload %llu, game %llu; "
                 "%.1f MB, %.1f MB before compression), %llu refused by the driver (%llu, %llu), %llu capture failed "
-                "(%llu, %llu), %llu without a key, %llu not captured (read-only cache); %llu were stored at the "
-                "start\n",
+                "(%llu, %llu), %llu without a key, %llu not captured (read-only cache), %llu not captured (size "
+                "guard); %llu were stored at the start\n",
                 when, n(p.used) + n(g.used), n(p.used), n(g.used), n(p.captured) + n(g.captured), n(p.captured),
                 n(g.captured), double(captured_bytes.load()) / (1024.0 * 1024.0),
                 double(captured_raw_bytes.load()) / (1024.0 * 1024.0), n(p.refused) + n(g.refused), n(p.refused),
                 n(g.refused), n(p.capture_failed) + n(g.capture_failed), n(p.capture_failed), n(g.capture_failed),
-                n(p.no_key) + n(g.no_key), n(p.plain) + n(g.plain), static_cast<unsigned long long>(stored_at_start));
+                n(p.no_key) + n(g.no_key), n(p.plain) + n(g.plain), n(p.not_captured) + n(g.not_captured),
+                static_cast<unsigned long long>(stored_at_start));
     std::fflush(stdout);
 }
 

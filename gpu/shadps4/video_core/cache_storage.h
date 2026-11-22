@@ -52,6 +52,8 @@ public:
 
     /// bbport: names of the stored blobs of a type, for loading them one by one through Load() (in parallel).
     std::vector<std::string> ListBlobNames(BlobType type);
+    /// bbport: the stored size of one blob (0: not stored), without reading it.
+    u64 BlobSize(BlobType type, const std::string& name);
     /// bbport: the cache folder (valid after Open()): the pack (shaders.pack), the driver's cache data, the
     /// prepared markers.
     [[nodiscard]] const std::filesystem::path& Directory() const {
