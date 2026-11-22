@@ -63,7 +63,9 @@ struct Values {
     std::atomic<bool> sharpen{true};
     std::atomic<float> sharpness{0.3f};
     std::atomic<bool> jitter{true};
-    std::atomic<bool> reactive{false};
+    /// FSR quality fix 2 (2026-11-22): on by default (FSR 3.1 only: ReactiveOn). Saved as reactive_mask;
+    /// the old key `reactive=0` was the default every menu save wrote, so only `reactive=1` is read.
+    std::atomic<bool> reactive{true};
     std::atomic<bool> object_motion{true};
     std::atomic<float> reactive_scale{1.0f};
     std::atomic<float> reactive_threshold{0.2f};

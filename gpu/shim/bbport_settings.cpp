@@ -89,6 +89,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "jitter") {
         v.jitter = i != 0;
     } else if (key == "reactive") {
+        // Files from before 0.3.6.67 wrote reactive=0 (the default then) on every save: only an
+        // explicit 1 is taken from that key; reactive_mask (BB_REACTIVE) is the setting now.
+        if (i != 0) v.reactive = true;
+    } else if (key == "reactive_mask") {
         v.reactive = i != 0;
     } else if (key == "object_motion") {
         v.object_motion = i != 0;
@@ -208,7 +212,7 @@ void Load() {
     }
     const std::pair<const char*, const char*> env_keys[] = {
         {"BB_FSR_SHARPNESS", "sharpness"},        {"BB_JITTER", "jitter"},
-        {"BB_REACTIVE", "reactive"},              {"BB_REACTIVE_SCALE", "reactive_scale"},
+        {"BB_REACTIVE", "reactive_mask"},             {"BB_REACTIVE_SCALE", "reactive_scale"},
         {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
         {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
         {"BB_FRAME_GEN", "frame_gen"},              {"BB_FRAME_GEN_MULTIPLIER", "frame_gen_multiplier"},
@@ -313,7 +317,7 @@ void Save() {
     std::fprintf(file,
                  "# bbport settings (in-game menu: Insert / L3+R3)\n"
                  "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"
-                 "reactive=%d\nobject_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\nreactive_max=%.2f\n"
+                 "reactive_mask=%d\nobject_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\nreactive_max=%.2f\n"
                  "debug_view=%d\nshow_fps=%d\nshow_fps_graph=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n",
                  UpscalerName(v.upscaler), v.preset.load(), int(v.sharpen.load()),
                  v.sharpness.load(), int(v.jitter.load()), int(v.reactive.load()),

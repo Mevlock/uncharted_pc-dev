@@ -1346,8 +1346,8 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
 }
 
 void TemporalUpscaler::OnBlendedSceneDraw() {
-    // The mask is opt-in (menu, BB_REACTIVE=1): on Bloodborne's thin mist it trades trails for
-    // jitter shimmer, which looked worse. Toggle 1 << 27 switches it off.
+    // The mask is on by default since FSR quality fix 2 (FSR 3.1 only; BB_REACTIVE=0 or the menu: off). It was
+    // opt-in for Bloodborne's thin mist (trails traded for jitter shimmer). Toggle 1 << 27 switches it off.
     if (snapshot_taken || !scene_color || !Active() || !ReactiveOn()) {
         return;
     }
@@ -1468,6 +1468,11 @@ bool TemporalUpscaler::RecordReactive(vk::ImageView color_view) {
     const auto& settings = BbSettings::Get();
     const std::array<float, 3> params{settings.reactive_scale, settings.reactive_max,
                                       settings.reactive_threshold};
+    if (static bool noted = false; !noted) {
+        noted = true;
+        std::printf("Upscaler: FSR 3.1 reactive mask on, %ux%u (scale %.2f, threshold %.2f, max %.2f; "
+                    "BB_REACTIVE=0: off)\n", w, h, params[0], params[2], params[1]);
+    }
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         const vk::ImageMemoryBarrier2 to_write{
             .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -1751,6 +1756,10 @@ void TemporalUpscaler::Run() {
             if (input_stencil_view) {
                 DumpImages(instance, scheduler, cmdbuf, dump,
                            {{input_depth, w, h, 1, "stencil", "u8", vk::ImageAspectFlagBits::eStencil}});
+            }
+            if (has_reactive) {
+                DumpImages(instance, scheduler, cmdbuf, dump,
+                           {{vk::Image(reactive_image), w, h, 1, "reactive", "u8"}});
             }
         }
         reset = false;
