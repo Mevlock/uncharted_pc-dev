@@ -2278,9 +2278,11 @@ static int cf_quiet(uint64_t m, const CfEntry *e) {
         const int64_t i=cf_w[w].widx;
         if (i<0 || (uint64_t)i>=workers) return 0;
         const volatile uint64_t *r=(const volatile uint64_t *)(uintptr_t)(m+0x180+(uint64_t)i*0x100);
-        const uint64_t done=r[2];
-        if (done && done==e->counter && r[0]) return 2;
-        if (!done || !r[0] || r[2]!=done) return 0;
+        /* +0x1c0 (the job's affinity, never 0) is written after the completion and cleared before it: non-zero and
+         * unchanged around the reads, the entry and completion read are the running job's own (a 0 completion too) */
+        const uint64_t a1=r[8], e1=r[0], done=r[2], a2=r[8], e2=r[0];
+        if (!a1 || a1!=a2 || !e1 || e1!=e2) return 0;   /* no job code running: a code-free window */
+        if (done && done==e->counter) return 2;
     }
     return 1;
 }
