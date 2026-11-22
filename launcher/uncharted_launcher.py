@@ -467,22 +467,50 @@ def shader_cache_dirs(s, key):
     return [p for p in root.glob(f"{info['id']}*") if p.is_dir() and '.' not in p.name]
 
 
+SHADER_PACK = 'shaders.pack'  # the game's shader cache file in each cache folder (gpu .../cache_pack.h)
+
+
+def shader_pack_id(folder):
+    """The id of a cache folder's shaders.pack (16 hex digits, as the game's prepared marker names it), or None.
+    The header: 8-byte magic BBSHPACK, format version (u32), header size (u32), id (u64), little-endian."""
+    try:
+        with open(folder / SHADER_PACK, 'rb') as pack:
+            head = pack.read(64)
+    except OSError:
+        return None
+    if len(head) < 64 or head[:8] != b'BBSHPACK' or int.from_bytes(head[8:12], 'little') != 1:
+        return None
+    return f"{int.from_bytes(head[16:24], 'little'):016x}"
+
+
 def shaders_prepared(s, key):
     """True when the game left a marker for the current list (its size in it), False when not, None with no list.
     The marker's line may go on after the size: AMD and Intel graphics write '<size> clip-jitter <version>' (the
     upscaler jitter in the vertex shaders changes their pipelines). Comparing the whole line, the launcher said 'not
-    prepared yet' on those cards after every preparation while the game itself found the marker."""
+    prepared yet' on those cards after every preparation while the game itself found the marker.
+    Its second line names the shader pack it was written for ('pack <id>'): a marker of a cleared or damaged pack (a
+    new id) does not count, as in the game. A one-line marker of an earlier build's folder cache (no pack yet) counts:
+    the game's next start moves that cache into a pack and ties the marker to it."""
     lists = shader_list(key)
     if not lists:
         return None
     stamp = str(lists[0].stat().st_size)
     for folder in shader_cache_dirs(s, key):
         try:
-            words = (folder / f'prepared_{lists[0].stem}').read_text().split('\n')[0].split()
-            if words and words[0] == stamp:
-                return True
+            lines = (folder / f'prepared_{lists[0].stem}').read_text().split('\n')
         except OSError:
-            pass
+            continue
+        words = lines[0].split()
+        if not words or words[0] != stamp:
+            continue
+        pack_id = shader_pack_id(folder)
+        if pack_id and len(lines) > 1 and lines[1].strip() == f'pack {pack_id}':
+            return True
+        # A folder cache of an earlier build, not moved into a pack yet: the game's first start moves it and ties
+        # its marker to the new pack.
+        if not (folder / SHADER_PACK).exists() and (folder / 'profile.bin').is_file() and \
+                not (len(lines) > 1 and lines[1].strip()):
+            return True
     return False
 
 

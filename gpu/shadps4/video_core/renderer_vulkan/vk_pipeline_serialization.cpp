@@ -177,12 +177,35 @@ bool WriteDeferredPreparedMarker() {
         deferred_marker.clear();
         return false;
     }
-    std::FILE* f = std::fopen(deferred_marker.string().c_str(), "w");
+    // bbport (pack cache): the marker names the pack it was written against, after everything written to it is on
+    // the disk (flushed); written beside and renamed into place. A game that only reads the cache (another one
+    // writes it) leaves no marker.
+    auto& db = Storage::DataBase::Instance();
+    const std::string pack_id = db.PackIdText();
+    if (!db.CanSave() || pack_id.empty() || !db.Sync()) {
+        if (deferred_marker_announce) {
+            std::printf("Preparation: the shader cache could not be written to the disk: no prepared marker\n");
+        }
+        deferred_marker.clear();
+        return false;
+    }
+    auto tmp = deferred_marker;
+    tmp += ".tmp";
+    std::FILE* f = std::fopen(tmp.string().c_str(), "w");
     if (!f) {
         return false;
     }
-    std::fprintf(f, "%s\n", deferred_stamp.c_str());
-    const bool closed = std::fclose(f) == 0;
+    std::fprintf(f, "%s\npack %s\n", deferred_stamp.c_str(), pack_id.c_str());
+    bool closed = std::fflush(f) == 0;
+    closed = std::fclose(f) == 0 && closed;
+    std::error_code ec;
+    if (closed) {
+        std::filesystem::rename(tmp, deferred_marker, ec);
+    }
+    if (!closed || ec) {
+        std::filesystem::remove(tmp, ec);
+        closed = false;
+    }
     deferred_marker.clear();
     deferred_marker_written = closed;
     return closed;
@@ -1681,9 +1704,13 @@ void PipelineCache::WarmUpThread() {
         if (!ship_list) {
             return false;
         }
+        // bbport (pack cache): the marker counts only for the pack it was written against (its second line, "pack
+        // <id>"): a cleared pack, or one that lost records to damage, has a new id, so it is prepared again.
         std::ifstream marker{prepared_marker};
-        std::string stamp;
-        return !std::getline(marker, stamp) || stamp != prepared_stamp;
+        std::string stamp, pack_line;
+        const std::string pack_id = db.PackIdText();
+        return !std::getline(marker, stamp) || stamp != prepared_stamp || !std::getline(marker, pack_line) ||
+               pack_id.empty() || pack_line != "pack " + pack_id;
     }();
     const bool full_preparation = prep_screen || prepare_only;
     struct PrepScreenOff {
@@ -1764,9 +1791,6 @@ void PipelineCache::WarmUpThread() {
     if (const char* env = std::getenv("BB_WARM_THREADS")) { // 1 = the old serial load, for timing
         threads = std::clamp<u32>(static_cast<u32>(std::atoi(env)), 1, 64);
     }
-    if (EmulatorSettings.IsPipelineCacheArchived()) {
-        threads = 1; // the zip reader is not thread-safe
-    }
     const auto device = instance.GetDevice();
 
     // 1. The stored pipeline keys.
@@ -1789,8 +1813,7 @@ void PipelineCache::WarmUpThread() {
         const bool v6 = version == 6 && (std::getenv("BB_VARIANT_SHIP") || std::getenv("BB_KEY_DUMP"));
         if (version != Serialization::PipelineKeyVersion && !v6) {
             // A key of an older cache layout can never load again: drop it.
-            std::error_code ec;
-            std::filesystem::remove(db.Directory() / (names[i] + ".key"), ec);
+            db.Remove(Storage::BlobType::PipelineKey, names[i]);
             return;
         }
         u32 is_compute{};

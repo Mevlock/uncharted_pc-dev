@@ -8,6 +8,7 @@
 #include "common/types.h"
 
 #include <array>
+#include <string>
 #include <functional>
 #include <thread>
 #include <vector>
@@ -46,10 +47,10 @@ public:
 
     void ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func);
 
-    /// bbport: names (without extension) of the stored blobs of a type, for loading them one by
-    /// one through Load() (in parallel for a folder cache; the zip reader is not thread-safe).
+    /// bbport: names of the stored blobs of a type, for loading them one by one through Load() (in parallel).
     std::vector<std::string> ListBlobNames(BlobType type);
-    /// bbport: the cache folder (valid after Open(); empty for an archived cache).
+    /// bbport: the cache folder (valid after Open()): the pack (shaders.pack), the driver's cache data, the
+    /// prepared markers.
     [[nodiscard]] const std::filesystem::path& Directory() const {
         return directory;
     }
@@ -74,14 +75,19 @@ public:
     /// bbport: waits until every queued write is done, or until none has completed for `stall_s` seconds (stuck);
     /// `tick(left)` about 4 times a second (false: stop waiting). True when all were done.
     bool WaitForWrites(double stall_s, const std::function<bool(u32 left)>& tick);
-
-public:
-    static constexpr u32 IoWorkers = 4; ///< file writer threads (one for an archive)
+    /// bbport (pack cache): everything written so far is flushed to the disk (before a prepared marker). False: this
+    /// game cannot write the cache, or the flush failed.
+    bool Sync();
+    /// bbport (pack cache): this game writes the cache (another game may hold it: then it only reads).
+    [[nodiscard]] bool CanSave() const;
+    /// bbport (pack cache): the pack's id (16 hex digits; new on every clear and when damage lost records), which a
+    /// prepared marker names; empty when there is none or this game found damage it could not repair.
+    [[nodiscard]] std::string PackIdText() const;
 
 private:
-    std::array<std::jthread, 4> io_workers{};
+    std::jthread io_worker{}; ///< the one writer thread (appends to the pack in order)
     std::filesystem::path cache_path{};
-    std::filesystem::path directory{}; ///< cache_path for a folder cache, empty for an archive
+    std::filesystem::path directory{}; ///< the cache folder
     bool opened{};
 };
 
