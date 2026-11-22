@@ -2152,6 +2152,36 @@ PipelineCache::NewProgram PipelineCache::CreateProgram(HwStage hw_stage, SwStage
     return result;
 }
 
+/// bbport (BB_SPEC_START_LOG=1, diagnosis): a stored permutation taken for a draw although it was translated for
+/// another binding start (its stage's resources numbered from another place in the descriptor set), while the stage
+/// has resource slots. Each permutation and start once, the first 64.
+static void NoteStartReuse(u64 pgm_hash, size_t perm_idx, const Shader::StageSpecialization& found,
+                           const Shader::StageSpecialization& wanted) {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_SPEC_START_LOG");
+        return env && env[0] == '1';
+    }();
+    if (!on || found.start.unified == wanted.start.unified) {
+        return;
+    }
+    const size_t slots = wanted.buffers.size() + wanted.images.size() + wanted.samplers.size();
+    if (slots == 0) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::unordered_set<u64> seen;
+    std::scoped_lock lk{mutex};
+    const u64 id = pgm_hash ^ (u64(perm_idx) << 40) ^ (u64(wanted.start.unified) << 56);
+    if (seen.size() >= 64 || !seen.insert(id).second) {
+        return;
+    }
+    std::printf("Spec start: permutation %zu of %#x (translated for binding start %u) taken for start %u: %zu buffers, "
+                "%zu images, %zu samplers, %zu of their sharps valid (bitset %s)\n",
+                perm_idx, static_cast<unsigned>(pgm_hash), found.start.unified, wanted.start.unified,
+                wanted.buffers.size(), wanted.images.size(), wanted.samplers.size(), wanted.bitset.count(),
+                wanted.bitset.none() ? "empty" : "not empty");
+}
+
 PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage hw_stage,
                                                 SwStage sw_stage,
                                                 const Shader::ShaderParams& params,
@@ -2211,6 +2241,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                     perm_idx = std::distance(program->modules.begin(), it);
                     module = it->module;
                     fetch_shader = it->spec.fetch_shader_data;
+                    NoteStartReuse(params.hash, perm_idx, it->spec, spec);
                 }
             }
             if (!found) {
@@ -2273,6 +2304,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             perm_idx = program->last_used;
             module = it->module;
             fetch_shader = it->spec.fetch_shader_data;
+            NoteStartReuse(params.hash, perm_idx, it->spec, spec);
         }
     }
     if (!found) {
@@ -2285,6 +2317,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                 perm_idx = std::distance(program->modules.begin(), it);
                 module = it->module;
                 fetch_shader = it->spec.fetch_shader_data;
+                NoteStartReuse(params.hash, perm_idx, it->spec, spec);
             }
         }
         if (!found) {
