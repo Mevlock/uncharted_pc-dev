@@ -2181,7 +2181,7 @@ static _Thread_local int cf_slot=-1;
  * job still named (cf_named: they get a new snap the moment no job names them, then join the ring). */
 static CfEntry *cf_ring; static size_t cf_cap, cf_head, cf_tail;
 static CfEntry *cf_named; static size_t cf_named_n, cf_named_cap;
-static size_t cf_peak;
+static size_t cf_peak, cf_named_peak;
 static long cf_deferred, cf_freed, cf_named_seen;
 static uint64_t cf_last_drain;
 static void cf_pass(void) {
@@ -2238,6 +2238,9 @@ static int cf_referenced(uint64_t m, uint64_t c) {
     for (uint64_t w=0;w<workers;++w) {
         const volatile uint64_t *e=(const volatile uint64_t *)(uintptr_t)(m+0x780+w*0x80);
         if (e[2]==c || e[3]==c || e[4]==c) return 1;
+        /* a running job's record (see cf_quiet) */
+        const volatile uint64_t *r=(const volatile uint64_t *)(uintptr_t)(m+0x180+w*0x100);
+        if (r[0] && r[2]==c) return 1;
     }
     uint64_t node=*(const volatile uint64_t *)(uintptr_t)(m+0x4ed0);
     for (int k=0;k<1024 && node;++k) {
@@ -2263,6 +2266,8 @@ static void cf_snap(CfEntry *e, uint64_t c, int skip) {
  * point. The one that freed it is excepted (it runs the freeing job). A worker that registered after the snap did so
  * at a job-free point. Until every worker has registered (its first idle pass or completion), and with more workers
  * than slots, nothing passes: a worker not seen may hold a job taken before the free. */
+/* 1: it may be freed; 2: a running job's record names it (the game freed a counter its own running job will still
+ * lower: it waits on the named list until no job names it); 0: a worker is in a code-free window (wait). */
 static int cf_quiet(uint64_t m, const CfEntry *e) {
     const int nw=__atomic_load_n(&cf_nw,__ATOMIC_ACQUIRE);
     const uint64_t workers=*(const volatile uint64_t *)(uintptr_t)(m+0x100);
@@ -2274,7 +2279,8 @@ static int cf_quiet(uint64_t m, const CfEntry *e) {
         if (i<0 || (uint64_t)i>=workers) return 0;
         const volatile uint64_t *r=(const volatile uint64_t *)(uintptr_t)(m+0x180+(uint64_t)i*0x100);
         const uint64_t done=r[2];
-        if (!done || done==e->counter || !r[0] || r[2]!=done) return 0;
+        if (done && done==e->counter && r[0]) return 2;
+        if (!done || !r[0] || r[2]!=done) return 0;
     }
     return 1;
 }
@@ -2289,8 +2295,19 @@ static void cf_push(const CfEntry *e) {
     cf_ring[cf_tail%cf_cap]=*e; ++cf_tail;
     if (cf_tail-cf_head>cf_peak) cf_peak=cf_tail-cf_head;
 }
+static void cf_name(uint64_t c) {
+    if (cf_named_n==cf_named_cap) {
+        const size_t cap=cf_named_cap ? cf_named_cap*2 : 64;
+        CfEntry *r=realloc(cf_named,cap*sizeof(*r));
+        if (!r) { fprintf(stderr,"STOP: job counter free: out of memory\n"); runtime_quit(21); }
+        cf_named=r; cf_named_cap=cap;
+    }
+    cf_named[cf_named_n++].counter=c;
+    if (cf_named_n>cf_named_peak) cf_named_peak=cf_named_n;
+}
 /* Under the manager lock. The ring is freed from its oldest end while the oldest has passed (the snaps only grow, so
- * one that has not passed holds the rest back, at most until the next job-free point of the worker it waits for). */
+ * one that has not passed holds the rest back, only until the worker it waits for leaves a code-free window: a free a
+ * running job's record names moves to the named list instead). */
 static void cf_drain(uint64_t m) {
     typedef void (ABI *Free)(uint64_t);
     for (size_t i=0;i<cf_named_n;) {
@@ -2301,10 +2318,11 @@ static void cf_drain(uint64_t m) {
     }
     while (cf_head!=cf_tail) {
         CfEntry *e=&cf_ring[cf_head%cf_cap];
-        if (!cf_quiet(m,e)) break;
-        ((Free)(uintptr_t)cf_free_fn)(e->counter);
+        const int q=cf_quiet(m,e);
+        if (!q) break;
+        if (q==2) cf_name(e->counter);   /* a long job holds it: it must not hold the rest of the ring back */
+        else { ((Free)(uintptr_t)cf_free_fn)(e->counter); ++cf_freed; }
         ++cf_head;
-        ++cf_freed;
     }
     const uint64_t now=__builtin_ia32_rdtsc();
     cf_last_drain=now;
@@ -2316,9 +2334,9 @@ static void cf_drain(uint64_t m) {
         const uint64_t pool=m+0xae0;
         uint64_t used=0;
         for (int k=0;k<32;++k) used+=(uint64_t)__builtin_popcountll(*(const volatile uint64_t *)(uintptr_t)(pool+0x20+k*8));
-        printf("Job counters: %ld frees deferred, %ld done, %ld named by a job at the free, waiting now %zu, most waiting at "
-               "once %zu; pool %llu of %u in use\n",cf_deferred,cf_freed,cf_named_seen,cf_tail-cf_head+cf_named_n,cf_peak,
-               (unsigned long long)used,*(const volatile uint32_t *)(uintptr_t)(pool+0x128));
+        printf("Job counters: %ld frees deferred, %ld done, %ld named by a job at the free, waiting now %zu + %zu named, most "
+               "waiting at once %zu + %zu named; pool %llu of %u in use\n",cf_deferred,cf_freed,cf_named_seen,cf_tail-cf_head,
+               cf_named_n,cf_peak,cf_named_peak,(unsigned long long)used,*(const volatile uint32_t *)(uintptr_t)(pool+0x128));
         fflush(stdout);
     }
 }
@@ -2331,14 +2349,8 @@ static __attribute__((noinline)) void cf_free_deferred(uint64_t c) {
     ((MutexOp)cf_lock_fn)(m+0xd50);
     ++cf_deferred;
     if (cf_referenced(m,c)) {
-        /* a job the manager holds still names it: it waits there until none does, then for every worker */
-        if (cf_named_n==cf_named_cap) {
-            const size_t cap=cf_named_cap ? cf_named_cap*2 : 64;
-            CfEntry *r=realloc(cf_named,cap*sizeof(*r));
-            if (!r) { fprintf(stderr,"STOP: job counter free: out of memory\n"); runtime_quit(21); }
-            cf_named=r; cf_named_cap=cap;
-        }
-        cf_named[cf_named_n++].counter=c;
+        /* a job the manager holds or runs still names it: it waits there until none does, then for every worker */
+        cf_name(c);
         ++cf_named_seen;
     } else {
         CfEntry e; cf_snap(&e,c,self);
