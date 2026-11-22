@@ -38,6 +38,7 @@
 #include "video_core/amdgpu/regs.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "bbport_focus_fix.h"
 extern "C" void runtime_freeze_guest(int on); // runtime.h: the game's threads wait (1) or go on (0)
@@ -3140,6 +3141,7 @@ void PipelineCache::WarmUpThread() {
                 num_pipelines.load(), num_total_pipelines, u32(stages.size()), threads, elapsed_ms(),
                 t_keys, t_shaders - t_keys, t_programs - t_shaders, elapsed_ms() - t_programs,
                 t_ready);
+    PipelineBinaries::PrintStats("preload");
     // bbport: preparation is done: the game's frames may go out; a variant list's first launch leaves the
     // "prepared" marker, so later launches load in the background with the corner box only.
     // bbport: a full preparation in play (the page) also saves what it prepared before the game goes on: the ~13,000

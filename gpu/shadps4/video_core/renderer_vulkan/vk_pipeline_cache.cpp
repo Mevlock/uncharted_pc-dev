@@ -40,6 +40,7 @@
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "bbport_exposure_fix.h"
@@ -585,6 +586,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
                vk::to_string(created.result));
     pipeline_cache = std::move(created.value);
     driver_cache_loaded_size = DriverCacheSize();
+    // bbport: the driver's own pipeline binaries in the shader pack (AMD warm start; vk_pipeline_binary.h): the stored
+    // ones are checked against this driver before any pipeline is made.
+    PipelineBinaries::Setup(instance);
     if (!driver_cache_path.empty()) {
         driver_cache_saver = std::jthread([this](std::stop_token stop) { DriverCacheSaver(stop); });
     }
@@ -844,6 +848,7 @@ void FlushPipelineCacheForExit(const std::function<bool(u32 left)>& note) {
     if (auto* cache = g_exit_pipeline_cache) {
         cache->SaveForExit(note);
     }
+    PipelineBinaries::PrintStats("this session");
     if (Storage::DataBase::Instance().IsOpened()) {
         Storage::DataBase::Instance().PrintWriteStats();
     }
