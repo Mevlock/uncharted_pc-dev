@@ -206,8 +206,8 @@ XESS = ('xess', 'Intel XeSS (Native AA, any GPU)')
 # L and M are the DLSS 4.5 models.
 DLSS_MODELS = [('default', "Driver default (K, DLSS 4)"), ('K', 'K (DLSS 4)'),
                ('L', 'L (DLSS 4.5)'), ('M', 'M (DLSS 4.5)')]
-# 'auto' (FSR quality fix 4): the port picks the upscaler's own default (BbSettings::AutoSharpness: FSR 3.1 near
-# AMD's sample value, the others Low); a level chosen here is kept as it is.
+# 'auto' (FSR quality fix 4): the port picks the upscaler's own default (BbSettings::AutoSharpness: FSR 3.1 0.5,
+# the others Low); a level chosen here is kept as it is.
 AA_SHARPNESS = [('auto', 'Default (per anti-aliasing)'), ('0', 'Off'), ('0.2', 'Low'), ('0.4', 'Medium'), ('0.7', 'High'), ('1.0', 'Very high'),
                 ('1.5', 'Maximum')]
 # Frames generated between two of the game's (BB_FRAME_GEN, BB_FRAME_GEN_MULTIPLIER).

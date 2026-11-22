@@ -2141,10 +2141,13 @@ float TemporalUpscaler::SceneMipBias() const {
     // FSR quality fix 3 (2026-11-22): AMD's FSR integration guide asks for log2(render/display) - 1
     // (Quality -1.58, Performance -2, Native AA -1); FSR had the ratio only, a mip level softer than
     // that. BB_FSR_MIP_BIAS (FSR 3.1) and BB_FSR4_MIP_BIAS (FSR 4, which AMD documents with the same
-    // formula) = the extra levels, default -1; 0 = as before.
+    // formula) = the extra levels; 0 = as before. Defaults from the desert still view (2026-11-22 night): FSR 3.1
+    // -1 (no steadiness cost measured, sharper texture); FSR 4 0 (with -1 its sand detail was less steady:
+    // frame-to-frame detail correlation 0.79 vs 0.89 at 0, distant dunes 0.77 vs 0.62 change).
     static const auto fsr_extra = [](const char* name) {
         const char* env = std::getenv(name);
-        const float v = env && env[0] ? static_cast<float>(std::atof(env)) : -1.0f;
+        const bool fsr4 = std::strcmp(name, "BB_FSR4_MIP_BIAS") == 0;
+        const float v = env && env[0] ? static_cast<float>(std::atof(env)) : fsr4 ? 0.0f : -1.0f;
         std::printf("Upscaler: %s extra mip bias %.2f (%s)\n",
                     std::strcmp(name, "BB_FSR4_MIP_BIAS") == 0 ? "FSR 4" : "FSR 3.1", v, name);
         return std::clamp(v, -3.0f, 1.0f);

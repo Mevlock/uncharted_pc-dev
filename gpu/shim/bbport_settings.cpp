@@ -469,12 +469,14 @@ const char* UpscalerName(int upscaler) {
 }
 
 float AutoSharpness(int upscaler) {
-    // FSR 3.1: near AMD's sample (0.8, RCAS) and judged on the U3 horse ride (fsrq report): its own
+    // FSR 3.1: 0.5, judged on the U3 desert still view (fsrq report): AMD's sample 0.8 added grain to the
+    // sand (detail correlation 0.72 at 0.8, 0.76 at 0.5, 0.82 at 0.2; old 0.74) while 0.5 stays sharper than
+    // before (edge 182 vs 149). Its own
     // RCAS works up to 1, the port's pass adds the rest. The others keep the launcher's old default
     // (Low, 0.2), which DLSS was tuned with. BB_AUTO_SHARPNESS_FSR3 / _FSR4 override for tests.
     static const float fsr3 = [] {
         const char* env = std::getenv("BB_AUTO_SHARPNESS_FSR3");
-        return env && env[0] ? Clamp(float(std::atof(env)), 0.0f, 2.0f) : 0.8f;
+        return env && env[0] ? Clamp(float(std::atof(env)), 0.0f, 2.0f) : 0.5f;
     }();
     static const float fsr4 = [] {
         const char* env = std::getenv("BB_AUTO_SHARPNESS_FSR4");
