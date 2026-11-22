@@ -20,6 +20,9 @@ enum class BlobType : u32 {
     ShaderBinary,
     PipelineKey,
     ShaderProfile,
+    /// bbport: the driver's own binaries of one pipeline (VK_KHR_pipeline_binary, vk_pipeline_binary.h), named by the
+    /// driver's pipeline key; "tag" names the driver they are of. Pack only: never in a folder cache, never moved.
+    PipelineBinary,
 };
 
 class DataBase {

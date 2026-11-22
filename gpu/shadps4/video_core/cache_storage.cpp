@@ -208,6 +208,9 @@ constexpr std::string GetBlobFileExtension(BlobType type) {
     case BlobType::ShaderProfile: {
         return "bin";
     }
+    case BlobType::PipelineBinary: {
+        return "pbin";
+    }
     default:
         UNREACHABLE();
     }
@@ -760,7 +763,7 @@ void DataBase::Close() {
 // bbport (pack cache): the session's appends, for the exit line (PrintWriteStats).
 static std::atomic<u64> appended{0}, appended_bytes{0}, append_ns{0}, append_max_ns{0}, appends_over_5ms{0};
 // Saves of content the pack already held (nothing appended), by blob type, and the first few names (writer thread).
-static std::array<u64, 4> same_by_type{};
+static std::array<u64, 5> same_by_type{};
 static std::string same_names;
 static std::mutex same_mutex;
 
@@ -793,7 +796,11 @@ static void QueueWrite(BlobType type, const std::string& name, std::vector<u8>&&
                             : pack.IsWriter() ? "the write failed: is the disk full?"
                                               : "this game only reads the cache");
             }
-            ++num_failed;
+            // A pipeline binary not saved is only compiled again at the next start (vk_pipeline_binary.cpp): it does
+            // not keep the shader preparation from being done.
+            if (type != BlobType::PipelineBinary) {
+                ++num_failed;
+            }
         }
     }};
     Enqueue(std::move(request));
@@ -922,7 +929,7 @@ void DataBase::PrintWriteStats() const {
     std::scoped_lock lk{same_mutex};
     std::printf("Shader cache: this session appended %llu blobs (%.1f MB) to %s: %.0f ms of writes in all, the "
                 "longest %.1f ms, %llu over 5 ms; %llu not saved; %llu saved again unchanged, not appended (%llu "
-                "meta, %llu spv, %llu key, %llu profile%s%s)\n",
+                "meta, %llu spv, %llu key, %llu profile, %llu pipeline binary%s%s)\n",
                 static_cast<unsigned long long>(appended.load()), double(appended_bytes.load()) / (1024.0 * 1024.0),
                 PackName, double(append_ns.load()) / 1e6, double(append_max_ns.load()) / 1e6,
                 static_cast<unsigned long long>(appends_over_5ms.load()),
@@ -930,7 +937,7 @@ void DataBase::PrintWriteStats() const {
                 static_cast<unsigned long long>(pack.SameSkipped()),
                 static_cast<unsigned long long>(same_by_type[0]), static_cast<unsigned long long>(same_by_type[1]),
                 static_cast<unsigned long long>(same_by_type[2]), static_cast<unsigned long long>(same_by_type[3]),
-                same_names.empty() ? "" : ": ", same_names.c_str());
+                static_cast<unsigned long long>(same_by_type[4]), same_names.empty() ? "" : ": ", same_names.c_str());
     std::fflush(stdout);
 }
 
