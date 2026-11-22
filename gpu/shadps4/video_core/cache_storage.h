@@ -88,10 +88,19 @@ public:
     /// bbport (pack cache): old cache files (one per blob, an earlier build's folder cache) still to be moved into the
     /// pack; 0: none.
     [[nodiscard]] u32 FolderCacheToMove() const;
+    /// bbport (pack cache): what this build stores, for telling whether an old folder cache is still usable.
+    struct CacheVersions {
+        /// The prepared marker's version words of this build ("cache <binary>.<meta>.<key>").
+        std::string marker_words;
+        /// True when a stored blob is of this build's versions (a meta's or key's version fields, the profile).
+        std::function<bool(BlobType type, const std::vector<u8>& data)> current;
+    };
     /// bbport (pack cache): moves them (read, appended, read back from the disk; the old files are then removed
-    /// behind the game). `progress(done, total)` from the reading threads; (0, 0) at the end. False: the old files
-    /// are kept (the next start tries again).
-    bool MoveFolderCache(const std::function<void(u32 done, u32 total)>& progress);
+    /// behind the game). When the old cache is of other versions (its markers' version words, its profile, its metas
+    /// and keys), nothing is moved: the pack starts empty and the old files are removed behind the game.
+    /// `progress(done, total)` from the reading threads; (0, 0) at the end. False: the old files are kept (the next
+    /// start tries again).
+    bool MoveFolderCache(const CacheVersions& versions, const std::function<void(u32 done, u32 total)>& progress);
 
 private:
     std::jthread io_worker{}; ///< the one writer thread (appends to the pack in order)

@@ -1692,7 +1692,28 @@ void PipelineCache::WarmUpThread() {
         if (page) {
             BbOverlay::SetPreparationScreen(true);
         }
-        db.MoveFolderCache([](u32 done, u32 total) { BbOverlay::SetMoveProgress(done, total); });
+        // What this build stores: the marker's version words (as prepared_stamp ends), a meta's two version fields,
+        // a key's version field, the profile.
+        Storage::DataBase::CacheVersions versions;
+        versions.marker_words = "cache " + std::to_string(Serialization::ShaderBinaryVersion) + "." +
+                                std::to_string(Serialization::ShaderMetaVersion) + "." +
+                                std::to_string(Serialization::PipelineKeyVersion);
+        versions.current = [this](Storage::BlobType type, const std::vector<u8>& data) {
+            u32 head[2]{};
+            std::memcpy(head, data.data(), std::min(data.size(), sizeof(head)));
+            switch (type) {
+            case Storage::BlobType::ShaderMeta:
+                return data.size() >= 8 && head[0] == Serialization::ShaderMetaVersion &&
+                       head[1] == Serialization::TranslatedBinaryVersion();
+            case Storage::BlobType::PipelineKey:
+                return data.size() >= 4 && head[0] == Serialization::PipelineKeyVersion;
+            case Storage::BlobType::ShaderProfile:
+                return data.size() == sizeof(profile) && std::memcmp(data.data(), &profile, sizeof(profile)) == 0;
+            default:
+                return true;
+            }
+        };
+        db.MoveFolderCache(versions, [](u32 done, u32 total) { BbOverlay::SetMoveProgress(done, total); });
         if (page) {
             BbOverlay::SetPreparationScreen(false);
         }

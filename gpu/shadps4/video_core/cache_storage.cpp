@@ -223,8 +223,9 @@ static int LooseBlobType(const std::filesystem::path& file) {
 }
 
 /// The prepared markers of the folder cache ("prepared_<list>", one line) get the pack's id as their second line:
-/// what they were written for is in the pack now.
-static void TieMarkersToPack(const std::filesystem::path& folder) {
+/// what they were written for is in the pack now. A first line without version words (an earlier build's marker)
+/// gets this build's: the move found the cache of these versions.
+static void TieMarkersToPack(const std::filesystem::path& folder, const std::string& marker_words) {
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
         const auto name = entry.path().filename().string();
@@ -234,9 +235,15 @@ static void TieMarkersToPack(const std::filesystem::path& folder) {
         std::string stamp, second;
         {
             std::ifstream in{entry.path()};
-            if (!std::getline(in, stamp) || std::getline(in, second)) {
+            if (!std::getline(in, stamp) || (std::getline(in, second) && !second.empty() && second != "\r")) {
                 continue; // empty, or already tied
             }
+        }
+        while (!stamp.empty() && (stamp.back() == '\r' || stamp.back() == ' ')) {
+            stamp.pop_back(); // written in text mode by an earlier build
+        }
+        if (!marker_words.empty() && (" " + stamp + " ").find(" cache ") == std::string::npos) {
+            stamp += " " + marker_words;
         }
         auto tmp = entry.path();
         tmp += ".tmp";
@@ -290,6 +297,22 @@ static void ListFolderCache(const std::filesystem::path& folder) {
     }
 }
 
+/// The prepared markers' version words ("cache <versions>", the end of their first line), or empty.
+static std::string MarkerVersionWords(const std::filesystem::path& marker) {
+    std::ifstream in{marker};
+    std::string line;
+    std::getline(in, line);
+    const auto at = (" " + line).find(" cache ");
+    if (at == std::string::npos) {
+        return {};
+    }
+    std::string words = line.substr(at);
+    while (!words.empty() && (words.back() == '\r' || words.back() == ' ')) {
+        words.pop_back();
+    }
+    return words;
+}
+
 /// Removes the old files behind the game, at low priority (a later start removes what is left).
 static void RemoveLooseFilesBehindTheGame() {
     std::vector<std::filesystem::path> paths;
@@ -326,7 +349,8 @@ u32 DataBase::FolderCacheToMove() const {
 /// (every record read and checked) and each moved blob looked up there; only then is the move's time recorded, the
 /// old prepared markers tied to the pack, and the old files removed (behind the game). Anything short of that keeps
 /// the old files (the next start tries again).
-bool DataBase::MoveFolderCache(const std::function<void(u32 done, u32 total)>& progress) {
+bool DataBase::MoveFolderCache(const CacheVersions& versions,
+                               const std::function<void(u32 done, u32 total)>& progress) {
     namespace fs = std::filesystem;
     if (!opened || !pack.IsWriter() || loose_files.empty()) {
         return true;
@@ -336,6 +360,86 @@ bool DataBase::MoveFolderCache(const std::function<void(u32 done, u32 total)>& p
                     loose_files.size(), PackName);
         RemoveLooseFilesBehindTheGame();
         return true;
+    }
+    // Of this build's versions? The markers' version words where they have them; the stored profile; and a sample
+    // of the metas and keys spread over the folder (a cache of other versions has none of the current ones; a usable
+    // one has a few stale entries at most, which the preload prunes as always).
+    {
+        std::string why;
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(directory, ec)) {
+            const auto name = entry.path().filename().string();
+            if (name.starts_with("prepared_") && !name.ends_with(".tmp")) {
+                if (const auto words = MarkerVersionWords(entry.path());
+                    !words.empty() && words != versions.marker_words) {
+                    why = "its prepared marker says " + words + ", this build " + versions.marker_words;
+                }
+            }
+        }
+        u32 metas = 0, metas_current = 0, keys = 0, keys_current = 0;
+        bool profile_seen = false, profile_current = false;
+        const auto read_file = [](const fs::path& path, std::vector<u8>& data) {
+            const Common::FS::IOFile in{path, Common::FS::FileAccessMode::Read};
+            if (!in.IsOpen()) {
+                return false;
+            }
+            data.resize(in.GetSize());
+            return in.Read(data) == data.size();
+        };
+        const size_t step = std::max<size_t>(1, loose_files.size() / 256);
+        for (size_t i = 0; i < loose_files.size(); ++i) {
+            const auto& f = loose_files[i];
+            const bool sample =
+                i % step == 0 && (f.type == int(BlobType::ShaderMeta) || f.type == int(BlobType::PipelineKey));
+            if (!f.fold || (f.type != int(BlobType::ShaderProfile) && !sample)) {
+                continue;
+            }
+            std::vector<u8> data;
+            if (!read_file(f.path, data)) {
+                continue;
+            }
+            const bool current = versions.current && versions.current(BlobType(f.type), data);
+            if (f.type == int(BlobType::ShaderProfile)) {
+                profile_seen = true;
+                profile_current = current;
+            } else if (f.type == int(BlobType::ShaderMeta)) {
+                ++metas;
+                metas_current += current ? 1 : 0;
+            } else {
+                ++keys;
+                keys_current += current ? 1 : 0;
+            }
+        }
+        if (why.empty() && profile_seen && !profile_current) {
+            why = "its shader profile is another build's or graphics card's";
+        }
+        if (why.empty() && metas > 0 && metas_current == 0) {
+            why = "none of " + std::to_string(metas) + " sampled shaders is of this build's versions";
+        }
+        if (why.empty() && keys > 0 && keys_current == 0) {
+            why = "none of " + std::to_string(keys) + " sampled pipeline keys is of this build's versions";
+        }
+        if (!why.empty()) {
+            std::printf("Shader cache: the %zu cache files of an earlier build are of other shader cache versions "
+                        "(%s): not moved; %s starts empty and the old files are removed behind the game\n",
+                        loose_files.size(), why.c_str(), PackName);
+            // Their prepared markers go now (they name shaders this build cannot use; removed behind the game, one
+            // could outlive the new marker this start writes).
+            std::vector<fs::path> markers;
+            for (const auto& entry : fs::directory_iterator(directory, ec)) {
+                if (entry.path().filename().string().starts_with("prepared_")) {
+                    markers.push_back(entry.path());
+                }
+            }
+            for (const auto& m : markers) {
+                fs::remove(m, ec);
+            }
+            RemoveLooseFilesBehindTheGame();
+            return true;
+        }
+        std::printf("Shader cache: the cache files of an earlier build are of this build's versions (%u of %u sampled "
+                    "shaders, %u of %u keys%s): moved into %s\n",
+                    metas_current, metas, keys_current, keys, profile_seen ? ", the profile" : "", PackName);
     }
     const auto t0 = std::chrono::steady_clock::now();
     const auto start_time = fs::file_time_type::clock::now().time_since_epoch().count();
@@ -445,7 +549,7 @@ bool DataBase::MoveFolderCache(const std::function<void(u32 done, u32 total)>& p
         std::printf("Shader cache: %s could not be written after the move: the old cache files are kept\n", PackName);
         return false;
     }
-    TieMarkersToPack(directory);
+    TieMarkersToPack(directory, versions.marker_words);
     std::printf("Shader cache: moved %llu cache files (%s) into %s in %.1f s (%llu were in it already); the %zu old "
                 "files are removed behind the game\n",
                 static_cast<unsigned long long>(moved.load()), MB(bytes.load()).c_str(), PackName,
