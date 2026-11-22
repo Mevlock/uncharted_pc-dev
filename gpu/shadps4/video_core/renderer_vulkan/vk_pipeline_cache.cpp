@@ -844,6 +844,9 @@ void FlushPipelineCacheForExit(const std::function<bool(u32 left)>& note) {
     if (auto* cache = g_exit_pipeline_cache) {
         cache->SaveForExit(note);
     }
+    if (Storage::DataBase::Instance().IsOpened()) {
+        Storage::DataBase::Instance().PrintWriteStats();
+    }
 }
 
 // bbport: shader/pipeline compile time on the GPU thread, reported by BB_FRAME_STATS.

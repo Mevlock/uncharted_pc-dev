@@ -811,11 +811,19 @@ bool PackFile::Sync() {
         return false;
     }
     std::scoped_lock wl{write_mutex_};
-    return SyncNative(WRITE_H);
+    if (synced_end_ == end_.load(std::memory_order_relaxed)) {
+        return true; // nothing written since the last flush (a flush of an unchanged file still costs the drive)
+    }
+    if (!SyncNative(WRITE_H)) {
+        return false;
+    }
+    synced_end_ = end_.load(std::memory_order_relaxed);
+    return true;
 }
 
 bool PackFile::ReplaceWith(const std::filesystem::path& tmp) {
     CloseHandles();
+    synced_end_ = 0;
     const bool renamed = RenameOver(tmp, path_);
     if (!renamed) {
         std::error_code ec;

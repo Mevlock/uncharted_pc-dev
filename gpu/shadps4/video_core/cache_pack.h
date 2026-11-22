@@ -153,6 +153,7 @@ private:
     uint64_t id_ = 0;
     std::atomic<uint64_t> end_{0};
     std::atomic<uint64_t> dead_bytes_{0};
+    uint64_t synced_end_ = 0; ///< the end at the last flush (under write_mutex_); 0: never flushed
     mutable std::shared_mutex mutex_;  ///< index and file identity (shared: reads; unique: index changes, Clear)
     std::mutex write_mutex_;           ///< one append at a time
     std::unordered_map<std::string, Entry> index_;

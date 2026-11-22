@@ -182,6 +182,18 @@ bool WriteDeferredPreparedMarker() {
     // writes it) leaves no marker.
     auto& db = Storage::DataBase::Instance();
     const std::string pack_id = db.PackIdText();
+    // The same marker is there already (an ordinary start of a prepared cache): nothing to write and no flush (what
+    // this start added is not what the marker counts on; if a power cut takes it, the next start builds it again).
+    const std::string content = deferred_stamp + "\npack " + pack_id + "\n";
+    if (!pack_id.empty()) {
+        std::ifstream existing{deferred_marker, std::ios::binary};
+        const std::string have{std::istreambuf_iterator<char>(existing), {}};
+        if (have == content) {
+            deferred_marker.clear();
+            deferred_marker_written = true;
+            return true;
+        }
+    }
     if (!db.CanSave() || pack_id.empty() || !db.Sync()) {
         if (deferred_marker_announce) {
             std::printf("Preparation: the shader cache could not be written to the disk: no prepared marker\n");
@@ -191,11 +203,11 @@ bool WriteDeferredPreparedMarker() {
     }
     auto tmp = deferred_marker;
     tmp += ".tmp";
-    std::FILE* f = std::fopen(tmp.string().c_str(), "w");
+    std::FILE* f = std::fopen(tmp.string().c_str(), "wb");
     if (!f) {
         return false;
     }
-    std::fprintf(f, "%s\npack %s\n", deferred_stamp.c_str(), pack_id.c_str());
+    std::fputs(content.c_str(), f);
     bool closed = std::fflush(f) == 0;
     closed = std::fclose(f) == 0 && closed;
     std::error_code ec;

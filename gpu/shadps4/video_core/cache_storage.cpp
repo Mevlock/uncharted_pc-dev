@@ -241,7 +241,7 @@ static void TieMarkersToPack(const std::filesystem::path& folder) {
         auto tmp = entry.path();
         tmp += ".tmp";
         {
-            std::ofstream out{tmp, std::ios::trunc};
+            std::ofstream out{tmp, std::ios::binary | std::ios::trunc};
             out << stamp << "\npack " << pack.IdText() << "\n";
         }
         std::filesystem::rename(tmp, entry.path(), ec);
@@ -536,9 +536,23 @@ void DataBase::Close() {
 }
 
 /// Queued for the writer thread: appended to the pack in the order saved.
+// bbport (pack cache): the session's appends, for the exit line (PrintWriteStats).
+static std::atomic<u64> appended{0}, appended_bytes{0}, append_ns{0}, append_max_ns{0}, appends_over_5ms{0};
+
 static void QueueWrite(BlobType type, const std::string& name, std::vector<u8>&& data) {
     auto request = std::packaged_task<void()>{[type, name, data = std::move(data)]() {
-        if (!pack.Put(PackType(type), name, data.data(), data.size())) {
+        const s64 t0 = NowNs();
+        const bool ok = pack.Put(PackType(type), name, data.data(), data.size());
+        const u64 ns = u64(NowNs() - t0);
+        if (ok) {
+            ++appended;
+            appended_bytes += data.size();
+            append_ns += ns;
+            appends_over_5ms += ns > 5000000 ? 1 : 0;
+            for (u64 max = append_max_ns.load(); ns > max && !append_max_ns.compare_exchange_weak(max, ns);) {
+            }
+        }
+        if (!ok) {
             static std::atomic<bool> said{false};
             if (!said.exchange(true)) {
                 std::printf("Shader cache: %s.%s not saved (%s): the next start prepares what is missing\n",
@@ -672,8 +686,26 @@ void DataBase::Flush(u32 max_ms) {
     Sync();
 }
 
+void DataBase::PrintWriteStats() const {
+    std::printf("Shader cache: this session appended %llu blobs (%.1f MB) to %s: %.0f ms of writes in all, the "
+                "longest %.1f ms, %llu over 5 ms; %llu not saved\n",
+                static_cast<unsigned long long>(appended.load()), double(appended_bytes.load()) / (1024.0 * 1024.0),
+                PackName, double(append_ns.load()) / 1e6, double(append_max_ns.load()) / 1e6,
+                static_cast<unsigned long long>(appends_over_5ms.load()),
+                static_cast<unsigned long long>(num_failed.load()));
+    std::fflush(stdout);
+}
+
 bool DataBase::Sync() {
-    return opened && pack.IsWriter() && pack.Sync();
+    if (!opened || !pack.IsWriter()) {
+        return false;
+    }
+    const s64 t0 = NowNs();
+    const bool ok = pack.Sync();
+    if (const double ms = double(NowNs() - t0) / 1e6; ms >= 20.0) {
+        std::printf("Shader cache: flushing %s to the disk took %.0f ms\n", PackName, ms);
+    }
+    return ok;
 }
 
 bool DataBase::CanSave() const {

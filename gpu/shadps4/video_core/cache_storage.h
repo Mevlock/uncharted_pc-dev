@@ -83,6 +83,8 @@ public:
     /// bbport (pack cache): the pack's id (16 hex digits; new on every clear and when damage lost records), which a
     /// prepared marker names; empty when there is none or this game found damage it could not repair.
     [[nodiscard]] std::string PackIdText() const;
+    /// bbport (pack cache): one log line with this session's appends (count, MB, write times), at the exit.
+    void PrintWriteStats() const;
     /// bbport (pack cache): old cache files (one per blob, an earlier build's folder cache) still to be moved into the
     /// pack; 0: none.
     [[nodiscard]] u32 FolderCacheToMove() const;
