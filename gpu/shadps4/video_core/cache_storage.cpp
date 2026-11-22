@@ -642,13 +642,24 @@ void DataBase::Close() {
 /// Queued for the writer thread: appended to the pack in the order saved.
 // bbport (pack cache): the session's appends, for the exit line (PrintWriteStats).
 static std::atomic<u64> appended{0}, appended_bytes{0}, append_ns{0}, append_max_ns{0}, appends_over_5ms{0};
+// Saves of content the pack already held (nothing appended), by blob type, and the first few names (writer thread).
+static std::array<u64, 4> same_by_type{};
+static std::string same_names;
+static std::mutex same_mutex;
 
 static void QueueWrite(BlobType type, const std::string& name, std::vector<u8>&& data) {
     auto request = std::packaged_task<void()>{[type, name, data = std::move(data)]() {
         const s64 t0 = NowNs();
+        const u64 same_before = pack.SameSkipped();
         const bool ok = pack.Put(PackType(type), name, data.data(), data.size());
         const u64 ns = u64(NowNs() - t0);
-        if (ok) {
+        if (ok && pack.SameSkipped() != same_before) {
+            std::scoped_lock lk{same_mutex};
+            const u32 t = u32(type);
+            if (t < same_by_type.size() && same_by_type[t]++ < 3) {
+                same_names += (same_names.empty() ? "" : ", ") + name + "." + GetBlobFileExtension(type);
+            }
+        } else if (ok) {
             ++appended;
             appended_bytes += data.size();
             append_ns += ns;
@@ -791,12 +802,18 @@ void DataBase::Flush(u32 max_ms) {
 }
 
 void DataBase::PrintWriteStats() const {
+    std::scoped_lock lk{same_mutex};
     std::printf("Shader cache: this session appended %llu blobs (%.1f MB) to %s: %.0f ms of writes in all, the "
-                "longest %.1f ms, %llu over 5 ms; %llu not saved\n",
+                "longest %.1f ms, %llu over 5 ms; %llu not saved; %llu saved again unchanged, not appended (%llu "
+                "meta, %llu spv, %llu key, %llu profile%s%s)\n",
                 static_cast<unsigned long long>(appended.load()), double(appended_bytes.load()) / (1024.0 * 1024.0),
                 PackName, double(append_ns.load()) / 1e6, double(append_max_ns.load()) / 1e6,
                 static_cast<unsigned long long>(appends_over_5ms.load()),
-                static_cast<unsigned long long>(num_failed.load()));
+                static_cast<unsigned long long>(num_failed.load()),
+                static_cast<unsigned long long>(pack.SameSkipped()),
+                static_cast<unsigned long long>(same_by_type[0]), static_cast<unsigned long long>(same_by_type[1]),
+                static_cast<unsigned long long>(same_by_type[2]), static_cast<unsigned long long>(same_by_type[3]),
+                same_names.empty() ? "" : ": ", same_names.c_str());
     std::fflush(stdout);
 }
 

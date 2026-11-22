@@ -93,8 +93,13 @@ public:
     }
 
     /// Writer only. Appends a record (the newest of the name wins). False: not written (disk full, refused); the
-    /// pack stays as it was. Thread-safe against readers; writes are serialised.
+    /// pack stays as it was. Thread-safe against readers; writes are serialised. The same content the pack already
+    /// holds for the name (same size and data checksum) is not appended again: true, and counted (SameSkipped).
     bool Put(uint16_t type, std::string_view name, const void* data, size_t size);
+    /// Puts that found the same content already in the pack (nothing appended), since the open.
+    [[nodiscard]] uint64_t SameSkipped() const {
+        return same_skipped_.load(std::memory_order_relaxed);
+    }
     /// Writer only. Appends a removal record (nothing when the name is not in the pack).
     bool Erase(uint16_t type, std::string_view name);
     /// Thread-safe. The data of a name (checksum checked); false when it is not in the pack or damaged.
@@ -153,6 +158,7 @@ private:
     uint64_t id_ = 0;
     std::atomic<uint64_t> end_{0};
     std::atomic<uint64_t> dead_bytes_{0};
+    std::atomic<uint64_t> same_skipped_{0};
     uint64_t synced_end_ = 0; ///< the end at the last flush (under write_mutex_); 0: never flushed
     mutable std::shared_mutex mutex_;  ///< index and file identity (shared: reads; unique: index changes, Clear)
     std::mutex write_mutex_;           ///< one append at a time

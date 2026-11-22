@@ -448,6 +448,7 @@ OpenStats PackFile::Open(const std::filesystem::path& path, bool want_writer, bo
     path_ = path;
     index_.clear();
     dead_bytes_ = 0;
+    same_skipped_ = 0;
     damaged_ = false;
     id_ = 0;
     end_ = HeaderSize;
@@ -745,6 +746,14 @@ bool PackFile::AppendRecord(uint16_t type, uint16_t flags, std::string_view name
 }
 
 bool PackFile::Put(uint16_t type, std::string_view name, const void* data, size_t size) {
+    if (!open_ || !writer_) {
+        return false;
+    }
+    if (uint64_t have_size = 0, have_hash = 0;
+        Find(type, name, &have_size, &have_hash) && have_size == size && have_hash == BodyHash(name, data, size)) {
+        same_skipped_.fetch_add(1, std::memory_order_relaxed);
+        return true; // already there, unchanged: a start that saves the same blobs again grows nothing
+    }
     return AppendRecord(type, 0, name, data, size);
 }
 
