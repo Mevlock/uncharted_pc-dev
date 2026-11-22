@@ -206,6 +206,27 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
 CameraMotion::~CameraMotion() = default;
 
 float CameraMotion::VerticalFov() const noexcept {
+    // FSR quality fix 6 (2026-11-22): velocity mode (Uncharted) never fills `current` (the far = 3000
+    // camera block is Bloodborne's), so the upscalers always got the fixed 1.0. The velocity pass's
+    // view from uv: view y = z (b v + d) with v 0..1 across the screen, so tan(fov / 2) = |b| / 2.
+    // BB_UPSCALER_REAL_FOV=0: the fixed value.
+    static const bool real_fov = [] {
+        const char* env = std::getenv("BB_UPSCALER_REAL_FOV");
+        return !(env && env[0] == '0');
+    }();
+    if (real_fov && velocity_mode && velocity_camera.valid) {
+        const float b = std::abs(velocity_camera.uv_to_view[1]);
+        const float fov = 2.0f * std::atan(0.5f * b);
+        if (std::isfinite(fov) && fov > 0.1f && fov < 3.0f) {
+            static bool noted = false;
+            if (!noted) {
+                noted = true;
+                std::printf("Camera motion: the game's vertical field of view for the upscalers: %.3f rad "
+                            "(%.1f degrees; BB_UPSCALER_REAL_FOV=0: 1.0)\n", fov, fov * 57.29578f);
+            }
+            return fov;
+        }
+    }
     if (current.proj[1] == 0.0f) {
         return 1.0f; // no camera constants (velocity mode): a typical 57 degrees
     }

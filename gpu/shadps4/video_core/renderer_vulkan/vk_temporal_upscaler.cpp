@@ -1891,6 +1891,8 @@ void TemporalUpscaler::CaptureFrameGen() {
         Dlss::FrameGenCamera camera{};
         camera_motion.RealCamera(camera); // DLSS rework 9 (valid false without the camera)
         frame_generator->SetCaptureCamera(camera);
+        frame_generator->SetCaptureClip(camera_motion.Near(), camera_motion.Far(10000.0f),
+                                        camera_motion.VerticalFov());
     }
 }
 

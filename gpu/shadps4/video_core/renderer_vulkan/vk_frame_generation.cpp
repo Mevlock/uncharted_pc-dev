@@ -2,6 +2,7 @@
 #include "video_core/renderer_vulkan/vk_frame_generation.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,8 +28,7 @@ namespace Vulkan {
 
 namespace {
 
-// The game's camera is not known in velocity mode (CameraMotion::VerticalFov, Near): the same
-// plausible values the upscalers get.
+// Before the first capture (SetCaptureClip) and with BB_FG_REAL_PLANES=0: plausible fixed values.
 constexpr float CameraNear = 0.1f;
 constexpr float CameraFar = 10000.0f;
 constexpr float CameraFov = 1.0f;
@@ -315,6 +315,21 @@ vk::ImageView FrameGenerator::BeginCapture(vk::CommandBuffer cmdbuf, vk::ImageVi
         cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &depth_ready});
     }
     return *motion_view;
+}
+
+void FrameGenerator::SetCaptureClip(float near_plane, float far_plane, float fov) {
+    static const bool real = [] {
+        const char* env = std::getenv("BB_FG_REAL_PLANES");
+        const bool v = !(env && env[0] == '0');
+        std::printf("Frame generation: %s camera planes and field of view (BB_FG_REAL_PLANES)\n",
+                    v ? "the game's" : "fixed");
+        return v;
+    }();
+    const bool ok = real && std::isfinite(near_plane) && std::isfinite(far_plane) && std::isfinite(fov) &&
+                    near_plane > 0.0f && far_plane > near_plane && fov > 0.0f && fov < 3.2f;
+    capture_near = ok ? near_plane : CameraNear;
+    capture_far = ok ? far_plane : CameraFar;
+    capture_fov = ok ? fov : CameraFov;
 }
 
 void FrameGenerator::EndCapture(vk::CommandBuffer cmdbuf, std::array<float, 2> jitter,
@@ -690,10 +705,10 @@ u32 FrameGenerator::GenerateFsr3(vk::CommandBuffer cmdbuf, vk::Image color,
         .maxLuminance = hdr ? BbHdr::PeakNits() : 1.0f,
         .transferFunction = hdr ? FFX_VK_FSR3_3_1_6_FRAMEGEN_TRANSFER_PQ
                                 : FFX_VK_FSR3_3_1_6_FRAMEGEN_TRANSFER_SRGB,
-        .cameraNear = CameraNear,
-        .cameraFar = CameraFar,
+        .cameraNear = capture_near,
+        .cameraFar = capture_far,
         .viewSpaceToMeters = 1.0f,
-        .cameraVerticalFovRadians = CameraFov,
+        .cameraVerticalFovRadians = capture_fov,
         .cameraPosition = {0.0f, 0.0f, 0.0f},
         .cameraUp = {0.0f, 1.0f, 0.0f},
         .cameraRight = {1.0f, 0.0f, 0.0f},
@@ -719,7 +734,7 @@ u32 FrameGenerator::GenerateFsr3(vk::CommandBuffer cmdbuf, vk::Image color,
         .cameraNear = prepare.cameraNear,
         .cameraFar = prepare.cameraFar,
         .viewSpaceToMeters = 1.0f,
-        .cameraVerticalFovRadians = CameraFov,
+        .cameraVerticalFovRadians = prepare.cameraVerticalFovRadians,
         .minLuminance = 0.0f,
         .maxLuminance = prepare.maxLuminance,
         .transferFunction = prepare.transferFunction,
@@ -857,9 +872,9 @@ u32 FrameGenerator::GenerateDlss(vk::CommandBuffer cmdbuf, vk::Image color,
                         .ui_alpha = ui_alpha,
                         .jitter_x = capture_jitter[0],
                         .jitter_y = capture_jitter[1],
-                        .camera_near = CameraNear,
-                        .camera_far = CameraFar,
-                        .camera_fov = CameraFov,
+                        .camera_near = capture_near,
+                        .camera_far = capture_far,
+                        .camera_fov = capture_fov,
                         .depth_inverted = depth_inverted,
                         .reset = reset,
                         .count = count,

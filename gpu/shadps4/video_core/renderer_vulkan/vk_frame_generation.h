@@ -71,6 +71,10 @@ public:
     void SetCaptureCamera(const Dlss::FrameGenCamera& camera) {
         capture_camera = camera;
     }
+    /// FSR quality fix 6: the captured frame's planes and vertical field of view (CameraMotion::Near, Far,
+    /// VerticalFov, as the upscalers get them) for FSR 3.1 and DLSS frame generation; they had fixed
+    /// 0.1 / 10000 / 1.0. BB_FG_REAL_PLANES=0: those fixed values.
+    void SetCaptureClip(float near_plane, float far_plane, float fov);
 
     /// The game's picture before its UI (`source`, TransferSrcOptimal layout): copied.
     void CaptureHudless(vk::CommandBuffer cmdbuf, vk::Image source, vk::Format format, u32 w,
@@ -139,6 +143,7 @@ private:
     bool captured = false; ///< BeginCapture ran since the last Generate
     std::array<float, 2> capture_jitter{};
     Dlss::FrameGenCamera capture_camera{}; ///< DLSS rework 9: the captured frame's real camera
+    float capture_near = 0.1f, capture_far = 10000.0f, capture_fov = 1.0f;
     // DLSS rework 9: the UI's coverage (R8) for DLSS Frame Generation.
     VideoCore::UniqueImage ui_alpha_image;
     vk::UniqueImageView ui_alpha_view;
