@@ -251,8 +251,8 @@ static void TieMarkersToPack(const std::filesystem::path& folder) {
 /// bbport (pack cache): a folder cache of an earlier build (one file per blob) moves into the pack: every blob file is
 /// read and appended (unless the pack already holds the same), the pack is flushed and opened again from the disk,
 /// and only when every moved blob reads back from it are the old files removed (behind the game). The time of the
-/// move is kept in the pack: a later start removes leftover files no newer than it without reading them; a newer
-/// one (an earlier build run on this folder since) is moved in again.
+/// move is kept in the pack: a later start removes leftover files no newer than it whose blob the pack holds without
+/// reading them; any other (an earlier build run on this folder since, a copied-in old cache) is moved in again.
 static void MoveFolderCacheIntoPack(const std::filesystem::path& folder) {
     namespace fs = std::filesystem;
     const auto t0 = std::chrono::steady_clock::now();
@@ -278,7 +278,10 @@ static void MoveFolderCacheIntoPack(const std::filesystem::path& folder) {
         }
         if (const int type = LooseBlobType(path); type >= 0) {
             const auto written = entry.last_write_time(ec).time_since_epoch().count();
-            files.push_back({path, type, folded_at == 0 || written > folded_at});
+            // A leftover of the move (no newer than it, its blob in the pack) goes unread; anything else moves in.
+            const bool leftover = folded_at != 0 && written <= folded_at &&
+                                  pack.Find(PackType(BlobType(type)), path.stem().string(), nullptr, nullptr);
+            files.push_back({path, type, !leftover});
         } else if (path.extension() == ".tmp" && !name.starts_with("prepared_")) {
             files.push_back({path, -1, false}); // an earlier build's unfinished write
         }
@@ -491,7 +494,9 @@ static void QueueWrite(BlobType type, const std::string& name, std::vector<u8>&&
             if (!said.exchange(true)) {
                 std::printf("Shader cache: %s.%s not saved (%s): the next start prepares what is missing\n",
                             name.c_str(), GetBlobFileExtension(type).c_str(),
-                            pack.IsWriter() ? "the write failed: is the disk full?" : "this game only reads the cache");
+                            !pack.IsOpen()    ? "the cache file is not open"
+                            : pack.IsWriter() ? "the write failed: is the disk full?"
+                                              : "this game only reads the cache");
             }
             ++num_failed;
         }
