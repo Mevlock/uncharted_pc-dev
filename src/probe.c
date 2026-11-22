@@ -2159,7 +2159,21 @@ enum { CFL_WORKERS=64 };
 typedef struct { uint64_t counter; uint64_t snap[CFL_WORKERS]; int nsnap, skip; } CfEntry;
 static uint64_t cf_free_fn, cf_wait_fn, cf_completion_ret;
 static uintptr_t cf_lock_fn, cf_unlock_fn;
-static struct { volatile uint64_t epoch; char pad[56]; } cf_w[CFL_WORKERS];
+static struct { volatile uint64_t epoch; int64_t widx; char pad[48]; } cf_w[CFL_WORKERS];
+static uint64_t cf_tls_var;   /* the game's global holding the TLS offset of the current worker's index */
+/* The game's own worker index of this thread (corelib GetCurrentWorkerThreadIndex: the TLS word v, v^0x8000 when bit
+ * 15 is set, else no worker): -1 when it is none. */
+static int64_t cf_worker_index(void) {
+    uint64_t tcb;
+#ifdef _WIN32
+    tcb=__readgsqword(runtime_thread_tcb_offset());
+#else
+    __asm__ volatile("mov %%fs:0,%0" : "=r"(tcb));
+#endif
+    if (!tcb || !cf_tls_var) return -1;
+    const uint64_t v=*(const volatile uint64_t *)(uintptr_t)(tcb+*(const int64_t *)(uintptr_t)cf_tls_var);
+    return (v&0x8000) ? (int64_t)(v^0x8000) : -1;
+}
 static int cf_nw;
 static _Thread_local int cf_slot=-1;
 /* Under the manager lock: the frees in the order they came (a ring; their snaps only grow along it), and the few that a
@@ -2174,6 +2188,7 @@ static void cf_pass(void) {
     if (s<0) {
         s=__atomic_fetch_add(&cf_nw,1,__ATOMIC_ACQ_REL);
         if (s>=CFL_WORKERS) return;   /* more workers than any of the games has: cf_quiet never passes (see there) */
+        cf_w[s].widx=cf_worker_index();
         cf_slot=s;
     }
     __atomic_add_fetch(&cf_w[s].epoch,1,__ATOMIC_RELEASE);
@@ -2237,16 +2252,28 @@ static void cf_snap(CfEntry *e, uint64_t c, int skip) {
     e->nsnap=n>CFL_WORKERS ? CFL_WORKERS : n;
     for (int w=0;w<e->nsnap;++w) e->snap[w]=__atomic_load_n(&cf_w[w].epoch,__ATOMIC_ACQUIRE);
 }
-/* Every job worker has passed a job-free point since the snap (the one that freed it excepted). A worker that registered
- * after the snap did so at such a point. Until every worker has registered (its first idle pass or completion), and with
- * more workers than slots, nothing passes: a worker not seen may hold a job taken before the free. */
+/* No job worker can still hold a job, taken before the snap, that lowers the counter. Each worker has either passed a
+ * job-free point since the snap, or is running a job whose record (manager+0x180+index*0x100: entry +0, completion
+ * +0x10; the same layout and order in 1.00 and 1.02) shows a non-zero completion counter that is not this one. The
+ * record is written entry first, completion second, before the job's code runs, and cleared completion first right
+ * after the code returns, before the completion lowers the counter; every other way out of a job clears it too, and a
+ * null job never writes it. So it shows a completion only while the job holding it runs its code: a worker between
+ * taking a job and its record, holding a null job, or between the code and the completion waits for its job-free
+ * point. The one that freed it is excepted (it runs the freeing job). A worker that registered after the snap did so
+ * at a job-free point. Until every worker has registered (its first idle pass or completion), and with more workers
+ * than slots, nothing passes: a worker not seen may hold a job taken before the free. */
 static int cf_quiet(uint64_t m, const CfEntry *e) {
     const int nw=__atomic_load_n(&cf_nw,__ATOMIC_ACQUIRE);
     const uint64_t workers=*(const volatile uint64_t *)(uintptr_t)(m+0x100);
     if ((uint64_t)nw<workers || nw>CFL_WORKERS) return 0;
     for (int w=0;w<e->nsnap;++w) {
         if (w==e->skip) continue;
-        if (__atomic_load_n(&cf_w[w].epoch,__ATOMIC_ACQUIRE)==e->snap[w]) return 0;
+        if (__atomic_load_n(&cf_w[w].epoch,__ATOMIC_ACQUIRE)!=e->snap[w]) continue;
+        const int64_t i=cf_w[w].widx;
+        if (i<0 || (uint64_t)i>=workers) return 0;
+        const volatile uint64_t *r=(const volatile uint64_t *)(uintptr_t)(m+0x180+(uint64_t)i*0x100);
+        const uint64_t done=r[2];
+        if (!done || done==e->counter || !r[0] || r[2]!=done) return 0;
     }
     return 1;
 }
@@ -2276,11 +2303,23 @@ static void cf_drain(uint64_t m) {
         if (!cf_quiet(m,e)) break;
         ((Free)(uintptr_t)cf_free_fn)(e->counter);
         ++cf_head;
-        if (!(++cf_freed & 0xffff))
-            printf("Job counters: %ld frees deferred, %ld done, %ld named by a job at the free, most waiting at once %zu\n",
-                   cf_deferred,cf_freed,cf_named_seen,cf_peak);
+        ++cf_freed;
     }
-    cf_last_drain=__builtin_ia32_rdtsc();
+    const uint64_t now=__builtin_ia32_rdtsc();
+    cf_last_drain=now;
+    static uint64_t printed;
+    if (!printed) printed=now;
+    if (now-printed>UINT64_C(40000000000)) {   /* about every 10 s */
+        printed=now;
+        /* the pool (manager+0xae0): bitmap +0x20 (32 words), size +0x128 */
+        const uint64_t pool=m+0xae0;
+        uint64_t used=0;
+        for (int k=0;k<32;++k) used+=(uint64_t)__builtin_popcountll(*(const volatile uint64_t *)(uintptr_t)(pool+0x20+k*8));
+        printf("Job counters: %ld frees deferred, %ld done, %ld named by a job at the free, waiting now %zu, most waiting at "
+               "once %zu; pool %llu of %u in use\n",cf_deferred,cf_freed,cf_named_seen,cf_tail-cf_head+cf_named_n,cf_peak,
+               (unsigned long long)used,*(const volatile uint32_t *)(uintptr_t)(pool+0x128));
+        fflush(stdout);
+    }
 }
 static __attribute__((noinline)) void cf_free_deferred(uint64_t c) {
     typedef int32_t (ABI *MutexOp)(uint64_t);
@@ -2483,6 +2522,39 @@ static void install_counter_free(uint64_t image_size) {
     else if (first[1][1]>=0 && first[1][1]==first[0][0]) wf=1;
     if (wf<0) { printf("Job counters: freed at once (FreeCounter / WaitForCounterAndFree not told apart)\n"); return; }
     const int64_t fr=fns[1-wf], wfr=fns[wf], wait=first[wf][0];
+    /* The worker index's TLS offset global: before the completion, 1.02 has it inline (fs:[0] + [rip+X]), 1.00 calls
+     * GetCurrentWorkerThreadIndex (push rbp; mov rbp,rsp; the same) after the job; fs:[0] is gs:[slot] once
+     * patch_tcb_loads ran. Exactly one such global, or the free stays the game's. */
+    uint64_t tls=0; int tls_n=0;
+    {
+        int64_t at_comp=-1;
+        for (int n=0;n<2 && at_comp<0;++n) {
+            const int64_t s=job_release_sites[n];
+            for (int b=0x0c;b<=0x30 && s-b>=0;++b) {
+                const unsigned char *x=image+s-b;
+                if (x[0]==0xf0 && x[1]==0x48 && x[2]==0x0f && x[3]==0xc1 && x[5]==0x20) { at_comp=s; break; }
+            }
+        }
+        for (int64_t k=at_comp-0x900;at_comp>0x900 && k<at_comp;++k) {
+            const unsigned char *c=image+k;
+            int64_t at=-1;
+            if ((c[0]==0x64 || c[0]==0x65) && c[1]==0x48 && c[2]==0x8b && c[3]==0x04 && c[4]==0x25 && c[9]==0x48 && c[10]==0x03 && c[11]==0x05) at=k;
+            else if (c[0]==0xe8) {
+                int32_t d; memcpy(&d,c+1,4);
+                const int64_t t=k+5+d;
+                if (t>0 && (uint64_t)t+0x20<image_size && !memcmp(image+t,"\x55\x48\x89\xe5",4)) {
+                    const unsigned char *f=image+t+4;
+                    if ((f[0]==0x64 || f[0]==0x65) && f[1]==0x48 && f[2]==0x8b && f[3]==0x04 && f[4]==0x25 && f[9]==0x48 && f[10]==0x03 && f[11]==0x05) at=t+4;
+                }
+            }
+            if (at<0) continue;
+            int32_t d; memcpy(&d,image+at+12,4);
+            const uint64_t x=(uint64_t)(uintptr_t)(image+at+16+d);
+            if (x!=tls) { tls=x; ++tls_n; }
+        }
+    }
+    if (tls_n!=1) { printf("Job counters: freed at once (%d worker index globals found, 1 expected)\n",tls_n); return; }
+    cf_tls_var=tls;
     /* the completion's release site */
     int64_t comp=-1;
     for (int n=0;n<2;++n) {
