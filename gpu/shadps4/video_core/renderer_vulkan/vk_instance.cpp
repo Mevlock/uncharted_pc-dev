@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <boost/container/static_vector.hpp>
@@ -290,6 +291,53 @@ bool Instance::CreateDevice() {
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
     maintenance_8 = add_extension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+    // bbport (AMD warm start): AMD's Windows driver keeps none of its compiled pipelines in a VkPipelineCache (its data
+    // stays ~820 KiB whatever it built) and its own disk cache did not make them fast either: every start built every
+    // stored pipeline again (Uncharted 3 ~12 s, 2 ~4.7 s, 1 ~2 s on an RX 7800 XT, 26.11.1). With VK_KHR_pipeline_binary
+    // the driver hands out each pipeline's binaries, which the port keeps in its shader pack and gives back at the next
+    // start (vk_pipeline_binary.h). On for every driver exposing it, with one exception for a documented driver defect:
+    // NVIDIA's vkGetPipelineKeyKHR global-key query clobbers a callee-saved register (AnyPS5 PR #18082: Windows 610.88,
+    // Linux 610.57/620.70, crashes on 6 of 10 boots; all 30 forced runs on an RTX 3070), and NVIDIA's own
+    // VkPipelineCache already keeps everything (warm U3 0.9 s, U2 0.5-1.2 s). Revisit when NVIDIA documents a fix.
+    // BB_PIPELINE_BINARY=1/0 forces it on (diagnostic) or off. Off: the device is created exactly as before.
+    {
+        const auto has = [&](std::string_view extension) {
+            return std::ranges::find(available_extensions, extension) != available_extensions.end();
+        };
+        const bool extension = has(VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
+        bool feature = false;
+        vk::PhysicalDevicePipelineBinaryPropertiesKHR props{};
+        if (extension && maintenance_5) {
+            const auto chain = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2,
+                                                            vk::PhysicalDevicePipelineBinaryFeaturesKHR>();
+            feature = chain.get<vk::PhysicalDevicePipelineBinaryFeaturesKHR>().pipelineBinaries;
+            const auto props_chain = physical_device.getProperties2<vk::PhysicalDeviceProperties2,
+                                                                    vk::PhysicalDevicePipelineBinaryPropertiesKHR>();
+            props = props_chain.get<vk::PhysicalDevicePipelineBinaryPropertiesKHR>();
+        }
+        const char* env = std::getenv("BB_PIPELINE_BINARY");
+        const bool nvidia = driver_id == vk::DriverId::eNvidiaProprietary;
+        const bool usable = extension && maintenance_5 && feature;
+        const bool wanted = env ? env[0] == '1' : !nvidia;
+        pipeline_binary = usable && wanted && add_extension(VK_KHR_PIPELINE_BINARY_EXTENSION_NAME);
+        const char* reason = !extension      ? "the driver has no VK_KHR_pipeline_binary"
+                             : !maintenance_5 ? "the driver has no VK_KHR_maintenance5"
+                             : !feature       ? "the driver's pipelineBinaries feature is off"
+                             : env            ? (wanted ? "BB_PIPELINE_BINARY=1" : "BB_PIPELINE_BINARY=0")
+                             : nvidia ? "NVIDIA: its pipeline cache keeps the pipelines, and its vkGetPipelineKeyKHR has a "
+                                        "documented defect; BB_PIPELINE_BINARY=1 forces it on"
+                                      : "the driver's binaries are kept in the shader pack";
+        if (extension && maintenance_5 && feature) {
+            std::printf("Pipeline binaries: %s (internal cache %d, its control %d, prefers it %d, precompiled %d, "
+                        "compressed %d; %s)\n",
+                        pipeline_binary ? "on" : "off", int(props.pipelineBinaryInternalCache),
+                        int(props.pipelineBinaryInternalCacheControl), int(props.pipelineBinaryPrefersInternalCache),
+                        int(props.pipelineBinaryPrecompiledInternalCache), int(props.pipelineBinaryCompressedData),
+                        reason);
+        } else {
+            std::printf("Pipeline binaries: off (%s)\n", reason);
+        }
+    }
     attachment_feedback_loop = add_extension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
     if (attachment_feedback_loop) {
         attachment_feedback_loop =
@@ -696,6 +744,9 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceMaintenance8FeaturesKHR{
             .maintenance8 = true,
         },
+        vk::PhysicalDevicePipelineBinaryFeaturesKHR{
+            .pipelineBinaries = true,
+        },
         vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT{
             .attachmentFeedbackLoopLayout = true,
         },
@@ -786,6 +837,9 @@ bool Instance::CreateDevice() {
     }
     if (!maintenance_8) {
         device_chain.unlink<vk::PhysicalDeviceMaintenance8FeaturesKHR>();
+    }
+    if (!pipeline_binary) {
+        device_chain.unlink<vk::PhysicalDevicePipelineBinaryFeaturesKHR>();
     }
     if (!attachment_feedback_loop) {
         device_chain.unlink<vk::PhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT>();
