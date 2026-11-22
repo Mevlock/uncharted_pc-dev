@@ -522,7 +522,7 @@ GraphicsPipeline::GraphicsPipeline(
     };
 
     // bbport: through the pipeline binaries (vk_pipeline_binary.h; off: in the pipeline cache as before).
-    auto [pipeline_result, pipe] = PipelineBinaries::CreateGraphics(instance, pipeline_cache, pipeline_info);
+    auto [pipeline_result, pipe] = PipelineBinaries::CreateGraphics(instance, pipeline_cache, pipeline_info, preloading);
     // bbport: a driver that cannot build one pipeline (ErrorUnknown on some AMD drivers) stopped
     // the game here; the pipeline stays empty instead and the draws that use it are skipped.
     // From SuperMedo's ab12fa37, via drakolordx7's community fork.
@@ -575,7 +575,7 @@ GraphicsPipeline::GraphicsPipeline(
             hdr_info.pNext = &hdr_rendering_ci;
             hdr_info.pStages = hdr_stages.data();
             hdr_info.stageCount = u32(hdr_stages.size());
-            auto [hdr_result, hdr_pipe] = PipelineBinaries::CreateGraphics(instance, pipeline_cache, hdr_info);
+            auto [hdr_result, hdr_pipe] = PipelineBinaries::CreateGraphics(instance, pipeline_cache, hdr_info, preloading);
             if (hdr_result == vk::Result::eSuccess && hdr_pipe) {
                 hdr_pipeline = std::move(hdr_pipe);
                 SetObjectName(device, *hdr_pipeline, "Graphics Pipeline {} HDR", debug_str);

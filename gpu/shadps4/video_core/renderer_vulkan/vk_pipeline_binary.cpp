@@ -41,8 +41,14 @@ bool load_stored = false; ///< the stored binaries are of this driver (the tag m
 bool can_save = false;    ///< this game writes the pack (else: the plain path for anything not stored)
 u64 stored_at_start = 0;
 
-std::atomic<u64> used{0}, captured{0}, captured_bytes{0}, captured_raw_bytes{0}, refused{0}, capture_failed{0},
-    no_key{0}, cache_misses{0};
+// Per creation path: [0] the preload (stored and listed keys), [1] the game (draw-preparation workers, GPU thread).
+struct PathCounts {
+    std::atomic<u64> used{0}, captured{0}, refused{0}, capture_failed{0}, no_key{0}, plain{0};
+};
+PathCounts counts[2];
+std::atomic<u64> captured_bytes{0}, captured_raw_bytes{0}, cache_misses{0};
+// Shared counts for the first-few log lines.
+std::atomic<u32> refusals_logged{0}, capture_failures_logged{0};
 
 std::string Hex(const u8* bytes, u32 size) {
     static constexpr char digits[] = "0123456789abcdef";
@@ -206,7 +212,7 @@ Created FromBinaries(vk::Device device, const Info& info, std::vector<u8>& blob)
 }
 
 /// The binaries of a pipeline created with the capture flag, saved under `name`; the captured data is released.
-void Capture(vk::Device device, VkPipeline pipeline, const std::string& name) {
+void Capture(vk::Device device, VkPipeline pipeline, const std::string& name, PathCounts& count) {
     const auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
     const VkPipelineBinaryCreateInfoKHR create_info{VK_STRUCTURE_TYPE_PIPELINE_BINARY_CREATE_INFO_KHR, nullptr,
                                                     nullptr, pipeline, nullptr};
@@ -253,7 +259,8 @@ void Capture(vk::Device device, VkPipeline pipeline, const std::string& name) {
         }
     }
     if (!ok) {
-        if (capture_failed.fetch_add(1, std::memory_order_relaxed) < 3) {
+        count.capture_failed.fetch_add(1, std::memory_order_relaxed);
+        if (capture_failures_logged.fetch_add(1, std::memory_order_relaxed) < 3) {
             std::printf("Pipeline binaries: the driver gave no binaries for pipeline %s (%s): compiled again at the "
                         "next start\n",
                         name.c_str(), vk::to_string(vk::Result(result)).c_str());
@@ -262,18 +269,21 @@ void Capture(vk::Device device, VkPipeline pipeline, const std::string& name) {
     }
     const u64 bytes = blob.size();
     if (Storage::DataBase::Instance().Save(BlobType::PipelineBinary, name, std::move(blob))) {
-        captured.fetch_add(1, std::memory_order_relaxed);
+        count.captured.fetch_add(1, std::memory_order_relaxed);
         captured_bytes.fetch_add(bytes, std::memory_order_relaxed);
         captured_raw_bytes.fetch_add(raw_bytes, std::memory_order_relaxed);
+    } else {
+        count.capture_failed.fetch_add(1, std::memory_order_relaxed); // the cache is not open
     }
 }
 
 template <typename Info>
-Created Create(const Instance& instance, vk::PipelineCache cache, const Info& info) {
+Created Create(const Instance& instance, vk::PipelineCache cache, const Info& info, bool preloading) {
     const auto device = instance.GetDevice();
     if (!active) {
         return CreatePlain(device, cache, info);
     }
+    PathCounts& count = counts[preloading ? 0 : 1];
     const auto& d = VULKAN_HPP_DEFAULT_DISPATCHER;
     // The create info as it is compiled: with the capture flag (VkPipelineCreateFlags2 replaces `flags`).
     const VkPipelineCreateFlags2CreateInfoKHR flags2{
@@ -286,7 +296,7 @@ Created Create(const Instance& instance, vk::PipelineCache cache, const Info& in
     VkPipelineBinaryKeyKHR key{VK_STRUCTURE_TYPE_PIPELINE_BINARY_KEY_KHR};
     if (d.vkGetPipelineKeyKHR(VkDevice(device), &key_info, &key) != VK_SUCCESS || key.keySize == 0 ||
         key.keySize > VK_MAX_PIPELINE_BINARY_KEY_SIZE_KHR) {
-        no_key.fetch_add(1, std::memory_order_relaxed);
+        count.no_key.fetch_add(1, std::memory_order_relaxed);
         return CreatePlain(device, cache, info);
     }
     const std::string name = Hex(key.key, key.keySize);
@@ -297,11 +307,12 @@ Created Create(const Instance& instance, vk::PipelineCache cache, const Info& in
         if (!blob.empty()) {
             auto created = FromBinaries(device, info, blob);
             if (created.result == vk::Result::eSuccess && created.value) {
-                used.fetch_add(1, std::memory_order_relaxed);
+                count.used.fetch_add(1, std::memory_order_relaxed);
                 return created;
             }
             // Refused (another driver build behind the same tag, damaged data): removed, compiled and captured again.
-            if (refused.fetch_add(1, std::memory_order_relaxed) < 3) {
+            count.refused.fetch_add(1, std::memory_order_relaxed);
+            if (refusals_logged.fetch_add(1, std::memory_order_relaxed) < 3) {
                 std::printf("Pipeline binaries: the driver refused the stored binaries of pipeline %s (%s): removed, "
                             "compiled again\n",
                             name.c_str(), vk::to_string(created.result).c_str());
@@ -312,19 +323,21 @@ Created Create(const Instance& instance, vk::PipelineCache cache, const Info& in
         }
     }
     if (!can_save) {
+        count.plain.fetch_add(1, std::memory_order_relaxed);
         return CreatePlain(device, cache, info); // nothing could be saved: as before
     }
     // Compiled with the capture flag: no pipeline cache (VUID-...-pNext-09617).
     auto created = CreateIn(device, VK_NULL_HANDLE, capture);
     if (created.result != vk::Result::eSuccess || !created.value) {
         // The driver did not build it this way: the VkPipelineCache, as before (the caller's own retry follows).
-        if (capture_failed.fetch_add(1, std::memory_order_relaxed) < 3) {
+        count.capture_failed.fetch_add(1, std::memory_order_relaxed);
+        if (capture_failures_logged.fetch_add(1, std::memory_order_relaxed) < 3) {
             std::printf("Pipeline binaries: pipeline %s was refused with the capture flag (%s): built as before\n",
                         name.c_str(), vk::to_string(created.result).c_str());
         }
         return CreatePlain(device, cache, info);
     }
-    Capture(device, VkPipeline(*created.value), name);
+    Capture(device, VkPipeline(*created.value), name, count);
     return created;
 }
 
@@ -405,12 +418,14 @@ bool Active() {
     return active;
 }
 
-Created CreateGraphics(const Instance& instance, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info) {
-    return Create(instance, cache, info);
+Created CreateGraphics(const Instance& instance, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info,
+                       bool preloading) {
+    return Create(instance, cache, info, preloading);
 }
 
-Created CreateCompute(const Instance& instance, vk::PipelineCache cache, const vk::ComputePipelineCreateInfo& info) {
-    return Create(instance, cache, info);
+Created CreateCompute(const Instance& instance, vk::PipelineCache cache, const vk::ComputePipelineCreateInfo& info,
+                      bool preloading) {
+    return Create(instance, cache, info, preloading);
 }
 
 u64 DriverCacheMisses() {
@@ -421,14 +436,18 @@ void PrintStats(const char* when) {
     if (!active) {
         return;
     }
-    std::printf("Pipeline binaries (%s): %llu used, %llu captured (%.1f MB, %.1f MB before compression), %llu refused "
-                "by the driver, %llu capture failed, %llu without a key; %llu were stored at the start\n",
-                when, static_cast<unsigned long long>(used.load()), static_cast<unsigned long long>(captured.load()),
-                double(captured_bytes.load()) / (1024.0 * 1024.0),
-                double(captured_raw_bytes.load()) / (1024.0 * 1024.0),
-                static_cast<unsigned long long>(refused.load()),
-                static_cast<unsigned long long>(capture_failed.load()), static_cast<unsigned long long>(no_key.load()),
-                static_cast<unsigned long long>(stored_at_start));
+    const auto n = [](const std::atomic<u64>& a) { return static_cast<unsigned long long>(a.load()); };
+    const auto& p = counts[0];
+    const auto& g = counts[1];
+    std::printf("Pipeline binaries (%s): %llu used (preload %llu, game %llu), %llu captured (preload %llu, game %llu; "
+                "%.1f MB, %.1f MB before compression), %llu refused by the driver (%llu, %llu), %llu capture failed "
+                "(%llu, %llu), %llu without a key, %llu not captured (read-only cache); %llu were stored at the "
+                "start\n",
+                when, n(p.used) + n(g.used), n(p.used), n(g.used), n(p.captured) + n(g.captured), n(p.captured),
+                n(g.captured), double(captured_bytes.load()) / (1024.0 * 1024.0),
+                double(captured_raw_bytes.load()) / (1024.0 * 1024.0), n(p.refused) + n(g.refused), n(p.refused),
+                n(g.refused), n(p.capture_failed) + n(g.capture_failed), n(p.capture_failed), n(g.capture_failed),
+                n(p.no_key) + n(g.no_key), n(p.plain) + n(g.plain), static_cast<unsigned long long>(stored_at_start));
     std::fflush(stdout);
 }
 

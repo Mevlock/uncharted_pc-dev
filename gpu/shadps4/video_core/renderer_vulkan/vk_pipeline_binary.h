@@ -49,9 +49,12 @@ void Setup(const Instance& instance);
 bool Active();
 
 /// Creates a game pipeline: from its stored binaries, else compiled and captured; off, in `cache` as before. Holds
-/// PipelineCacheUse() shared around each creation.
-Created CreateGraphics(const Instance& instance, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info);
-Created CreateCompute(const Instance& instance, vk::PipelineCache cache, const vk::ComputePipelineCreateInfo& info);
+/// PipelineCacheUse() shared around each creation. `preloading`: built by the preload (the stored and listed keys),
+/// else by the game (the draw-preparation workers, the GPU thread): counted apart in the stats line.
+Created CreateGraphics(const Instance& instance, vk::PipelineCache cache, const vk::GraphicsPipelineCreateInfo& info,
+                       bool preloading);
+Created CreateCompute(const Instance& instance, vk::PipelineCache cache, const vk::ComputePipelineCreateInfo& info,
+                      bool preloading);
 
 /// Creations through the VkPipelineCache that the driver compiled (its creation feedback: not a hit in the cache),
 /// since the start: the driver's cache data changed and is to be saved.

@@ -118,7 +118,7 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
         .layout = *pipeline_layout,
     };
     // bbport: through the pipeline binaries (vk_pipeline_binary.h; off: in the pipeline cache as before).
-    auto [pipeline_result, pipe] = PipelineBinaries::CreateCompute(instance, pipeline_cache, compute_pipeline_ci);
+    auto [pipeline_result, pipe] = PipelineBinaries::CreateCompute(instance, pipeline_cache, compute_pipeline_ci, preloading);
     // bbport: as for graphics pipelines, a driver failure skips its dispatches. From SuperMedo's
     // ab12fa37, via drakolordx7's community fork.
     if (pipeline_result != vk::Result::eSuccess) {
