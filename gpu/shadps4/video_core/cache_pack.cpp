@@ -40,7 +40,8 @@ struct FileHeader {
     uint32_t header_size;
     uint64_t id;
     uint64_t created;
-    uint8_t reserved[24];
+    char port[16];        ///< PortName, zero-padded (all zero: a pack of this port's test builds before 2026-11-22)
+    uint8_t reserved[8];
     uint64_t hash; ///< XXH3 of the 56 bytes before it
 };
 struct RecordHeader {
@@ -82,6 +83,7 @@ FileHeader MakeHeader(uint64_t id) {
     h.version = FormatVersion;
     h.header_size = HeaderSize;
     h.id = id;
+    std::memcpy(h.port, PortName, std::min(sizeof(h.port), std::strlen(PortName)));
     h.created = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
                              std::chrono::system_clock::now().time_since_epoch())
                              .count());
@@ -89,11 +91,20 @@ FileHeader MakeHeader(uint64_t id) {
     return h;
 }
 
-/// 0: valid; 1: not a pack (or damaged header); 2: another format version (`version` set).
+/// 0: valid; 1: this port's pack with a damaged header; 2: this port's pack of another format version (`version`
+/// set); 3: not this port's file (another magic, or another port's name in the header).
 int CheckHeader(const FileHeader& h, uint32_t* version) {
-    if (std::memcmp(h.magic, HeaderMagic, sizeof(h.magic)) != 0 ||
-        h.hash != XXH3_64bits(&h, offsetof(FileHeader, hash))) {
+    if (std::memcmp(h.magic, HeaderMagic, sizeof(h.magic)) != 0) {
+        return 3;
+    }
+    if (h.hash != XXH3_64bits(&h, offsetof(FileHeader, hash))) {
         return 1;
+    }
+    char ours[sizeof(h.port)]{};
+    std::memcpy(ours, PortName, std::min(sizeof(ours), std::strlen(PortName)));
+    static constexpr char none[sizeof(h.port)]{};
+    if (std::memcmp(h.port, ours, sizeof(ours)) != 0 && std::memcmp(h.port, none, sizeof(none)) != 0) {
+        return 3;
     }
     *version = h.version;
     return h.version == FormatVersion && h.header_size == HeaderSize ? 0 : 2;
@@ -499,11 +510,30 @@ OpenStats PackFile::Open(const std::filesystem::path& path, bool want_writer, bo
     }
     FileHeader header{};
     uint32_t version = 0;
-    const int header_state =
-        ReadAt(0, &header, sizeof(header)) ? CheckHeader(header, &version) : 1;
+    const uint64_t on_disk = SizeNative(READ_H);
+    int header_state = 1;
+    if (ReadAt(0, &header, sizeof(header))) {
+        header_state = CheckHeader(header, &version);
+    } else if (on_disk > 0) {
+        // Shorter than a header: this port's only if what is there begins like its magic (an empty file holds
+        // nothing and is made new).
+        std::vector<char> head(size_t(std::min<uint64_t>(on_disk, sizeof(header.magic))));
+        header_state = ReadAt(0, head.data(), head.size()) &&
+                               std::memcmp(head.data(), HeaderMagic, head.size()) == 0
+                           ? 1
+                           : 3;
+    }
+    if (header_state == 3) {
+        // Another program's file of this name (forks or other ports may share the cache folder): never replaced,
+        // written or removed; this game keeps no cache.
+        stats.foreign = true;
+        stats.error = "it is not this port's file (left as it is)";
+        CloseHandles();
+        return finish(false);
+    }
     // A damaged header (not another version) over records: the records check themselves, so they are kept; the
     // pack gets a new header and id (a damaged pack's markers no longer count).
-    const bool header_damaged = header_state == 1 && writer_ && SizeNative(READ_H) > HeaderSize &&
+    const bool header_damaged = header_state == 1 && writer_ && on_disk > HeaderSize &&
                                 std::memcmp(header.magic, HeaderMagic, sizeof(header.magic)) == 0;
     if (header_damaged) {
         header = MakeHeader(NewId());

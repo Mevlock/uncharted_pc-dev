@@ -184,7 +184,8 @@ bool WriteDeferredPreparedMarker() {
     const std::string pack_id = db.PackIdText();
     // The same marker is there already (an ordinary start of a prepared cache): nothing to write and no flush (what
     // this start added is not what the marker counts on; if a power cut takes it, the next start builds it again).
-    const std::string content = deferred_stamp + "\npack " + pack_id + "\n";
+    const std::string content =
+        deferred_stamp + "\npack " + pack_id + "\n" + Storage::DataBase::MarkerIdentity + "\n";
     if (!pack_id.empty()) {
         std::ifstream existing{deferred_marker, std::ios::binary};
         const std::string have{std::istreambuf_iterator<char>(existing), {}};
@@ -1788,7 +1789,8 @@ void PipelineCache::WarmUpThread() {
     if (ship_list) {
         std::error_code ec;
         const std::filesystem::path list_path{ship_list};
-        prepared_marker = db.Directory() / ("prepared_" + list_path.stem().string());
+        // bbport (pack cache): this build's own marker file (other builds' "prepared_<list>" are left alone).
+        prepared_marker = db.MarkerPath(list_path.stem().string());
         prepared_stamp = std::to_string(std::filesystem::file_size(list_path, ec));
         // The jitter in the vertex shaders (non-NVIDIA, runtime_info.h ClipJitter) changes every vertex pipeline:
         // a cache prepared without it is prepared again once.
@@ -1818,12 +1820,14 @@ void PipelineCache::WarmUpThread() {
             return false;
         }
         // bbport (pack cache): the marker counts only for the pack it was written against (its second line, "pack
-        // <id>"): a cleared pack, or one that lost records to damage, has a new id, so it is prepared again.
+        // <id>"): a cleared pack, or one that lost records to damage, has a new id, so it is prepared again. Its third
+        // line is this port's identity.
         std::ifstream marker{prepared_marker};
-        std::string stamp, pack_line;
+        std::string stamp, pack_line, identity;
         const std::string pack_id = db.PackIdText();
         return !std::getline(marker, stamp) || stamp != prepared_stamp || !std::getline(marker, pack_line) ||
-               pack_id.empty() || pack_line != "pack " + pack_id;
+               pack_id.empty() || pack_line != "pack " + pack_id || !std::getline(marker, identity) ||
+               identity != Storage::DataBase::MarkerIdentity;
     }();
     const bool full_preparation = prep_screen || prepare_only;
     struct PrepScreenOff {

@@ -96,11 +96,19 @@ public:
         std::function<bool(BlobType type, const std::vector<u8>& data)> current;
     };
     /// bbport (pack cache): moves them (read, appended, read back from the disk; the old files are then removed
-    /// behind the game). When the old cache is of other versions (its markers' version words, its profile, its metas
+    /// behind the game), only when the folder cache is obviously this port's (FolderCacheIsOurs in cache_storage.cpp; any
+    /// other is left in place untouched). When the old cache is of other versions (its markers' version words, its profile, its metas
     /// and keys), nothing is moved: the pack starts empty and the old files are removed behind the game.
     /// `progress(done, total)` from the reading threads; (0, 0) at the end. False: the old files are kept (the next
     /// start tries again).
     bool MoveFolderCache(const CacheVersions& versions, const std::function<void(u32 done, u32 total)>& progress);
+    /// bbport (pack cache): this build's prepared marker for a variant list ("shaders.pack.prepared_<list>"; other
+    /// builds' "prepared_<list>" files in the same folder are never written; an earlier build of this port's are
+    /// turned into this build's by the move).
+    [[nodiscard]] std::filesystem::path MarkerPath(const std::string& list_name) const;
+    /// bbport (pack cache): the identity line of this build's prepared markers (their third line); the pack's header
+    /// carries Pack::PortName.
+    static constexpr const char* MarkerIdentity = "by Uncharted PC (bbport), shader pack format 1";
 
 private:
     std::jthread io_worker{}; ///< the one writer thread (appends to the pack in order)

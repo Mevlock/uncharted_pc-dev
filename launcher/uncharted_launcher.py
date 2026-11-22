@@ -472,6 +472,9 @@ SHADER_PACK = 'shaders.pack'  # the game's shader cache file in each cache folde
 # The game's shader cache versions (ShaderBinaryVersion.ShaderMetaVersion.PipelineKeyVersion in
 # vk_pipeline_serialization.cpp); tests/test_shader_cache_version.py fails when they differ.
 SHADER_CACHE_VERSIONS = '24.17.8'
+# The port's name in the pack header (bytes 32-47, zero-padded; cache_pack.h PortName). All zero: a pack of this port's
+# test builds before 2026-11-22. Any other name, or another magic: another program's file.
+SHADER_PACK_PORT = b'Uncharted PC'.ljust(16, b'\0')
 
 
 def shader_pack_id(folder):
@@ -482,29 +485,34 @@ def shader_pack_id(folder):
             head = pack.read(64)
     except OSError:
         return None
-    if len(head) < 64 or head[:8] != b'BBSHPACK' or int.from_bytes(head[8:12], 'little') != 1:
+    if len(head) < 64 or head[:8] != b'BBSHPACK' or int.from_bytes(head[8:12], 'little') != 1 or \
+            head[32:48] not in (SHADER_PACK_PORT, bytes(16)):
         return None
     return f"{int.from_bytes(head[16:24], 'little'):016x}"
 
 
+SHADER_MARKER = 'shaders.pack.prepared_'  # + the list's name: the game's prepared marker (cache_storage.h, MarkerPath)
+# The third line of the game's prepared markers (cache_storage.h, MarkerIdentity): only this port writes it.
+SHADER_MARKER_IDENTITY = 'by Uncharted PC (bbport), shader pack format 1'
+
+
 def shaders_prepared(s, key):
-    """True when the game left a marker for the current list, the current shader cache versions and the cache
-    folder's shaders.pack, False when not, None with no list. The marker, as the game writes it:
-        <list size> [clip-jitter <version>] cache <shader cache versions>
-        pack <id>
+    """True when the game left its prepared marker for the current list, the current shader cache versions and the
+    shader pack beside it, False when not, None with no list. The marker (shaders.pack.prepared_<list>) has three
+    lines: '<list size> [clip-jitter <version>] cache <shader cache versions>', 'pack <id>' and this port's identity.
     The clip-jitter part is left out of the comparison: AMD and Intel graphics write it (the upscaler jitter in the
     vertex shaders changes their pipelines), and comparing it the launcher said 'not prepared yet' on those cards after
     every preparation while the game itself found the marker. A marker without the cache versions, or with others,
-    was written for shaders the game can no longer use, and one naming another pack (cleared, or damaged records
-    dropped: a new id) for a cache that is gone: the game prepares again once on the page. Markers of the folder
-    caches before shaders.pack carry no cache versions, so they never count either."""
+    was written for shaders the game can no longer use; one of a cleared or damaged pack (a new id) does not count
+    either: the game prepares again once on the page. Other builds' 'prepared_<list>' files in the same folder are
+    not this build's and say nothing about its cache."""
     lists = shader_list(key)
     if not lists:
         return None
     stamp = str(lists[0].stat().st_size)
     for folder in shader_cache_dirs(s, key):
         try:
-            lines = (folder / f'prepared_{lists[0].stem}').read_text().split('\n')
+            lines = [line.strip() for line in (folder / f'{SHADER_MARKER}{lists[0].stem}').read_text().split('\n')]
         except OSError:
             continue
         words = lines[0].split()
@@ -513,7 +521,7 @@ def shaders_prepared(s, key):
         if not ('cache' in words[:-1] and words[words.index('cache') + 1] == SHADER_CACHE_VERSIONS):
             continue
         pack_id = shader_pack_id(folder)
-        if pack_id and len(lines) > 1 and lines[1].strip() == f'pack {pack_id}':
+        if pack_id and len(lines) > 2 and lines[1] == f'pack {pack_id}' and lines[2] == SHADER_MARKER_IDENTITY:
             return True
     return False
 
@@ -3166,7 +3174,7 @@ class Launcher:
         if not lists:
             return
         for folder in shader_cache_dirs(s, s['start']):
-            (folder / f'prepared_{lists[0].stem}').unlink(missing_ok=True)
+            (folder / f'{SHADER_MARKER}{lists[0].stem}').unlink(missing_ok=True)
         self.play(prepare=True)
 
     def play(self, prepare=False, collection=False):

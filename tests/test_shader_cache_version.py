@@ -54,7 +54,8 @@ class ShadersPreparedTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def prepared(self, marker):
-        (self.cache / 'prepared_u3_variants').write_text(marker + '\npack 0000000000000abc\n')
+        (self.cache / 'shaders.pack.prepared_u3_variants').write_text(
+            marker + '\npack 0000000000000abc\n' + LAUNCHER.SHADER_MARKER_IDENTITY + '\n')
         return LAUNCHER.shaders_prepared(SimpleNamespace(), 'u3')
 
     def test_current_marker(self):

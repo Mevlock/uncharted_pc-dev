@@ -7,7 +7,8 @@
 // on some PCs at every start (224 s for 13,000 shaders on one), and the first start's saving waited on Windows' file
 // calls, not on the drive. The pack is one file:
 //
-//   header (64 bytes): magic, format version, pack id (random, new on every clear), creation time, checksum
+//   header (64 bytes): magic, format version, pack id (random, new on every clear), creation time, this port's name,
+//   checksum
 //   records, appended one after another: a 32-byte header (magic, type, flags, name and data length, checksum of the
 //   name and data, checksum of the header itself), then the name, then the data.
 //
@@ -38,6 +39,9 @@
 namespace Storage::Pack {
 
 constexpr uint32_t FormatVersion = 1;
+/// This port's name in every pack header it writes (16 bytes, zero-padded). A file named shaders.pack without this
+/// port's magic, or with another port's name, is another program's: never replaced, written or removed.
+constexpr const char* PortName = "Uncharted PC";
 constexpr uint32_t HeaderSize = 64;
 constexpr uint32_t RecordHeaderSize = 32;
 constexpr uint32_t MaxNameLength = 1024;
@@ -48,6 +52,7 @@ struct OpenStats {
     bool writer = false;       ///< this process may write (it holds the lock)
     bool created = false;      ///< there was no pack (or none usable): a new empty one
     bool replaced = false;     ///< an unusable pack (bad header, other format version) was replaced by a new one
+    bool foreign = false;      ///< the file is not this port's (another magic or port name): left as it is, not opened
     uint32_t old_version = 0;  ///< the format version of a replaced pack (0: unreadable header)
     uint64_t records = 0;      ///< good records read
     uint64_t live = 0;         ///< names in the index

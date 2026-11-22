@@ -85,6 +85,9 @@ std::atomic<u64> num_started{};
 
 Storage::Pack::PackFile pack;
 constexpr const char* PackName = "shaders.pack";
+// This build's prepared markers: "shaders.pack.prepared_<list>" (cache_storage.h, MarkerPath). Earlier builds of this
+// port wrote "prepared_<list>" (one line); other builds sharing the folder name may write files of that name too.
+constexpr const char* MarkerPrefix = "shaders.pack.prepared_";
 // The pack's own record of when the folder cache was moved into it (file clock ticks): loose blob files no newer than
 // that are leftovers of the move, removed without reading them again.
 constexpr u16 InternalType = 0x100;
@@ -222,22 +225,114 @@ static int LooseBlobType(const std::filesystem::path& file) {
     return -1;
 }
 
-/// The prepared markers of the folder cache ("prepared_<list>", one line) get the pack's id as their second line:
-/// what they were written for is in the pack now. A first line without version words (an earlier build's marker)
-/// gets this build's: the move found the cache of these versions.
-static void TieMarkersToPack(const std::filesystem::path& folder, const std::string& marker_words) {
+/// An earlier build's prepared marker ("prepared_<list>": "<list size>[ clip-jitter <n>][ cache <a>.<b>.<c>]", and
+/// after a move by a test build of the pack a second line "pack <16 hex digits>"): this port's format, or not.
+static bool IsOurOldMarker(const std::filesystem::path& file) {
+    std::ifstream in{file, std::ios::binary};
+    std::string text{std::istreambuf_iterator<char>(in), {}};
+    if (!in.good() && !in.eof()) {
+        return false;
+    }
+    std::erase(text, '\r');
+    std::vector<std::string> lines;
+    for (size_t at = 0; at <= text.size();) {
+        const size_t nl = std::min(text.find('\n', at), text.size());
+        lines.push_back(text.substr(at, nl - at));
+        at = nl + 1;
+    }
+    while (!lines.empty() && lines.back().empty()) {
+        lines.pop_back();
+    }
+    const auto digits = [](std::string_view v) {
+        return !v.empty() && v.size() <= 12 &&
+               std::all_of(v.begin(), v.end(), [](char c) { return c >= '0' && c <= '9'; });
+    };
+    if (lines.empty() || lines.size() > 2) {
+        return false;
+    }
+    // Line 1, word by word.
+    std::vector<std::string> words;
+    for (size_t at = 0; at < lines[0].size();) {
+        const size_t sp = std::min(lines[0].find(' ', at), lines[0].size());
+        if (sp > at) {
+            words.push_back(lines[0].substr(at, sp - at));
+        }
+        at = sp + 1;
+    }
+    size_t w = 0;
+    if (words.empty() || !digits(words[w++])) {
+        return false;
+    }
+    if (w < words.size() && words[w] == "clip-jitter") {
+        if (w + 1 >= words.size() || !digits(words[w + 1])) {
+            return false;
+        }
+        w += 2;
+    }
+    if (w < words.size() && words[w] == "cache") {
+        if (w + 1 >= words.size()) {
+            return false;
+        }
+        const auto& v = words[w + 1];
+        const size_t d1 = v.find('.'), d2 = d1 == std::string::npos ? d1 : v.find('.', d1 + 1);
+        if (d2 == std::string::npos || !digits(v.substr(0, d1)) || !digits(v.substr(d1 + 1, d2 - d1 - 1)) ||
+            !digits(v.substr(d2 + 1))) {
+            return false;
+        }
+        w += 2;
+    }
+    if (w != words.size()) {
+        return false;
+    }
+    if (lines.size() == 2) {
+        const auto& l = lines[1];
+        return l.size() == 21 && l.starts_with("pack ") &&
+               std::all_of(l.begin() + 5, l.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+    }
+    return true;
+}
+
+/// bbport (pack cache): an earlier build's folder cache (one file per blob) in this folder is OBVIOUSLY this port's
+/// when the folder holds tiling_pipelines.txt (written only by this port, since 0.3.6.30; upstream and plain shadPS4
+/// builds never write it) and every "prepared_*" file in it is of this port's marker format (IsOurOldMarker). Only
+/// then are its files moved into the pack (or, of other versions, removed). Anything else is not provably ours: left
+/// exactly as it is (not read, moved, renamed or removed). Forks of this port that keep its file names and formats
+/// cannot be told apart by any file they write.
+static bool FolderCacheIsOurs(const std::filesystem::path& folder, std::string* why) {
     std::error_code ec;
+    if (!std::filesystem::is_regular_file(folder / "tiling_pipelines.txt", ec)) {
+        *why = "no tiling_pipelines.txt, which every build of this port since 0.3.6.30 writes there";
+        return false;
+    }
     for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
         const auto name = entry.path().filename().string();
-        if (!name.starts_with("prepared_") || name.ends_with(".tmp") || !entry.is_regular_file(ec)) {
-            continue;
+        if (name.starts_with("prepared_") && !name.ends_with(".tmp") && entry.is_regular_file(ec) &&
+            !IsOurOldMarker(entry.path())) {
+            *why = name + " is not in this port's marker format";
+            return false;
         }
-        std::string stamp, second;
+    }
+    return true;
+}
+
+/// The prepared markers of a moved folder cache ("prepared_<list>", ours by FolderCacheIsOurs) become this build's
+/// markers ("shaders.pack.prepared_<list>": the stamp, "pack <id>", the identity line): what they were written for is
+/// in the pack now. A first line without version words (an earlier build's marker) gets this build's: the move found
+/// the cache of these versions. A marker of this build already there is kept. The old markers are removed.
+static void TieMarkersToPack(const std::filesystem::path& folder, const std::string& marker_words) {
+    std::error_code ec;
+    std::vector<std::filesystem::path> old;
+    for (const auto& entry : std::filesystem::directory_iterator(folder, ec)) {
+        const auto name = entry.path().filename().string();
+        if (name.starts_with("prepared_") && !name.ends_with(".tmp") && entry.is_regular_file(ec)) {
+            old.push_back(entry.path());
+        }
+    }
+    for (const auto& path : old) {
+        std::string stamp;
         {
-            std::ifstream in{entry.path()};
-            if (!std::getline(in, stamp) || (std::getline(in, second) && !second.empty() && second != "\r")) {
-                continue; // empty, or already tied
-            }
+            std::ifstream in{path};
+            std::getline(in, stamp);
         }
         while (!stamp.empty() && (stamp.back() == '\r' || stamp.back() == ' ')) {
             stamp.pop_back(); // written in text mode by an earlier build
@@ -245,13 +340,17 @@ static void TieMarkersToPack(const std::filesystem::path& folder, const std::str
         if (!marker_words.empty() && (" " + stamp + " ").find(" cache ") == std::string::npos) {
             stamp += " " + marker_words;
         }
-        auto tmp = entry.path();
-        tmp += ".tmp";
-        {
-            std::ofstream out{tmp, std::ios::binary | std::ios::trunc};
-            out << stamp << "\npack " << pack.IdText() << "\n";
+        const auto ours = folder / (std::string{MarkerPrefix} + path.filename().string().substr(9));
+        if (!std::filesystem::exists(ours, ec) && !stamp.empty()) {
+            auto tmp = ours;
+            tmp += ".tmp";
+            {
+                std::ofstream out{tmp, std::ios::binary | std::ios::trunc};
+                out << stamp << "\npack " << pack.IdText() << "\n" << DataBase::MarkerIdentity << "\n";
+            }
+            std::filesystem::rename(tmp, ours, ec);
         }
-        std::filesystem::rename(tmp, entry.path(), ec);
+        std::filesystem::remove(path, ec);
     }
 }
 
@@ -294,6 +393,13 @@ static void ListFolderCache(const std::filesystem::path& folder) {
         } else if (path.extension() == ".tmp" && !name.starts_with("prepared_")) {
             loose_files.push_back({path, -1, false});
         }
+    }
+    if (std::string why; !loose_files.empty() && !FolderCacheIsOurs(folder, &why)) {
+        std::printf("Shader cache: %zu cache files of another build in this folder (%s): left in place, not read, "
+                    "moved or removed; this build uses only %s\n",
+                    loose_files.size(), why.c_str(), PackName);
+        loose_files.clear();
+        loose_to_fold = 0;
     }
 }
 
@@ -427,7 +533,7 @@ bool DataBase::MoveFolderCache(const CacheVersions& versions,
             // could outlive the new marker this start writes).
             std::vector<fs::path> markers;
             for (const auto& entry : fs::directory_iterator(directory, ec)) {
-                if (entry.path().filename().string().starts_with("prepared_")) {
+                if (entry.path().filename().string().starts_with("prepared_")) { // ours (FolderCacheIsOurs)
                     markers.push_back(entry.path());
                 }
             }
@@ -848,20 +954,24 @@ void DataBase::Clear() {
     if (!pack.Clear()) {
         std::printf("Shader cache: %s could not be made new: shaders are compiled again\n", PackName);
     }
-    // The rest of the folder belongs to the old cache too (the driver's cache data, prepared markers, old blob files).
+    // This build's prepared markers go with it (the new pack id makes them count for nothing anyway). Nothing else in
+    // the folder is touched: an earlier build's folder cache is handled by the move (FolderCacheIsOurs), other
+    // builds' files are not ours, and the driver checks its own cache data.
     std::error_code ec;
     u64 removed = 0;
     for (const auto& entry : std::filesystem::directory_iterator(cache_path, ec)) {
         const auto name = entry.path().filename().string();
-        if (name.starts_with(PackName) || !entry.is_regular_file(ec)) {
-            continue;
-        }
-        if (std::filesystem::remove(entry.path(), ec)) {
+        if (name.starts_with(MarkerPrefix) && entry.is_regular_file(ec) && std::filesystem::remove(entry.path(), ec)) {
             ++removed;
         }
     }
-    LOG_WARNING(Render, "Pipeline cache cleared ({} blobs, {} other files): it is rebuilt for this build", blobs,
-                removed);
+    std::printf("Shader cache: cleared for this build (%zu blobs, %llu prepared markers of this build removed; other "
+                "files in the folder left as they are)\n",
+                blobs, static_cast<unsigned long long>(removed));
+}
+
+std::filesystem::path DataBase::MarkerPath(const std::string& list_name) const {
+    return cache_path / (std::string{MarkerPrefix} + list_name);
 }
 
 void DataBase::Remove(BlobType type, const std::string& name) {
