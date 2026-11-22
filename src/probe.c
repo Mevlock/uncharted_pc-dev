@@ -2561,22 +2561,35 @@ int main(int argc, char **argv) {
     mallopt(M_MMAP_THRESHOLD,32*1024*1024);
 #endif
 #ifdef _WIN32
-    /* DLSS rework 12 (BB_SCALED_BEFORE_POST=1, off by default): Quality .. Performance upscale before the game's
+    /* DLSS rework 12 (BB_SCALED_BEFORE_POST=1; unset: on for FSR 3.1 / FSR 4, below): Quality .. Performance upscale before the game's
      * post-processing. The game is then patched to the OUTPUT size like Native (its post effects, HUD and display
      * buffer at full size) and only the scene's passes are drawn at the render size, into reduced stand-ins
      * (SceneTargets); the upscaler runs on the HDR scene before the post (TemporalUpscaler::Run). Set up here,
      * before anything reads the sizes: BB_SCENE_SIZE takes the render size, BB_RENDER_RES the output size. */
     {
         const char *on = getenv("BB_SCALED_BEFORE_POST"), *render = getenv("BB_RENDER_RES"), *output = getenv("BB_OUTPUT_RES");
+        /* FSR quality fix 1 (2026-11-22): unset = by upscaler. FSR 3.1 and FSR 4 (BB_UPSCALER fsr3 / fsr4 / fsr411)
+         * take the scene before the game's motion blur, depth of field, bloom and tone map, as AMD's integration
+         * guide asks: on the finished 8-bit frame FSR 3.1 dropped its history in fast motion (the game's motion blur
+         * moves colour against the motion vectors) and showed the blurred low-res frame (U3 horse ride). DLSS, XeSS
+         * and TAA keep the old order. BB_SCALED_BEFORE_POST=0 / 1: off / on for every upscaler. */
+        const char *upscaler = getenv("BB_UPSCALER");
+        const int fsr = upscaler && (!strcmp(upscaler, "fsr3") || !strcmp(upscaler, "fsr4") || !strcmp(upscaler, "fsr411"));
+        const int wanted = on && on[0] ? on[0] == '1' : fsr;
         unsigned rw = 0, rh = 0, ow = 0, oh = 0;
-        if (on && on[0] == '1' && render && output && sscanf(render, "%ux%u", &rw, &rh) == 2 &&
+        if (wanted && render && output && sscanf(render, "%ux%u", &rw, &rh) == 2 &&
             sscanf(output, "%ux%u", &ow, &oh) == 2 && rw && rh && (rw < ow || rh < oh) && rw <= ow && rh <= oh) {
-            char scene[32];
+            char scene[32], out[32];
             snprintf(scene, sizeof(scene), "%ux%u", rw, rh);
+            snprintf(out, sizeof(out), "%s", output);
             _putenv_s("BB_SCENE_SIZE", scene);
-            _putenv_s("BB_RENDER_RES", output);
-            printf("Render resolution: scene %s upscaled to %s before the post-processing (BB_SCALED_BEFORE_POST=1): "
-                   "the game runs at the output size\n", scene, output);
+            _putenv_s("BB_RENDER_RES", out);
+            printf("Render resolution: scene %s upscaled to %s before the post-processing (BB_SCALED_BEFORE_POST=%s): "
+                   "the game runs at the output size\n", scene, out, on && on[0] ? "1" : "unset, on for FSR");
+        } else if (render && output && sscanf(render, "%ux%u", &rw, &rh) == 2 &&
+                   sscanf(output, "%ux%u", &ow, &oh) == 2 && (rw < ow || rh < oh)) {
+            printf("Render resolution: %s upscaled to %s after the post-processing (BB_SCALED_BEFORE_POST=%s)\n",
+                   render, output, on && on[0] ? on : "unset: before it for FSR 3.1 / FSR 4 only");
         }
     }
 #endif
