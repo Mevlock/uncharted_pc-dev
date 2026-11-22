@@ -500,7 +500,13 @@ OpenStats PackFile::Open(const std::filesystem::path& path, bool want_writer, bo
     uint32_t version = 0;
     const int header_state =
         ReadAt(0, &header, sizeof(header)) ? CheckHeader(header, &version) : 1;
-    if (header_state != 0) {
+    // A damaged header (not another version) over records: the records check themselves, so they are kept; the
+    // pack gets a new header and id (a damaged pack's markers no longer count).
+    const bool header_damaged = header_state == 1 && writer_ && SizeNative(READ_H) > HeaderSize &&
+                                std::memcmp(header.magic, HeaderMagic, sizeof(header.magic)) == 0;
+    if (header_damaged) {
+        header = MakeHeader(NewId());
+    } else if (header_state != 0) {
         if (!writer_) {
             stats.error = header_state == 2 ? "another format version" : "not a pack";
             damaged_ = header_state == 1;
@@ -520,6 +526,10 @@ OpenStats PackFile::Open(const std::filesystem::path& path, bool want_writer, bo
     if (!Scan(stats)) {
         stats.error = "the pack could not be read";
         return finish(false);
+    }
+    if (header_damaged) {
+        ++stats.bad_records;
+        stats.bad_bytes += HeaderSize;
     }
     if (writer_) {
         if (stats.torn_bytes) {
