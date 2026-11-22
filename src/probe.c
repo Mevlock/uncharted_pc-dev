@@ -2284,15 +2284,9 @@ static void cf_name(uint64_t c) {
     cf_named[cf_named_n++].counter=c;
     if (cf_named_n>cf_named_peak) cf_named_peak=cf_named_n;
 }
-/* Under the manager lock: the waiting counters nothing names any more go to the ready list. */
-static void cf_drain(uint64_t m) {
-    for (size_t i=0;i<cf_named_n;) {
-        if (cf_referenced(m,cf_named[i].counter)) { ++i; continue; }
-        cf_ready_push(cf_named[i].counter);
-        cf_named[i]=cf_named[--cf_named_n];
-    }
+/* Under the manager lock: about every 10 s one line. */
+static void cf_stats(uint64_t m) {
     const uint64_t now=__builtin_ia32_rdtsc();
-    cf_last_drain=now;
     static uint64_t printed;
     if (!printed) printed=now;
     if (now-printed>UINT64_C(40000000000)) {   /* about every 10 s */
@@ -2301,11 +2295,22 @@ static void cf_drain(uint64_t m) {
         const uint64_t pool=m+0xae0;
         uint64_t used=0;
         for (int k=0;k<32;++k) used+=(uint64_t)__builtin_popcountll(*(const volatile uint64_t *)(uintptr_t)(pool+0x20+k*8));
+        int held=0; for (int k=0;k<CFL_WORKERS;++k) held+=cf_held[k]!=0;
         printf("Job counters: %ld frees, %ld done, %ld waited (a job or signal still named the counter), waiting now %zu, most "
-               "waiting at once %zu; pool %llu of %u in use\n",cf_deferred,cf_freed,cf_named_seen,cf_named_n,cf_named_peak,
+               "waiting at once %zu, taken jobs holding a counter now %d; pool %llu of %u in use\n",cf_deferred,cf_freed,cf_named_seen,cf_named_n,cf_named_peak,held,
                (unsigned long long)used,*(const volatile uint32_t *)(uintptr_t)(pool+0x128));
         fflush(stdout);
     }
+}
+
+/* Under the manager lock: the waiting counters nothing names any more go to the ready list. */
+static void cf_drain(uint64_t m) {
+    for (size_t i=0;i<cf_named_n;) {
+        if (cf_referenced(m,cf_named[i].counter)) { ++i; continue; }
+        cf_ready_push(cf_named[i].counter);
+        cf_named[i]=cf_named[--cf_named_n];
+    }
+    cf_last_drain=__builtin_ia32_rdtsc();
 }
 /* The ready frees are taken under the manager lock and freed after it is dropped: by the game's FreeCounter (it takes
  * the pool lock +0xc10 itself), or, from inside RunJobs (which holds +0xc10 already), by the pool's own steps: the slot
@@ -2345,6 +2350,7 @@ static __attribute__((noinline)) void cf_free_deferred(uint64_t c) {
     if (cf_referenced(m,c)) { cf_name(c); ++cf_named_seen; }   /* something still names it: it waits */
     else cf_ready_push(c);
     if (cf_named_n && __builtin_ia32_rdtsc()-cf_last_drain>100000) cf_drain(m);   /* at most about every 25 us */
+    cf_stats(m);
     ((MutexOp)cf_unlock_fn)(m+0xd50);
     cf_flush(m,0);
 }
