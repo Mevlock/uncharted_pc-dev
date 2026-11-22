@@ -1361,8 +1361,9 @@ void TemporalUpscaler::ExtraSharpen(vk::CommandBuffer cmdbuf, vk::Image target, 
 }
 
 void TemporalUpscaler::OnBlendedSceneDraw() {
-    // The mask is on by default since FSR quality fix 2 (FSR 3.1 only; BB_REACTIVE=0 or the menu: off). It was
-    // opt-in for Bloodborne's thin mist (trails traded for jitter shimmer). Toggle 1 << 27 switches it off.
+    // The mask is opt-in (menu, BB_REACTIVE=1): in Uncharted 3 it marked the hazy distance and the desert, FSR 3.1
+    // dropped its history there and the jitter shimmered (desert still view: ~20x the frame-to-frame change); on
+    // Bloodborne's thin mist likewise. Toggle 1 << 27 switches it off.
     if (snapshot_taken || !scene_color || !Active() || !ReactiveOn()) {
         return;
     }

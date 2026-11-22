@@ -67,9 +67,11 @@ struct Values {
     /// the menu's slider ends it.
     std::atomic<bool> sharpness_auto{false};
     std::atomic<bool> jitter{true};
-    /// FSR quality fix 2 (2026-11-22): on by default (FSR 3.1 only: ReactiveOn). Saved as reactive_mask;
-    /// the old key `reactive=0` was the default every menu save wrote, so only `reactive=1` is read.
-    std::atomic<bool> reactive{true};
+    /// Off by default again (FSR quality, 2026-11-22 night): on, it marked the whole hazy desert / town
+    /// (distant dunes and rock: frame-to-frame change 9.0 vs 0.4 off, still view), so FSR 3.1 dropped its
+    /// history there and showed the raw jitter: the shimmer the user saw. BB_REACTIVE=1 / the menu: on.
+    /// Saved as reactive_mask; from the old key `reactive` only an explicit 1 is read.
+    std::atomic<bool> reactive{false};
     std::atomic<bool> object_motion{true};
     std::atomic<float> reactive_scale{1.0f};
     std::atomic<float> reactive_threshold{0.2f};
