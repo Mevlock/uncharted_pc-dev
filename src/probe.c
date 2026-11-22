@@ -2153,24 +2153,27 @@ static uint64_t job_resume_count(void) {
  * the three games, EU and US, 1.00 and 1.02 (the job manager's layout is checked, job_layout_ok; the manager lock is
  * taken through the functions the completion itself calls). Every 65536 frees one line: the frees deferred, done, the ones a job still named, the
  * most waiting at once. BB_COUNTER_FREE=0: off (the game's immediate free). */
-enum { CFL_WORKERS=64, CFL_MAX=4096 };
-typedef struct { uint64_t counter; uint64_t snap[CFL_WORKERS]; int nsnap, skip, referenced; } CfEntry;
+enum { CFL_WORKERS=64 };
+/* A deferred free: the counter, each worker's job-free point count when it was taken (snap), the thread that freed it
+ * when that is a worker in a job (skip: it holds no other job), whether a job the manager holds named it then. */
+typedef struct { uint64_t counter; uint64_t snap[CFL_WORKERS]; int nsnap, skip; } CfEntry;
 static uint64_t cf_free_fn, cf_wait_fn, cf_completion_ret;
 static uintptr_t cf_lock_fn, cf_unlock_fn;
-static struct { volatile uint64_t epoch; } cf_w[CFL_WORKERS];
+static struct { volatile uint64_t epoch; char pad[56]; } cf_w[CFL_WORKERS];
 static int cf_nw;
-static int cf_overflow;
 static _Thread_local int cf_slot=-1;
-static CfEntry cf_list[CFL_MAX];
-static int cf_count, cf_peak;
-static long cf_deferred, cf_freed, cf_ref_seen, cf_full_waits;
+/* Under the manager lock: the frees in the order they came (a ring; their snaps only grow along it), and the few that a
+ * job still named (cf_named: they get a new snap the moment no job names them, then join the ring). */
+static CfEntry *cf_ring; static size_t cf_cap, cf_head, cf_tail;
+static CfEntry *cf_named; static size_t cf_named_n, cf_named_cap;
+static size_t cf_peak;
+static long cf_deferred, cf_freed, cf_named_seen;
 static uint64_t cf_last_drain;
 static void cf_pass(void) {
     int s=cf_slot;
     if (s<0) {
-        if (s==-2) return;
         s=__atomic_fetch_add(&cf_nw,1,__ATOMIC_ACQ_REL);
-        if (s>=CFL_WORKERS) { cf_slot=-2; __atomic_store_n(&cf_overflow,1,__ATOMIC_RELEASE); return; }
+        if (s>=CFL_WORKERS) return;   /* more workers than any of the games has: cf_quiet never passes (see there) */
         cf_slot=s;
     }
     __atomic_add_fetch(&cf_w[s].epoch,1,__ATOMIC_RELEASE);
@@ -2228,29 +2231,54 @@ static int cf_referenced(uint64_t m, uint64_t c) {
     }
     return 0;
 }
-/* Every job worker (registered at its first idle pass or completion) has passed a job-free point since the free. */
+static void cf_snap(CfEntry *e, uint64_t c, int skip) {
+    e->counter=c; e->skip=skip;
+    int n=__atomic_load_n(&cf_nw,__ATOMIC_ACQUIRE);
+    e->nsnap=n>CFL_WORKERS ? CFL_WORKERS : n;
+    for (int w=0;w<e->nsnap;++w) e->snap[w]=__atomic_load_n(&cf_w[w].epoch,__ATOMIC_ACQUIRE);
+}
+/* Every job worker has passed a job-free point since the snap (the one that freed it excepted). A worker that registered
+ * after the snap did so at such a point. Until every worker has registered (its first idle pass or completion), and with
+ * more workers than slots, nothing passes: a worker not seen may hold a job taken before the free. */
 static int cf_quiet(uint64_t m, const CfEntry *e) {
     const int nw=__atomic_load_n(&cf_nw,__ATOMIC_ACQUIRE);
     const uint64_t workers=*(const volatile uint64_t *)(uintptr_t)(m+0x100);
-    if ((uint64_t)nw<workers) return 0;     /* a worker not seen yet may hold a job taken before the free */
-    for (int w=0;w<e->nsnap && w<CFL_WORKERS;++w) {
+    if ((uint64_t)nw<workers || nw>CFL_WORKERS) return 0;
+    for (int w=0;w<e->nsnap;++w) {
         if (w==e->skip) continue;
         if (__atomic_load_n(&cf_w[w].epoch,__ATOMIC_ACQUIRE)==e->snap[w]) return 0;
     }
     return 1;
 }
-/* Under the manager lock. */
+static void cf_push(const CfEntry *e) {
+    if (cf_tail-cf_head==cf_cap) {   /* grow the ring (never wait: the freeing job may be what the oldest frees wait on) */
+        const size_t cap=cf_cap ? cf_cap*2 : 1024;
+        CfEntry *r=malloc(cap*sizeof(*r));
+        if (!r) { fprintf(stderr,"STOP: job counter free: out of memory\n"); runtime_quit(21); }
+        for (size_t i=0;i<cf_tail-cf_head;++i) r[i]=cf_ring[(cf_head+i)%cf_cap];
+        cf_tail-=cf_head; cf_head=0; free(cf_ring); cf_ring=r; cf_cap=cap;
+    }
+    cf_ring[cf_tail%cf_cap]=*e; ++cf_tail;
+    if (cf_tail-cf_head>cf_peak) cf_peak=cf_tail-cf_head;
+}
+/* Under the manager lock. The ring is freed from its oldest end while the oldest has passed (the snaps only grow, so
+ * one that has not passed holds the rest back, at most until the next job-free point of the worker it waits for). */
 static void cf_drain(uint64_t m) {
     typedef void (ABI *Free)(uint64_t);
-    for (int i=0;i<cf_count;) {
-        CfEntry *e=&cf_list[i];
-        if (!cf_quiet(m,e) || (e->referenced && cf_referenced(m,e->counter))) { ++i; continue; }
+    for (size_t i=0;i<cf_named_n;) {
+        if (cf_referenced(m,cf_named[i].counter)) { ++i; continue; }
+        CfEntry e; cf_snap(&e,cf_named[i].counter,-1);   /* no job holds it in the manager now: wait for every worker */
+        cf_push(&e);
+        cf_named[i]=cf_named[--cf_named_n];
+    }
+    while (cf_head!=cf_tail) {
+        CfEntry *e=&cf_ring[cf_head%cf_cap];
+        if (!cf_quiet(m,e)) break;
         ((Free)(uintptr_t)cf_free_fn)(e->counter);
+        ++cf_head;
         if (!(++cf_freed & 0xffff))
-            printf("Job counters: %ld frees deferred, %ld done, %ld still named by a job at the free, most waiting at once %d, "
-                   "%ld frees waited for room\n",cf_deferred,cf_freed,cf_ref_seen,cf_peak,cf_full_waits);
-        if (i!=cf_count-1) cf_list[i]=cf_list[cf_count-1];
-        --cf_count;
+            printf("Job counters: %ld frees deferred, %ld done, %ld named by a job at the free, most waiting at once %zu\n",
+                   cf_deferred,cf_freed,cf_named_seen,cf_peak);
     }
     cf_last_drain=__builtin_ia32_rdtsc();
 }
@@ -2258,32 +2286,26 @@ static __attribute__((noinline)) void cf_free_deferred(uint64_t c) {
     typedef int32_t (ABI *MutexOp)(uint64_t);
     typedef void (ABI *Free)(uint64_t);
     const uint64_t m=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
-    if (!c || !m || __atomic_load_n(&cf_overflow,__ATOMIC_ACQUIRE)) { ((Free)(uintptr_t)cf_free_fn)(c); return; }
-    const int self=cf_slot;
-    for (int tries=0;;++tries) {
-        ((MutexOp)cf_lock_fn)(m+0xd50);
-        if (cf_count) cf_drain(m);
-        if (cf_count<CFL_MAX) {
-            CfEntry *e=&cf_list[cf_count++];
-            e->counter=c;
-            e->referenced=cf_referenced(m,c);
-            e->nsnap=__atomic_load_n(&cf_nw,__ATOMIC_ACQUIRE);
-            if (e->nsnap>CFL_WORKERS) e->nsnap=CFL_WORKERS;
-            for (int w=0;w<e->nsnap;++w) e->snap[w]=__atomic_load_n(&cf_w[w].epoch,__ATOMIC_ACQUIRE);
-            e->skip=self;   /* this thread runs the freeing job (or is no worker): it holds no other job */
-            ++cf_deferred; if (e->referenced) ++cf_ref_seen;
-            if (cf_count>cf_peak) cf_peak=cf_count;
-            ((MutexOp)cf_unlock_fn)(m+0xd50);
-            return;
+    if (!c || !m) { ((Free)(uintptr_t)cf_free_fn)(c); return; }
+    const int self=cf_slot;   /* this thread runs the freeing job (or is no worker): it holds no other job */
+    ((MutexOp)cf_lock_fn)(m+0xd50);
+    ++cf_deferred;
+    if (cf_referenced(m,c)) {
+        /* a job the manager holds still names it: it waits there until none does, then for every worker */
+        if (cf_named_n==cf_named_cap) {
+            const size_t cap=cf_named_cap ? cf_named_cap*2 : 64;
+            CfEntry *r=realloc(cf_named,cap*sizeof(*r));
+            if (!r) { fprintf(stderr,"STOP: job counter free: out of memory\n"); runtime_quit(21); }
+            cf_named=r; cf_named_cap=cap;
         }
-        ((MutexOp)cf_unlock_fn)(m+0xd50);
-        if (!tries) __atomic_add_fetch(&cf_full_waits,1,__ATOMIC_RELAXED);
-#ifdef _WIN32
-        Sleep(1);
-#else
-        usleep(1000);
-#endif
+        cf_named[cf_named_n++].counter=c;
+        ++cf_named_seen;
+    } else {
+        CfEntry e; cf_snap(&e,c,self);
+        cf_push(&e);
     }
+    cf_drain(m);
+    ((MutexOp)cf_unlock_fn)(m+0xd50);
 }
 static ABI void cf_free_hook(uint64_t c) { cf_free_deferred(c); }
 /* WaitForCounterAndFree: the game's wait, then the deferred free (the game's own body frees at once). The wait may
@@ -2311,7 +2333,7 @@ static ABI uint64_t job_release_wake(uint64_t a, uint64_t b, uint64_t c, uint64_
     if (cf_on) {
         /* the release after a job's completion (the worker's lock xadd): this worker holds no job now */
         if ((uint64_t)(uintptr_t)__builtin_return_address(0)==cf_completion_ret) cf_pass();
-        if (cf_count && __builtin_ia32_rdtsc()-cf_last_drain>100000)
+        if ((cf_head!=cf_tail || cf_named_n) && __builtin_ia32_rdtsc()-cf_last_drain>100000)
             cf_drain(*(const volatile uint64_t *)(uintptr_t)job_manager_global);
     }
     return r;
