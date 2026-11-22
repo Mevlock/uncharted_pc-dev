@@ -240,7 +240,6 @@ private:
     }
     void WaitWarm();
     void SaveDriverCache();
-    size_t DriverCacheSize();
     void DriverCacheSaver(std::stop_token stop);
 
     void DumpShader(std::span<const u32> code, u64 hash, Shader::HwStage stage, size_t perm_idx,
@@ -349,7 +348,6 @@ private:
     std::filesystem::path driver_cache_path;
     std::mutex driver_cache_mutex;
     std::atomic<u32> driver_cache_dirty{0}; ///< pipelines created since the last save
-    size_t driver_cache_loaded_size = 0;
     std::jthread driver_cache_saver;
 
     // Only if Config::collectShadersForDebug()

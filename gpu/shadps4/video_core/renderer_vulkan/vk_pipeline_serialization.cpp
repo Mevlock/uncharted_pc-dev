@@ -1736,6 +1736,8 @@ void PipelineCache::WarmUpThread() {
     Common::SetCurrentThreadName("bb:PipelineWarm");
     BbThreads::MakeBelowNormal();
     auto& db = Storage::DataBase::Instance();
+    // The driver's cache data is saved after the preload when the driver compiled any pipeline in it meanwhile (the end).
+    const u64 driver_cache_misses_at_start = PipelineBinaries::DriverCacheMisses();
     // bbport (pack cache): the first start after the update moves an earlier build's folder cache (one file per blob)
     // into the pack, before anything reads the cache or its prepared markers (the move ties them to the pack). On a PC
     // where each file is slow to open (an antivirus) that takes as long as that build's starts did, once: it shows on
@@ -3325,9 +3327,14 @@ void PipelineCache::WarmUpThread() {
         std::printf("Pipeline cache: %u shader binaries did not match their meta: removed, "
                     "translated again when used\n", n);
     }
-    // The driver's cache gets the entries this preload had to compile.
-    if (driver_cache_loaded_size != DriverCacheSize()) {
+    // The driver's cache gets the entries this preload had to compile: saved when the driver compiled any pipeline in
+    // it meanwhile (its creation feedback: not a hit). Its data's size was the signal before: AMD's never changes
+    // (~820 KiB whatever it holds), and an unchanged size says nothing about the content on any driver.
+    if (const u64 misses = PipelineBinaries::DriverCacheMisses() - driver_cache_misses_at_start; misses != 0) {
         driver_cache_dirty.fetch_add(1);
+        std::printf("Pipeline cache: the driver compiled %llu pipelines in its cache since the start: its data is "
+                    "saved\n",
+                    static_cast<unsigned long long>(misses));
     }
 }
 
