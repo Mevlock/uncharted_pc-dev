@@ -12,6 +12,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -363,6 +364,11 @@ private:
     VAddr hudless_address = 0;
     int applied_preset = -1;
     int applied_upscaler = -1;
+    /// bbport: the upscaler in use (a BbSettings::Upscaler): the setting's value as taken over by
+    /// TakeUpscalerChoice, between frames. Everything here reads this one, not the setting (which the overlay and
+    /// BB_PRESET_FILE change at any moment): a frame's resources and its upscale are for the same upscaler.
+    std::atomic<int> upscaler_in_use{0};
+    void TakeUpscalerChoice();
     bool dispatched_last_frame = false;
     bool last_active = false, last_jitter = false;
 
