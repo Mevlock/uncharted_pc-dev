@@ -5324,7 +5324,30 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     motion_cost_t1 = motion_cost_t0 ? __rdtsc() : 0;
-    if (motion_draw && motion_geometry) {
+    // BB_MOTION_GATE_CEILING=<percent> (measurement only, the vectors are WRONG with it): that share of the motion
+    // draws (picked by mesh, the same ones every frame) goes out without store, history and parameter, as a draw
+    // gated for standing still would: the most a still-draw gate with a free decision can save on this thread.
+    static const u32 gate_ceiling = [] {
+        const char* env = std::getenv("BB_MOTION_GATE_CEILING");
+        const u32 percent = env ? u32(std::strtoul(env, nullptr, 10)) : 0;
+        if (percent) {
+            std::printf("Object motion: BB_MOTION_GATE_CEILING=%u: %u%% of the motion draws without history "
+                        "(measurement only, wrong vectors)
+", percent, percent);
+        }
+        return percent;
+    }();
+    bool ceiling_gated = false;
+    if (gate_ceiling && motion_draw && motion_geometry) {
+        u64 h = (motion_geometry ^ regs.index_base_address.Address<VAddr>() ^ u64(regs.num_indices) << 40) *
+                0x9e3779b97f4a7c15ULL;
+        h ^= h >> 32;
+        ceiling_gated = h % 100 < gate_ceiling;
+        if (ceiling_gated) {
+            push_data.motion_param = 0;
+        }
+    }
+    if (motion_draw && motion_geometry && !ceiling_gated) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         const auto [base_vertex, first_instance] =
             GetDrawOffsets(regs, vs, pipeline->GetFetchShader());

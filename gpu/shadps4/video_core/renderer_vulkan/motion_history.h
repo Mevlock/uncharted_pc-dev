@@ -504,6 +504,95 @@ private:
     FlatMap<GateKey, uint32_t, GateHash> gate_occurrences;
 };
 
+// Draws that do not move. A draw's still key is a hash of everything its vertex positions follow from but the camera
+// (its mesh and its object's constants, ObjectMotion's caller builds it). A key that was also drawn in the frame
+// before belongs to an object that stood where it stands now: its motion is the camera's, which the camera pass gives
+// exactly, so the draw needs no store, no history and no parameter. An object that starts to move has a new key at
+// once (its first moving frame has no stored positions to compare with: the camera's motion for that one frame, as
+// for a draw that appears); the frame it stops, its key repeats and it is still again. No order between draws and no
+// count of identical draws enters: the same key twice in a frame is the same answer twice.
+class StillDraws {
+public:
+    /// Whether `key` was drawn in the previous frame; notes it for this one.
+    bool Seen(uint64_t key) {
+        key |= 1; // 0 marks a free slot
+        if ((used + 1) * 2 > slots.size()) {
+            Rebuild(slots.size() * 2);
+        }
+        const size_t mask = slots.size() - 1;
+        for (size_t i = Start(key) & mask;; i = (i + 1) & mask) {
+            Slot& slot = slots[i];
+            if (slot.key == key) {
+                if (slot.last != frame) {
+                    slot.before = slot.last;
+                    slot.last = frame;
+                }
+                return slot.before + 1 == frame;
+            }
+            if (!slot.key) {
+                slot = {key, frame, NoFrame};
+                ++used;
+                return false;
+            }
+        }
+    }
+    void NextFrame() {
+        ++frame;
+        // Keys not drawn for a frame can never be "seen in the previous frame" again: dropped now and then.
+        if (frame % Trim == 0) {
+            Rebuild(slots.size());
+        }
+    }
+    /// Two frames on at once: nothing of before counts (a cut, a gap in the frames).
+    void Forget() {
+        frame += 2;
+    }
+    size_t Size() const { return used; }
+
+private:
+    static constexpr uint32_t NoFrame = UINT32_MAX - 1, Trim = 64;
+    struct Slot {
+        uint64_t key{};
+        uint32_t last{};   ///< the last frame it was drawn in
+        uint32_t before{}; ///< the frame it was drawn in before that one (NoFrame: none)
+    };
+    static size_t Start(uint64_t key) {
+        const uint64_t h = key * 0x9e3779b97f4a7c15ULL;
+        return size_t(h ^ (h >> 29));
+    }
+    void Rebuild(size_t size) {
+        std::vector<Slot> old(64);
+        old.swap(slots);
+        size_t live = 0;
+        for (const auto& slot : old) {
+            live += slot.key && slot.last + 1 >= frame;
+        }
+        while (size > 64 && live * 4 < size) {
+            size /= 2;
+        }
+        while (live * 2 >= size) {
+            size *= 2;
+        }
+        slots.assign(size, Slot{});
+        used = 0;
+        const size_t mask = slots.size() - 1;
+        for (const auto& slot : old) {
+            if (!slot.key || slot.last + 1 < frame) {
+                continue;
+            }
+            size_t i = Start(slot.key) & mask;
+            while (slots[i].key) {
+                i = (i + 1) & mask;
+            }
+            slots[i] = slot;
+            ++used;
+        }
+    }
+    std::vector<Slot> slots = std::vector<Slot>(1024);
+    size_t used = 0;
+    uint32_t frame = 2;
+};
+
 // The pairing of 0.3.6.68 (a table keyed by draw and occurrence: the k-th of identical draws of a frame takes the k-th's
 // store of the previous frame), kept as the reference History must equal: BB_MOTION_HISTORY_CHECK=1 (diagnosis) runs
 // it next to History on the real draws and counts allocations that differ; the motion-history test compares the two.

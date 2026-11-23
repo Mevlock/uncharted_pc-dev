@@ -299,10 +299,52 @@ int main() {
     ranges.Trim(IndexRangeCache::Revalidate + IndexRangeCache::Unused + 1);
     assert(ranges.Size() == 0);
 
+    // Still draws: a key counts when it was drawn in the frame before, however often and in whatever order.
+    {
+        StillDraws still;
+        still.NextFrame();
+        assert(!still.Seen(10) && !still.Seen(10) && !still.Seen(0)); // new this frame, twice the same answer
+        still.NextFrame();
+        assert(still.Seen(0) && still.Seen(10) && still.Seen(10) && !still.Seen(20));
+        still.NextFrame();
+        assert(still.Seen(20) && still.Seen(10));
+        still.NextFrame(); // 20 moved away (another key), 10 not drawn
+        assert(!still.Seen(30));
+        still.NextFrame();
+        assert(!still.Seen(20) && !still.Seen(10) && still.Seen(30)); // back after a frame away: not still
+        still.NextFrame();
+        assert(still.Seen(20) && still.Seen(10) && still.Seen(30));
+        still.Forget(); // a cut
+        still.NextFrame();
+        assert(!still.Seen(20) && !still.Seen(10));
+        // Against a plain model over many frames, with the table growing, trimming and shrinking.
+        StillDraws table;
+        std::map<uint64_t, uint32_t> last; // key -> the last frame drawn
+        std::mt19937_64 rng{7};
+        for (uint32_t frame = 1; frame <= 400; ++frame) {
+            table.NextFrame();
+            const uint32_t draws = frame % 50 < 25 ? 3000 : 40;
+            std::map<uint64_t, bool> answers;
+            for (uint32_t i = 0; i < draws; ++i) {
+                // Most keys repeat from frame to frame; some change every frame.
+                const uint64_t key = rng() % 4 ? (rng() % 2500) * 2 : rng() * 2;
+                const auto it = last.find(key);
+                const bool expected = answers.contains(key) ? answers[key]
+                                                             : it != last.end() && it->second + 1 == frame;
+                answers.emplace(key, expected);
+                assert(table.Seen(key) == expected);
+            }
+            for (const auto& [key, answer] : answers) {
+                last[key] = frame;
+            }
+            assert(table.Size() <= 2 * 3000 + 64 * 3000);
+        }
+    }
+
     assert(JitterPhases(1920, 1920) == 8);
     assert(JitterPhases(1280, 1920) == 18);
     assert(JitterPhases(960, 1920) == 32);
     assert(JitterPhases(640, 1920) == 72);
     assert(JitterPhases(0, 1920) == 8);
-    std::puts("Motion history: PASS (ranges, restart, offsets, matching, in-order = keyed pairing, capacity, gating, index cache, jitter)");
+    std::puts("Motion history: PASS (ranges, restart, offsets, matching, in-order = keyed pairing, capacity, gating, still draws, index cache, jitter)");
 }
