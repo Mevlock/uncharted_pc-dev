@@ -8861,6 +8861,21 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     const auto& key = pipeline->GetGraphicsKey();
     if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
         scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
+    // FSR night: Uncharted has no 5-target G-buffer, so the reduced scene never started there: with the upscale before
+    // the post (FSR 3.1 / FSR 4 at Quality .. Performance) the game drew the whole scene at the output size and the
+    // upscaler's input was a downsample of it (no GPU saving, a filtered image instead of jittered samples: grain and
+    // crawling on fine detail, Nate's hair on U3's horse ride). The scene starts at the frame's first depth-writing pass
+    // into an output-size depth (velocity mode). BB_UNCHARTED_REDUCED=0: as before.
+    static const bool uncharted_reduced = [] {
+        const char* env = std::getenv("BB_UNCHARTED_REDUCED");
+        const bool on = !(env && env[0] == '0');
+        std::printf("Scene resolution: Uncharted's scene drawn at the render size before the post %s "
+                    "(BB_UNCHARTED_REDUCED)\n", on ? "on" : "off");
+        return on;
+    }();
+    if (uncharted_reduced && !scene_started && camera_motion->VelocityMode() && db_desc.first &&
+        regs.depth_control.depth_write_enable &&
+        scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
     // same image through the guest's native descriptor during this draw.
     bool reduced = scene_started && upscaler->RasterScaling() && key.num_samples == 1;
@@ -8888,6 +8903,14 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         return *pass_size == proxy;
     };
     for (u32 cb = 0; cb < num_attachments; ++cb) {
+        // FSR night: the object motion twin's mask carries the motion output (bit Output, 7): the slots between
+        // the guest's targets and it are no attachments of this pass (they held earlier passes' targets and kept
+        // Uncharted's G-buffer native with character motion on). BB_SCENE_MASKED_SLOTS=0: as before.
+        static const bool masked_slots = [] {
+            const char* env = std::getenv("BB_SCENE_MASKED_SLOTS");
+            return !(env && env[0] == '0');
+        }();
+        if (masked_slots && key.motion_vectors && !(key.mrt_mask & (1u << cb))) continue;
         const auto& [id, desc] = cb_descs[cb];
         if (id) {
             const auto& image = texture_cache.GetImage(id);
@@ -8907,6 +8930,17 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     }
     if (db_desc.first && (!scene_targets->Eligible(texture_cache.GetImage(db_desc.first)) ||
                           !same_size(texture_cache.GetImage(db_desc.first), 0))) {
+        reduced = false;
+    }
+    // FSR night: a depth attachment this draw also samples (bound as a texture) stays native, as a bound color
+    // target does: with its stand-in attached the native read resolved it and the native transition then
+    // invalidated the stand-in, a resolve and a refill per pass (U3's half-size light passes: 10 of each a frame).
+    // BB_SCENE_BOUND_DEPTH=0: as before.
+    static const bool bound_depth_native = [] {
+        const char* env = std::getenv("BB_SCENE_BOUND_DEPTH");
+        return !(env && env[0] == '0');
+    }();
+    if (bound_depth_native && reduced && db_desc.first && texture_cache.GetImage(db_desc.first).binding.is_bound) {
         reduced = false;
     }
     if (debug_pass) {
@@ -8930,6 +8964,16 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     state.num_color_attachments = std::bit_width(key.mrt_mask);
     for (auto cb = 0u; cb < state.num_color_attachments; ++cb) {
         auto& [image_id, desc] = cb_descs[cb];
+        // FSR night: the motion twin's unused slots (see above) are not attached; with the reduced scene their stale
+        // native targets got stand-ins filled every pass.
+        static const bool masked_slots = [] {
+            const char* env = std::getenv("BB_SCENE_MASKED_SLOTS");
+            return !(env && env[0] == '0');
+        }();
+        if (masked_slots && reduced && key.motion_vectors && !(key.mrt_mask & (1u << cb))) {
+            state.color_attachments[cb] = {};
+            continue;
+        }
         if (!image_id) {
             state.color_attachments[cb] = {};
             continue;
