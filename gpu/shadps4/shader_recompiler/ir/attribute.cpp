@@ -174,6 +174,10 @@ std::string NameOf(Attribute attribute) {
         return "BaseInstance";
     case Attribute::IsHelperInvocation:
         return "IsHelperInvocation";
+    case Attribute::InstanceIdStepRate0:
+        return "InstanceIdStepRate0";
+    case Attribute::InstanceIdStepRate1:
+        return "InstanceIdStepRate1";
     default:
         break;
     }

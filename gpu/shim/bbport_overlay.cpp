@@ -645,10 +645,23 @@ void CheckpointsPage() {
                                   ImGui::GetTextLineHeightWithSpacing() * 8.0f);
     if (ImGui::BeginChild("##checkpoints", ImVec2(0.0f, list_h),
                           ImGuiChildFlags_Borders)) {
+        // Entering the list with the pad (focus coming from outside it) lands on its first checkpoint, not on the one
+        // ImGui's nearest-item search finds: the focus is seen on another item, and the next frame puts it on the
+        // first one. A click is left alone.
+        static bool list_had_focus = false;
+        static bool focus_first = false;
+        bool list_has_focus = false;
+        bool first_item = true;
         for (int i = 0; i < static_cast<int>(list.size()); ++i) {
             const auto& c = list[i];
             if (c.chapter != chapter) {
                 continue;
+            }
+            const bool is_first = first_item;
+            first_item = false;
+            if (is_first && focus_first) {
+                focus_first = false;
+                ImGui::SetKeyboardFocusHere();
             }
             const bool is_current = i == current;
             const std::string label = (is_current ? std::string("> ") : std::string("   ")) + std::to_string(c.number) +
@@ -662,15 +675,40 @@ void CheckpointsPage() {
             if (ImGui::Selectable(label.c_str(), i == picked || (is_current && picked < 0),
                                   ImGuiSelectableFlags_AllowDoubleClick)) {
                 picked = i;
-                // A double click goes there at once (the same as picking it and pressing Go there), but never to the
+                // A double click with the mouse, or the confirm button (A / Cross) pressed twice quickly on the same
+                // checkpoint, goes there at once (the same as picking it and pressing Go there), but never to the
                 // checkpoint the player is at (from El Dorado, michelle: the game's task reset there leaves the scene
                 // without its characters).
-                if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && !(now.known && list[i].task == now.task)) {
+                bool double_pick = ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+                // The pad: a fresh press of the confirm button (not a held one) twice on the same item within the
+                // mouse's double-click time.
+                static int pad_item = -1;
+                static double pad_time = 0.0;
+                if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false)) {
+                    const double t = ImGui::GetTime();
+                    if (pad_item == i && t - pad_time <= ImGui::GetIO().MouseDoubleClickTime) {
+                        double_pick = true;
+                        pad_item = -1;
+                    } else {
+                        pad_item = i;
+                        pad_time = t;
+                    }
+                } else if (!double_pick) {
+                    pad_item = -1;
+                }
+                if (double_pick && !(now.known && list[i].task == now.task)) {
                     // A jump that starts closes the menu, so the game is in view at once; a refused one keeps it
                     // open with its message.
                     if (BbSaves::Jump(list[i], message)) {
                         SetOpen(false);
                     }
+                }
+            }
+            if (ImGui::IsItemFocused()) {
+                list_has_focus = true;
+                if (!list_had_focus && !is_first && !ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                    !ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    focus_first = true;
                 }
             }
             if (is_current) {
@@ -680,6 +718,7 @@ void CheckpointsPage() {
                 }
             }
         }
+        list_had_focus = list_has_focus || focus_first;
     }
     ImGui::EndChild();
     const bool already_here = picked >= 0 && now.known && list[picked].task == now.task;
@@ -688,7 +727,7 @@ void CheckpointsPage() {
         BbSaves::Jump(list[picked], message);
     }
     ImGui::EndDisabled();
-    Hint(T("Or double-click a checkpoint in the list."));
+    Hint(T("Or double-click a checkpoint in the list, or press A (Cross) twice on it."));
     if (!message.empty()) {
         ImGui::SameLine();
         ImGui::TextWrapped("%s", message.c_str());
@@ -2383,13 +2422,29 @@ void SetShaderPreparation(int phase, u32 done, u32 total) {
 
 static std::atomic<u32> scan_done{0}, scan_total{0};
 static std::atomic<s64> scan_start_ms{0};
+// What the one-time step counts: 0 = the scan of the game files (MiB), 1 = the move of an earlier build's shader cache
+// files into one file (files). Shown the same way: the page's bar, the corner box, the launcher's PREP lines.
+static std::atomic<int> scan_kind{0};
+
+static void SetOneTimeProgress(int kind, u32 done, u32 total) {
+    if (total && !scan_total.load(std::memory_order_relaxed)) {
+        scan_start_ms.store(NowMs(), std::memory_order_relaxed);
+        scan_kind.store(kind, std::memory_order_relaxed);
+    }
+    scan_done.store(done, std::memory_order_relaxed);
+    scan_total.store(total, std::memory_order_release);
+}
 
 void SetScanProgress(u32 done_mib, u32 total_mib) {
-    if (total_mib && !scan_total.load(std::memory_order_relaxed)) {
-        scan_start_ms.store(NowMs(), std::memory_order_relaxed);
-    }
-    scan_done.store(done_mib, std::memory_order_relaxed);
-    scan_total.store(total_mib, std::memory_order_release);
+    SetOneTimeProgress(0, done_mib, total_mib);
+}
+
+void SetMoveProgress(u32 done_files, u32 total_files) {
+    SetOneTimeProgress(1, done_files, total_files);
+}
+
+static bool MovingCache() {
+    return scan_kind.load(std::memory_order_relaxed) == 1;
 }
 
 /// "  about 3 min left" for the scan: its average rate so far (reading is steady, unlike pipeline builds).
@@ -2405,6 +2460,14 @@ static std::string ScanEta(u32 done, u32 total) {
 
 static const char* const ScanStep = N_("Step 1 of 2: finding the shaders in your game files (only this once)");
 static const char* const ScanStep3 = N_("Step 1 of 3: finding the shaders in your game files (only this once)");
+static const char* const MoveStep = N_("Moving the shader cache into one file (only this once)");
+
+/// "1.2 / 60.3 GB  about 3 min left" (the scan) or "1240 / 31986 files  about 40 s left" (the move).
+static std::string OneTimeCount(u32 at, u32 of) {
+    return (MovingCache() ? fmt::format(fmt::runtime(T("{} / {} files")), at, of)
+                          : fmt::format("{:.1f} / {:.1f} GB", at / 1024.0, of / 1024.0)) +
+           ScanEta(at, of);
+}
 
 static std::atomic<bool> prep_rebuild{false};
 
@@ -2593,7 +2656,7 @@ void FullScreenPreparation() {
                                    : T("Starting...");
     const u32 scan_of = scan_total.load(std::memory_order_acquire);
     const u32 scan_at = std::min(scan_done.load(std::memory_order_relaxed), scan_of);
-    centered(scan_of ? (three ? T(ScanStep3) : T(ScanStep)) : step, 1.2f, white);
+    centered(scan_of ? (MovingCache() ? T(MoveStep) : three ? T(ScanStep3) : T(ScanStep)) : step, 1.2f, white);
     ImGui::Dummy(ImVec2(0.0f, 10.0f * base_scale));
     const float bar_w = std::min(w * 0.55f, 900.0f * base_scale);
     ImGui::SetCursorPosX((w - bar_w) * 0.5f);
@@ -2604,7 +2667,7 @@ void FullScreenPreparation() {
     ImGui::Dummy(ImVec2(0.0f, 8.0f * base_scale));
     // the countdown only in step 2: before it the remaining time cannot be told
     const std::string count =
-        scan_of ? fmt::format("{:.1f} / {:.1f} GB{}", scan_at / 1024.0, scan_of / 1024.0, ScanEta(scan_at, scan_of))
+        scan_of ? OneTimeCount(scan_at, scan_of)
         : !finishing && total
             ? fmt::format("{} / {}{}", done, total,
                           phase == 2 || phase == 4 ? PreparationEta(done, total) : std::string{})
@@ -2626,8 +2689,9 @@ void PrintPreparationProgress() {
     if (const u32 total = scan_total.load(std::memory_order_acquire)) {
         const u32 done = std::min(scan_done.load(std::memory_order_relaxed), total);
         // The 6th number: how many steps this preparation has (3 when it saves at the end, 2 when not).
-        std::printf("PREP %d %u %u 5 %d|%s\n", int(100.0f * float(done) / float(total)), done, total,
-                    PreparationSavesStep() ? 3 : 2, ScanEta(done, total).c_str());
+        // Step 5: the scan (MiB), step 6: the move of an earlier build's cache files (files).
+        std::printf("PREP %d %u %u %d %d|%s\n", int(100.0f * float(done) / float(total)), done, total,
+                    MovingCache() ? 6 : 5, PreparationSavesStep() ? 3 : 2, ScanEta(done, total).c_str());
         std::fflush(stdout);
         return;
     }
@@ -2684,8 +2748,13 @@ void ShaderPreparation() {
     const u32 total = prep_total.load(std::memory_order_relaxed);
     if (scan_of) {
         const u32 scan_at = std::min(scan_done.load(std::memory_order_relaxed), scan_of);
-        ImGui::Text(T("Finding the shaders in your game files (only this once) %.1f / %.1f GB%s"), scan_at / 1024.0,
-                    scan_of / 1024.0, ScanEta(scan_at, scan_of).c_str());
+        if (MovingCache()) {
+            ImGui::Text(T("Moving the shader cache into one file (only this once) %u / %u files%s"), scan_at, scan_of,
+                        ScanEta(scan_at, scan_of).c_str());
+        } else {
+            ImGui::Text(T("Finding the shaders in your game files (only this once) %.1f / %.1f GB%s"),
+                        scan_at / 1024.0, scan_of / 1024.0, ScanEta(scan_at, scan_of).c_str());
+        }
     } else if (total == 0) {
         ImGui::TextUnformatted(phase == 1 ? T("Preparing shaders") : T("Preparing pipelines"));
     } else {

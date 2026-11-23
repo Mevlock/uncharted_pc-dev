@@ -43,6 +43,17 @@ class Runtime;
 
 namespace VideoCore {
 
+/// Diagnostics: how the game clears stencil. The stencil planes of the first depth targets with
+/// stencil are noted; for each plane, the first DB clear, the first shader write over it and the
+/// first CP DMA write over it are logged once.
+namespace StencilClearLog {
+enum class Path : u32 { DbClear, ShaderWrite, DmaWrite };
+void NotePlane(VAddr address, u32 size);
+/// `detail`: the clear value (DbClear), the shader's program hash (ShaderWrite) or the fill data
+/// (DmaWrite, ~0 for a copy).
+void NoteWrite(Path path, VAddr address, u64 size, u64 detail);
+} // namespace StencilClearLog
+
 class BufferCache;
 class PageManager;
 

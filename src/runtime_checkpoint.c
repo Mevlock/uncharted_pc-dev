@@ -54,26 +54,29 @@ typedef void (__attribute__((sysv_abi)) *PlayTask)(void *task, int mode, int *fa
 int bbport_saves_start_practice(void); /* gpu/shim/bbport_saves.cpp: the practice copy, then practice mode on */
 void bbport_saves_test_jump_tick(void); /* gpu/shim/bbport_saves.cpp: BB_TEST_JUMP_EVERY soak jumps */
 
-/* BB_CHECKPOINT_TEST=<task id hex>@<seconds> (tests): one jump that many seconds after the first frame
- * this hook saw, as if picked in the overlay (practice mode too: the campaign save is not touched). */
+/* BB_CHECKPOINT_TEST=<task id hex>@<seconds>[,<task id hex>@<seconds>...] (tests): jumps as if picked in the overlay
+ * (practice mode too: the campaign save is not touched), the first that many seconds after the first frame this hook
+ * saw, each next one that many seconds after the one before it. */
 static void test_request(void) {
     static int state;  /* 0 unread, 1 waiting, 2 done or off */
+    static const char *next;
     static uint32_t task;
     static double due;
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC,&now);
     const double t=now.tv_sec+now.tv_nsec*1e-9;
-    if (state==0) {
-        const char *e=getenv("BB_CHECKPOINT_TEST");
+    if (state==0) next=getenv("BB_CHECKPOINT_TEST");
+    if (state==0 || (state==1 && t>=due)) {
+        if (state==1) {
+            if (bbport_saves_start_practice()) atomic_store(&requested,task);
+            else printf("Checkpoints: test jump not made (practice mode could not start)\n");
+        }
         unsigned seconds=60;
-        state=e && sscanf(e,"%x@%u",&task,&seconds)>=1 && task ? 1 : 2;
+        state=next && sscanf(next,"%x@%u",&task,&seconds)>=1 && task ? 1 : 2;
         due=t+seconds;
         if (state==1) printf("Checkpoints: test jump to task %08x in %u s (BB_CHECKPOINT_TEST)\n",task,seconds);
-    }
-    if (state==1 && t>=due) {
-        state=2;
-        if (bbport_saves_start_practice()) atomic_store(&requested,task);
-        else printf("Checkpoints: test jump not made (practice mode could not start)\n");
+        next=next ? strchr(next,',') : NULL;
+        if (next) ++next;
     }
 }
 
@@ -119,7 +122,9 @@ void __attribute__((ms_abi)) runtime_checkpoint_frame_us(uint64_t rdi, uint64_t 
  * OnExecute: U1 EU 0x738ee0, U2 EU 0xa6cac0): the task found by its hash in the game's task map; when it is
  * already the active task only ResetTasks; otherwise StartAtTaskIndex(game flow, the task's index, 1, 0) and,
  * when that returns true, ResetTasks(1) and the PlayTask wrapper. When StartAtTaskIndex returns false a level
- * load has started and the menu does nothing more (and neither does the port). U2 first follows the task's
+ * load has started and the menu does nothing more (and neither does the port). (Its test is whether the chapter's
+ * chunk set is installed, IsChunkSetEntirelyWithin, so on the PC it is always true: every jump is this in-place one, and
+ * PlayTask loads the levels the task wants and drops the others; levels both tasks want stay loaded as they were.) U2 first follows the task's
  * redirect (a group to its first playable task). U2 1.02 has no task-by-hash function: its map is walked here
  * (FNV-1a of the hash, buckets of nodes {next, ..., hash +0x10, task +0x18}, bucket[count] = end).
  * Every function the sequence calls is checked against its first bytes first. */
@@ -129,6 +134,7 @@ typedef struct {
     uint64_t find, map_buckets, map_count;  /* find 0: walk the map */
     uint64_t redirect, is_active;            /* 0: none (U1: the task's state word == 1) */
     uint64_t task_index, start, game_flow, reset, wrap;
+    uint64_t water_mgr, set_water;           /* the water manager, SetWaterState (0: none) */
     int reset_active;                        /* ResetTasks argument in the "already active" branch */
     Check checks[8];
 } OldBuild;
@@ -138,19 +144,27 @@ typedef struct {
 #define U1_TASK_INDEX "55 48 89 e5 41 56 53 48 81 e4 e0 ff ff ff 48 81 ec 60 01 00 00 48 89 fb 4c 8b 35"
 #define U1_RESET "55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 28 41 89 fd 48 8b 05"
 #define U1_WRAP "55 48 89 e5 53 48 83 ec 18 48 8b 1d ?? ?? ?? ?? 48 8b 03 48 89 45 f0 c7 45 e8 00 00 00 00 48 8d 75 e8 31 d2 e8"
+/* SetWaterState(water manager, water id, on): the first water unit with that id (the list at +0x18: unit id +0x58,
+ * on +0x14) switched, its draw data made when it comes on (the set-water-state script function). */
+#define SET_WATER "55 48 89 e5 41 57 41 56 41 54 53 48 83 ec 20 41 89 d6 89 f0 4c 8b 25 ?? ?? ?? ?? 49 8b 0c 24 48 89 4d d8 48 8b 5f 18 48 83 c7 18"
+/* The set-water-state script function up to its lea of the water manager (the displacement, per release, is the
+ * check that the manager is where the table says). */
+#define SET_WATER_SCRIPT "55 48 89 e5 53 50 83 ff 02 7c 21 8b 06 83 7e 08 00 0f 95 c1 0f b6 d1 48 8d 3d"
 #define U2_WRAP "55 48 89 e5 53 48 83 ec 18 48 8b 1d ?? ?? ?? ?? 48 8b 03 48 89 45 f0 c7 45 e8 00 00 00 00 48 8d 55 e8 be 01 00 00 00 b9 01 00 00 00 e8"
 #define U2_REDIRECT "55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 28 48 8b 0d ?? ?? ?? ?? 48 8b 01 48 89 45 d0 31"
 static const OldBuild old_builds[]={
-    {"Uncharted 1 EU",0x322300,0,0,0,0,0x31df00,0x14abf0,0xabb148,0x3203e0,0x320f80,0,
-     {{0x322300,FIND_BY_HASH},{0x31df00,U1_TASK_INDEX},{0x14abf0,START_AT},{0x3203e0,U1_RESET},{0x320f80,U1_WRAP}}},
-    {"Uncharted 1 1.02",0x3229c0,0,0,0,0,0x31e5c0,0x14b0b0,0xa7f048,0x320aa0,0x321640,0,
-     {{0x3229c0,FIND_BY_HASH},{0x31e5c0,U1_TASK_INDEX},{0x14b0b0,START_AT},{0x320aa0,U1_RESET},{0x321640,U1_WRAP}}},
-    {"Uncharted 2 EU",0x4362b0,0,0,0x435830,0x43a060,0x435980,0x2a1f90,0xf2e350,0x437830,0x438fb0,1,
+    {"Uncharted 1 EU",0x322300,0,0,0,0,0x31df00,0x14abf0,0xabb148,0x3203e0,0x320f80,0xbe5bb0,0x3385b0,0,
+     {{0x322300,FIND_BY_HASH},{0x31df00,U1_TASK_INDEX},{0x14abf0,START_AT},{0x3203e0,U1_RESET},{0x320f80,U1_WRAP},{0x3385b0,SET_WATER},
+      {0x2f5020,SET_WATER_SCRIPT " 72 0b 8f 00"}}},
+    {"Uncharted 1 1.02",0x3229c0,0,0,0,0,0x31e5c0,0x14b0b0,0xa7f048,0x320aa0,0x321640,0xba9b00,0x338d30,0,
+     {{0x3229c0,FIND_BY_HASH},{0x31e5c0,U1_TASK_INDEX},{0x14b0b0,START_AT},{0x320aa0,U1_RESET},{0x321640,U1_WRAP},{0x338d30,SET_WATER},
+      {0x2f56b0,SET_WATER_SCRIPT " 32 44 8b 00"}}},
+    {"Uncharted 2 EU",0x4362b0,0,0,0x435830,0x43a060,0x435980,0x2a1f90,0xf2e350,0x437830,0x438fb0,0,0,1,
      {{0x4362b0,FIND_BY_HASH},{0x435830,U2_REDIRECT},
       {0x43a060,"55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 28 4c 8b 3d ?? ?? ?? ?? 49 8b 07 48 89 45 d0 48"},
       {0x435980,"55 48 89 e5 41 57 41 56 53 48 81 e4 e0 ff ff ff 48 81 ec 60 01 00 00 48"},{0x2a1f90,START_AT},
       {0x437830,"55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 18 41 89 fd 48 8b 05"},{0x438fb0,U2_WRAP}}},
-    {"Uncharted 2 1.02",0,0x153c000,0x153c03c,0xa58240,0xa5d6e0,0xa583d0,0x5cc7f0,0x1136640,0xa5a270,0xa5bcd0,1,
+    {"Uncharted 2 1.02",0,0x153c000,0x153c03c,0xa58240,0xa5d6e0,0xa583d0,0x5cc7f0,0x1136640,0xa5a270,0xa5bcd0,0,0,1,
      {{0xa58240,U2_REDIRECT},{0xa5d6e0,"55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 28 48 8b 15"},
       {0xa583d0,"55 48 89 e5 41 56 53 48 81 e4 e0 ff ff ff 48 81 ec 60 01 00 00 48 89 fb"},
       {0x5cc7f0,"55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 e4 e0 ff ff ff 48 81 ec 80 01 00 00 41 89 cf 41 89"},
@@ -170,6 +184,29 @@ static int matches(const unsigned char *code, const char *pattern) {
         p+=2;
     }
     return 1;
+}
+
+/* Water units back on before the jump's task starts. A level makes its water units on when it logs in, and the
+ * levels' scripts switch some off (set-water-state); ResetTasks resets the units' other per-play state but not
+ * that. A level that stays loaded across the jump so kept what the play before it switched off: from Uncharted 1
+ * chapter 1 (the dive boat, where temple-0a is loaded as the island in the distance and its three stream units
+ * are off) the chapter 2 stream had no water (no surface, no splashes, fish in the air), and the checkpoint's
+ * restart kept it so. On a real load (Continue, or a jump through other levels) the level logs in again and its
+ * units are on until the new task's scripts say otherwise; this puts the kept levels in that same state. A script
+ * switches the first unit with an id only (the script function's lookup), so the same call puts each back. */
+typedef void (__attribute__((sysv_abi)) *SetWaterState)(void *mgr, int id, int on);
+static void water_units_on(const OldBuild *b, uint64_t image) {
+    if (!b->water_mgr) return;
+    unsigned char *mgr=(unsigned char *)(uintptr_t)(image+b->water_mgr);
+    unsigned char *head=mgr+0x18;
+    int units=0, switched=0;
+    for (unsigned char *u=*(unsigned char **)head; u && u!=head && units<4096; u=*(unsigned char **)u, ++units)
+        if (!u[0x14]) {
+            ((SetWaterState)(uintptr_t)(image+b->set_water))(mgr,*(const int *)(u+0x58),1);
+            if (u[0x14]) ++switched;
+            else printf("Checkpoints: water unit %d stays off (not the first with its id)\n",*(const int *)(u+0x58));
+        }
+    if (switched) printf("Checkpoints: %d of %d water units back on (as a level logs in)\n",switched,units);
 }
 
 typedef void *(__attribute__((sysv_abi)) *TaskByHash)(uint32_t hash);
@@ -192,8 +229,23 @@ static void *walk_task_map(unsigned char *base, const OldBuild *b, uint32_t hash
     return NULL;
 }
 
+/* BB_WATER_TRACE=1 (diagnosis): the water units (id:on) about twice a second, when they changed. */
+static void water_trace(const OldBuild *b, uint64_t image) {
+    static int on=-1, frames;
+    static char last[4096];
+    if (on<0) { const char *e=getenv("BB_WATER_TRACE"); on=e && e[0]=='1'; }
+    if (!on || !b->water_mgr || ++frames%30) return;
+    char text[4096]; size_t n=0; int units=0;
+    unsigned char *head=(unsigned char *)(uintptr_t)(image+b->water_mgr)+0x18;
+    for (unsigned char *u=*(unsigned char **)head; u && u!=head && units<1000 && n<sizeof(text)-40; u=*(unsigned char **)u, ++units)
+        n+=(size_t)snprintf(text+n,sizeof(text)-n,"%d:%d ",*(const int *)(u+0x58),u[0x14]);
+    text[n]=0;
+    if (strcmp(text,last)) { strcpy(last,text); printf("Water: %d units: %s\n",units,text); fflush(stdout); }
+}
+
 static void old_frame(const OldBuild *b, uint64_t image) {
     atomic_store(&hooked,1);
+    water_trace(b,image);
     test_request();
     bbport_saves_test_jump_tick();
     const uint32_t task=atomic_exchange(&requested,0);
@@ -239,6 +291,7 @@ static void old_frame(const OldBuild *b, uint64_t image) {
         const int index=((TaskIndex)(uintptr_t)(image+b->task_index))(t);
         if (((StartAtTaskIndex)(uintptr_t)(image+b->start))(base+b->game_flow,index,1,0)) {
             ((ResetTasks)(uintptr_t)(image+b->reset))(1);
+            water_units_on(b,image);
             ((PlayTaskWrap)(uintptr_t)(image+b->wrap))(t);
         } else {
             printf("Checkpoints: task %08x: the game loads its level first (index %d)\n",task,index);

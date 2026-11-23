@@ -1166,9 +1166,16 @@ static void install_ndgi_hooks(uint64_t image_size) {
  * yields its CPU to a thread that wants one (SwitchToThread: no wait when none does).
  * BB_JOB_YIELD=0: off; BB_TOGGLE_FILE bit 61: off while running. */
 extern uint64_t runtime_disabled_optimizations;
+static int job_yield_on;     /* the idle check yields; 0: the hook is there for the deferred counter free only */
+static int cf_on, cf_want;   /* the deferred counter free (cf_free_deferred): on, wanted (BB_COUNTER_FREE) */
+static int job_idle_hooked;
+static void cf_pass(void);
+static void cf_idle_flush(void);
 static void __attribute__((ms_abi)) job_idle_yield(uint64_t rdi, uint64_t rsi, uint64_t base,
                                                    uint64_t r14) {
     (void)rdi; (void)rsi; (void)base; (void)r14;
+    if (cf_on) { cf_pass(); cf_idle_flush(); }   /* the worker holds no job (or lock) here (the deferred counter free) */
+    if (!job_yield_on) return;
     if (__atomic_load_n(&runtime_disabled_optimizations,__ATOMIC_RELAXED) & (UINT64_C(1)<<61)) return;
 #ifdef _WIN32
     SwitchToThread();
@@ -1193,11 +1200,14 @@ static int kernel_va_shadow_on(void) {
 }
 static void install_job_idle_yield(uint64_t image_size) {
     const char *env=getenv("BB_JOB_YIELD");
-    if (env && env[0]=='0') { printf("Job workers: idle ones do not yield (BB_JOB_YIELD=0)\n"); return; }
-    if (!(env && env[0]=='1') && kernel_va_shadow_on()) {
+    { const char *cf=getenv("BB_COUNTER_FREE"); cf_want=!(cf && cf[0]=='0'); }
+    job_yield_on=1;
+    if (env && env[0]=='0') { printf("Job workers: idle ones do not yield (BB_JOB_YIELD=0)\n"); job_yield_on=0; }
+    else if (!(env && env[0]=='1') && kernel_va_shadow_on()) {
         printf("Job workers: idle ones do not yield (kernel VA shadow on: kernel calls are slow; BB_JOB_YIELD=1 yields)\n");
-        return;
+        job_yield_on=0;
     }
+    if (!job_yield_on && !cf_want) return;
     /* US / EU-Russian 1.02: mov r8,r14; cmp r13d,3; ja; mov rax,[r15]; mov rcx,[rax+r12*8+d32]; rdtsc.
      * EU 1.02 (CUSA02343): the same with other registers: cmp r12d,3; mov rax,[r13]. */
     static const struct { unsigned char head[7]; unsigned char tail[8]; size_t tail_len; } forms[]={
@@ -1218,9 +1228,10 @@ static void install_job_idle_yield(uint64_t image_size) {
         const size_t tl=forms[form].tail_len;
         if (memcmp(c+j,forms[form].tail,tl) || c[j+tl+4]!=0x0f || c[j+tl+5]!=0x31) continue;
         if (!callback_thunk(image+at,sizeof(forms[form].head),(const void *)job_idle_yield)) break;
-        printf("Job workers: the idle check at %#" PRIx64 " yields the CPU\n",at);
+        if (job_yield_on) printf("Job workers: the idle check at %#" PRIx64 " yields the CPU\n",at);
         ++hooked;
     }
+    job_idle_hooked=hooked==1;
     if (!hooked) printf("Job workers: idle check not found\n");
 }
 /* Naughty Dog's FrameBegin (ndlib/render/fg-draw-mgr.cpp) asserts that the frame it recycles,
@@ -2113,6 +2124,8 @@ static void patch_job_sleep(uint64_t image_size) {
  * sticky signal, so a worker on its way to the wait does not miss it) when the release moved a job.
  * BB_JOB_RESUME_WAKE=0: off. BB_JOB_WAKE_STATS=1: every 5 s, releases per second and how many moved a job. */
 static uint64_t job_release_fn, job_manager_global;
+static int job_resume_wake_on, job_layout_ok;
+static int64_t job_release_sites[2]={-1,-1}; /* the release's 2 call sites, before they are re-pointed */
 static int job_wake_stats_on;
 static volatile long job_release_calls, job_release_moved;
 static uint64_t job_resume_count(void) {
@@ -2124,17 +2137,322 @@ static uint64_t job_resume_count(void) {
     for (int q=0;q<8;++q) n+=*(const volatile uint64_t *)(uintptr_t)(queues+(uint64_t)q*0x2078+0x2038);
     return n;
 }
+/* Job counters are freed only when nothing can still lower them (freeze_log9_analysis.md; the cutscene freeze).
+ * The game frees a counter right after the wait it cares about, but not every job that lowers a counter is waited
+ * for: U3's particle setup (0xf6dc50, the gparams+0x11 == 0 path) kicks a dependency link onto block+0x98 that
+ * nothing waits on, and the frame frees its 27 counters (0xeba720) as soon as MainDraw's wait is over. On the PS4
+ * that link has long run by then. Here a job worker can lose its core between taking a job and lowering its counter
+ * (the job system unlocks in between); the link then lowers a freed slot, the counter pool hands the lowest free slot
+ * to the next new counter, and that counter gets one decrement too many: a job list that starts at == 0 sees -1 and
+ * stays parked for good (Log 9: block+0xa0 at -1).
+ * So FreeCounter and the free of WaitForCounterAndFree (their call sites) defer the free while anything names the
+ * counter, all checked under the manager lock +0xd50:
+ * - a job the manager holds: the wait list, the woken lists, the workers' handoff slots, the queued and the parked job
+ *   lists (completion +0x10, wait counters +0x18 / +0x20, a list's start counter +0x20);
+ * - a job a worker has TAKEN: at every take the taken job's completion counter is published in the worker's 'held'
+ *   slot before the game drops the manager lock after the take (cf_take_hook), and cleared in the release right after
+ *   that job's completion (its lock xadd and release, under the same lock) or at the worker's next idle pass;
+ * - a GPU counter signal still pending on it (cf_gpu_table).
+ * A counter nothing names is freed at once; one that something names waits on a list and is freed as soon as nothing
+ * does. The free itself is the game's FreeCounter, run after the manager lock is dropped (or the pool's own steps
+ * inside RunJobs, which holds the pool lock). Same mechanism in the three games, EU and US, 1.00 and 1.02. About every
+ * 10 s one line: frees, frees that waited, most waiting at once, pool use. BB_COUNTER_FREE=0: off. */
+enum { CFL_WORKERS=64 };
+typedef struct { uint64_t counter; } CfEntry;
+static uint64_t cf_free_fn, cf_wait_fn, cf_completion_ret, cf_alloc_fn;
+static long cf_alloc_waits, cf_runjobs_waits;
+static uint64_t cf_pool_alloc_fn;   /* the counter pool's slot allocator (called with manager+0xae0) */
+/* Frees nothing names any more, waiting for the game's FreeCounter (taken under the manager lock, freed after it is
+ * dropped: the manager lock +0xd50 is never held around the pool lock +0xc10) */
+static uint64_t *cf_ready; static size_t cf_ready_n, cf_ready_cap;
+static uintptr_t cf_lock_fn, cf_unlock_fn;
+static uint64_t cf_tls_var;   /* the game's global holding the TLS offset of the current worker's index */
+/* The GPU's counter signals (corelib GpuJobSystemCounterSync): slots {counter +0, op dword +8} 16 bytes apart, labels at
+ * [+0x200], pending bits at +0x208. The GfxEop handler lowers or sets a slot's counter (lock xadd / xchg), calls
+ * CounterChanged, and only then clears the slot and its pending bit, so a pending slot names its counter from the
+ * signal's registration until after its decrement and release. 0: not found (then nothing GPU-side is checked). */
+static uint64_t cf_gpu_table;
+/* Per worker (the game's own worker index), the completion counter of the job it has taken and not yet completed. */
+static volatile uint64_t cf_held[CFL_WORKERS];
+static int64_t cf_done_off;   /* the taken job's completion in the worker loop's frame: 1.02 [rbp+off], 1.00 [rsp+off] */
+/* The game's own worker index of this thread (corelib GetCurrentWorkerThreadIndex: the TLS word v, v^0x8000 when bit
+ * 15 is set, else no worker): -1 when it is none. */
+static int64_t cf_worker_index(void) {
+    uint64_t tcb;
+#ifdef _WIN32
+    tcb=__readgsqword(runtime_thread_tcb_offset());
+#else
+    __asm__ volatile("mov %%fs:0,%0" : "=r"(tcb));
+#endif
+    if (!tcb || !cf_tls_var) return -1;
+    const uint64_t v=*(const volatile uint64_t *)(uintptr_t)(tcb+*(const int64_t *)(uintptr_t)cf_tls_var);
+    return (v&0x8000) ? (int64_t)(v^0x8000) : -1;
+}
+static _Thread_local int cf_widx=-2;   /* -2: not looked up yet */
+static inline int cf_my_index(void) {
+    if (cf_widx==-2) { const int64_t i=cf_worker_index(); cf_widx=i>=0 && i<CFL_WORKERS ? (int)i : -1; }
+    return cf_widx;
+}
+/* Under the manager lock: counters some job or signal still names, waiting to be freed */
+static CfEntry *cf_named; static size_t cf_named_n, cf_named_cap;
+static size_t cf_named_peak;
+static long cf_deferred, cf_freed, cf_named_seen;
+static uint64_t cf_last_drain;
+/* The worker holds no taken job any more: after its job's completion and release (under the manager lock), or at its
+ * idle pass (it took nothing). */
+static void cf_pass(void) {
+    const int i=cf_my_index();
+    if (i>=0) __atomic_store_n(&cf_held[i],0,__ATOMIC_RELEASE);
+}
+static inline int cf_list_refs(uint64_t l, uint64_t c) {
+    const volatile uint64_t *w=(const volatile uint64_t *)(uintptr_t)l;
+    if (w[4]==c) return 1;
+    const uint32_t head=*(const volatile uint32_t *)(uintptr_t)l, left=*(const volatile uint32_t *)(uintptr_t)(l+8);
+    const uint32_t cap=*(const volatile uint32_t *)(uintptr_t)(l+0x18);
+    const uint64_t decls=w[2];
+    if (!decls || !cap || cap>0x10000 || left>cap) return 0;
+    for (uint32_t k=0;k<left;++k) {
+        const volatile uint64_t *d=(const volatile uint64_t *)(uintptr_t)(decls+(uint64_t)((head+k)%cap)*0x40);
+        if (d[2]==c || d[3]==c || d[4]==c) return 1;
+    }
+    return 0;
+}
+/* Under the manager lock: does anything still name the counter? */
+static int cf_referenced(uint64_t m, uint64_t c) {
+    uint64_t workers=*(const volatile uint64_t *)(uintptr_t)(m+0x100);
+    if (workers>CFL_WORKERS) workers=CFL_WORKERS;
+    for (uint64_t w=0;w<workers;++w) if (__atomic_load_n(&cf_held[w],__ATOMIC_ACQUIRE)==c) return 1;   /* a taken job */
+    uint64_t n=*(const volatile uint64_t *)(uintptr_t)(m+0x4ee0);
+    const uint64_t waits=*(const volatile uint64_t *)(uintptr_t)(m+0x4ed8);
+    if (n>0x100) n=0x100;
+    for (uint64_t i=0;i<n && waits;++i) {
+        const volatile uint64_t *e=(const volatile uint64_t *)(uintptr_t)(waits+i*0x80);
+        if (e[2]==c || e[3]==c || e[4]==c) return 1;
+    }
+    const uint64_t q=*(const volatile uint64_t *)(uintptr_t)(m+0x4f10);
+    for (int p=0;p<8 && q;++p) {
+        const uint64_t base=q+(uint64_t)p*0x2078;
+        uint64_t woken=*(const volatile uint64_t *)(uintptr_t)(base+0x2038);
+        const uint64_t entries=*(const volatile uint64_t *)(uintptr_t)(base+0x2070);
+        if (woken>0x100) woken=0x100;
+        for (uint64_t i=0;i<woken && entries;++i) {
+            const volatile uint64_t *e=(const volatile uint64_t *)(uintptr_t)(entries+i*0x80);
+            if (e[2]==c || e[3]==c || e[4]==c) return 1;
+        }
+        uint64_t lists=*(const volatile uint64_t *)(uintptr_t)base;
+        if (lists>0x400) lists=0x400;
+        for (uint64_t i=0;i<lists;++i) {
+            const uint64_t l=*(const volatile uint64_t *)(uintptr_t)(base+0x38+i*8);
+            if (l && cf_list_refs(l,c)) return 1;
+        }
+    }
+    for (uint64_t w=0;w<workers;++w) {
+        const volatile uint64_t *e=(const volatile uint64_t *)(uintptr_t)(m+0x780+w*0x80);
+        if (e[2]==c || e[3]==c || e[4]==c) return 1;
+    }
+    if (cf_gpu_table) {   /* a GPU signal still pending on it */
+        const uint64_t pend=*(const volatile uint64_t *)(uintptr_t)(cf_gpu_table+0x208);
+        for (uint64_t b=pend;b;b&=b-1) {
+            const int k=__builtin_ctzll(b);
+            if (*(const volatile uint64_t *)(uintptr_t)(cf_gpu_table+(uint64_t)k*16)==c) return 1;
+        }
+    }
+    uint64_t node=*(const volatile uint64_t *)(uintptr_t)(m+0x4ed0);
+    for (int k=0;k<1024 && node;++k) {
+        const volatile uint64_t *nd=(const volatile uint64_t *)(uintptr_t)node;
+        if (nd[0] && cf_list_refs(nd[0],c)) return 1;
+        node=nd[1];
+    }
+    return 0;
+}
+static void cf_ready_push(uint64_t c) {
+    if (cf_ready_n==cf_ready_cap) {
+        const size_t cap=cf_ready_cap ? cf_ready_cap*2 : 1024;
+        uint64_t *r=realloc(cf_ready,cap*sizeof(*r));
+        if (!r) { fprintf(stderr,"STOP: job counter free: out of memory\n"); runtime_quit(21); }
+        cf_ready=r; cf_ready_cap=cap;
+    }
+    cf_ready[cf_ready_n++]=c;
+}
+static void cf_name(uint64_t c) {
+    if (cf_named_n==cf_named_cap) {
+        const size_t cap=cf_named_cap ? cf_named_cap*2 : 64;
+        CfEntry *r=realloc(cf_named,cap*sizeof(*r));
+        if (!r) { fprintf(stderr,"STOP: job counter free: out of memory\n"); runtime_quit(21); }
+        cf_named=r; cf_named_cap=cap;
+    }
+    cf_named[cf_named_n++].counter=c;
+    if (cf_named_n>cf_named_peak) cf_named_peak=cf_named_n;
+}
+/* Under the manager lock: about every 10 s one line. */
+static void cf_stats(uint64_t m) {
+    const uint64_t now=__builtin_ia32_rdtsc();
+    static uint64_t printed;
+    if (!printed) printed=now;
+    if (now-printed>UINT64_C(40000000000)) {   /* about every 10 s */
+        printed=now;
+        /* the pool (manager+0xae0): bitmap +0x20 (32 words), size +0x128 */
+        const uint64_t pool=m+0xae0;
+        uint64_t used=0;
+        for (int k=0;k<32;++k) used+=(uint64_t)__builtin_popcountll(*(const volatile uint64_t *)(uintptr_t)(pool+0x20+k*8));
+        int held=0; for (int k=0;k<CFL_WORKERS;++k) held+=cf_held[k]!=0;
+        printf("Job counters: %ld frees, %ld done, %ld waited (a job or signal still named the counter), waiting now %zu, most "
+               "waiting at once %zu, taken jobs holding a counter now %d; pool %llu of %u in use\n",cf_deferred,cf_freed,cf_named_seen,cf_named_n,cf_named_peak,held,
+               (unsigned long long)used,*(const volatile uint32_t *)(uintptr_t)(pool+0x128));
+        fflush(stdout);
+    }
+}
+
+/* Under the manager lock: the waiting counters nothing names any more go to the ready list. */
+static void cf_drain(uint64_t m) {
+    for (size_t i=0;i<cf_named_n;) {
+        if (cf_referenced(m,cf_named[i].counter)) { ++i; continue; }
+        cf_ready_push(cf_named[i].counter);
+        cf_named[i]=cf_named[--cf_named_n];
+    }
+    cf_last_drain=__builtin_ia32_rdtsc();
+}
+/* The ready frees are taken under the manager lock and freed after it is dropped: by the game's FreeCounter (it takes
+ * the pool lock +0xc10 itself), or, from inside RunJobs (which holds +0xc10 already), by the pool's own steps: the slot
+ * spin lock (pool+0), the name/line/user/TSC words cleared, the slot's bit cleared, the spin lock dropped. The caller
+ * holds no manager lock. */
+static void cf_flush(uint64_t m, int pool_locked) {
+    typedef int32_t (ABI *MutexOp)(uint64_t);
+    typedef void (ABI *Free)(uint64_t);
+    uint64_t batch[256];
+    for (;;) {
+        size_t n=0;
+        ((MutexOp)cf_lock_fn)(m+0xd50);
+        while (cf_ready_n && n<256) batch[n++]=cf_ready[--cf_ready_n];
+        ((MutexOp)cf_unlock_fn)(m+0xd50);
+        if (!n) return;
+        for (size_t k=0;k<n;++k) {
+            if (!pool_locked) { ((Free)(uintptr_t)cf_free_fn)(batch[k]); continue; }
+            const uint64_t pool=m+0xae0, c=batch[k];
+            volatile uint64_t *spin=(volatile uint64_t *)(uintptr_t)pool;
+            for (;;) { uint64_t z=0; if (__atomic_compare_exchange_n(spin,&z,~UINT64_C(0),0,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED)) break; __builtin_ia32_pause(); }
+            const uint64_t idx=(c-*(const volatile uint64_t *)(uintptr_t)(pool+0x120))>>7;
+            volatile uint64_t *w=(volatile uint64_t *)(uintptr_t)c;
+            w[3]=0; w[2]=0; w[1]=0; w[0]=0;
+            *(volatile uint64_t *)(uintptr_t)(pool+0x20+(idx>>6)*8)&=~(UINT64_C(1)<<(idx&63));
+            __atomic_store_n(spin,0,__ATOMIC_RELEASE);
+        }
+        __atomic_add_fetch(&cf_freed,(long)n,__ATOMIC_RELAXED);
+    }
+}
+static __attribute__((noinline)) void cf_free_deferred(uint64_t c) {
+    typedef int32_t (ABI *MutexOp)(uint64_t);
+    typedef void (ABI *Free)(uint64_t);
+    const uint64_t m=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
+    if (!c || !m) { ((Free)(uintptr_t)cf_free_fn)(c); return; }
+    ((MutexOp)cf_lock_fn)(m+0xd50);
+    ++cf_deferred;
+    if (cf_referenced(m,c)) { cf_name(c); ++cf_named_seen; }   /* something still names it: it waits */
+    else cf_ready_push(c);
+    if (cf_named_n && __builtin_ia32_rdtsc()-cf_last_drain>100000) cf_drain(m);   /* at most about every 25 us */
+    cf_stats(m);
+    ((MutexOp)cf_unlock_fn)(m+0xd50);
+    cf_flush(m,0);
+}
+static ABI void cf_free_hook(uint64_t c) { cf_free_deferred(c); }
+/* The take: the worker has taken a job under the manager lock and is about to drop it (this hook is the call of the
+ * unlock right after the take). The job's completion counter is already in the worker loop's frame (the slot the
+ * completion reads later); it is published before the unlock, so a free (which checks under the same lock) sees the
+ * job either still in the manager's lists or here. frame: 1.02 rbp, 1.00 the caller's rsp. */
+static ABI int32_t cf_take_hook(uint64_t mutex, uint64_t frame) {
+    typedef int32_t (ABI *MutexOp)(uint64_t);
+    const int i=cf_my_index();
+    if (i>=0) __atomic_store_n(&cf_held[i],*(const volatile uint64_t *)(uintptr_t)(frame+(uint64_t)cf_done_off),__ATOMIC_RELEASE);
+    return ((MutexOp)cf_unlock_fn)(mutex);
+}
+/* AllocateCounter (its call sites): the game's own; when the pool has no free slot while frees still wait, the slots
+ * are on their way back: drain and try again until a slot comes or nothing waits any more (then the game's own
+ * result, as without the deferral). What a free waits for is a taken job's completion, a queued job or a GPU signal:
+ * none of them needs the allocating thread. */
+static ABI uint64_t cf_alloc_hook(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
+    typedef uint64_t (ABI *Alloc)(uint64_t, uint64_t, uint64_t, uint64_t);
+    typedef int32_t (ABI *MutexOp)(uint64_t);
+    uint64_t r=((Alloc)(uintptr_t)cf_alloc_fn)(a,b,c,d);
+    if (r) return r;
+    const uint64_t m=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
+    for (int first=1;m;first=0) {
+        ((MutexOp)cf_lock_fn)(m+0xd50);
+        cf_drain(m);
+        const int waiting=cf_named_n || cf_ready_n;
+        ((MutexOp)cf_unlock_fn)(m+0xd50);
+        cf_flush(m,0);
+        r=((Alloc)(uintptr_t)cf_alloc_fn)(a,b,c,d);
+        if (r || !waiting) break;
+        if (first) { const long n=__atomic_add_fetch(&cf_alloc_waits,1,__ATOMIC_RELAXED);
+                     if (n<=20) { printf("Job counters: the pool is full while frees wait: waiting for them (%ld)\n",n); fflush(stdout); } }
+#ifdef _WIN32
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
+    }
+    return r;
+}
+/* RunJobs' own counter allocation (it inlines AllocateCounter: +0xc10 locked, the pool's slot allocator called): on
+ * no free slot while frees wait, the same wait, with the frees done by the pool's own steps (this thread holds +0xc10;
+ * it takes the manager lock only around the drain, and nothing takes +0xc10 inside the manager lock). Otherwise the
+ * game's own result (RunJobs then gives its jobs no completion counter, as without the deferral). */
+static ABI uint64_t cf_runjobs_pool_hook(uint64_t pool) {
+    typedef uint64_t (ABI *Alloc)(uint64_t);
+    typedef int32_t (ABI *MutexOp)(uint64_t);
+    uint64_t r=((Alloc)(uintptr_t)cf_pool_alloc_fn)(pool);
+    if (r) return r;
+    const uint64_t m=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
+    for (int first=1;m;first=0) {
+        ((MutexOp)cf_lock_fn)(m+0xd50);
+        cf_drain(m);
+        const int waiting=cf_named_n || cf_ready_n;
+        ((MutexOp)cf_unlock_fn)(m+0xd50);
+        cf_flush(m,1);
+        r=((Alloc)(uintptr_t)cf_pool_alloc_fn)(pool);
+        if (r || !waiting) break;
+        if (first) { const long n=__atomic_add_fetch(&cf_runjobs_waits,1,__ATOMIC_RELAXED);
+                     if (n<=20) { printf("Job counters: RunJobs found the pool full while frees wait: waiting for them (%ld)\n",n); fflush(stdout); } }
+#ifdef _WIN32
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
+    }
+    return r;
+}
+/* WaitForCounterAndFree: the game's wait, then the deferred free (the game's own body frees at once). The wait may
+ * suspend this job and resume it on another worker: nothing thread-local is kept across it. */
+static ABI void cf_wait_free_hook(uint64_t c, uint64_t a, uint64_t b) {
+    typedef void (ABI *Wait)(uint64_t, uint64_t, uint64_t);
+    ((Wait)(uintptr_t)cf_wait_fn)(c,a,b);
+    cf_free_deferred(c);
+}
+static void cf_idle_flush(void) {
+    if (!__atomic_load_n(&cf_ready_n,__ATOMIC_RELAXED)) return;
+    const uint64_t m=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
+    if (m) cf_flush(m,0);
+}
 static ABI uint64_t job_release_wake(uint64_t a, uint64_t b, uint64_t c, uint64_t d) {
     typedef uint64_t (ABI *Release)(uint64_t, uint64_t, uint64_t, uint64_t);
     typedef int32_t (ABI *Broadcast)(uint64_t);
-    const uint64_t before=job_resume_count();
+    const int wake=job_resume_wake_on;
+    const uint64_t before=wake ? job_resume_count() : 0;
     const uint64_t r=((Release)(uintptr_t)job_release_fn)(a,b,c,d);
-    const uint64_t after=job_resume_count();
-    if (job_wake_stats_on) __atomic_add_fetch(&job_release_calls,1,__ATOMIC_RELAXED);
-    if (after>before) {
-        if (job_wake_stats_on) __atomic_add_fetch(&job_release_moved,1,__ATOMIC_RELAXED);
-        const uint64_t manager=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
-        ((Broadcast)(uintptr_t)job_wake_stub)(manager+0x80);
+    if (wake) {
+        const uint64_t after=job_resume_count();
+        if (job_wake_stats_on) __atomic_add_fetch(&job_release_calls,1,__ATOMIC_RELAXED);
+        if (after>before) {
+            if (job_wake_stats_on) __atomic_add_fetch(&job_release_moved,1,__ATOMIC_RELAXED);
+            const uint64_t manager=*(const volatile uint64_t *)(uintptr_t)job_manager_global;
+            ((Broadcast)(uintptr_t)job_wake_stub)(manager+0x80);
+        }
+    }
+    if (cf_on) {
+        /* the release after a job's completion (the worker's lock xadd): this worker holds no job now */
+        if ((uint64_t)(uintptr_t)__builtin_return_address(0)==cf_completion_ret) cf_pass();
+        if (cf_named_n && __builtin_ia32_rdtsc()-cf_last_drain>100000)
+            cf_drain(*(const volatile uint64_t *)(uintptr_t)job_manager_global);
     }
     return r;
 }
@@ -2153,11 +2471,15 @@ static void *job_wake_stats(void *unused) {
     }
     return NULL;
 }
+/* The release's call sites go through job_release_wake when the workers sleep (the wake) or for the deferred
+ * counter free (its job-free point and its frees; with spinning workers too). */
 static void install_job_resume_wake(uint64_t image_size) {
     const char *env=getenv("BB_JOB_RESUME_WAKE");
-    if (env && env[0]=='0') { printf("Job workers: resumed jobs do not wake them (BB_JOB_RESUME_WAKE=0)\n"); return; }
-    if (!job_sleep_installed) return; /* spinning workers find the jobs themselves */
-    if (!job_wake_stub) { printf("Job workers: resumed jobs do not wake them (no sticky wake-ups)\n"); return; }
+    int wake=1;
+    if (env && env[0]=='0') { printf("Job workers: resumed jobs do not wake them (BB_JOB_RESUME_WAKE=0)\n"); wake=0; }
+    else if (!job_sleep_installed) wake=0; /* spinning workers find the jobs themselves */
+    else if (!job_wake_stub) { printf("Job workers: resumed jobs do not wake them (no sticky wake-ups)\n"); wake=0; }
+    if (!wake && !cf_want) return;
     /* the release: push rbp..rbx; sub rsp,0x38; mov [rbp-0x50],rsi; mov [rbp-0x40],rdi; mov rax,[stack guard];
      * (U3: lea rax,[stack guard]); mov rax,[rax]; mov [rbp-0x30],rax; then within 0x30 bytes lea reg,[manager]; and
      * cmp qword [rbx+0x4ee0],0. Found in U1 1.02 0x45c950 / 1.00 0x366690, U2 0xb3bbf0 / 0x4ebbc0, U3 0xda5c20 / 0x49e1e0. */
@@ -2194,6 +2516,22 @@ static void install_job_resume_wake(uint64_t image_size) {
         }
     }
     if (!job_manager_global) { printf("Job workers: resumed jobs do not wake them (manager not found)\n"); return; }
+    /* The layout the deferred counter free reads: the release's 0x560 bytes name each of these offsets exactly as
+     * often as in all twelve executables (U1-U3, 1.00 and 1.02, EU and US): +0x4ed0 (the parked-list chain) 2,
+     * +0x4ed8 (the wait list) 2, +0x4ee0 (its count) 5, +0x4f10 (the queues) 1, +0x4eb0 and +0x4eb8 (the chain's node
+     * pool) 2 each, +0x2038 (a priority's woken count) 2, +0x2070 (its woken entries) 1, +0x2040 (its per-worker
+     * woken counts) 1, +0x100 (the worker count) 3. */
+    static const struct { uint32_t disp; int count; } fp[]={
+        {0x4ed0,2},{0x4ed8,2},{0x4ee0,5},{0x4f10,1},{0x4eb0,2},{0x4eb8,2},{0x2038,2},{0x2070,1},{0x2040,1},{0x100,3}};
+    job_layout_ok=(uint64_t)fn+0x560<=image_size;
+    for (size_t k=0;k<sizeof(fp)/sizeof(*fp) && job_layout_ok;++k) {
+        int n=0;
+        for (uint64_t i=(uint64_t)fn;i+4<=(uint64_t)fn+0x560;++i) if (!memcmp(image+i,&fp[k].disp,4)) ++n;
+        if (n!=fp[k].count) {
+            job_layout_ok=0;
+            printf("Job manager: the release names +%#x %d times (%d expected): layout not confirmed\n",fp[k].disp,n,fp[k].count);
+        }
+    }
     job_release_fn=(uint64_t)(uintptr_t)(image+fn);
     unsigned char *t=near_image_memory(64*16);
     if (!t) { printf("Job workers: resumed jobs do not wake them (no thunk memory)\n"); return; }
@@ -2214,10 +2552,254 @@ static void install_job_resume_wake(uint64_t image_size) {
         const int32_t to=(int32_t)((int64_t)(uintptr_t)t-(int64_t)(uintptr_t)(image+at[n]+5));
         memcpy(image+at[n]+1,&to,4);
     }
-    printf("Job workers: resumed jobs wake them (release %#" PRIx64 ", %d call sites; BB_JOB_RESUME_WAKE=0: off)\n",
-           (uint64_t)fn,sites);
+    job_release_sites[0]=(int64_t)at[0]; job_release_sites[1]=(int64_t)at[1];
+    job_resume_wake_on=wake;
+    if (wake) printf("Job workers: resumed jobs wake them (release %#" PRIx64 ", %d call sites; BB_JOB_RESUME_WAKE=0: off)\n",
+                     (uint64_t)fn,sites);
     const char *stats=getenv("BB_JOB_WAKE_STATS");
     if (stats && stats[0]=='1') { job_wake_stats_on=1; pthread_t th; pthread_create(&th,NULL,job_wake_stats,NULL); }
+}
+/* The deferred counter free (cf_free_deferred): FreeCounter and WaitForCounterAndFree are the two functions that clear
+ * a counter's bit in the pool bitmap (and [reg+rcx*8+0xb00], rax) within 0x200 bytes of their push rbp; mov rbp,rsp.
+ * WaitForCounterAndFree first calls the counter wait, then FreeCounter's own first call (the pool lock); FreeCounter's
+ * first call is that lock. Their call sites (call or jmp rel32) are re-pointed. The completion's release site (the one
+ * with the completion's lock xadd [reg+0x20] just before) marks a worker's job-free point. */
+/* mov edi,0xd50 within the first n bytes (1.00's manager lock helpers) */
+static int cf_has(const unsigned char *p, size_t n) {
+    for (size_t i=0;i+5<=n;++i) if (p[i]==0xbf && p[i+1]==0x50 && p[i+2]==0x0d && !p[i+3] && !p[i+4]) return 1;
+    return 0;
+}
+static void install_counter_free(uint64_t image_size) {
+    if (!cf_want) { printf("Job counters: freed at once (BB_COUNTER_FREE=0)\n"); return; }
+    if (!job_layout_ok || job_release_sites[0]<0) { printf("Job counters: freed at once (job manager layout not confirmed)\n"); return; }
+    if (!job_idle_hooked) { printf("Job counters: freed at once (the workers' idle check is not hooked)\n"); return; }
+    int64_t fns[4]; int nf=0;
+    for (uint64_t i=0x200;i+8<=image_size;++i) {
+        const unsigned char *c=image+i;
+        if (c[0]!=0x21 || c[1]!=0x84 || c[3]!=0x00 || c[4]!=0x0b || c[5]!=0x00 || c[6]!=0x00) continue;
+        int64_t p=-1;
+        for (int64_t k=(int64_t)i-4;k>(int64_t)i-0x200;--k) if (!memcmp(image+k,"\x55\x48\x89\xe5",4)) { p=k; break; }
+        if (p<0) continue;
+        int dup=0; for (int n=0;n<nf;++n) dup|=fns[n]==p;
+        if (!dup && nf<4) fns[nf++]=p;
+    }
+    if (nf!=2) { printf("Job counters: freed at once (%d pool free functions, 2 expected)\n",nf); return; }
+    /* the first two rel32 calls of each (within 0x40 bytes of the start) */
+    int64_t first[2][2]={{-1,-1},{-1,-1}};
+    for (int f=0;f<2;++f) {
+        int got=0;
+        for (int64_t k=fns[f]+4;k<fns[f]+0x60 && got<2;++k) {
+            if (image[k]!=0xe8) continue;
+            int32_t d; memcpy(&d,image+k+1,4);
+            const int64_t t=k+5+d;
+            if (t<0 || (uint64_t)t>=image_size) continue;
+            first[f][got++]=t;
+        }
+    }
+    int wf=-1;
+    if (first[0][1]>=0 && first[0][1]==first[1][0]) wf=0;
+    else if (first[1][1]>=0 && first[1][1]==first[0][0]) wf=1;
+    if (wf<0) { printf("Job counters: freed at once (FreeCounter / WaitForCounterAndFree not told apart)\n"); return; }
+    const int64_t fr=fns[1-wf], wfr=fns[wf], wait=first[wf][0];
+    /* The worker index's TLS offset global: before the completion, 1.02 has it inline (fs:[0] + [rip+X]), 1.00 calls
+     * GetCurrentWorkerThreadIndex (push rbp; mov rbp,rsp; the same) after the job; fs:[0] is gs:[slot] once
+     * patch_tcb_loads ran. Exactly one such global, or the free stays the game's. */
+    uint64_t tls=0; int tls_n=0;
+    {
+        int64_t at_comp=-1;
+        for (int n=0;n<2 && at_comp<0;++n) {
+            const int64_t s=job_release_sites[n];
+            for (int b=0x0c;b<=0x30 && s-b>=0;++b) {
+                const unsigned char *x=image+s-b;
+                if (x[0]==0xf0 && x[1]==0x48 && x[2]==0x0f && x[3]==0xc1 && x[5]==0x20) { at_comp=s; break; }
+            }
+        }
+        for (int64_t k=at_comp-0x900;at_comp>0x900 && k<at_comp;++k) {
+            const unsigned char *c=image+k;
+            int64_t at=-1;
+            if ((c[0]==0x64 || c[0]==0x65) && c[1]==0x48 && c[2]==0x8b && c[3]==0x04 && c[4]==0x25 && c[9]==0x48 && c[10]==0x03 && c[11]==0x05) at=k;
+            else if (c[0]==0xe8) {
+                int32_t d; memcpy(&d,c+1,4);
+                const int64_t t=k+5+d;
+                if (t>0 && (uint64_t)t+0x20<image_size && !memcmp(image+t,"\x55\x48\x89\xe5",4)) {
+                    const unsigned char *f=image+t+4;
+                    if ((f[0]==0x64 || f[0]==0x65) && f[1]==0x48 && f[2]==0x8b && f[3]==0x04 && f[4]==0x25 && f[9]==0x48 && f[10]==0x03 && f[11]==0x05) at=t+4;
+                }
+            }
+            if (at<0) continue;
+            int32_t d; memcpy(&d,image+at+12,4);
+            const uint64_t x=(uint64_t)(uintptr_t)(image+at+16+d);
+            if (x!=tls) { tls=x; ++tls_n; }
+        }
+    }
+    if (tls_n!=1) { printf("Job counters: freed at once (%d worker index globals found, 1 expected)\n",tls_n); return; }
+    cf_tls_var=tls;
+    /* the GPU signal table: the slot processing (mov reg,[base+0x208] ... mov reg,[base+0x200] ... two lock xadd and an
+     * xchg within 0x140 bytes), and next to it (within 0x2000 bytes) the one function naming +0x2e0 (the table's spin
+     * lock) whose callers enter it with lea rdi,[table]: all of them the same table, or none is used */
+    {
+        uint64_t table=0; int bad=0, proc=0;
+        for (uint64_t i=0;i+0x140<=image_size && !bad;++i) {
+            const unsigned char *x=image+i;
+            if (!((x[0]&0xf0)==0x40 && x[1]==0x8b && (x[2]&0xc0)==0x80 && x[3]==0x08 && x[4]==0x02 && !x[5] && !x[6])) continue;
+            int has200=0, xadds=0, xchg=0;
+            for (int k=0;k+7<0x140;++k) {
+                const unsigned char *y=x+k;
+                if ((y[0]&0xf0)==0x40 && y[1]==0x8b && (y[2]&0xc0)==0x80 && y[3]==0x00 && y[4]==0x02 && !y[5] && !y[6]) has200=1;
+                if (y[0]==0xf0 && y[1]==0x48 && y[2]==0x0f && y[3]==0xc1) ++xadds;
+                if (y[0]==0x48 && y[1]==0x87) xchg=1;
+            }
+            if (!has200 || xadds<2 || !xchg) continue;
+            ++proc;
+            for (uint64_t a=i>0x2000 ? i-0x2000 : 0;a+4<=i+0x2000 && a+4<=image_size;++a) {
+                if (memcmp(image+a,"\xe0\x02\x00\x00",4)) continue;
+                int64_t f=-1;
+                for (int64_t k=(int64_t)a-1;k>(int64_t)a-0x200 && k>=0;--k) if (!memcmp(image+k,"\x55\x48\x89\xe5",4)) { f=k; break; }
+                if (f<0) continue;
+                for (uint64_t s=5;s+5<=image_size;++s) {
+                    if (image[s]!=0xe8) continue;
+                    int32_t d; memcpy(&d,image+s+1,4);
+                    if ((int64_t)s+5+d!=f) continue;
+                    for (int64_t k=(int64_t)s-1;k>(int64_t)s-0x40 && k>=0;--k)
+                        if (image[k]==0x48 && image[k+1]==0x8d && image[k+2]==0x3d) {
+                            int32_t e; memcpy(&e,image+k+3,4);
+                            const uint64_t t=(uint64_t)(uintptr_t)(image+k+7+e);
+                            if (table && t!=table) bad=1;
+                            table=t; break;
+                        }
+                }
+            }
+        }
+        if (proc==1 && !bad && table) cf_gpu_table=table;
+        printf("Job counters: GPU counter signals %s (table %#llx, %d slot processing sites)\n",cf_gpu_table ? "checked" : "NOT checked",
+               (unsigned long long)(table ? table-(uint64_t)(uintptr_t)image : 0),proc);
+    }
+    /* the completion's release site */
+    int64_t comp=-1;
+    for (int n=0;n<2;++n) {
+        const int64_t s=job_release_sites[n];
+        for (int b=0x0c;b<=0x30 && s-b>=0;++b) {
+            const unsigned char *x=image+s-b;
+            if (x[0]==0xf0 && x[1]==0x48 && x[2]==0x0f && x[3]==0xc1 && x[5]==0x20) { comp=s; break; }
+        }
+    }
+    if (comp<0) { printf("Job counters: freed at once (the completion's release site not found)\n"); return; }
+    /* The manager lock +0xd50 the completion takes for its lock xadd and the release, and drops after it: 1.02 calls
+     * scePthreadMutexLock / Unlock on manager+0xd50 (add rdi,0xd50; call), 1.00 calls ND's own helpers that name
+     * +0xd50 themselves (mov edi,0xd50; add rdi,[manager]). The free calls the same two functions with manager+0xd50
+     * (the 1.00 helpers ignore it). */
+    int64_t xa=-1;
+    for (int b=0x0c;b<=0x30 && xa<0;++b) {
+        const unsigned char *x=image+comp-b;
+        if (x[0]==0xf0 && x[1]==0x48 && x[2]==0x0f && x[3]==0xc1 && x[5]==0x20) xa=comp-b;
+    }
+    int64_t lock_t=-1, unlock_t=-1;
+    for (int64_t k=xa-5;k>xa-0xd0 && k>=7 && lock_t<0;--k) {
+        if (image[k]!=0xe8) continue;
+        int32_t d; memcpy(&d,image+k+1,4);
+        const int64_t t=k+5+d;
+        if (t<0 || (uint64_t)t+0x20>image_size) continue;
+        if (!memcmp(image+k-7,"\x48\x81\xc7\x50\x0d\x00\x00",7) || cf_has(image+t,0x20)) lock_t=t;
+    }
+    for (int64_t k=comp+5;k<comp+0x20 && unlock_t<0;++k) {
+        if (image[k]!=0xe8) continue;
+        int32_t d; memcpy(&d,image+k+1,4);
+        const int64_t t=k+5+d;
+        if (t<0 || (uint64_t)t+0x20>image_size) continue;
+        if (!memcmp(image+k-7,"\x48\x81\xc7\x50\x0d\x00\x00",7) || cf_has(image+t,0x20)) unlock_t=t;
+    }
+    if (lock_t<0 || unlock_t<0) { printf("Job counters: freed at once (the manager lock +0xd50 not found at the completion)\n"); return; }
+    /* The taken job's completion in the worker loop's frame, as the completion reads it right before its lock xadd:
+     * 1.02 mov rdi,[rbp+d8] (rbp frame), 1.00 mov rbx,[rsp+d32] (rsp frame). The take: the one call of that same unlock
+     * in the worker loop that is followed (within 0x70 bytes) by the test of the taken job's entry (test r15,r15 or
+     * test r14,r14; je): the unlock right after the take. */
+    int frame_rbp=-1;
+    if (xa>=4 && image[xa-4]==0x48 && image[xa-3]==0x8b && image[xa-2]==0x7d) { frame_rbp=1; cf_done_off=(int8_t)image[xa-1]; }
+    else for (int64_t k=xa-0x40;k<xa;++k)
+        if (k>=0 && !memcmp(image+k,"\x48\x8b\x9c\x24",4)) { int32_t d; memcpy(&d,image+k+4,4); frame_rbp=0; cf_done_off=d; }
+    int64_t take=-1; int ntake=0;
+    for (int64_t k=comp-0x2000;k<comp;++k) {
+        if (k<0 || image[k]!=0xe8) continue;
+        int32_t d; memcpy(&d,image+k+1,4);
+        if (k+5+d!=unlock_t) continue;
+        for (int j=0;j<0x70;++j) {
+            const unsigned char *x=image+k+5+j;
+            if (x[0]==0x4d && x[1]==0x85 && (x[2]==0xff || x[2]==0xf6) && x[3]==0x0f && x[4]==0x84) { take=k; ++ntake; break; }
+        }
+    }
+    if (frame_rbp<0 || ntake!=1) { printf("Job counters: freed at once (the take: %d sites, frame %s)\n",ntake,frame_rbp<0 ? "not found" : "found"); return; }
+    unsigned char *t=near_image_memory(96);
+    if (!t) { printf("Job counters: freed at once (no thunk memory)\n"); return; }
+    {   /* the take: pass the frame (1.02 rbp, 1.00 the caller's rsp) and go to cf_take_hook */
+        unsigned char *k=t+64; int n=0;
+        if (frame_rbp) { k[n++]=0x48; k[n++]=0x89; k[n++]=0xee; }                       /* mov rsi, rbp */
+        else { k[n++]=0x48; k[n++]=0x8d; k[n++]=0x74; k[n++]=0x24; k[n++]=0x08; }        /* lea rsi, [rsp+8] */
+        const uintptr_t h=(uintptr_t)cf_take_hook;
+        k[n++]=0x48; k[n++]=0xb8; memcpy(k+n,&h,8); n+=8; k[n++]=0xff; k[n++]=0xe0;      /* movabs rax, cf_take_hook; jmp rax */
+    }
+    const uintptr_t h1=(uintptr_t)cf_free_hook, h2=(uintptr_t)cf_wait_free_hook, h3=(uintptr_t)cf_alloc_hook, h4=(uintptr_t)cf_runjobs_pool_hook;
+    /* AllocateCounter: the function that stamps a new counter's +0x18 with rdtsc (rdtsc; shl rdx,0x20; or rdx,rax;
+     * mov [rbx+0x18],rdx), within 0x180 bytes of its push rbp; mov rbp,rsp; exactly one. */
+    int64_t al=-1; int nal=0;
+    for (uint64_t i=0x180;i+13<=image_size;++i) {
+        if (memcmp(image+i,"\x0f\x31\x48\xc1\xe2\x20\x48\x09\xc2\x48\x89\x53\x18",13)) continue;
+        int64_t p=-1;
+        for (int64_t k=(int64_t)i-4;k>(int64_t)i-0x180;--k) if (!memcmp(image+k,"\x55\x48\x89\xe5",4)) { p=k; break; }
+        if (p>=0 && p!=al) { al=p; ++nal; }
+    }
+    if (nal!=1) { printf("Job counters: freed at once (%d counter allocators found, 1 expected)\n",nal); return; }
+    cf_alloc_fn=(uint64_t)(uintptr_t)(image+al);
+    /* the pool's slot allocator: the calls right after add rdi,0xae0 (manager+0xae0 = the pool), all to one function:
+     * one inside AllocateCounter, the others RunJobs' inlined allocation (re-pointed) */
+    int64_t pool_fn=-1, rj_site[4]; int nrj=0, npool=0, pool_bad=0;
+    for (uint64_t i=7;i+5<=image_size;++i) {
+        if (image[i]!=0xe8 || memcmp(image+i-7,"\x48\x81\xc7\xe0\x0a\x00\x00",7)) continue;
+        int32_t d; memcpy(&d,image+i+1,4);
+        const int64_t t=(int64_t)i+5+d;
+        if (pool_fn>=0 && t!=pool_fn) { pool_bad=1; break; }
+        pool_fn=t; ++npool;
+        if ((int64_t)i>=al && (int64_t)i<al+0x180) continue;
+        if (nrj<4) rj_site[nrj]=(int64_t)i;
+        ++nrj;
+    }
+    if (pool_bad || pool_fn<0 || npool!=nrj+1 || nrj<1 || nrj>4) {
+        printf("Job counters: freed at once (pool allocator calls: %d, RunJobs sites %d%s)\n",npool,nrj,pool_bad ? ", several targets" : "");
+        return;
+    }
+    cf_pool_alloc_fn=(uint64_t)(uintptr_t)(image+pool_fn);
+    t[0]=0x48; t[1]=0xb8; memcpy(t+2,&h1,8); t[10]=0xff; t[11]=0xe0;          /* movabs rax, cf_free_hook; jmp rax */
+    t[16]=0x48; t[17]=0xb8; memcpy(t+18,&h2,8); t[26]=0xff; t[27]=0xe0;       /* movabs rax, cf_wait_free_hook; jmp rax */
+    t[32]=0x48; t[33]=0xb8; memcpy(t+34,&h3,8); t[42]=0xff; t[43]=0xe0;       /* movabs rax, cf_alloc_hook; jmp rax */
+    t[48]=0x48; t[49]=0xb8; memcpy(t+50,&h4,8); t[58]=0xff; t[59]=0xe0;       /* movabs rax, cf_runjobs_pool_hook; jmp rax */
+    for (int k=0;k<nrj;++k) {
+        const int32_t nd=(int32_t)((int64_t)(uintptr_t)(t+48)-(int64_t)(uintptr_t)(image+rj_site[k]+5));
+        memcpy(image+rj_site[k]+1,&nd,4);
+    }
+    cf_free_fn=(uint64_t)(uintptr_t)(image+fr);
+    cf_wait_fn=(uint64_t)(uintptr_t)(image+wait);
+    cf_completion_ret=(uint64_t)(uintptr_t)(image+comp+5);
+    cf_lock_fn=(uintptr_t)(image+lock_t); cf_unlock_fn=(uintptr_t)(image+unlock_t);
+    int sites[3]={0,0,0};
+    for (uint64_t i=0;i+5<=image_size;++i) {
+        if (image[i]!=0xe8 && image[i]!=0xe9) continue;
+        int32_t d; memcpy(&d,image+i+1,4);
+        const int64_t to=(int64_t)i+5+d;
+        int which=to==fr ? 0 : to==wfr ? 1 : to==al ? 2 : -1;
+        if (which<0) continue;
+        const int32_t nd=(int32_t)((int64_t)(uintptr_t)(t+16*which)-(int64_t)(uintptr_t)(image+i+5));
+        memcpy(image+i+1,&nd,4);
+        ++sites[which];
+    }
+    {
+        const int32_t nd=(int32_t)((int64_t)(uintptr_t)(t+64)-(int64_t)(uintptr_t)(image+take+5));
+        memcpy(image+take+1,&nd,4);
+    }
+    cf_on=1;
+    printf("Job counters: the take at %#" PRIx64 " publishes the taken job's completion (frame %s%+lld)\n",(uint64_t)take,
+           frame_rbp ? "rbp" : "rsp",(long long)cf_done_off);
+    printf("Job counters: freed once no job can still lower them (FreeCounter %#" PRIx64 " %d sites, WaitForCounterAndFree %#"
+           PRIx64 " %d sites, AllocateCounter %#" PRIx64 " %d sites, RunJobs' pool allocation %d sites, completion release %#" PRIx64
+           "; BB_COUNTER_FREE=0: off)\n",(uint64_t)fr,sites[0],(uint64_t)wfr,sites[1],(uint64_t)al,sites[2],nrj,(uint64_t)comp);
 }
 /* The job system's counter wait (corelib job scheduling: until [counter+0x20] == or <= a target):
  * a job worker that finds the counter not there yet suspends its job (SuspendJob) and retries when
@@ -2920,6 +3502,7 @@ int main(int argc, char **argv) {
         patch_u1_frame_time(image_end);
         patch_job_sleep(image_end);
         install_job_resume_wake(image_end);
+        install_counter_free(image_end);
         patch_job_lock_wait(image_end);
         patch_null_binding_handler(image_end);
         patch_dev_menu_camera(image_end);
@@ -3030,3 +3613,4 @@ int main(int argc, char **argv) {
 #endif
     fail("entry unexpectedly returned");
 }
+

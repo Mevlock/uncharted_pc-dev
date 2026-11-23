@@ -272,6 +272,9 @@ public:
     [[nodiscard]] bool VertexCheck() const {
         return hw_stage == HwStage::Vertex && Shader::VertexCheck::address != 0;
     }
+    [[nodiscard]] bool LoopCount() const {
+        return Shader::LoopCount::address != 0;
+    }
     [[nodiscard]] bool FragmentMotion() const {
         return sw_stage == SwStage::Fragment && runtime_info.hw.fs.motion_vectors;
     }

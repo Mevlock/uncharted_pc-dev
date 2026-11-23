@@ -207,6 +207,12 @@ public:
         return current;
     }
 
+    /// GPU thread: the current submission's command words as the game submitted them (empty when
+    /// the workers have none for it).
+    [[nodiscard]] std::span<const u32> CurrentCommands() const {
+        return current ? std::span<const u32>{current->commands} : std::span<const u32>{};
+    }
+
 private:
     u32 current_draw = 0;
     u64 used = 0, unused = 0;

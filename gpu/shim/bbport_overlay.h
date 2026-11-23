@@ -48,6 +48,9 @@ void SetShaderPreparation(int phase, u32 done, u32 total);
 /// The scan of the game files for shaders (a release without a shipped index), MiB read of MiB; total 0: not
 /// scanning. Its own state: the pipeline warm-up may run beside it and sets the preparation phase meanwhile.
 void SetScanProgress(u32 done_mib, u32 total_mib);
+/// The move of an earlier build's shader cache files into one file (the first start after the update), files moved of
+/// files; total 0: not moving. Shown like the scan.
+void SetMoveProgress(u32 done_files, u32 total_files);
 
 /// Any thread: the full-screen preparation page instead of the corner box. While it is on, the presenter shows blank
 /// frames with the page and holds the game's flips (the game waits at its first frames until preparation is done).

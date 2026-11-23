@@ -28,6 +28,9 @@ inline bool WaveLdsBarriers() {
 namespace Shader::Optimization {
 
 void SsaRewritePass(IR::Program& program);
+/// bbport (exact variant key): replaces a vertex shader's v1/v2 placeholders (instance ID over a
+/// step rate) after the SSA rewrite and records which of them the program reads.
+void LowerInstanceStepRatePass(IR::Program& program, const RuntimeInfo& runtime_info);
 void SsaRepairPass(IR::Program& program);
 void PhiSimplificationPass(IR::Program& program);
 void InverseBallotEliminationPass(IR::Program& program);

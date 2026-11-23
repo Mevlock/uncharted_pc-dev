@@ -38,6 +38,7 @@
 #include "video_core/amdgpu/regs.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "bbport_focus_fix.h"
 extern "C" void runtime_freeze_guest(int on); // runtime.h: the game's threads wait (1) or go on (0)
@@ -46,8 +47,8 @@ extern "C" void runtime_freeze_guest(int on); // runtime.h: the game's threads w
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 23u; // bbport: ReadConst windows sized by their offsets' range (srt.h); shadPS4 #5447, #5427, #5364, #5365 (CFG fallthrough), #5429 (LDS barriers); page table watch bit; WorkgroupSplit (Umar-Qayyum-dev)
-static constexpr u32 ShaderMetaVersion = 16u; // bbport: BufferSpecialization::coherent; Info::cs_split_eligible
+static constexpr u32 ShaderBinaryVersion = 24u; // bbport: wave64 ballot slot pair; PKRTZ saturate; RCP_LEGACY sign; SAMPLE_CD derivatives; object-motion atomic stores; ReadConst windows sized by their offsets' range (srt.h); shadPS4 #5447, #5427, #5364, #5365 (CFG fallthrough), #5429 (LDS barriers); page table watch bit; WorkgroupSplit (Umar-Qayyum-dev)
+static constexpr u32 ShaderMetaVersion = 17u; // bbport: exact variant key (StageSpecialization::DropUnreadState: coherent only on written buffers, step rates only when read); Info::vs_step_rate_inputs/reads; Info and PersistentSrtInfo written field by field (deterministic metas)
 static constexpr u32 PipelineKeyVersion = 8u; // bbport: GraphicsPipelineKey::split_sets; Info layout (cs_split_eligible)
 // bbport: translator options that change the shaders it produces are part of the stored version,
 // so switching one retranslates the shaders instead of reusing the cached ones.
@@ -177,12 +178,48 @@ bool WriteDeferredPreparedMarker() {
         deferred_marker.clear();
         return false;
     }
-    std::FILE* f = std::fopen(deferred_marker.string().c_str(), "w");
+    // bbport (pack cache): the marker names the pack it was written against, after everything written to it is on
+    // the disk (flushed); written beside and renamed into place. A game that only reads the cache (another one
+    // writes it) leaves no marker.
+    auto& db = Storage::DataBase::Instance();
+    const std::string pack_id = db.PackIdText();
+    // The same marker is there already (an ordinary start of a prepared cache): nothing to write and no flush (what
+    // this start added is not what the marker counts on; if a power cut takes it, the next start builds it again).
+    const std::string content =
+        deferred_stamp + "\npack " + pack_id + "\n" + Storage::DataBase::MarkerIdentity + "\n";
+    if (!pack_id.empty()) {
+        std::ifstream existing{deferred_marker, std::ios::binary};
+        const std::string have{std::istreambuf_iterator<char>(existing), {}};
+        if (have == content) {
+            deferred_marker.clear();
+            deferred_marker_written = true;
+            return true;
+        }
+    }
+    if (!db.CanSave() || pack_id.empty() || !db.Sync()) {
+        if (deferred_marker_announce) {
+            std::printf("Preparation: the shader cache could not be written to the disk: no prepared marker\n");
+        }
+        deferred_marker.clear();
+        return false;
+    }
+    auto tmp = deferred_marker;
+    tmp += ".tmp";
+    std::FILE* f = std::fopen(tmp.string().c_str(), "wb");
     if (!f) {
         return false;
     }
-    std::fprintf(f, "%s\n", deferred_stamp.c_str());
-    const bool closed = std::fclose(f) == 0;
+    std::fputs(content.c_str(), f);
+    bool closed = std::fflush(f) == 0;
+    closed = std::fclose(f) == 0 && closed;
+    std::error_code ec;
+    if (closed) {
+        std::filesystem::rename(tmp, deferred_marker, ec);
+    }
+    if (!closed || ec) {
+        std::filesystem::remove(tmp, ec);
+        closed = false;
+    }
     deferred_marker.clear();
     deferred_marker_written = closed;
     return closed;
@@ -316,7 +353,9 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     }
 
     spec.Deserialize(ar);
-    info.Deserialize(ar);
+    if (meta_version < 17 ? !info.DeserializeRaw(ar) : !info.Deserialize(ar)) {
+        return false;
+    }
     u32 has_inputs{};
     if (meta_version >= 14) {
         meta.Read(has_inputs);
@@ -916,6 +955,14 @@ static void SaveShaderLocations(const std::filesystem::path& path, const ShaderL
 static std::mutex g_shader_types_mutex;
 static std::unordered_map<u64, u32> g_shader_types;
 
+/// The binary info type of a hardware stage (99: none of the three).
+static u32 ShaderTypeOf(Shader::HwStage stage) {
+    return stage == Shader::HwStage::Fragment ? 0
+           : stage == Shader::HwStage::Vertex ? 1
+           : stage == Shader::HwStage::Compute ? 4
+                                               : 99;
+}
+
 static std::optional<std::vector<u32>> ReadShaderCodeAt(std::FILE* f, u64 at, u64 hash, u32 length,
                                                        std::vector<u32>* registers = nullptr) {
     if (at < 8 || length < 8 || length >= (1u << 22)) {
@@ -1071,10 +1118,16 @@ static ShaderLocations ScanShaderLocations(const std::filesystem::path& app0, u6
 }
 
 /// The code of the given shaders, from their saved locations; a scan of the game's files finds (and saves) the
-/// locations when one is missing or no longer right.
+/// locations when one is missing or no longer right. wanted_types (binary info type per hash, ShaderTypeOf): the
+/// shader read for a hash must be of that type; when the first copy found is another one, the copies under other top
+/// folders are read in turn. Two different shaders can share a hash: U2's pixel shader and U3's vertex shader
+/// 000000008e11813d (EU and US, 1.00 and 1.02); the first found was U2's, so U3's listed vertex variant was never
+/// built. (A scan notes one copy per top folder, so two shaders of one hash under the same top folder are still
+/// one location.)
 static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(
     const std::set<u64>& wanted, u64* files_scanned,
-    std::unordered_map<u64, std::vector<u32>>* registers = nullptr) {
+    std::unordered_map<u64, std::vector<u32>>* registers = nullptr,
+    const std::unordered_map<u64, u32>* wanted_types = nullptr) {
     std::unordered_map<u64, std::vector<u32>> found;
     const char* app0_env = std::getenv("BB_APP0_DIR");
     if (!app0_env || wanted.empty()) {
@@ -1114,6 +1167,45 @@ static std::unordered_map<u64, std::vector<u32>> ReadGameShaderCode(
                 }
             }
             std::fclose(f);
+        }
+        if (!wanted_types) {
+            return;
+        }
+        // A hash whose shader read is not of the wanted type: its copies, in turn, until one is.
+        for (const auto& [hash, loc] : locations.copies) {
+            const auto type = wanted_types->find(hash);
+            if (type == wanted_types->end() || !wanted.contains(hash)) {
+                continue;
+            }
+            {
+                std::scoped_lock lk{g_shader_types_mutex};
+                const auto read = g_shader_types.find(hash);
+                if (found.contains(hash) && read != g_shader_types.end() && read->second == type->second) {
+                    continue;
+                }
+            }
+            std::FILE* f = _wfopen((app0 / locations.files[loc.file]).c_str(), L"rb");
+            if (!f) {
+                continue;
+            }
+            std::vector<u32> regs;
+            auto code = ReadShaderCodeAt(f, loc.at, hash, loc.length, registers ? &regs : nullptr);
+            std::fclose(f);
+            bool right;
+            {
+                std::scoped_lock lk{g_shader_types_mutex};
+                right = code && g_shader_types[hash] == type->second;
+            }
+            if (!right) {
+                continue;
+            }
+            if (registers) {
+                (*registers)[hash] = std::move(regs);
+            }
+            found.insert_or_assign(hash, std::move(*code));
+            std::printf("Shader locations: %016llx read from its copy in %s (the first copy found is another "
+                        "stage's shader with the same hash)\n",
+                        static_cast<unsigned long long>(hash), locations.files[loc.file].c_str());
         }
     };
     // The saved locations come from a scan of every game file: a shader missing there is not in the game files. Only
@@ -1155,6 +1247,7 @@ struct StoredPipeline {
     bool parsed = false;
     bool compute = false;
     bool renumbered = false; ///< a shipped list's key rewritten to this cache's variant numbers
+    bool built = false;      ///< preloaded (the variant ship's pass over every key skips it)
     GraphicsPipelineKey gkey{};
     GraphicsPipeline::SerializationSupport gsdata{};
     ComputePipelineKey ckey{};
@@ -1226,7 +1319,7 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
         u32 version{}, binary_version{};
         r.Read(version);
         r.Read(binary_version);
-        // 16 (Info::cs_split_eligible, in former padding) reads like 15.
+        // 16 (Info::cs_split_eligible, in former padding) reads like 15; from 17 Info is written field by field.
         if (version < 13 || version > Serialization::ShaderMetaVersion) {
             return;
         }
@@ -1238,7 +1331,14 @@ static void DumpSpecs(Storage::DataBase& db, const char* path) {
         Shader::StageSpecialization spec;
         spec.Deserialize(ar);
         Shader::Info info;
-        info.Deserialize(ar);
+        if (version < 17) {
+            info.DeserializeRaw(ar);
+        } else {
+            info.Deserialize(ar);
+        }
+        // The exact variant key (DropUnreadState) on what earlier versions stored: their Info has no step rate
+        // record, so there only what the code alone leaves out is dropped.
+        spec.DropUnreadState(info);
         u32 reads = 0;
         if (version >= 14) {
             u32 has_inputs{};
@@ -1461,11 +1561,7 @@ vk::ShaderModule PipelineCache::BuildListedVariant(const ListedVariant& v, std::
     {
         std::scoped_lock lk{g_shader_types_mutex};
         const auto it = g_shader_types.find(v.hash);
-        const u32 want = draw.hw_stage == Shader::HwStage::Fragment ? 0
-                         : draw.hw_stage == Shader::HwStage::Vertex ? 1
-                         : draw.hw_stage == Shader::HwStage::Compute ? 4
-                                                                     : 99;
-        if (it == g_shader_types.end() || it->second != want) {
+        if (it == g_shader_types.end() || it->second != ShaderTypeOf(draw.hw_stage)) {
             trace_line("wrong-stage");
             info_out.reset();
             return {};
@@ -1641,6 +1737,46 @@ void PipelineCache::WarmUpThread() {
     Common::SetCurrentThreadName("bb:PipelineWarm");
     BbThreads::MakeBelowNormal();
     auto& db = Storage::DataBase::Instance();
+    // The driver's cache data is saved after the preload when the driver compiled any pipeline in it meanwhile (the end).
+    const u64 driver_cache_misses_at_start = PipelineBinaries::DriverCacheMisses();
+    // bbport (pack cache): the first start after the update moves an earlier build's folder cache (one file per blob)
+    // into the pack, before anything reads the cache or its prepared markers (the move ties them to the pack). On a PC
+    // where each file is slow to open (an antivirus) that takes as long as that build's starts did, once: it shows on
+    // the preparation page (files moved, time left) and the launcher's bar, as the scan of the game files does.
+    // Before the preload's clock starts (t0): its phase times leave the move out.
+    {
+        const char* prepare_only_env = std::getenv("BB_PREPARE_ONLY");
+        const bool page = db.FolderCacheToMove() > 0 && !(prepare_only_env && prepare_only_env[0] == '1');
+        if (page) {
+            BbOverlay::SetPreparationScreen(true);
+        }
+        // What this build stores: the marker's version words (as prepared_stamp ends), a meta's two version fields,
+        // a key's version field, the profile.
+        Storage::DataBase::CacheVersions versions;
+        versions.marker_words = "cache " + std::to_string(Serialization::ShaderBinaryVersion) + "." +
+                                std::to_string(Serialization::ShaderMetaVersion) + "." +
+                                std::to_string(Serialization::PipelineKeyVersion);
+        versions.current = [this](Storage::BlobType type, const std::vector<u8>& data) {
+            u32 head[2]{};
+            std::memcpy(head, data.data(), std::min(data.size(), sizeof(head)));
+            switch (type) {
+            case Storage::BlobType::ShaderMeta:
+                return data.size() >= 8 && head[0] == Serialization::ShaderMetaVersion &&
+                       head[1] == Serialization::TranslatedBinaryVersion();
+            case Storage::BlobType::PipelineKey:
+                return data.size() >= 4 && head[0] == Serialization::PipelineKeyVersion;
+            case Storage::BlobType::ShaderProfile:
+                return data.size() == sizeof(profile) && std::memcmp(data.data(), &profile, sizeof(profile)) == 0;
+            default:
+                return true;
+            }
+        };
+        db.MoveFolderCache(versions, [](u32 done, u32 total) { BbOverlay::SetMoveProgress(done, total); });
+        if (page) {
+            BbOverlay::SetPreparationScreen(false);
+        }
+    }
+
     const auto t0 = std::chrono::steady_clock::now();
     const auto elapsed_ms = [&] {
         return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
@@ -1657,13 +1793,19 @@ void PipelineCache::WarmUpThread() {
     if (ship_list) {
         std::error_code ec;
         const std::filesystem::path list_path{ship_list};
-        prepared_marker = db.Directory() / ("prepared_" + list_path.stem().string());
+        // bbport (pack cache): this build's own marker file (other builds' "prepared_<list>" are left alone).
+        prepared_marker = db.MarkerPath(list_path.stem().string());
         prepared_stamp = std::to_string(std::filesystem::file_size(list_path, ec));
         // The jitter in the vertex shaders (non-NVIDIA, runtime_info.h ClipJitter) changes every vertex pipeline:
         // a cache prepared without it is prepared again once.
         if (Shader::ClipJitter::enabled) {
             prepared_stamp += " clip-jitter " + std::to_string(Shader::ClipJitter::Version);
         }
+        // A new shader cache version makes every stored shader or pipeline key unusable: a cache prepared with
+        // another version is prepared again once, on the page, instead of behind the game.
+        prepared_stamp += " cache " + std::to_string(Serialization::ShaderBinaryVersion) + "." +
+                          std::to_string(Serialization::ShaderMetaVersion) + "." +
+                          std::to_string(Serialization::PipelineKeyVersion);
     }
     // BB_PREPARE_ONLY=1 (the launcher's Prepare shaders button): no window and no game, the progress goes to the
     // launcher (PrepareShadersWithoutWindow); preparation runs at full speed as on the page.
@@ -1681,9 +1823,15 @@ void PipelineCache::WarmUpThread() {
         if (!ship_list) {
             return false;
         }
+        // bbport (pack cache): the marker counts only for the pack it was written against (its second line, "pack
+        // <id>"): a cleared pack, or one that lost records to damage, has a new id, so it is prepared again. Its third
+        // line is this port's identity.
         std::ifstream marker{prepared_marker};
-        std::string stamp;
-        return !std::getline(marker, stamp) || stamp != prepared_stamp;
+        std::string stamp, pack_line, identity;
+        const std::string pack_id = db.PackIdText();
+        return !std::getline(marker, stamp) || stamp != prepared_stamp || !std::getline(marker, pack_line) ||
+               pack_id.empty() || pack_line != "pack " + pack_id || !std::getline(marker, identity) ||
+               identity != Storage::DataBase::MarkerIdentity;
     }();
     const bool full_preparation = prep_screen || prepare_only;
     struct PrepScreenOff {
@@ -1764,9 +1912,6 @@ void PipelineCache::WarmUpThread() {
     if (const char* env = std::getenv("BB_WARM_THREADS")) { // 1 = the old serial load, for timing
         threads = std::clamp<u32>(static_cast<u32>(std::atoi(env)), 1, 64);
     }
-    if (EmulatorSettings.IsPipelineCacheArchived()) {
-        threads = 1; // the zip reader is not thread-safe
-    }
     const auto device = instance.GetDevice();
 
     // 1. The stored pipeline keys.
@@ -1789,8 +1934,7 @@ void PipelineCache::WarmUpThread() {
         const bool v6 = version == 6 && (std::getenv("BB_VARIANT_SHIP") || std::getenv("BB_KEY_DUMP"));
         if (version != Serialization::PipelineKeyVersion && !v6) {
             // A key of an older cache layout can never load again: drop it.
-            std::error_code ec;
-            std::filesystem::remove(db.Directory() / (names[i] + ".key"), ec);
+            db.Remove(Storage::BlobType::PipelineKey, names[i]);
             return;
         }
         u32 is_compute{};
@@ -2221,12 +2365,14 @@ void PipelineCache::WarmUpThread() {
             }
         }
         std::set<u64> wanted;
+        std::unordered_map<u64, u32> wanted_types; // a hash's first listed stage
         for (const auto& v : listed) {
             wanted.insert(v.hash);
+            wanted_types.try_emplace(v.hash, ShaderTypeOf(v.spec.runtime_info.hw_stage));
         }
         u64 scanned = 0;
         std::unordered_map<u64, std::vector<u32>> registers;
-        const auto code = ReadGameShaderCode(wanted, &scanned, &registers);
+        const auto code = ReadGameShaderCode(wanted, &scanned, &registers, &wanted_types);
         std::atomic<u32> same{0}, differ{0}, no_reference{0}, no_code{0}, failed{0};
         std::mutex shown_mutex;
         u32 shown = 0;
@@ -2251,15 +2397,19 @@ void PipelineCache::WarmUpThread() {
             }
             const auto& draw = v.spec.runtime_info;
             const u64 sum = BinaryChecksum(spv);
-            // BB_VARIANT_LIST_SUMS=<file>: each built line's binary checksum (offline scoring of predictions).
+            // BB_VARIANT_LIST_SUMS=<file>: each built line's binary checksum (offline scoring of predictions), then the
+            // line of the specialization the game computes for it, without perm= and ck=: lines of one shader with the
+            // same specialization must have the same binary (the exact variant key's twin check).
             static std::FILE* sums = [] {
                 const char* path = std::getenv("BB_VARIANT_LIST_SUMS");
                 return path ? std::fopen(path, "w") : nullptr;
             }();
             if (sums) {
+                const std::string built_line = ListLineBody(VariantLine(v.hash, v.perm, 0, built_spec));
                 std::scoped_lock lk{shown_mutex};
-                std::fprintf(sums, "%016llx %u %zu %016llx\n", (unsigned long long)v.hash, u32(v.spec.runtime_info.hw_stage),
-                             v.perm, (unsigned long long)sum);
+                std::fprintf(sums, "%016llx %u %zu %016llx\t%s\n", (unsigned long long)v.hash,
+                             u32(v.spec.runtime_info.hw_stage), v.perm, (unsigned long long)sum,
+                             built_line.c_str());
                 std::fflush(sums);
             }
             const auto ref = stored_checksums.find(v.hash);
@@ -2388,6 +2538,11 @@ void PipelineCache::WarmUpThread() {
         if (i >= names.size() && !entry.compute && defer_list_keys.load(std::memory_order_relaxed)) {
             return;
         }
+        // bbport: the variant ship's pass goes over every key again (the cache's keys naming a listed variant are
+        // built then); one the stored phase preloaded was counted "built by the game first" there.
+        if (entry.built) {
+            return;
+        }
         if (entry.compute) {
             const auto it = by_hash.find(entry.ckey.value);
             if (it == by_hash.end() || !it->second->ready) {
@@ -2417,6 +2572,7 @@ void PipelineCache::WarmUpThread() {
             std::unique_lock lock{pipelines_mutex};
             const bool added = compute_pipelines.try_emplace(entry.ckey, std::move(pipeline)).second;
             num_pipelines += added;
+            entry.built = added;
             lock.unlock();
             if (added && entry.renumbered) {
                 RegisterPipelineData(entry.ckey, entry.csdata);
@@ -2526,6 +2682,7 @@ void PipelineCache::WarmUpThread() {
             std::unique_lock lock{pipelines_mutex};
             added = graphics_pipelines.try_emplace(entry.gkey, std::move(pipeline)).second;
             num_pipelines += added;
+            entry.built = added;
         }
         // A list key in this cache's numbers is saved as the cache's own: the next launch loads the variants it names
         // (the cache loads the variants its keys name) and needs no rebuild.
@@ -2537,6 +2694,40 @@ void PipelineCache::WarmUpThread() {
     // The hold below lasts until the listed variants are built too (step 5b), so no shader work is left behind the game.
     bool held = false, held_page = false;
     std::chrono::steady_clock::time_point held_since{};
+    // bbport: one page judge for the whole hold: the stored phase (the cache's own keys and the compute keys) and the
+    // variant ship's (the list's graphics keys, which wait for it). Each key counts once, in the phase that builds it;
+    // the projection is the time per key so far times the keys left in both. A start whose keys are mostly the list's
+    // (Uncharted 3 on AMD: ~9,500 of ~12,000 built in the ship phase) froze ~11 s without the page: the stored phase
+    // counted the waiting list keys as done and projected under 3 s.
+    struct HoldJudge {
+        bool on = false; ///< the game is held and the page is allowed
+        std::chrono::steady_clock::time_point start{};
+        std::atomic<u32> done{0};
+        std::atomic<bool> raised{false};
+    } judge;
+    const auto judge_counted = [&](size_t i, bool ship_phase) {
+        const bool list_key = i >= names.size() && !stored[i].compute;
+        return ship_phase ? list_key : !(ship_active && list_key);
+    };
+    const auto judge_note = [&](size_t i, bool ship_phase) {
+        if (!judge.on || !judge_counted(i, ship_phase)) {
+            return;
+        }
+        const u32 done = judge.done.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (judge.raised.load(std::memory_order_relaxed) || done % 64 != 0 || done >= stored.size()) {
+            return;
+        }
+        const double ms =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - judge.start).count();
+        const double left_ms = ms / done * double(stored.size() - done);
+        if (ms > 1000.0 && left_ms > 3000.0 && !judge.raised.exchange(true)) {
+            std::printf("Preparation: the graphics driver compiles the shaders again (%u of %zu pipelines in %.0f ms, "
+                        "about %.0f s left%s): the page shows\n",
+                        done, stored.size(), ms, left_ms / 1000.0, ship_phase ? ", in the listed variants' phase" : "");
+            BbOverlay::SetPreparationRebuild(true);
+            BbOverlay::SetPreparationScreen(true);
+        }
+    };
     // bbport: a large cache (a prepared list) shows the same "Preparing pipelines" progress as the list build.
     if (stored.size() >= 500) {
         // A later launch (no page) builds these behind the game. With the graphics driver's own cache warm that takes
@@ -2568,30 +2759,19 @@ void PipelineCache::WarmUpThread() {
             runtime_freeze_guest(1);
         }
         const auto hold_start = std::chrono::steady_clock::now();
-        std::atomic<bool> page_raised{false};
+        judge.on = hold && page_allowed;
+        judge.start = hold_start;
         BbOverlay::SetShaderPreparation(2, 0, u32(stored.size()));
         std::atomic<u32> stored_done{0};
         ParallelFor(stored.size(), threads, [&](size_t i) {
             build_stored(i);
             const u32 done = stored_done.fetch_add(1, std::memory_order_relaxed) + 1;
             BbOverlay::SetShaderPreparation(2, done, u32(stored.size()));
-            if (hold && page_allowed && !page_raised.load(std::memory_order_relaxed) && done % 64 == 0) {
-                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                                            hold_start)
-                                      .count();
-                const double left_ms = ms / done * double(stored.size() - done);
-                if (ms > 1000.0 && left_ms > 3000.0 && !page_raised.exchange(true)) {
-                    std::printf("Preparation: the graphics driver compiles the shaders again (%u of %zu pipelines in "
-                                "%.0f ms, about %.0f s left): the page shows\n",
-                                done, stored.size(), ms, left_ms / 1000.0);
-                    BbOverlay::SetPreparationRebuild(true);
-                    BbOverlay::SetPreparationScreen(true);
-                }
-            }
+            judge_note(i, false);
         });
         BbOverlay::SetShaderPreparation(0, 0, 0);
         held = hold;
-        held_page = page_raised.load();
+        held_page = judge.raised.load();
         held_since = hold_start;
     } else {
         ParallelFor(stored.size(), threads, build_stored);
@@ -2605,8 +2785,8 @@ void PipelineCache::WarmUpThread() {
         const double t_ship = elapsed_ms();
         BbOverlay::SetShaderPreparation(1, 0, 0);
         // Behind the game: half the warm-up threads (BB_SHIP_THREADS), so play keeps its share of the CPU; all of
-        // them while the full-screen page holds the game.
-        u32 ship_threads = full_preparation ? threads : std::max<u32>(1, threads / 2);
+        // them while the full-screen page or the start-up hold holds the game (it needs no share then).
+        u32 ship_threads = (full_preparation || held) ? threads : std::max<u32>(1, threads / 2);
         if (const char* env = std::getenv("BB_SHIP_THREADS")) {
             ship_threads = std::clamp<u32>(u32(std::atoi(env)), 1, 64);
         }
@@ -2687,12 +2867,14 @@ void PipelineCache::WarmUpThread() {
             std::fclose(f);
         }
         std::set<u64> wanted;
+        std::unordered_map<u64, u32> wanted_types; // a hash's first listed stage
         for (const auto& v : listed) {
             wanted.insert(v.hash);
+            wanted_types.try_emplace(v.hash, ShaderTypeOf(v.spec.runtime_info.hw_stage));
         }
         u64 scanned = 0;
         std::unordered_map<u64, std::vector<u32>> registers;
-        const auto code = ReadGameShaderCode(wanted, &scanned, &registers);
+        const auto code = ReadGameShaderCode(wanted, &scanned, &registers, &wanted_types);
         const double t_read = elapsed_ms();
         std::atomic<u32> built{0}, taken{0}, failed{0}, no_code{0}, progress{0};
         std::mutex shipped_mutex;
@@ -2849,8 +3031,10 @@ void PipelineCache::WarmUpThread() {
             build_stored(i);
             BbOverlay::SetShaderPreparation(2, pipelines_done.fetch_add(1, std::memory_order_relaxed) + 1,
                                             u32(stored.size()));
+            judge_note(i, true);
         });
         BbOverlay::SetShaderPreparation(0, 0, 0);
+        held_page = held && judge.raised.load(); // raised in either phase: released by the page, as in the stored one
         std::printf("Variant ship: %zu listed variants not in the cache; code read in %.0f ms; built %u (%u taken by "
                     "the game first, %u failed, %u without code) in %.0f ms; then %u pipelines in %.0f ms\n",
                     listed.size(), t_read - t_ship, built.load(), taken.load(), failed.load(), no_code.load(),
@@ -2992,6 +3176,7 @@ void PipelineCache::WarmUpThread() {
                 num_pipelines.load(), num_total_pipelines, u32(stages.size()), threads, elapsed_ms(),
                 t_keys, t_shaders - t_keys, t_programs - t_shaders, elapsed_ms() - t_programs,
                 t_ready);
+    PipelineBinaries::PrintStats("preload");
     // bbport: preparation is done: the game's frames may go out; a variant list's first launch leaves the
     // "prepared" marker, so later launches load in the background with the corner box only.
     // bbport: a full preparation in play (the page) also saves what it prepared before the game goes on: the ~13,000
@@ -3150,9 +3335,14 @@ void PipelineCache::WarmUpThread() {
         std::printf("Pipeline cache: %u shader binaries did not match their meta: removed, "
                     "translated again when used\n", n);
     }
-    // The driver's cache gets the entries this preload had to compile.
-    if (driver_cache_loaded_size != DriverCacheSize()) {
+    // The driver's cache gets the entries this preload had to compile: saved when the driver compiled any pipeline in
+    // it meanwhile (its creation feedback: not a hit). Its data's size was the signal before: AMD's never changes
+    // (~820 KiB whatever it holds), and an unchanged size says nothing about the content on any driver.
+    if (const u64 misses = PipelineBinaries::DriverCacheMisses() - driver_cache_misses_at_start; misses != 0) {
         driver_cache_dirty.fetch_add(1);
+        std::printf("Pipeline cache: the driver compiled %llu pipelines in its cache since the start: its data is "
+                    "saved\n",
+                    static_cast<unsigned long long>(misses));
     }
 }
 
@@ -3163,10 +3353,89 @@ void PipelineCache::Sync() {
 
 namespace Shader {
 
+// bbport: InfoPersistent field by field. Written as raw memory (sizeof(InfoPersistent)) it carried the unused
+// capacity of the resource lists and the padding of every element and field: uninitialised memory, so two
+// preparations by the same build wrote different metas for the same translation (12,927 of 12,929 in one test),
+// and a save of a meta the cache already held never matched. `io` reads or writes the bytes of one field.
+// A new InfoPersistent field has to be added here (the size checks below fail until it is).
+static_assert(sizeof(InfoPersistent) == 6368, "InfoPersistent changed: update PersistentFields");
+static_assert(sizeof(BufferResource) == 40 && sizeof(ImageResource) == 64 && sizeof(SamplerResource) == 36 &&
+                  sizeof(FMaskResource) == 2,
+              "a resource changed: update PersistentFields");
+
+template <bool reading, typename Io>
+static bool PersistentFields(InfoPersistent& p, Io&& io) {
+    const auto fetch = [&](auto& f) {
+        io(f.immediates);
+        io(f.offsets);
+        io(f.load_mask);
+    };
+    bool ok = true;
+    const auto list = [&](auto& v, auto&& element) {
+        u32 n = u32(v.size());
+        io(n);
+        if constexpr (reading) {
+            if (n > v.capacity()) {
+                ok = false;
+                return;
+            }
+            v.resize(n);
+        }
+        for (auto& e : v) {
+            element(e);
+        }
+    };
+    list(p.buffers, [&](BufferResource& b) {
+        fetch(b.sharp_fetch);
+        io(b.used_types);
+        io(b.buffer_type);
+        io(b.is_written);
+        io(b.is_formatted);
+        io(b.post_op);
+        io(b.post_op_dw1_mask);
+    });
+    list(p.images, [&](ImageResource& m) {
+        fetch(m.sharp_fetch);
+        io(m.is_depth);
+        io(m.is_atomic);
+        io(m.is_array);
+        io(m.is_written);
+        io(m.is_r128);
+        io(m.needs_native);
+        io(m.constant_mip_index);
+        io(m.mip_fallback_mode);
+        io(m.post_op);
+    });
+    list(p.samplers, [&](SamplerResource& s) {
+        fetch(s.sharp_fetch);
+        io(s.post_op);
+        io(s.post_op_tsharp_dw3_off);
+        io(s.is_depth);
+    });
+    list(p.fmasks, [&](FMaskResource& f) { io(f.sharp_idx); });
+    io(p.ud_mask.mask);
+    io(p.fetch_shader_sgpr_base);
+    io(p.shared_memory_scratch_size);
+    io(p.pgm_hash);
+    io(p.tess_consts_dword_offset);
+    io(p.tess_consts_ptr_base);
+    io(p.hw_stage);
+    io(p.sw_stage);
+    io(p.mrt_mask);
+    io(p.has_fetch_shader);
+    io(p.has_bitwise_xor);
+    io(p.uses_dma);
+    io(p.cs_split_eligible);
+    io(p.vs_step_rate_inputs);
+    io(p.vs_step_rate_reads);
+    return ok;
+}
+
 void Info::Serialize(Serialization::Archive& ar) const {
     Serialization::Writer info{ar};
 
-    info.Write(this, sizeof(InfoPersistent));
+    PersistentFields<false>(const_cast<Info&>(*this),
+                            [&](const auto& field) { info.Write(&field, sizeof(field)); });
     info.Write(flattened_ud_buf);
     srt_info.Serialize(ar);
 }
@@ -3174,10 +3443,24 @@ void Info::Serialize(Serialization::Archive& ar) const {
 bool Info::Deserialize(Serialization::Archive& ar) {
     Serialization::Reader info{ar};
 
-    info.Read(this, sizeof(Shader::InfoPersistent));
+    if (!PersistentFields<true>(*this, [&](auto& field) { info.Read(&field, sizeof(field)); })) {
+        return false;
+    }
     info.Read(flattened_ud_buf);
 
     return srt_info.Deserialize(ar);
+}
+
+bool Info::DeserializeRaw(Serialization::Archive& ar) {
+    Serialization::Reader info{ar};
+
+    info.Read(this, sizeof(Shader::InfoPersistent));
+    // Earlier versions had no step rate record (that byte pair was padding: anything).
+    vs_step_rate_inputs = 0;
+    vs_step_rate_reads = 0;
+    info.Read(flattened_ud_buf);
+
+    return srt_info.DeserializeRaw(ar);
 }
 
 void Gcn::FetchShaderData::Serialize(Serialization::Archive& ar) const {
@@ -3204,7 +3487,9 @@ bool Gcn::FetchShaderData::Deserialize(Serialization::Archive& ar) {
 void PersistentSrtInfo::Serialize(Serialization::Archive& ar) const {
     Serialization::Writer srt{ar};
 
-    srt.Write(this, sizeof(*this));
+    // bbport: not the walker's address (this session's JIT memory) nor the struct's padding.
+    srt.Write(walker_func_size);
+    srt.Write(flattened_bufsize_dw);
     if (walker_func_size) {
         srt.Write(reinterpret_cast<void*>(walker_func), walker_func_size);
     }
@@ -3213,8 +3498,22 @@ void PersistentSrtInfo::Serialize(Serialization::Archive& ar) const {
 bool PersistentSrtInfo::Deserialize(Serialization::Archive& ar) {
     Serialization::Reader srt{ar};
 
-    srt.Read(this, sizeof(*this));
+    srt.Read(walker_func_size);
+    srt.Read(flattened_bufsize_dw);
+    walker_func = nullptr;
+    if (walker_func_size) {
+        walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
+        ar.Advance(walker_func_size);
+    }
 
+    return true;
+}
+
+bool PersistentSrtInfo::DeserializeRaw(Serialization::Archive& ar) {
+    Serialization::Reader srt{ar};
+
+    srt.Read(this, sizeof(*this));
+    walker_func = nullptr;
     if (walker_func_size) {
         walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
         ar.Advance(walker_func_size);

@@ -40,6 +40,7 @@
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_pipeline_binary.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "bbport_exposure_fix.h"
@@ -142,6 +143,78 @@ void SetupVertexCheck(const Instance& instance) {
     std::printf("VS check: on (vertex shaders compiled now, none from the shader cache)\n");
 }
 } // namespace
+
+// bbport diagnosis: BB_LOOP_COUNT=1: shaders record their hash when one invocation takes
+// Shader::LoopCount::Threshold loop back edges; LoopCountPoll names each such shader once.
+namespace {
+u32* loop_count_mapped = nullptr;
+
+void SetupLoopCount(const Instance& instance) {
+    const char* env = std::getenv("BB_LOOP_COUNT");
+    if (!env || env[0] != '1' || Shader::LoopCount::address) {
+        return;
+    }
+    const auto features = instance.GetPhysicalDevice().getFeatures();
+    if (!features.vertexPipelineStoresAndAtomics || !features.fragmentStoresAndAtomics) {
+        std::printf("Loop count: stores from vertex or pixel shaders unsupported, off\n");
+        return;
+    }
+    const VkDeviceSize size = 16 + Shader::LoopCount::Slots * Shader::LoopCount::RecordWords * 4;
+    const VkBufferCreateInfo buffer_ci{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+    };
+    const VmaAllocationCreateInfo alloc_ci{
+        .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                 VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
+        .usage = VMA_MEMORY_USAGE_AUTO,
+        .requiredFlags = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    };
+    VkBuffer buffer{};
+    VmaAllocation allocation{};
+    VmaAllocationInfo info{};
+    if (vmaCreateBuffer(instance.GetAllocator(), &buffer_ci, &alloc_ci, &buffer, &allocation,
+                        &info) != VK_SUCCESS || !info.pMappedData) {
+        std::printf("Loop count: buffer creation failed, off\n");
+        return;
+    }
+    loop_count_mapped = static_cast<u32*>(info.pMappedData);
+    std::memset(loop_count_mapped, 0, size);
+    Shader::LoopCount::address = instance.GetDevice().getBufferAddress({.buffer = buffer});
+    std::printf("Loop count: on (shaders cached apart, '-loops' folder); a shader is named once when one "
+                "invocation takes %u loop back edges\n", Shader::LoopCount::Threshold);
+}
+} // namespace
+
+void LoopCountPoll() {
+    if (!loop_count_mapped) {
+        return;
+    }
+    const u32 count = __atomic_load_n(&loop_count_mapped[0], __ATOMIC_ACQUIRE);
+    if (!count) {
+        return;
+    }
+    __atomic_store_n(&loop_count_mapped[0], 0u, __ATOMIC_RELEASE);
+    static std::map<std::pair<u32, u32>, u64> hits; // (hash, stage) -> invocations so far
+    static u64 total = 0;
+    total += count;
+    std::map<std::pair<u32, u32>, u32> now;
+    for (u32 i = 0; i < std::min(count, Shader::LoopCount::Slots); ++i) {
+        const u32* record = &loop_count_mapped[4 + i * Shader::LoopCount::RecordWords];
+        ++now[{record[0], record[1]}];
+    }
+    static constexpr const char* stages[] = {"pixel", "hull", "domain", "vertex", "geometry", "compute"};
+    for (const auto& [key, n] : now) {
+        if (hits[key]++ == 0) {
+            std::printf("Loop count: %s shader %08x took %u loop back edges in one invocation "
+                        "(%u invocations this flip; %llu in all so far)\n",
+                        key.second < std::size(stages) ? stages[key.second] : "?", key.first,
+                        Shader::LoopCount::Threshold, n, static_cast<unsigned long long>(total));
+        }
+        hits[key] += n - 1;
+    }
+}
 
 void VertexCheckPoll() {
     if (!vertex_check_mapped) {
@@ -476,6 +549,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     SetupVertexCheck(instance);
+    SetupLoopCount(instance);
     sel.regs = &liverpool->regs;
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
@@ -584,7 +658,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     ASSERT_MSG(created.result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
                vk::to_string(created.result));
     pipeline_cache = std::move(created.value);
-    driver_cache_loaded_size = DriverCacheSize();
+    // bbport: the driver's own pipeline binaries in the shader pack (AMD warm start; vk_pipeline_binary.h): the stored
+    // ones are checked against this driver before any pipeline is made.
+    PipelineBinaries::Setup(instance);
     if (!driver_cache_path.empty()) {
         driver_cache_saver = std::jthread([this](std::stop_token stop) { DriverCacheSaver(stop); });
     }
@@ -685,16 +761,6 @@ void PipelineCache::PublishGraphics() {
 std::shared_mutex& PipelineCacheUse() {
     static std::shared_mutex use;
     return use;
-}
-
-size_t PipelineCache::DriverCacheSize() {
-    size_t size = 0;
-    std::unique_lock use{PipelineCacheUse()};
-    if (pipeline_cache && instance.GetDevice().getPipelineCacheData(*pipeline_cache, &size,
-                                                                   nullptr) != vk::Result::eSuccess) {
-        return 0;
-    }
-    return size;
 }
 
 /// Writes the driver's pipeline cache beside the shader blobs (temp file, then rename).
@@ -843,6 +909,10 @@ void PipelineCache::SaveForExit(const std::function<bool(u32 left)>& note) {
 void FlushPipelineCacheForExit(const std::function<bool(u32 left)>& note) {
     if (auto* cache = g_exit_pipeline_cache) {
         cache->SaveForExit(note);
+    }
+    PipelineBinaries::PrintStats("this session");
+    if (Storage::DataBase::Instance().IsOpened()) {
+        Storage::DataBase::Instance().PrintWriteStats();
     }
 }
 
@@ -2149,6 +2219,36 @@ PipelineCache::NewProgram PipelineCache::CreateProgram(HwStage hw_stage, SwStage
     return result;
 }
 
+/// bbport (BB_SPEC_START_LOG=1, diagnosis): a stored permutation taken for a draw although it was translated for
+/// another binding start (its stage's resources numbered from another place in the descriptor set), while the stage
+/// has resource slots. Each permutation and start once, the first 64.
+static void NoteStartReuse(u64 pgm_hash, size_t perm_idx, const Shader::StageSpecialization& found,
+                           const Shader::StageSpecialization& wanted) {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_SPEC_START_LOG");
+        return env && env[0] == '1';
+    }();
+    if (!on || found.start.unified == wanted.start.unified) {
+        return;
+    }
+    const size_t slots = wanted.buffers.size() + wanted.images.size() + wanted.samplers.size();
+    if (slots == 0) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::unordered_set<u64> seen;
+    std::scoped_lock lk{mutex};
+    const u64 id = pgm_hash ^ (u64(perm_idx) << 40) ^ (u64(wanted.start.unified) << 56);
+    if (seen.size() >= 64 || !seen.insert(id).second) {
+        return;
+    }
+    std::printf("Spec start: permutation %zu of %#x (translated for binding start %u) taken for start %u: %zu buffers, "
+                "%zu images, %zu samplers, %zu of their sharps valid (bitset %s)\n",
+                perm_idx, static_cast<unsigned>(pgm_hash), found.start.unified, wanted.start.unified,
+                wanted.buffers.size(), wanted.images.size(), wanted.samplers.size(), wanted.bitset.count(),
+                wanted.bitset.none() ? "empty" : "not empty");
+}
+
 PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage hw_stage,
                                                 SwStage sw_stage,
                                                 const Shader::ShaderParams& params,
@@ -2208,6 +2308,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                     perm_idx = std::distance(program->modules.begin(), it);
                     module = it->module;
                     fetch_shader = it->spec.fetch_shader_data;
+                    NoteStartReuse(params.hash, perm_idx, it->spec, spec);
                 }
             }
             if (!found) {
@@ -2270,6 +2371,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             perm_idx = program->last_used;
             module = it->module;
             fetch_shader = it->spec.fetch_shader_data;
+            NoteStartReuse(params.hash, perm_idx, it->spec, spec);
         }
     }
     if (!found) {
@@ -2282,6 +2384,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                 perm_idx = std::distance(program->modules.begin(), it);
                 module = it->module;
                 fetch_shader = it->spec.fetch_shader_data;
+                NoteStartReuse(params.hash, perm_idx, it->spec, spec);
             }
         }
         if (!found) {
