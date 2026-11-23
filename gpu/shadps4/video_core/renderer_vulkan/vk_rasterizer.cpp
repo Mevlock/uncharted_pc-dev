@@ -50,6 +50,7 @@
 #include <immintrin.h>
 extern "C" unsigned runtime_render_width, runtime_render_height;
 extern "C" int runtime_ultrawide_fill;
+extern "C" int runtime_uncharted_game; // runtime_ultrawide.c: 1, 2, 3 once the game code is patched
 // src/runtime_file.c: movie streams (.bsf) opened so far.
 extern "C" volatile int runtime_movie_opens;
 // src/probe.c patch_movie_start: calls of the movie manager's Start so far.
@@ -4648,6 +4649,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (camera_motion->Enabled() && regs.color_buffers[0] &&
         FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
         scene_started = false;
+        scene_targets->Sweep();
         upscaler->BeforeDisplayPass(regs.color_buffers[0].Address());
         camera_motion->OnDisplayPass(cb_descs[0].first);
         if (upscaler->OnFrameStart()) {
@@ -8517,7 +8519,17 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                                                   vk::AccessFlagBits2::eDepthStencilAttachmentRead |
                                                   vk::AccessFlagBits2::eDepthStencilAttachmentWrite
                                             : vk::AccessFlags2(vk::AccessFlagBits2::eShaderRead);
+                    // FSR night: the sampled depth target's own attachment write is not this sampling's: as a
+                    // write it marked the native image written, so a reduced pass refilled the stand-in it had
+                    // just resolved (a resolve and a refill per pass). A native pass records its depth write in
+                    // BeginRenderingFull. BB_SCENE_DEPTH_SAMPLE=0: as before.
+                    static const bool sample_only = [] {
+                        const char* env = std::getenv("BB_SCENE_DEPTH_SAMPLE");
+                        return !(env && env[0] == '0');
+                    }();
+                    runtime.scene_sample_only = sample_only && depth_target;
                     barrier |= runtime.Transit(&image, new_layout, stage, access, desc.view_info.range);
+                    runtime.scene_sample_only = false;
                 }
             }
             image.usage.storage |= is_storage;
@@ -8865,15 +8877,26 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     // the post (FSR 3.1 / FSR 4 at Quality .. Performance) the game drew the whole scene at the output size and the
     // upscaler's input was a downsample of it (no GPU saving, a filtered image instead of jittered samples: grain and
     // crawling on fine detail, Nate's hair on U3's horse ride). The scene starts at the frame's first depth-writing pass
-    // into an output-size depth (velocity mode). BB_UNCHARTED_REDUCED=0: as before.
-    static const bool uncharted_reduced = [] {
+    // into an output-size depth (velocity mode). BB_UNCHARTED_REDUCED=0: as before; =1: also in U2.
+    // Default: U1 and U3. U2 keeps the old order for now: its forward passes sample the full-size depth between
+    // depth-writing draws, so the stand-in is resolved 16 times a frame (U2 museum, FSR 3.1 Quality 3440, functional
+    // runs: 146 FPS against 167-175 with the old order; U1 and U3 run as before).
+    static const int uncharted_reduced = [] {
         const char* env = std::getenv("BB_UNCHARTED_REDUCED");
-        const bool on = !(env && env[0] == '0');
-        std::printf("Scene resolution: Uncharted's scene drawn at the render size before the post %s "
-                    "(BB_UNCHARTED_REDUCED)\n", on ? "on" : "off");
-        return on;
+        return env && env[0] ? (env[0] == '1' ? 1 : 0) : -1; // -1: by game
     }();
-    if (uncharted_reduced && !scene_started && camera_motion->VelocityMode() && db_desc.first &&
+    const bool reduced_here = uncharted_reduced == 1 || (uncharted_reduced == -1 && runtime_uncharted_game != 2);
+    {
+        static int noted = -2;
+        const int game = runtime_uncharted_game;
+        if (camera_motion->VelocityMode() && noted != game && game != 0) {
+            noted = game;
+            std::printf("Scene resolution: U%d's scene drawn at the render size before the post %s "
+                        "(BB_UNCHARTED_REDUCED%s)\n", game, reduced_here ? "on" : "off",
+                        uncharted_reduced == -1 ? " unset: U1 and U3" : "");
+        }
+    }
+    if (reduced_here && !scene_started && camera_motion->VelocityMode() && db_desc.first &&
         regs.depth_control.depth_write_enable &&
         scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
@@ -8932,13 +8955,12 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
                           !same_size(texture_cache.GetImage(db_desc.first), 0))) {
         reduced = false;
     }
-    // FSR night: a depth attachment this draw also samples (bound as a texture) stays native, as a bound color
-    // target does: with its stand-in attached the native read resolved it and the native transition then
-    // invalidated the stand-in, a resolve and a refill per pass (U3's half-size light passes: 10 of each a frame).
-    // BB_SCENE_BOUND_DEPTH=0: as before.
+    // FSR night (A/B, BB_SCENE_BOUND_DEPTH=1): a depth attachment this draw also samples stays native. Replaced by
+    // BB_SCENE_DEPTH_SAMPLE (the sampling no longer counts as a write): native, such passes alternated with reduced
+    // ones on U2's full-size depth (16 resolves + 14 refills a frame, ~10% slower).
     static const bool bound_depth_native = [] {
         const char* env = std::getenv("BB_SCENE_BOUND_DEPTH");
-        return !(env && env[0] == '0');
+        return env && env[0] == '1';
     }();
     if (bound_depth_native && reduced && db_desc.first && texture_cache.GetImage(db_desc.first).binding.is_bound) {
         reduced = false;
@@ -9122,7 +9144,15 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         }
 
         if (reduced) {
-            const auto target = scene_targets->Attachment(image_id, desc.view_info);
+            // FSR night: a depth stand-in only tested (no depth or stencil writes, no clear) stays as it was: marked
+            // written, the next native read of the depth resolved it again (BB_SCENE_DEPTH_SAMPLE=0: as before).
+            static const bool read_only_kept = [] {
+                const char* env = std::getenv("BB_SCENE_DEPTH_SAMPLE");
+                return !(env && env[0] == '0');
+            }();
+            const bool writes = !read_only_kept || regs.depth_control.depth_write_enable || stencil_write ||
+                                is_depth_clear || is_stencil_clear;
+            const auto target = scene_targets->Attachment(image_id, desc.view_info, writes);
             attachment.image_view = target.view;
             attachment.image_layout = target.layout;
         }

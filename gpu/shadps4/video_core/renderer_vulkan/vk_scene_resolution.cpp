@@ -122,6 +122,45 @@ bool SceneTargets::SetSize(SceneResolution::Size next) {
                 "(live)\n", size.width, size.height, size.width / 2, size.height / 2);
     return true;
 }
+void SceneTargets::Sweep() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_SCENE_SWEEP");
+        return !(env && env[0] == '0');
+    }();
+    const u64 flip = g_flips.load(std::memory_order_relaxed);
+    if (!on || flip == swept_flip) return;
+    swept_flip = flip;
+    u32 dropped = 0;
+    for (auto it = entries.begin(); it != entries.end();) {
+        if (lookup(it->second->source, it->second->uid)) {
+            ++it;
+            continue;
+        }
+        tracked.erase(it->second->uid);
+        // In flight until the GPU passes this tick: destroyed then (views first, with the entry).
+        std::shared_ptr<Entry> gone{std::move(it->second)};
+        scheduler.DeferOperation([gone]() mutable { gone.reset(); });
+        it = entries.erase(it);
+        ++dropped;
+    }
+    if (dropped) {
+        // The uids of the remaining entries keep their tracking (another level of a dropped image is gone too).
+        for (const auto& [key, entry] : entries) tracked.insert(entry->uid);
+        recent = {};
+        ++generation;
+        swept_total += dropped;
+    }
+    static const bool log = std::getenv("BB_SCENE_COPY_LOG") != nullptr;
+    if ((log || debug) && flip % 600 == 1) {
+        u64 bytes = 0;
+        for (const auto& [key, entry] : entries) {
+            const auto& e = entry->image.image_ci.extent;
+            bytes += u64(e.width) * e.height * 8;
+        }
+        std::printf("Scene stand-ins: %zu (about %llu MiB), %llu dropped so far\n", entries.size(),
+                    static_cast<unsigned long long>(bytes >> 20), static_cast<unsigned long long>(swept_total));
+    }
+}
 void SceneTargets::ResolveAll() {
     for (auto& [key, entry] : entries) {
         if (entry->state.dirty) {
@@ -450,7 +489,7 @@ vk::ImageView SceneTargets::View(Entry& e, const VideoCore::Image& original,
     return result;
 }
 SceneTargets::Target SceneTargets::Attachment(VideoCore::ImageId id,
-                                               const VideoCore::ImageViewInfo& info) {
+                                               const VideoCore::ImageViewInfo& info, bool writes) {
     auto& original = *lookup(id, 0);
     auto& e = Get(id, info.range.base.level);
     const bool depth = original.info.props.is_depth;
@@ -464,7 +503,7 @@ SceneTargets::Target SceneTargets::Attachment(VideoCore::ImageId id,
             depth ? vk::AccessFlagBits2::eDepthStencilAttachmentRead | vk::AccessFlagBits2::eDepthStencilAttachmentWrite
                   : vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite);
     }
-    e.state.ProxyWrite();
+    if (writes) e.state.ProxyWrite();
     auto attachment_info = info;
     attachment_info.is_storage = true; // include stencil in attachment views
     return {e.image, View(e, original, attachment_info), e.layout, e.image.image_ci.usage};

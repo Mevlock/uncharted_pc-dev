@@ -51,7 +51,8 @@ public:
         vk::ImageLayout layout;
         vk::ImageUsageFlags usage;
     };
-    Target Attachment(VideoCore::ImageId, const VideoCore::ImageViewInfo&);
+    /// `writes`: the pass may write the target (false: a depth only tested keeps its coherence state).
+    Target Attachment(VideoCore::ImageId, const VideoCore::ImageViewInfo&, bool writes = true);
     Target Read(VideoCore::ImageId, const VideoCore::ImageViewInfo&,
                 vk::PipelineStageFlags2 = vk::PipelineStageFlagBits2::eComputeShader,
                 vk::AccessFlags2 = vk::AccessFlagBits2::eShaderRead);
@@ -76,6 +77,10 @@ public:
         return !copying && tracked.contains(image_uid);
     }
     void ResolveAll();
+    /// Once per shown frame: drops the stand-ins of native images the texture cache no longer has (freed when the GPU
+    /// is past this point). They were kept until a size change: U1 and U2 replace scene-size images during play, and
+    /// their orphaned stand-ins filled the video memory (12.3 of 9.3 GiB, texture eviction, 6-17 FPS).
+    void Sweep();
     bool debug = false; ///< BB_SCENE_DEBUG frame: print resolves and fills
 private:
     struct Entry {
@@ -120,6 +125,8 @@ private:
     mutable std::array<bool, 256> format_known{};
     std::array<std::pair<u64, Entry*>, 8> recent{}; ///< last entries by Key
     u32 recent_next = 0;
+    u64 swept_flip = ~0ull;  ///< the frame of the last Sweep
+    u64 swept_total = 0;     ///< stand-ins dropped by Sweep
     vk::UniqueShaderModule fs_tri_vert, depth_frag, depth_stencil_frag, stencil_bits_frag;
     vk::UniqueDescriptorSetLayout resample_set_layout;
     vk::UniquePipelineLayout resample_layout;

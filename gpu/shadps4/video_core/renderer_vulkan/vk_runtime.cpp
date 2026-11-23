@@ -219,7 +219,10 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                       vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
                       std::optional<VideoCore::SubresourceRange> subres_range) {
     BeforeImageAccess();
-    if (scene_targets) scene_targets->NativeAccess(*image, dst_access);
+    if (scene_targets) {
+        scene_targets->NativeAccess(*image, scene_sample_only ? vk::AccessFlags2(vk::AccessFlagBits2::eShaderRead)
+                                                              : dst_access);
+    }
     if (GuestSync::On() &&
         (dst_access & (vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eShaderStorageWrite |
                        vk::AccessFlagBits2::eTransferWrite))) {

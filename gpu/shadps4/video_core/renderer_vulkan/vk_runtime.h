@@ -41,6 +41,8 @@ public:
 
     void TickFrame();
     SceneTargets* scene_targets = nullptr;
+    /// FSR night: the next Transit samples the image only, whatever its access says (the scene stand-ins' coherence).
+    bool scene_sample_only = false;
 
     void CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
                     std::span<const vk::BufferCopy> copies);
