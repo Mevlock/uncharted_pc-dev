@@ -4817,6 +4817,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             if (flip != motion_flip) {
                 motion_flip = flip;
                 object_motion->OnFrameStart();
+                if (Motion::Survey::On()) {
+                    motion_survey.NextFrame();
+                }
                 if (MotionCost::On()) {
                     ReportMotionCost();
                 }
@@ -5358,6 +5361,32 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 palette = XXH3_64bits_withSeed(reinterpret_cast<const void*>(address), size,
                                                palette);
             }
+        }
+        // BB_MOTION_STATIC_LOG=1 (diagnosis): the draw's inputs for the survey of draws that do not move.
+        if (Motion::Survey::On()) {
+            Motion::Survey::Draw survey{.shader = vs.pgm_hash,
+                                        .geometry = motion_geometry,
+                                        .indices = index_address,
+                                        .index_count = regs.num_indices,
+                                        .instances = regs.num_instances.NumInstances(),
+                                        .first_instance = first_instance,
+                                        .images = !vs.images.empty()};
+            for (const auto& resource : vs.buffers) {
+                if (resource.IsSpecial() || survey.num_buffers == Motion::Survey::MaxBuffers) continue;
+                const auto buffer = resource.GetSharp(vs);
+                if (!buffer.Valid()) continue;
+                auto& out = survey.buffers[survey.num_buffers++];
+                out.size = buffer.GetSize();
+                out.stride = buffer.GetStride();
+                out.address = buffer.base_address;
+                out.gpu_written = buffer_cache.IsRegionGpuModified(out.address, out.size);
+                if ((out.stride == 16 || out.stride == 0) && out.size && out.size <= 1_MB &&
+                    memory->IsValidGpuMapping(out.address, 0) &&
+                    memory->ClampRangeSize(out.address, out.size) == out.size) {
+                    out.content = XXH3_64bits(reinterpret_cast<const void*>(out.address), out.size) | 1;
+                }
+            }
+            motion_survey.OnDraw(survey);
         }
         push_data.motion_param = 0;
         if (!gated || object_motion->Moving({.shader = vs.pgm_hash,
