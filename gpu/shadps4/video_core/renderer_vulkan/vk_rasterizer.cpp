@@ -5201,23 +5201,28 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const u64 motion_cost_t0 = motion_draw && MotionCost::On() ? __rdtsc() : 0;
     u64 motion_cost_t1 = 0, motion_cost_t2 = 0;
     if (motion_draw && Shader::MotionVectors::characters && !motion_geometry) {
-        const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
-        u64 hash = 0x6a09e667f3bcc909ULL;
-        u32 records = 0;
-        for (const auto& resource : vs.buffers) {
-            if (resource.IsSpecial()) continue;
-            const auto buffer = resource.GetSharp(vs);
-            if (!buffer.Valid()) continue;
-            // (A multiply-mix, not XXH3: once per buffer of every G-buffer draw.)
-            hash = (hash ^ (u64(buffer.num_records) << 32 | buffer.GetStride())) *
-                   0x9e3779b97f4a7c15ULL;
-            hash ^= hash >> 29;
-            if (buffer.GetStride() != 16 && buffer.GetStride() != 0) {
-                records = std::max<u32>(records, buffer.num_records);
+        // The draw-preparation worker's when the draw was prepared (the same sharps: its flattened user data matched).
+        if (draw_prepared && draw_prepared->motion_geometry) {
+            motion_geometry = draw_prepared->motion_geometry;
+            stream_records = draw_prepared->motion_records;
+            // BB_MOTION_IDENTITY_CHECK=1 (diagnosis): computed here as well and compared.
+            static const bool check = [] {
+                const char* env = std::getenv("BB_MOTION_IDENTITY_CHECK");
+                return env && env[0] == '1';
+            }();
+            if (check) {
+                static u64 checked = 0, differed = 0;
+                u32 records = 0;
+                const u64 hash = MotionDrawIdentity(pipeline->GetStage(Shader::SwStage::Vertex), records);
+                differed += hash != motion_geometry || records != stream_records;
+                if ((++checked & 0x3ffff) == 0) {
+                    std::printf("Object motion identity check: %llu prepared draws, %llu differed\n",
+                                (unsigned long long)checked, (unsigned long long)differed);
+                }
             }
+        } else {
+            motion_geometry = MotionDrawIdentity(pipeline->GetStage(Shader::SwStage::Vertex), stream_records);
         }
-        stream_records = records;
-        motion_geometry = hash;
     }
     motion_cost_t1 = motion_cost_t0 ? __rdtsc() : 0;
     if (motion_draw && motion_geometry) {

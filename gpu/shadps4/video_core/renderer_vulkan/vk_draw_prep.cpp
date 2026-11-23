@@ -930,6 +930,11 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     }
                     draw.vertex.valid = false;
                     const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
+                    draw.motion_geometry = 0;
+                    draw.motion_records = 0;
+                    if (vs && sel.graphics_key.motion_vectors && Shader::MotionVectors::characters) {
+                        draw.motion_geometry = MotionDrawIdentity(*vs, draw.motion_records);
+                    }
                     if (vs && sel.fetch_shader) {
                         PrepareVertexInputs(*vs, *sel.fetch_shader, *regs, draw.vertex, arena);
                     }
