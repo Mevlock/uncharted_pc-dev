@@ -65,6 +65,10 @@ struct Values {
     std::atomic<bool> jitter{true};
     std::atomic<bool> reactive{false};
     std::atomic<bool> object_motion{true};
+    /// The characters' own motion vectors with Uncharted's velocity-pass camera (the G-buffer pipelines' motion
+    /// twins): the launcher's and the in-game menu's "Character motion vectors". Read once, before the shader
+    /// warm-up (the rasterizer); a change applies after restarting the game. BB_CHARACTER_MOTION=0/1 overrides it.
+    std::atomic<bool> character_motion{false};
     std::atomic<float> reactive_scale{1.0f};
     std::atomic<float> reactive_threshold{0.2f};
     std::atomic<float> reactive_max{0.9f};
@@ -139,6 +143,7 @@ struct Values {
     int startup_preset = NativeAA;
     int startup_upscaler = UpscalerFsr3;
     bool startup_object_motion = true;
+    bool startup_character_motion = false;
     bool startup_effects[EffectCount]{};
     int startup_model_lod = 0;
     int startup_output_res = OutputDefault;

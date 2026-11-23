@@ -99,9 +99,9 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
         // bbport (from BilalReloaded's Uncharted port, #84): characters' own motion (skinning,
         // animation) from their vertices; decided by the rasterizer before the pipeline warm-up
         // (Shader::MotionVectors::characters), which prepares the G-buffer pipelines' motion twins.
-        // Off by default (BB_CHARACTER_MOTION=1: on). Off: characters get the camera's motion, no twins.
+        // Off by default (the setting "Character motion vectors"). Off: characters get the camera's motion.
         std::printf("Camera motion: character motion vectors %s\n",
-                    Shader::MotionVectors::characters ? "on (BB_CHARACTER_MOTION=1)" : "off");
+                    Shader::MotionVectors::characters ? "on" : "off");
     }
     const auto device = instance.GetDevice();
     if (for_upscaler) {

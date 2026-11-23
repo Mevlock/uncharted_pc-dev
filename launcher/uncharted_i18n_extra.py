@@ -262,6 +262,9 @@ EXTRA_TRANSLATIONS = {
         'Step 2 of 2: compiling them for your graphics card':
         'Schritt 2 von 2: Kompilieren für deine Grafikkarte',
         'Saving the prepared shaders': 'Vorbereitete Shader werden gespeichert',
+        'Character motion vectors': 'Bewegungsvektoren für Figuren',
+        'With DLSS or FSR: more accurate motion for characters, so moving characters smear less. A small CPU cost; applies at the next start.':
+        'Mit DLSS oder FSR: genauere Bewegung für Figuren, sodass bewegte Figuren weniger verschmieren. Kostet etwas CPU-Zeit; gilt ab dem nächsten Start.',
         'Pause in the background': 'Im Hintergrund pausieren',
         'The game stands still while its window is minimized or another window has the focus, and its pause menu opens when you come back to gameplay.':
         'Das Spiel hält an, solange sein Fenster minimiert ist oder ein anderes Fenster den Fokus hat, und sein Pausemenü öffnet sich, wenn du ins Spiel zurückkehrst.',
@@ -763,6 +766,9 @@ EXTRA_TRANSLATIONS = {
         'Step 2 of 2: compiling them for your graphics card':
         'Passo 2 di 2: compilazione per la tua scheda video',
         'Saving the prepared shaders': 'Salvataggio degli shader preparati',
+        'Character motion vectors': 'Vettori di movimento dei personaggi',
+        'With DLSS or FSR: more accurate motion for characters, so moving characters smear less. A small CPU cost; applies at the next start.':
+        'Con DLSS o FSR: movimento più preciso per i personaggi, che in movimento lasciano meno scie. Costa un po\' di CPU; vale dal prossimo avvio.',
         'Pause in the background': 'Pausa in background',
         'The game stands still while its window is minimized or another window has the focus, and its pause menu opens when you come back to gameplay.':
         "Il gioco si ferma mentre la sua finestra è ridotta a icona o un'altra finestra ha il focus, e il suo menu di pausa si apre quando torni al gioco.",
@@ -1257,6 +1263,9 @@ EXTRA_TRANSLATIONS = {
         'Finishing…': '完了処理中…',
         'Step 2 of 2: compiling them for your graphics card': '手順 2/2: グラフィックカード向けにコンパイル中',
         'Saving the prepared shaders': '準備したシェーダーを保存中',
+        'Character motion vectors': 'キャラクターのモーションベクター',
+        'With DLSS or FSR: more accurate motion for characters, so moving characters smear less. A small CPU cost; applies at the next start.':
+        'DLSS または FSR 使用時：キャラクターの動きをより正確に伝え、動くキャラクターのにじみを抑えます。CPU の負荷がわずかに増えます。次回の起動から有効になります。',
         'Pause in the background': 'バックグラウンドで一時停止',
         'The game stands still while its window is minimized or another window has the focus, and its pause menu opens when you come back to gameplay.':
         'ウィンドウが最小化されているか別のウィンドウがフォーカスを持っている間はゲームが止まり、ゲームプレイに戻るとポーズメニューが開きます。',
@@ -1654,6 +1663,9 @@ EXTRA_TRANSLATIONS = {
         'Step 2 of 2: compiling them for your graphics card':
         'Paso 2 de 2: compilándolos para tu tarjeta gráfica',
         'Saving the prepared shaders': 'Guardando los shaders preparados',
+        'Character motion vectors': 'Vectores de movimiento de personajes',
+        'With DLSS or FSR: more accurate motion for characters, so moving characters smear less. A small CPU cost; applies at the next start.':
+        'Con DLSS o FSR: movimiento más preciso de los personajes, que dejan menos estela al moverse. Cuesta un poco de CPU; se aplica en el próximo inicio.',
         'Pause in the background': 'Pausar en segundo plano',
         'The game stands still while its window is minimized or another window has the focus, and its pause menu opens when you come back to gameplay.':
         'El juego se detiene mientras su ventana está minimizada u otra ventana tiene el foco, y su menú de pausa se abre al volver a la partida.',
@@ -2053,6 +2065,9 @@ EXTRA_TRANSLATIONS = {
         'Step 2 of 2: compiling them for your graphics card':
         'Etapa 2 de 2: compilando-os para sua placa de vídeo',
         'Saving the prepared shaders': 'Salvando os shaders preparados',
+        'Character motion vectors': 'Vetores de movimento dos personagens',
+        'With DLSS or FSR: more accurate motion for characters, so moving characters smear less. A small CPU cost; applies at the next start.':
+        'Com DLSS ou FSR: movimento mais preciso dos personagens, que deixam menos rastro ao se mover. Custa um pouco de CPU; vale a partir da próxima inicialização.',
         'Pause in the background': 'Pausar em segundo plano',
         'The game stands still while its window is minimized or another window has the focus, and its pause menu opens when you come back to gameplay.':
         'O jogo fica parado enquanto a janela dele está minimizada ou outra janela está em foco, e o menu de pausa abre quando você volta à partida.',
@@ -2453,6 +2468,9 @@ EXTRA_TRANSLATIONS = {
         'Step 2 of 2: compiling them for your graphics card':
         'Étape 2 sur 2 : compilation pour votre carte graphique',
         'Saving the prepared shaders': 'Enregistrement des shaders préparés',
+        'Character motion vectors': 'Vecteurs de mouvement des personnages',
+        'With DLSS or FSR: more accurate motion for characters, so moving characters smear less. A small CPU cost; applies at the next start.':
+        'Avec DLSS ou FSR : un mouvement plus précis pour les personnages, qui laissent moins de traînées en bougeant. Coûte un peu de temps processeur ; s’applique au prochain démarrage.',
         'Pause in the background': 'Pause en arrière-plan',
         'The game stands still while its window is minimized or another window has the focus, and its pause menu opens when you come back to gameplay.':
         "Le jeu s'arrête tant que sa fenêtre est réduite ou qu'une autre fenêtre a le focus, et son menu pause s'ouvre quand vous revenez en jeu.",
@@ -3031,6 +3049,9 @@ EXTRA_TRANSLATIONS = {
         'Reset all settings': 'Сбросить все настройки',
         'Reset every setting to its default?': 'Вернуть все настройки к значениям по умолчанию?',
         'Saving the prepared shaders': 'Сохранение подготовленных шейдеров',
+        'Character motion vectors': 'Векторы движения персонажей',
+        'With DLSS or FSR: more accurate motion for characters, so moving characters smear less. A small CPU cost; applies at the next start.':
+        'С DLSS или FSR: более точное движение персонажей, движущиеся персонажи меньше размываются. Немного нагружает процессор; действует со следующего запуска.',
         'Pause in the background': 'Пауза в фоне',
         'The game stands still while its window is minimized or another window has the focus, and its pause menu opens when you come back to gameplay.':
         'Игра останавливается, пока её окно свёрнуто или активно другое окно, и при возвращении в игру открывается меню паузы.',
