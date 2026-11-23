@@ -471,7 +471,7 @@ SHADER_PACK = 'shaders.pack'  # the game's shader cache file in each cache folde
 
 # The game's shader cache versions (ShaderBinaryVersion.ShaderMetaVersion.PipelineKeyVersion in
 # vk_pipeline_serialization.cpp); tests/test_shader_cache_version.py fails when they differ.
-SHADER_CACHE_VERSIONS = '24.17.8'
+SHADER_CACHE_VERSIONS = '25.17.8'
 # The port's name in the pack header (bytes 32-47, zero-padded; cache_pack.h PortName). All zero: a pack of this port's
 # test builds before 2026-11-22. Any other name, or another magic: another program's file.
 SHADER_PACK_PORT = b'Uncharted PC'.ljust(16, b'\0')
