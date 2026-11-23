@@ -5346,7 +5346,41 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             push_data.motion_param = 0;
         }
     }
-    if (motion_draw && motion_geometry && !ceiling_gated) {
+    // bbport (still draws): a prepared draw whose still key was drawn in the frame before stands still: the camera
+    // pass gives its motion, it takes no store, history or parameter (ObjectMotion::Still). A draw without a key
+    // (not prepared, or its program's position inputs or camera place are not known) keeps its history.
+    bool still_draw = false;
+    if (motion_draw && motion_geometry && !ceiling_gated && Shader::MotionVectors::characters &&
+        object_motion->GateEnabled()) {
+        const u64 gate_start = motion_cost_t0 ? __rdtsc() : 0;
+        const auto* still_program = draw_prepared ? draw_prepared->still_program : nullptr;
+        if (still_program && draw_prepared->still_key) {
+            const auto flat = pipeline->GetStage(Shader::SwStage::Vertex).FlatUserData();
+            const u64 key = draw_prepared->still_key ^ ((u64(index_offset) << 1 | u64(is_indexed)) *
+                                                        0x9e3779b97f4a7c15ULL);
+            still_draw = object_motion->Still(*still_program, flat, key, draw_prepared->camera_key);
+        } else {
+            object_motion->CountNoKey();
+            if (still_program && still_program->state.load(std::memory_order_relaxed) ==
+                                     Motion::StillProgram::NoCamera) {
+                const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+                object_motion->LearnCameraFrom(vs_info.pgm_hash, const_cast<Motion::StillProgram&>(*still_program),
+                                               vs_info.FlatUserData());
+            }
+        }
+        // BB_MOTION_GATE_CHECK=1 (diagnosis): the other way round, only the still draws keep their vectors.
+        if (object_motion->GateCheck() ? !still_draw : still_draw) {
+            push_data.motion_param = 0;
+            still_draw = true;
+        } else {
+            still_draw = false;
+        }
+        if (gate_start) {
+            MotionCost::Add(MotionCost::BGate, __rdtsc() - gate_start);
+            MotionCost::Add(MotionCost::BGated, still_draw);
+        }
+    }
+    if (motion_draw && motion_geometry && !ceiling_gated && !still_draw) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         const auto [base_vertex, first_instance] =
             GetDrawOffsets(regs, vs, pipeline->GetFetchShader());
@@ -5645,6 +5679,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 memory->IsValidGpuMapping(sharp.base_address, bytes)) {
                 camera_motion->OnVelocityConstants(
                     reinterpret_cast<const float*>(sharp.base_address), bytes / sizeof(float));
+                // bbport (still draws): its world-to-clip rows (c24..c39) confirm the camera this frame's draws
+                // were drawn with.
+                object_motion->OnVelocityClip(reinterpret_cast<const float*>(sharp.base_address) + 24);
             }
         }
     }

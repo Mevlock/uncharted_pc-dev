@@ -13,7 +13,9 @@
 #include <mutex>
 #include <vector>
 #include <cstdlib>
+#include <span>
 #include "video_core/renderer_vulkan/motion_history.h"
+#include "video_core/renderer_vulkan/motion_still.h"
 
 #include "common/types.h"
 #include "shader_recompiler/info.h"
@@ -52,6 +54,8 @@ enum Counter : u32 {
     CB0, CB1, CB2, CB3, CB4, CB5, OB0, OB1, OB2, OB3, OB4, OB5,
     WDraws, WCycles,           ///< workers: prepared draws (PrepareGraphicsPipeline .. Ready)
     PrepUsed, PrepLate, PrepUnavailable, PrepChecksum, PrepRejected, ///< stage A: prepared draw outcome
+    BGate, BGated,             ///< stage B: the still-draw gate's time (all motion draws) and the draws it took
+    WStillDraws, WStill,       ///< workers: still keys made and their time
     Count
 };
 /// Each thread's own counters (only it writes them, with plain loads and stores: one shared array of atomics put
@@ -97,8 +101,9 @@ class Scheduler;
 /// can move between frames); `records`: its longest vertex stream (constant buffers, stride 16, and raw buffers,
 /// stride 0, are not streams). The draw-preparation worker computes it with the draw (PreparedDraw); the recording
 /// thread only for a draw that was not prepared.
-inline u64 MotionDrawIdentity(const Shader::Info& vs, u32& records) {
-    u64 hash = 0x6a09e667f3bcc909ULL;
+/// `addresses` (still draws): a hash of the same buffers' addresses as well, the draw's mesh in guest memory.
+inline u64 MotionDrawIdentity(const Shader::Info& vs, u32& records, u64* addresses = nullptr) {
+    u64 hash = 0x6a09e667f3bcc909ULL, where = 0xbb67ae8584caa73bULL;
     records = 0;
     for (const auto& resource : vs.buffers) {
         if (resource.IsSpecial()) continue;
@@ -107,12 +112,39 @@ inline u64 MotionDrawIdentity(const Shader::Info& vs, u32& records) {
         // (A multiply-mix, not XXH3: once per buffer of every G-buffer draw.)
         hash = (hash ^ (u64(buffer.num_records) << 32 | buffer.GetStride())) * 0x9e3779b97f4a7c15ULL;
         hash ^= hash >> 29;
+        where = (where ^ buffer.base_address) * 0x9e3779b97f4a7c15ULL;
+        where ^= where >> 29;
         if (buffer.GetStride() != 16 && buffer.GetStride() != 0) {
             records = std::max<u32>(records, buffer.num_records);
         }
     }
+    if (addresses) {
+        *addresses = where;
+    }
     return hash;
 }
+
+/// bbport (still draws): the still data of the vertex shader program `pgm_hash` (motion_still.h), made at its first
+/// use from the program's SPIR-V: the one just translated in this session (NoteVertexShaderCode), else its stored
+/// binary. Never null and never freed; any thread.
+Motion::StillProgram& StillProgramOf(u64 pgm_hash);
+/// A vertex shader's SPIR-V as translated in this session (before the program's first draw).
+void NoteVertexShaderCode(u64 pgm_hash, std::span<const u32> spv);
+/// Whether the still-draw gate is on (BB_MOTION_GATE=0: off, every motion draw keeps its history).
+inline bool StillGateOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_MOTION_GATE");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+/// A motion draw's keys from its program's still data (state Ready) and its vertex shader's flat data: `still`, a
+/// hash of `seed` (the mesh and the draw's numbers) and the position's flat words without the camera's; `camera`,
+/// a hash of the view and projection matrices (never 0). still = 0: the flat data is shorter than the program reads.
+struct StillKeys {
+    u64 still{}, camera{};
+};
+StillKeys MakeStillKeys(const Motion::StillProgram& program, std::span<const u32> flat, u64 seed);
 struct RenderState;
 
 class ObjectMotion {
@@ -145,10 +177,37 @@ public:
     /// Rendering of a motion pipeline: the motion attachment (render-target size).
     void Attach(RenderState& state, u32 width, u32 height);
 
+    /// bbport (still draws): whether the still-draw gate is on (the character vectors on; BB_MOTION_GATE=0: off).
+    [[nodiscard]] bool GateEnabled() const noexcept {
+        return gate_enabled;
+    }
+    /// BB_MOTION_GATE_CHECK=1 (diagnosis, the vectors are NOT usable with it): only the draws the gate takes for
+    /// still keep their object vectors, and the camera pass writes their difference to the camera's vectors.
+    [[nodiscard]] bool GateCheck() const noexcept {
+        return gate_check;
+    }
+    /// A prepared motion draw with its keys (PreparedDraw::still_key with the draw's index offset, camera_key), its
+    /// program's still data (Ready) and its vertex shader's flat data: true when the draw stands still, i.e. its
+    /// still key was drawn in the frame before, under the camera the frame's first such draw has, in a frame whose
+    /// predecessor's camera was confirmed by the velocity pass. Such a draw needs no store, history or parameter.
+    bool Still(const Motion::StillProgram& program, std::span<const u32> flat, u64 still_key, u64 camera_key);
+    /// A motion draw of a program whose camera place is not known yet: its flat data is kept for the frame's
+    /// velocity pass (OnVelocityClip).
+    void LearnCameraFrom(u64 pgm_hash, Motion::StillProgram& program, std::span<const u32> flat);
+    /// The game's velocity pass of this frame: its world-to-clip rows (16 floats). Confirms the frame's camera
+    /// for the gate and finds the camera's place for the programs waiting.
+    void OnVelocityClip(const float* clip);
+    /// A motion draw the gate did not look at (not prepared, or its program has no still data).
+    void CountNoKey() noexcept {
+        ++gate_stats.no_key;
+    }
+
     /// Start of a frame (display pass).
     void OnFrameStart();
     void InvalidateHistory() {
         FlushPairing();
+        still.Forget();
+        camera_confirmed_frame = ~0ull;
         history.NextFrame();
         history.NextFrame();
         if (history_check) {
@@ -204,6 +263,25 @@ private:
         u32 index;
     };
     std::vector<Deferred> deferred;
+    // The still-draw gate (motion_history.h StillDraws, motion_still.h).
+    bool gate_enabled = false, gate_check = false;
+    Motion::StillDraws still;
+    u64 frame_camera_key = 0;             ///< the camera key of the frame's first draw with one (0: none yet)
+    std::array<u32, 32> frame_camera{};   ///< that draw's view and projection matrices
+    bool frame_camera_checked = false;    ///< the velocity pass of this frame was compared with them
+    u64 camera_confirmed_frame = ~0ull;   ///< the last frame whose camera the velocity pass confirmed
+    struct CameraLesson {
+        u64 pgm_hash;
+        Motion::StillProgram* program;
+        std::vector<u32> flat;
+    };
+    std::vector<CameraLesson> lessons;    ///< this frame's draws of programs without a camera place
+    struct GateStats {
+        u64 draws{}, still{}, moved{}, other_camera{}, frame_unconfirmed{}, no_key{};
+        u64 confirmed{}, refuted{}, no_pass{};
+        u32 learned{}, unusable{};
+        float worst_error{};
+    } gate_stats;
     std::array<u64, FrameSlots> params_ticks{};
     vk::Buffer params_buffer{};
     VmaAllocation params_allocation{};

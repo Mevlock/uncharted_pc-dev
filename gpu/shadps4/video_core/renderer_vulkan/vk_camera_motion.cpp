@@ -1074,7 +1074,10 @@ void CameraMotion::RecordVelocity(vk::CommandBuffer cmdbuf, vk::ImageView depth_
         .jitter = now_jitter,
         .previous_jitter = before_jitter,
         // BB_DLSS_ZERO_MOTION=1 (diagnosis): no camera motion vectors at all.
-        .mode = still ? 3u : (objects ? 4u : 2u) | (stencil_view ? camera.stencil_select : 0u),
+        // Bit 10 (BB_MOTION_GATE_CHECK=1, diagnosis): the object vectors' difference to the camera's is written.
+        .mode = still ? 3u
+                      : (objects ? 4u : 2u) | (stencil_view ? camera.stencil_select : 0u) |
+                            (objects && object_motion->GateCheck() ? 0x400u : 0u),
         .pad = 0,
         .stencil_offset = {camera.stencil_clip_offset[0], camera.stencil_clip_offset[1],
                            camera.stencil_clip_offset[2], 1.0f / jitter_scale},
