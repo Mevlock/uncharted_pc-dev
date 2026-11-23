@@ -177,15 +177,24 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushDat
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
     const auto stage_flags = IsCompute() ? vk::ShaderStageFlagBits::eCompute : AllGraphicsStageBits;
     const vk::PipelineLayout layout = *pipeline_layout;
-    scheduler.Record([layout, stage_flags, push_data](vk::CommandBuffer cmdbuf) {
-        cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(push_data), &push_data);
-    });
     if (motion_push) {
-        const Shader::MotionPushData motion{
-            u32(Shader::MotionVectors::params_address), u32(Shader::MotionVectors::params_address >> 32),
-            u32(Shader::MotionVectors::positions_address), u32(Shader::MotionVectors::positions_address >> 32)};
-        scheduler.Record([layout, stage_flags, motion](vk::CommandBuffer cmdbuf) {
-            cmdbuf.pushConstants(layout, stage_flags, Shader::MotionPushData::Offset, sizeof(motion), &motion);
+        // The motion buffers' addresses follow the usual push constants: one push of both (a second recorded
+        // command and push for them was stage B time on every G-buffer draw).
+        struct Both {
+            Shader::PushData push;
+            Shader::MotionPushData motion;
+        };
+        static_assert(offsetof(Both, motion) == Shader::MotionPushData::Offset);
+        const Both both{push_data,
+                        {u32(Shader::MotionVectors::params_address), u32(Shader::MotionVectors::params_address >> 32),
+                         u32(Shader::MotionVectors::positions_address),
+                         u32(Shader::MotionVectors::positions_address >> 32)}};
+        scheduler.Record([layout, stage_flags, both](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(both), &both);
+        });
+    } else {
+        scheduler.Record([layout, stage_flags, push_data](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(push_data), &push_data);
         });
     }
 
