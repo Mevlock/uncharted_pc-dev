@@ -368,6 +368,13 @@ public:
             ++stats.exhausted;
         }
         current.push_back({draw, hash, result.store, NoEntry, NoEntry, false});
+        // The next draw's likely partner (the walk's next entry), fetched while the rest of the draw is recorded: between
+        // two draws the recording thread's other work evicts the previous frame's entries.
+        if (cursor < previous.size()) {
+            const auto* next = reinterpret_cast<const char*>(&previous[cursor]);
+            __builtin_prefetch(next);
+            __builtin_prefetch(next + sizeof(Entry) - 1);
+        }
         return result;
     }
 
