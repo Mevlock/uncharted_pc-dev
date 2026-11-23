@@ -3409,8 +3409,7 @@ void PipelineCache::WarmUpThread() {
                         const auto it = by_hash.find(stage_hash);
                         return it != by_hash.end() && it->second->owner ? it->second->owner->info.pgm_hash : 0;
                     };
-                    std::fprintf(f, "start	%lld	keys	%zu	candidates	%zu
-",
+                    std::fprintf(f, "start\t%lld\tkeys\t%zu\tcandidates\t%zu\n",
                                  static_cast<long long>(std::time(nullptr)), first_twin, candidates.size());
                     for (size_t i = 0; i < first_twin; ++i) {
                         const auto& entry = stored[i];
@@ -3420,8 +3419,7 @@ void PipelineCache::WarmUpThread() {
                         const auto it = twin_key_of.find(i);
                         const auto& k = entry.gkey;
                         std::fprintf(f,
-                                     "key	cand=%u	twin=%016llx	stored_twin=%u	gs=%u	vs=%016llx	ps=%016llx	%s
-",
+                                     "key\tcand=%u\ttwin=%016llx\tstored_twin=%u\tgs=%u\tvs=%016llx\tps=%016llx\t%s\n",
                                      u32(it != twin_key_of.end()),
                                      static_cast<unsigned long long>(it != twin_key_of.end() ? it->second : 0),
                                      u32(entry.twin), u32(!entry.gsdata.tcs.empty() || !entry.gsdata.tes.empty()),
