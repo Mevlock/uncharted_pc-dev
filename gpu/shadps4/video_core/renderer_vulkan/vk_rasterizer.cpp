@@ -5332,8 +5332,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         const u32 percent = env ? u32(std::strtoul(env, nullptr, 10)) : 0;
         if (percent) {
             std::printf("Object motion: BB_MOTION_GATE_CEILING=%u: %u%% of the motion draws without history "
-                        "(measurement only, wrong vectors)
-", percent, percent);
+                        "(measurement only, wrong vectors)\n", percent, percent);
         }
         return percent;
     }();
