@@ -4301,8 +4301,7 @@ void ReportMotionCost() {
         std::printf("Motion cost (per frame, 600 frames, %.1f fps): stage A %.0f draws %.0f us (%.0f ns each); stage B "
                     "%.0f draws %.0f us (%.0f ns each) + %.0f motion draws %.0f us (%.0f ns each: identity %.1f, "
                     "offsets %.1f, history %.1f, attach %.1f); workers %.0f draws %.0f us (%.0f ns each); prepared "
-                    "used %.1f%%, late %.1f%%, unavailable %.1f%%, checksum %.1f%%, rejected %.1f%%
-",
+                    "used %.1f%%, late %.1f%%, unavailable %.1f%%, checksum %.1f%%, rejected %.1f%%\n",
                     600.0 / (std::chrono::duration<double>(now - t0).count()),
                     c[MotionCost::ADraws] / 600.0, us_frame(c[MotionCost::ACycles]),
                     ns_each(c[MotionCost::ACycles], c[MotionCost::ADraws]), c[MotionCost::BDraws] / 600.0,
