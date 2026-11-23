@@ -717,6 +717,16 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         // The driver, for the game-side patches (projection jitter itself is on with every GPU).
         runtime_gpu_nvidia = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ? 1 : 0;
     }
+    // bbport (from BilalReloaded's Uncharted port, #84): the characters' own motion vectors with Uncharted's
+    // velocity-pass camera (vk_camera_motion.cpp): off by default, BB_CHARACTER_MOTION=1: on. Fixed before the
+    // warm-up, which prepares the G-buffer pipelines' motion twins when they are on.
+    {
+        const char* upscaler = std::getenv("BB_UPSCALER");
+        const char* velocity = std::getenv("BB_VELOCITY_PS");
+        const char* characters = std::getenv("BB_CHARACTER_MOTION");
+        Shader::MotionVectors::characters = !(upscaler && std::strcmp(upscaler, "none") == 0) && velocity &&
+                                            *velocity && characters && characters[0] == '1';
+    }
     // bbport: from here the stored pipelines load on background threads (the motion shaders
     // among them need the buffer addresses fixed just above).
     pipeline_cache.StartWarmUp();
