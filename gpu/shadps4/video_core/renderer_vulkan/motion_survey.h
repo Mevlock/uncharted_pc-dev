@@ -152,6 +152,15 @@ public:
             auto& fc = w.flats[d.flat_size];
             ++fc.n;
             fc.same += n == 0;
+            // Which words change, apart for the draws with moved (GPU-written) streams.
+            if (rec.flat.size() == words) {
+                auto& wc = w.word_changes[{d.flat_size, !streams_same}];
+                wc.resize(words + 1);
+                ++wc[words];
+                for (uint32_t i = 0; i < words; ++i) {
+                    wc[i] += rec.flat[i] != d.flat[i];
+                }
+            }
             w.flat_same += n == 0;
             w.flat_and_streams_same += n == 0 && streams_same && constants_same && !gpu;
             if (n) {
@@ -277,6 +286,35 @@ public:
             patterns += part;
         }
         std::printf("Motion survey changed inputs (of the paired draws)%s\n", patterns.c_str());
+        for (const auto& [cls, counts] : w.word_changes) {
+            const uint64_t total = counts.back();
+            if (total < 600) {
+                continue; // under one draw a frame
+            }
+            std::string text;
+            for (size_t i = 0; i + 1 < counts.size(); ++i) {
+                if (counts[i] * 500 < total) {
+                    continue; // under 0.2%
+                }
+                // Runs of words that change equally often are printed as one range.
+                size_t j = i;
+                const auto rate = [&](size_t k) { return int(100.0 * double(counts[k]) / double(total) + 0.5); };
+                while (j + 2 < counts.size() && counts[j + 1] * 500 >= total && rate(j + 1) == rate(i)) {
+                    ++j;
+                }
+                char part[64];
+                if (j == i) {
+                    std::snprintf(part, sizeof(part), " %zu:%d%%", i, rate(i));
+                } else {
+                    std::snprintf(part, sizeof(part), " %zu-%zu:%d%%", i, j, rate(i));
+                }
+                text += part;
+                i = j;
+            }
+            std::printf("Motion survey words changed (%u words, streams %s, %.0f draws a frame; word: share of the "
+                        "draws it changed in):%s\n",
+                        cls.first, cls.second ? "moved" : "in place", total / f, text.c_str());
+        }
         w = {};
         // Forget what has not been drawn for a while.
         std::erase_if(records, [this](const auto& r) { return r.second.frame + 600 < frame; });
@@ -323,6 +361,7 @@ private:
         };
         std::map<uint32_t, Flat> flats;
         std::map<std::string, uint64_t> flat_patterns;
+        std::map<std::pair<uint32_t, bool>, std::vector<uint64_t>> word_changes; ///< per word; the last: draws
         std::map<uint32_t, Class> classes;
         std::map<std::string, uint64_t> patterns;
     } w;
