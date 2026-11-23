@@ -114,6 +114,13 @@ public:
                     if (old.address != b.address) {
                         streams_same = false;
                     }
+                    // Stream addresses by kind (GPU-written: compute-skinned vertices), as for the constants.
+                    auto& sc = w.streams[b.gpu_written];
+                    ++sc.n;
+                    sc.address_same += old.address == b.address;
+                    sc.address_turns += old.address != b.address && old.address2 == b.address;
+                    sc.address_three += old.address != b.address && old.address2 != b.address &&
+                                        old.address3 == b.address;
                     continue;
                 }
                 auto& cls = w.classes[b.size];
@@ -175,6 +182,7 @@ public:
             ++w.patterns[changed.empty() ? "none" : changed];
         }
         for (uint32_t i = 0; i < d.num_buffers; ++i) {
+            rec.buffers[i].address3 = paired ? rec.buffers[i].address2 : 0;
             rec.buffers[i].address2 = paired ? rec.buffers[i].address : 0;
             rec.buffers[i].address = d.buffers[i].address;
             rec.buffers[i].content = d.buffers[i].content;
@@ -195,6 +203,9 @@ public:
         }
     }
 
+    uint64_t Frame() const {
+        return frame;
+    }
     void NextFrame() {
         ++frame;
         occurrences.clear();
@@ -222,6 +233,14 @@ public:
             classes += part;
         }
         std::printf("Motion survey constants (by size)%s\n", classes.c_str());
+        for (int gpu = 0; gpu < 2; ++gpu) {
+            const auto& c = w.streams[gpu];
+            std::printf("Motion survey streams (%s): %.0f a frame, address same %.1f%%, the one of two frames back "
+                        "%.1f%%, of three frames back %.1f%%, other %.1f%%\n",
+                        gpu ? "GPU-written" : "not GPU-written", c.n / f, pct(c.address_same, c.n),
+                        pct(c.address_turns, c.n), pct(c.address_three, c.n),
+                        pct(c.n - c.address_same - c.address_turns - c.address_three, c.n));
+        }
         std::string flats;
         for (const auto& [size, c] : w.flats) {
             char part[100];
@@ -278,7 +297,7 @@ private:
     }
     struct Record {
         struct Old {
-            uint64_t address{}, address2{}, content{};
+            uint64_t address{}, address2{}, address3{}, content{};
         };
         std::array<Old, MaxBuffers> buffers{};
         std::vector<uint32_t> flat;
@@ -295,6 +314,10 @@ private:
     struct Window {
         uint64_t draws{}, paired{}, streams_same{}, all_same{}, key_static{}, key_twice{}, streak8{}, streak60{};
         uint64_t gpu_inputs{}, images{}, flat_same{}, flat_and_streams_same{}, cpu_written{};
+        struct Stream {
+            uint64_t n{}, address_same{}, address_turns{}, address_three{};
+        };
+        std::array<Stream, 2> streams{};
         struct Flat {
             uint64_t n{}, same{};
         };

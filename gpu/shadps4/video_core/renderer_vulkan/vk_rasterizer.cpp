@@ -5383,9 +5383,19 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 if ((out.stride == 16 || out.stride == 0) && out.size && out.size <= 1_MB &&
                     memory->IsValidGpuMapping(out.address, 0) &&
                     memory->ClampRangeSize(out.address, out.size) == out.size) {
-                    out.content = XXH3_64bits(reinterpret_cast<const void*>(out.address), out.size) | 1;
                     if (out.size >= 64_KB) {
+                        // A large table: hashed once a frame (15 us a draw otherwise).
+                        static VAddr big_address = 0;
+                        static u64 big_frame = ~0ull, big_hash = 0;
                         survey.cpu_written |= buffer_cache.IsRegionCpuModified(out.address, out.size);
+                        if (big_address != out.address || big_frame != motion_survey.Frame()) {
+                            big_address = out.address;
+                            big_frame = motion_survey.Frame();
+                            big_hash = XXH3_64bits(reinterpret_cast<const void*>(out.address), out.size) | 1;
+                        }
+                        out.content = big_hash;
+                    } else {
+                        out.content = XXH3_64bits(reinterpret_cast<const void*>(out.address), out.size) | 1;
                     }
                 }
             }
