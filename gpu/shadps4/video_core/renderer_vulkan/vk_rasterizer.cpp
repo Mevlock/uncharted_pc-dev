@@ -812,6 +812,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     g_prepared_read_pending = [](VAddr address, u64 size) {
         return busy_check->OnStageA() && !busy_check->DrawPipeIdle() && busy_check->PendingWriteOverlaps(address, size);
     };
+    // bbport (still draws): the workers' still keys take in the write counts of the regions a draw's buffers lie in.
+    g_guest_write_epoch = [](VAddr address, u64 size) { return busy_check->buffer_cache.WriteEpoch(address, size); };
     if (ud_read_sync) {
         Shader::g_ud_table_read = [](u64 address, u64 size) {
             if (CaptureDirectRead(address, size)) {

@@ -98,6 +98,10 @@ struct PreparedDirectRead {
 /// them) overlaps the range, on the GPU thread.
 inline bool (*g_prepared_read_pending)(VAddr address, u64 size) = nullptr;
 
+/// bbport (still draws), set by the rasterizer: the buffer cache's write epoch of a guest range (BufferCache::
+/// WriteEpoch), for the workers' still keys.
+inline u64 (*g_guest_write_epoch)(VAddr address, u64 size) = nullptr;
+
 /// Draw-preparation workers: records a descriptor read while a draw is prepared (true: recorded).
 bool CaptureDirectRead(VAddr address, u64 size);
 /// BB_PREP_DIRECT_CHECK=1 (diagnosis): the reads are recorded and checked again (PipelineCache::TryPreparedPipeline).

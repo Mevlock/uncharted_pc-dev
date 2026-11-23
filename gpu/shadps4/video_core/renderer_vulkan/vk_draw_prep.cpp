@@ -961,6 +961,21 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                                     seed ^= seed >> 32;
                                 };
                                 mix(vs->pgm_hash);
+                                // The buffers' memory: the write counts of the regions they lie in (a buffer
+                                // rewritten in place, by the guest or the GPU, is another key).
+                                if (g_guest_write_epoch) {
+                                    u64 last_region = ~0ull;
+                                    for (const auto& resource : vs->buffers) {
+                                        if (resource.IsSpecial()) continue;
+                                        const auto buffer = resource.GetSharp(*vs);
+                                        if (!buffer.Valid()) continue;
+                                        const u64 first = buffer.base_address >> 22;
+                                        const u64 end = (buffer.base_address + buffer.GetSize() - 1) >> 22;
+                                        if (first == last_region && end == last_region) continue;
+                                        last_region = end;
+                                        mix(g_guest_write_epoch(buffer.base_address, buffer.GetSize()));
+                                    }
+                                }
                                 mix(regs->index_base_address.Address<VAddr>());
                                 mix(u64(regs->num_indices) << 32 | regs->num_instances.NumInstances());
                                 mix(u64(regs->index_offset) << 8 | u64(regs->index_buffer_type.index_type));

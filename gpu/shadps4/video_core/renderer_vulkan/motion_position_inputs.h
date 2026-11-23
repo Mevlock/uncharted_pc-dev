@@ -244,7 +244,7 @@ private:
                     failed = "a long access chain";
                     return;
                 }
-                // (Inner chains come first in this walk: their indices go behind the outer ones'.)
+                // (The walk goes from the pointer towards its variable: the indices seen so far go behind.)
                 for (uint32_t i = num; i-- > 0;) {
                     indices[i + (count - 4)] = indices[i];
                 }
