@@ -136,7 +136,11 @@ bool ObjectMotion::Still(const Motion::StillProgram& program, std::span<const u3
         return false;
     }
     // Noted every frame, also while the gate may not act on it.
+    const u64 seen_start = MotionCost::On() ? __rdtsc() : 0;
     const bool seen = still.Seen(still_key);
+    if (seen_start) {
+        MotionCost::Add(MotionCost::BGateSeen, __rdtsc() - seen_start);
+    }
     if (camera_confirmed_frame + 1 != frame) {
         ++gate_stats.frame_unconfirmed; // the frame before had no velocity pass, or another camera than its draws
         return false;
@@ -190,7 +194,8 @@ void ObjectMotion::OnVelocityClip(const float* clip) {
         static u32 lines = 0;
         float error = 0.0f;
         size_t words = 0;
-        if (program.LearnCamera(lesson.flat, clip, &error, &words)) {
+        u32 matches[9]{};
+        if (program.LearnCamera(lesson.flat, clip, &error, &words, matches)) {
             ++gate_stats.learned;
             if (lines < 16) {
                 ++lines;
@@ -211,8 +216,10 @@ void ObjectMotion::OnVelocityClip(const float* clip) {
             if (lines < 16) {
                 ++lines;
                 std::printf("Object motion gate: vs %08x: no camera found in its flat data (%zu position words, "
-                            "closest pair off by %.3g of a row): its draws are never taken for still\n",
-                            u32(lesson.pgm_hash), words, error);
+                            "closest pair off by %.3g of a row; %u pairs match: %u/%u %u/%u %u/%u): its draws are "
+                            "never taken for still\n",
+                            u32(lesson.pgm_hash), words, error, matches[0], matches[1], matches[2], matches[3],
+                            matches[4], matches[5], matches[6]);
             }
         }
     }

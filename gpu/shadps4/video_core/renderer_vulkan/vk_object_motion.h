@@ -56,6 +56,7 @@ enum Counter : u32 {
     PrepUsed, PrepLate, PrepUnavailable, PrepChecksum, PrepRejected, ///< stage A: prepared draw outcome
     BGate, BGated,             ///< stage B: the still-draw gate's time (all motion draws) and the draws it took
     WStillDraws, WStill,       ///< workers: still keys made and their time
+    BGateSeen,                 ///< stage B: the still table's part of the gate
     Count
 };
 /// Each thread's own counters (only it writes them, with plain loads and stores: one shared array of atomics put

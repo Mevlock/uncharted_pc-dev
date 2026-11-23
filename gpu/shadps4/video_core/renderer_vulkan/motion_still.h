@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "motion_position_inputs.h" // (relative: the regression test includes this header alone)
@@ -79,8 +80,9 @@ inline constexpr float CameraTolerance = 2e-4f;
 
 /// Finds the view and projection matrices in `flat` among the position's words: both runs of 16 words of `words`,
 /// the view's last row (0, 0, 0, 1). True with their first words when exactly one pair matches `clip`.
+/// `matches` (diagnosis, 9 words): how many pairs matched, then the first four (view, projection).
 inline bool FindCamera(std::span<const uint32_t> flat, const std::vector<uint16_t>& words, const float* clip,
-                       uint16_t& view_at, uint16_t& proj_at, float* error = nullptr) {
+                       uint16_t& view_at, uint16_t& proj_at, float* error = nullptr, uint32_t* matches = nullptr) {
     std::vector<uint16_t> starts; // first words of 16 consecutive position words inside the flat data
     for (const auto& run : Runs(words)) {
         for (uint32_t s = run.first; run.count >= 16 && s + 16 <= uint32_t(run.first) + run.count; ++s) {
@@ -91,6 +93,7 @@ inline bool FindCamera(std::span<const uint32_t> flat, const std::vector<uint16_
     }
     static constexpr uint32_t one = 0x3f800000u;
     uint32_t found = 0;
+    std::pair<uint16_t, uint16_t> pairs_found[4];
     float best = 1e9f;
     for (const uint16_t v : starts) {
         const uint32_t* row = &flat[v + 12];
@@ -105,8 +108,9 @@ inline bool FindCamera(std::span<const uint32_t> flat, const std::vector<uint16_
             const bool match = ProductIs(&flat[v], &flat[p], clip, CameraTolerance, &e);
             best = std::min(best, e);
             if (match) {
-                view_at = v;
-                proj_at = p;
+                if (found < 4) {
+                    pairs_found[found] = {v, p};
+                }
                 ++found;
             }
         }
@@ -114,7 +118,19 @@ inline bool FindCamera(std::span<const uint32_t> flat, const std::vector<uint16_
     if (error) {
         *error = best;
     }
-    return found == 1;
+    if (matches) {
+        *matches = found;
+        for (uint32_t i = 0; i < found && i < 4; ++i) {
+            matches[1 + 2 * i] = pairs_found[i].first;
+            matches[2 + 2 * i] = pairs_found[i].second;
+        }
+    }
+    if (found != 1) {
+        return false;
+    }
+    view_at = pairs_found[0].first;
+    proj_at = pairs_found[0].second;
+    return true;
 }
 
 /// The words of `words` outside the two camera matrices, as runs; false when a matrix is not wholly among them.
@@ -198,13 +214,13 @@ struct StillProgram {
     /// The recording thread, with a draw's flat data and the frame's velocity clip matrix: finds the camera's
     /// place (state Ready). `words`: how many flat words the position reads for this draw.
     bool LearnCamera(std::span<const uint32_t> flat, const float* clip, float* error = nullptr,
-                     size_t* words = nullptr) {
+                     size_t* words = nullptr, uint32_t* matches = nullptr) {
         const auto inputs = code->Inputs(flat);
         if (words) {
             *words = inputs.words.size();
         }
         uint16_t v = 0, p = 0;
-        if (!inputs.valid || !FindCamera(flat, inputs.words, clip, v, p, error)) {
+        if (!inputs.valid || !FindCamera(flat, inputs.words, clip, v, p, error, matches)) {
             return false;
         }
         view_at = v;

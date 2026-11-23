@@ -4353,6 +4353,14 @@ void ReportMotionCost() {
                     prep ? 100.0 * c[MotionCost::PrepUnavailable] / prep : 0.0,
                     prep ? 100.0 * c[MotionCost::PrepChecksum] / prep : 0.0,
                     prep ? 100.0 * c[MotionCost::PrepRejected] / prep : 0.0);
+        if (c[MotionCost::BGate] || c[MotionCost::WStillDraws]) {
+            std::printf("Motion cost gate: %.1f ns a motion draw on stage B (the still table %.1f), %.0f still draws a "
+                        "frame; workers: %.0f still keys a frame, %.0f ns each\n",
+                        ns_each(c[MotionCost::BGate], c[MotionCost::BMotionDraws]),
+                        ns_each(c[MotionCost::BGateSeen], c[MotionCost::BMotionDraws]),
+                        c[MotionCost::BGated] / 600.0, c[MotionCost::WStillDraws] / 600.0,
+                        ns_each(c[MotionCost::WStill], c[MotionCost::WStillDraws]));
+        }
         const auto parts = [&](u32 base, u64 n) {
             return std::array<double, 5>{ns_each(c[base], n), ns_each(c[base + 1], n), ns_each(c[base + 2], n),
                                          ns_each(c[base + 3], n), ns_each(c[base + 4], n)};
