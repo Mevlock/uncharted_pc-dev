@@ -149,6 +149,17 @@ public:
             } else {
                 lo = 0, hi = words, n = words;
             }
+            // The user-data registers (words 0..15: table pointers, where the per-object constants are read from):
+            // a register that changed, against its value two and three frames back (constants written into
+            // copies that take turns would come back).
+            for (uint32_t i = 0; i < 16 && i < words && rec.flat.size() == words; ++i) {
+                if (rec.flat[i] == d.flat[i]) {
+                    continue;
+                }
+                ++w.registers_changed;
+                w.registers_two += rec.registers2[i] == d.flat[i];
+                w.registers_three += rec.registers2[i] != d.flat[i] && rec.registers3[i] == d.flat[i];
+            }
             auto& fc = w.flats[d.flat_size];
             ++fc.n;
             fc.same += n == 0;
@@ -195,6 +206,10 @@ public:
             rec.buffers[i].address2 = paired ? rec.buffers[i].address : 0;
             rec.buffers[i].address = d.buffers[i].address;
             rec.buffers[i].content = d.buffers[i].content;
+        }
+        for (uint32_t i = 0; i < 16; ++i) {
+            rec.registers3[i] = paired ? rec.registers2[i] : 0;
+            rec.registers2[i] = paired && i < rec.flat.size() ? rec.flat[i] : 0;
         }
         rec.flat.assign(d.flat, d.flat + std::min<uint32_t>(d.flat_size, MaxFlat));
         rec.num_buffers = d.num_buffers;
@@ -250,6 +265,11 @@ public:
                         pct(c.address_turns, c.n), pct(c.address_three, c.n),
                         pct(c.n - c.address_same - c.address_turns - c.address_three, c.n));
         }
+        std::printf("Motion survey user-data registers (table pointers; of the paired draws): %.1f changed a draw; of "
+                    "those the value of two frames back %.1f%%, of three frames back %.1f%%, another %.1f%%\n",
+                    w.paired ? double(w.registers_changed) / double(w.paired) : 0.0,
+                    pct(w.registers_two, w.registers_changed), pct(w.registers_three, w.registers_changed),
+                    pct(w.registers_changed - w.registers_two - w.registers_three, w.registers_changed));
         std::string flats;
         for (const auto& [size, c] : w.flats) {
             char part[100];
@@ -339,6 +359,7 @@ private:
         };
         std::array<Old, MaxBuffers> buffers{};
         std::vector<uint32_t> flat;
+        std::array<uint32_t, 16> registers2{}, registers3{}; ///< the flat words 0..15 two and three frames back
         uint32_t num_buffers{};
         uint64_t frame{};
     };
@@ -352,6 +373,7 @@ private:
     struct Window {
         uint64_t draws{}, paired{}, streams_same{}, all_same{}, key_static{}, key_twice{}, streak8{}, streak60{};
         uint64_t gpu_inputs{}, images{}, flat_same{}, flat_and_streams_same{}, cpu_written{};
+        uint64_t registers_changed{}, registers_two{}, registers_three{};
         struct Stream {
             uint64_t n{}, address_same{}, address_turns{}, address_three{};
         };
