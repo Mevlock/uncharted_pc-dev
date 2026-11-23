@@ -156,6 +156,9 @@ void AddMotionAttachment(GraphicsPipelineKey& key);
 /// from the driver's cache, its time in all and the longest), of them the ones the driver compiled (not in its cache)
 /// and those whose shader stages had to be translated (not prepared).
 inline std::atomic<u64> g_twin_fallback_gpu{0}, g_twin_fallback_worker{0}, g_twins_built_in_play{0};
+/// bbport (object motion twins): the twins' shader variants are still being loaded behind the game (step 5d of the
+/// warm-up): no twin is loaded or translated meanwhile (its draws take their ordinary pipelines).
+inline std::atomic<bool> g_twin_stages_pending{false};
 inline std::atomic<u64> g_twin_load_ns{0}, g_twin_load_max_ns{0}, g_twins_compiled_in_play{0},
     g_twins_translated_in_play{0};
 

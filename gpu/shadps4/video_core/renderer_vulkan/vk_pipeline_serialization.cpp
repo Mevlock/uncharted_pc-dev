@@ -472,6 +472,9 @@ struct LoadedStage {
     size_t perm_idx{};
     vk::ShaderModule module{};
     bool parsed = false; ///< metadata read: its permutation slot is known
+    /// bbport (object motion twins): a twin's stage with the characters' vectors on: its module is made after the
+    /// start-up hold (step 5d), off the path to the game's first frame.
+    bool deferred = false;
     /// bbport: a stored meta this build cannot read (another meta or translator version). Its number is not reserved,
     /// so the game's next new permutation of the shader takes it; the keys naming the old one are removed.
     bool stale = false;
@@ -2257,6 +2260,10 @@ void PipelineCache::WarmUpThread() {
     stage_hashes.erase(std::unique(stage_hashes.begin(), stage_hashes.end()), stage_hashes.end());
     std::vector<LoadedStage> stages(stage_hashes.size());
     std::atomic<u32> mismatched_binaries{0};
+    // bbport (object motion twins): whatever way this thread ends, no twin waits for step 5d any more.
+    struct TwinStagesDone {
+        ~TwinStagesDone() { g_twin_stages_pending.store(false, std::memory_order_release); }
+    } twin_stages_done;
     std::atomic<u32> motion_stages_reserved{0};
     static const bool synth_variants = [] {
         const char* env = std::getenv("BB_VARIANT_SYNTH");
@@ -2318,15 +2325,18 @@ void PipelineCache::WarmUpThread() {
         stage.checksum = checksum;
         // Motion shaders need the session's buffer addresses: without them the slot is only
         // reserved, so a later permutation cannot take its index. bbport (object motion twins): the
-        // twins' stages (the motion permutations) are loaded only when a twin can be drawn (the
-        // characters' vectors on) or is prepared (step 5c); a start with the vectors off reserves
-        // their slots and creates none of their modules.
+        // twins' stages (the motion permutations) are loaded now only when they are prepared (step
+        // 5c); with the characters' vectors on, after the start-up hold (step 5d: ~11,000 modules,
+        // 0.45 s on a slow CPU before the game could select); with them off never (slots reserved).
         const auto& info = stage.program->info;
         const bool motion_stage =
             (info.hw_stage == Shader::HwStage::Vertex && stage.spec.runtime_info.hw.vs.motion_vectors) ||
             (info.hw_stage == Shader::HwStage::Fragment && stage.spec.runtime_info.hw.fs.motion_vectors);
-        if (motion_stage && (Shader::MotionVectors::positions_address == 0 ||
-                             !(Shader::MotionVectors::characters || prepare_twins))) {
+        if (motion_stage && (Shader::MotionVectors::positions_address == 0 || !prepare_twins)) {
+            if (Shader::MotionVectors::positions_address != 0 && Shader::MotionVectors::characters) {
+                stage.deferred = true;
+                g_twin_stages_pending.store(true, std::memory_order_release);
+            }
             motion_stages_reserved.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -2532,6 +2542,60 @@ void PipelineCache::WarmUpThread() {
         stage.ready = true;
     }
     const double t_programs = elapsed_ms();
+
+    // bbport (object motion twins, step 5d): the deferred twins' stages (step 2) into their reserved slots, unless the
+    // game made the same permutation meanwhile. Idempotent; afterwards a twin's draw may load its twin.
+    const auto load_deferred_twin_stages = [&](u32 load_threads) {
+        std::vector<size_t> todo;
+        for (size_t i = 0; i < stages.size(); ++i) {
+            if (stages[i].deferred && stages[i].owner) {
+                todo.push_back(i);
+            }
+        }
+        if (todo.empty()) {
+            g_twin_stages_pending.store(false, std::memory_order_release);
+            return;
+        }
+        const double t_load = elapsed_ms();
+        std::atomic<u32> bad{0};
+        ParallelFor(todo.size(), load_threads, [&](size_t j) {
+            auto& stage = stages[todo[j]];
+            std::vector<u32> spv{};
+            db.Load(Storage::BlobType::ShaderBinary, BinaryName(stage.owner->info.pgm_hash, stage.perm_idx), spv);
+            if (spv.empty() || BinaryChecksum(spv) != stage.checksum) {
+                bad.fetch_add(1, std::memory_order_relaxed); // translated again if ever needed
+                return;
+            }
+            stage.module = CompileSPV(spv, device);
+        });
+        u32 installed = 0, taken = 0;
+        {
+            std::unique_lock lk{programs_mutex};
+            for (const size_t i : todo) {
+                auto& stage = stages[i];
+                stage.deferred = false;
+                if (!stage.module) {
+                    continue;
+                }
+                auto& modules = stage.owner->modules;
+                const auto found = std::ranges::find(modules, stage.spec, &Program::Module::spec);
+                if (stage.perm_idx < modules.size() && !modules[stage.perm_idx].module &&
+                    (found == modules.end() || !found->module)) {
+                    modules[stage.perm_idx] = {stage.module, stage.spec};
+                    stage.ready = true;
+                    ++installed;
+                } else {
+                    device.destroyShaderModule(stage.module);
+                    stage.module = vk::ShaderModule{};
+                    ++taken;
+                }
+            }
+        }
+        g_twin_stages_pending.store(false, std::memory_order_release);
+        std::printf("Motion twins: %u twin shader variants loaded behind the game in %.0f ms (%u threads; %u taken by "
+                    "the game first, %u without a matching binary)\n",
+                    installed, elapsed_ms() - t_load, load_threads, taken, bad.load());
+    };
 
     // 4. The programs are final: selection may start. (A permutation the game needs that is
     // not stored is appended behind the stored ones, as the reserved slots promise.)
@@ -3116,6 +3180,9 @@ void PipelineCache::WarmUpThread() {
         const u64 compiled_now = PipelineBinaries::DriverCacheMisses() - driver_cache_misses_at_start;
         const bool rebuild_twins = Shader::MotionVectors::characters && twins_possible && marker_twins &&
                                    compiled_now * 10 > u64(num_pipelines.load());
+        if (rebuild_twins) {
+            load_deferred_twin_stages(ship_threads);
+        }
         if (twin_prep && (prepare_twins || rebuild_twins)) {
             const double t_twin = elapsed_ms();
             constexpr u32 fs_slot = u32(Shader::SwStage::Fragment);
@@ -3366,8 +3433,12 @@ void PipelineCache::WarmUpThread() {
     if (held) {
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - held_since)
                               .count();
+        u32 twins_left = 0; // (not built at this start: not waited for)
+        for (const auto& entry : stored) {
+            twins_left += entry.twin && !entry.built;
+        }
         std::printf("Preparation: the game waited %.0f ms for %zu stored pipelines and the listed variants%s\n", ms,
-                    stored.size(), held_page ? " (page shown)" : "");
+                    stored.size() - twins_left, held_page ? " (page shown)" : "");
         if (held_page) {
             BbOverlay::SetPreparationScreen(false);
             BbOverlay::SetPreparationRebuild(false);
@@ -3375,6 +3446,9 @@ void PipelineCache::WarmUpThread() {
             runtime_freeze_guest(0);
         }
     }
+    // 5d. bbport (object motion twins): the twins' stages of a start with the characters' vectors on, behind the game
+    // (half the warm-up threads); until they are in, a twin's draw takes its ordinary pipeline and no twin is loaded.
+    load_deferred_twin_stages(std::max<u32>(1, threads / 2));
 
     // 6. bbport (shader variant list, BB_VARIANT_REPLAY=1): variants with translation inputs but no binary are
     // translated from the code in the player's own game files, with the recorded inputs in place of game memory,
@@ -3483,11 +3557,11 @@ void PipelineCache::WarmUpThread() {
     }
     const u32 num_total_pipelines = static_cast<u32>(stored.size()) - twins_waiting;
     if (twins_waiting) {
-        std::printf("Motion twins: %u stored, not preloaded (%s); %u motion shader variants not loaded\n",
-                    twins_waiting,
+        std::printf("Motion twins: %u stored, not preloaded (%s); %u motion shader variants %s\n", twins_waiting,
                     Shader::MotionVectors::characters ? "each loaded when its draw first comes"
                                                       : "the characters' motion vectors are off",
-                    motion_stages_reserved.load());
+                    motion_stages_reserved.load(),
+                    Shader::MotionVectors::characters ? "loaded behind the game" : "not loaded");
     }
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines.load());
     if (num_total_pipelines > num_pipelines.load()) {

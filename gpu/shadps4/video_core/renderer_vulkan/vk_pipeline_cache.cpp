@@ -1032,7 +1032,8 @@ bool PipelineCache::PrepareGraphicsPipeline(PipelineSelection& worker_sel) {
 
 void PipelineCache::BuildMotionTwin(PipelineSelection& worker_sel) {
     auto& worker = *worker_sel.worker;
-    if (!worker_sel.twin_wanted || !worker.compile || !IsWarm()) {
+    if (!worker_sel.twin_wanted || !worker.compile || !IsWarm() ||
+        g_twin_stages_pending.load(std::memory_order_acquire)) {
         return;
     }
     worker_sel.twin_wanted = false;
