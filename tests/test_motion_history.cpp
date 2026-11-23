@@ -84,10 +84,28 @@ void RandomEquivalence(uint32_t seed) {
     History history{110000};
     ReferenceHistory reference{110000};
     KeyedHistory keyed{110000}; // the same, as BB_MOTION_HISTORY_CHECK runs it in the game
+    // As ObjectMotion runs it: Allocate at each draw, Pair for the draws with a store later in batches (at the
+    // submissions: here at random points and before every NextFrame), a draw without a store paired at once after
+    // the batch.
+    History deferred{110000};
+    struct Pending {
+        Draw draw;
+        History::Allocation allocation, want;
+    };
+    std::vector<Pending> pending;
+    const auto flush = [&] {
+        for (auto& p : pending) {
+            deferred.Pair(p.draw, p.allocation);
+            assert(Same(p.allocation, p.want));
+        }
+        pending.clear();
+    };
     uint64_t loads = 0, draws = 0;
     for (uint32_t frame = 0; frame < 300; ++frame) {
         const uint32_t skips = pick(40) == 0 ? 2 : 1;
         for (uint32_t s = 0; s < skips; ++s) {
+            flush();
+            deferred.NextFrame();
             history.NextFrame();
             reference.NextFrame();
             keyed.NextFrame();
@@ -122,6 +140,19 @@ void RandomEquivalence(uint32_t seed) {
             const auto got = history.Prepare(d);
             const auto want = reference.Prepare(d);
             assert(Same(keyed.Prepare(d), want));
+            auto stored = deferred.Allocate(d);
+            if (!stored.valid) {
+                assert(Same(stored.allocation, want) && Same(History::Allocation{}, want));
+            } else if (!stored.allocation.store) {
+                flush();
+                deferred.Pair(d, stored.allocation);
+                assert(Same(stored.allocation, want));
+            } else {
+                pending.push_back({d, stored.allocation, want});
+                if (pick(30) == 0) {
+                    flush();
+                }
+            }
             if (!Same(got, want)) {
                 std::printf("seed %u frame %u: store %u/%u load %u/%u\n", seed, frame, got.store, want.store,
                             got.load, want.load);
@@ -136,6 +167,9 @@ void RandomEquivalence(uint32_t seed) {
                     (unsigned long long)loads, (unsigned long long)draws,
                     (unsigned long long)history.stats.exhausted, (unsigned long long)history.stats.invalid);
     }
+    flush();
+    assert(deferred.stats.draws == history.stats.draws && deferred.stats.loaded == history.stats.loaded &&
+           deferred.stats.exhausted == history.stats.exhausted && deferred.stats.invalid == history.stats.invalid);
     assert(history.stats.exhausted && history.stats.invalid); // both edge cases were exercised
     assert(loads > draws / 2); // most draws found their history (the test pairs, not only stores)
 }

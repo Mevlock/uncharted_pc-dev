@@ -789,6 +789,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // bbport: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
+        object_motion->FlushPairing(); // the motion parameters this submission's draws read
         runtime.FlushBarriers(GuestSync::SiteSubmit);
         buffer_cache.SubmitPendingArenaBinds(info);
     });
@@ -4330,7 +4331,7 @@ void ReportMotionCost() {
                          c[MotionCost::PrepChecksum] + c[MotionCost::PrepRejected];
         std::printf("Motion cost (per frame, 600 frames, %.1f fps): stage A %.0f draws %.0f us (%.0f ns each); stage B "
                     "%.0f draws %.0f us (%.0f ns each) + %.0f motion draws %.0f us (%.0f ns each: identity %.1f, "
-                    "offsets %.1f, history %.1f (pairing %.1f), attach %.1f); workers %.0f draws %.0f us (%.0f ns each); prepared "
+                    "offsets %.1f, history %.1f (allocation %.1f), attach %.1f; paired later %.1f ns a draw); workers %.0f draws %.0f us (%.0f ns each); prepared "
                     "used %.1f%%, late %.1f%%, unavailable %.1f%%, checksum %.1f%%, rejected %.1f%%\n",
                     600.0 / (std::chrono::duration<double>(now - t0).count()),
                     c[MotionCost::ADraws] / 600.0, us_frame(c[MotionCost::ACycles]),
@@ -4342,7 +4343,8 @@ void ReportMotionCost() {
                     ns_each(c[MotionCost::BOffsets], c[MotionCost::BMotionDraws]),
                     ns_each(c[MotionCost::BHistory], c[MotionCost::BMotionDraws]),
                     ns_each(c[MotionCost::BPair], c[MotionCost::BMotionDraws]),
-                    ns_each(c[MotionCost::BAttach], c[MotionCost::BMotionDraws]), c[MotionCost::WDraws] / 600.0,
+                    ns_each(c[MotionCost::BAttach], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BFlushCycles], c[MotionCost::BFlushDraws]), c[MotionCost::WDraws] / 600.0,
                     us_frame(c[MotionCost::WCycles]), ns_each(c[MotionCost::WCycles], c[MotionCost::WDraws]),
                     prep ? 100.0 * c[MotionCost::PrepUsed] / prep : 0.0,
                     prep ? 100.0 * c[MotionCost::PrepLate] / prep : 0.0,

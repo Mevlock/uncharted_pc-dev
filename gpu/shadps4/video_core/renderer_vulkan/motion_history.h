@@ -281,6 +281,11 @@ public:
     struct Allocation {
         uint32_t store{}, load{}, vertices{}, instances{}, first_vertex{}, first_instance{};
     };
+    /// Allocate's result: the draw's store (in draw order) without its pairing; Pair adds the load.
+    struct Stored {
+        Allocation allocation;
+        bool valid{}; ///< false: no vertices or out of range (nothing stored, nothing paired)
+    };
     struct Stats {
         uint64_t draws{}, stored{}, loaded{}, unmatched{}, exhausted{}, invalid{}, still{};
         uint64_t in_order{}, searched{}, indexes{}; ///< paired at the walk's position, through the index; indexes built
@@ -322,7 +327,20 @@ public:
     // are walked in order (one compare a draw); a draw out of that order (the camera culled or uncovered some) is
     // found through an index of the previous frame, built at the first such draw of a frame, and the walk goes on
     // behind it. (Two hash-table lookups a draw were ~70 ns of the GPU thread's ~110 ns on a motion draw.)
+    //
+    // Prepare is Allocate then Pair. They can also run apart (ObjectMotion defers the pairing of a draw whose store
+    // was allocated to a batch before the submission): Allocate in draw order, Pair later for the same draws in the
+    // same order, with no NextFrame between them. The store does not depend on the pairing, so the allocations are
+    // the same either way.
     Allocation Prepare(const Draw& draw) {
+        Stored stored = Allocate(draw);
+        if (stored.valid) {
+            Pair(draw, stored.allocation);
+        }
+        return stored.allocation;
+    }
+    /// The draw's store (positions of this frame), in draw order.
+    Stored Allocate(const Draw& draw) {
         ++stats.draws;
         const uint64_t count = uint64_t(draw.vertices.count) * draw.instances;
         if (!count || uint64_t(draw.vertices.first) + draw.vertices.count - 1 > INT32_MAX ||
@@ -330,6 +348,18 @@ public:
             ++stats.invalid;
             return {};
         }
+        Stored result{{0, 0, draw.vertices.count, draw.instances, draw.vertices.first, draw.first_instance}, true};
+        if (count <= capacity - used) {
+            result.allocation.store = 1 + uint32_t(frame & 1) * capacity + used;
+            used += uint32_t(count);
+            ++stats.stored;
+        } else {
+            ++stats.exhausted;
+        }
+        return result;
+    }
+    /// The load of a valid draw `Allocate` gave `result` for: its partner of the previous frame.
+    void Pair(const Draw& draw, Allocation& result) {
         const uint64_t hash = OfDraw(draw);
         Entry* prev = nullptr;
         if (cursor < previous.size() && previous[cursor].hash == hash && !previous[cursor].paired &&
@@ -349,8 +379,6 @@ public:
             prev = Find(hash, draw);
             ++stats.searched;
         }
-        Allocation result{0, 0, draw.vertices.count, draw.instances,
-                          draw.vertices.first, draw.first_instance};
         if (prev) {
             prev->paired = true;
         }
@@ -360,22 +388,7 @@ public:
         } else {
             ++stats.unmatched;
         }
-        if (count <= capacity - used) {
-            result.store = 1 + uint32_t(frame & 1) * capacity + used;
-            used += uint32_t(count);
-            ++stats.stored;
-        } else {
-            ++stats.exhausted;
-        }
         current.push_back({draw, hash, result.store, NoEntry, NoEntry, false});
-        // The next draw's likely partner (the walk's next entry), fetched while the rest of the draw is recorded: between
-        // two draws the recording thread's other work evicts the previous frame's entries.
-        if (cursor < previous.size()) {
-            const auto* next = reinterpret_cast<const char*>(&previous[cursor]);
-            __builtin_prefetch(next);
-            __builtin_prefetch(next + sizeof(Entry) - 1);
-        }
-        return result;
     }
 
     uint32_t Used() const { return used; }

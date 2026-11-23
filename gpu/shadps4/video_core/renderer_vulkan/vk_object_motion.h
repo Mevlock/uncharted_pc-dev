@@ -38,7 +38,8 @@ enum Counter : u32 {
     BMotionDraws, BMotionCycles, ///< stage B: DrawRecord of motion draws
     BIdentity, BOffsets, BHistory, ///< stage B: the motion block's parts (motion draws)
     BAttach,                   ///< stage B: ObjectMotion::Attach
-    BPair,                     ///< stage B: History::Prepare (pairing) within the history part
+    BPair,                     ///< stage B: History::Allocate (the store) within the history part
+    BFlushDraws, BFlushCycles, ///< ObjectMotion::FlushPairing: draws paired after their recording, and the time
     CDraws, C0, C1, C2, C3, C4, ///< stage B: G-buffer candidates (twins, or the draws that would be): DrawRecord's parts
     ODraws, O0, O1, O2, O3, O4, ///< stage B: the other draws, the same parts
     RChunks, RCycles,          ///< the Vulkan recording thread: chunks executed and their time
@@ -124,7 +125,12 @@ public:
     }
 
     using DrawInfo = Motion::Draw;
+    /// The draw's parameter index (0: none) for its push constants. The parameter itself (the pairing with the
+    /// previous frame's draw) is written by FlushPairing.
     u32 PrepareDraw(const DrawInfo& draw);
+    /// Pairs the draws PrepareDraw left for later and writes their parameters: before every submission of the draw
+    /// scheduler (the GPU reads them) and before the history goes on to the next frame.
+    void FlushPairing();
     /// Small skeletons: whether the bone palette changed (Motion::History::Moving).
     bool Moving(const Motion::History::GateKey& key, u64 palette) {
         return history.Moving(key, palette);
@@ -142,6 +148,7 @@ public:
     /// Start of a frame (display pass).
     void OnFrameStart();
     void InvalidateHistory() {
+        FlushPairing();
         history.NextFrame();
         history.NextFrame();
         if (history_check) {
@@ -164,6 +171,11 @@ public:
 
 private:
     void EnsureImage(u32 width, u32 height);
+    /// The next parameter of this frame's slot.
+    u32 NextParam();
+    void WriteParam(u32 index, const Motion::History::Allocation& allocation);
+    /// BB_MOTION_HISTORY_CHECK: the keyed pairing for the same draw, compared.
+    void CheckAllocation(const DrawInfo& draw, const Motion::History::Allocation& allocation);
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -180,6 +192,16 @@ private:
     std::unique_ptr<Motion::KeyedHistory> history_check;
     u64 history_checked = 0, history_differed = 0;
     Motion::IndexRangeCache index_ranges;
+    /// Draws whose store is allocated and whose pairing and parameter wait for FlushPairing, in draw order (index 0:
+    /// an invalid draw, kept only for the history check's order). The pairing was a third of a motion draw's cost on
+    /// the draw recording thread (~40 ns between the rest of each draw's work; in one pass the previous frame's walk
+    /// stays in cache).
+    struct Deferred {
+        DrawInfo draw;
+        u32 store;
+        u32 index;
+    };
+    std::vector<Deferred> deferred;
     std::array<u64, FrameSlots> params_ticks{};
     vk::Buffer params_buffer{};
     VmaAllocation params_allocation{};

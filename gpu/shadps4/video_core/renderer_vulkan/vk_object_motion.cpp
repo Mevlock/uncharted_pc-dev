@@ -83,6 +83,7 @@ ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
     }
     params_mapped = static_cast<u32*>(mapped);
     std::memset(params_mapped, 0, 32);
+    deferred.reserve(ParamsPerFrame); // at most a frame's parameters wait
     Shader::MotionVectors::params_address = params_address;
     Shader::MotionVectors::positions_address = positions_address;
     enabled = true;
@@ -110,6 +111,7 @@ void ObjectMotion::OnFrameStart() {
     if (!enabled) {
         return;
     }
+    FlushPairing();
     if (BbStats::enabled && (frame % 600) == 0 && history.stats.draws) {
         const auto& s = history.stats;
         std::printf("Object motion: %llu draws, %llu stored, %llu with history, %llu unmatched, "
@@ -183,26 +185,68 @@ u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
     if (!enabled || BbToggle::Disabled(1u << 29) || params_used >= ParamsPerFrame) {
         return 0;
     }
-    const u64 pair_start = MotionCost::On() ? __rdtsc() : 0;
-    const auto allocation = history.Prepare(draw);
-    if (pair_start) {
-        MotionCost::Add(MotionCost::BPair, __rdtsc() - pair_start);
+    const u64 allocate_start = MotionCost::On() ? __rdtsc() : 0;
+    const auto stored = history.Allocate(draw);
+    if (allocate_start) {
+        MotionCost::Add(MotionCost::BPair, __rdtsc() - allocate_start);
     }
-    if (history_check) {
-        const auto want = history_check->Prepare(draw);
-        ++history_checked;
-        history_differed += want.store != allocation.store || want.load != allocation.load ||
-                            want.vertices != allocation.vertices || want.instances != allocation.instances ||
-                            want.first_vertex != allocation.first_vertex ||
-                            want.first_instance != allocation.first_instance;
-    }
-    u32 flags = (allocation.store ? Shader::MotionVectors::FlagStore : 0) |
-                (allocation.load ? Shader::MotionVectors::FlagLoad : 0);
-    if (!flags) {
+    if (!stored.valid) {
+        if (history_check) {
+            deferred.push_back({draw, 0, 0}); // the keyed pairing counts it too, in order
+        }
         return 0;
     }
+    if (!stored.allocation.store) {
+        // No room left for its positions this frame: it gets a parameter only with a load, which the pairing gives.
+        FlushPairing();
+        auto allocation = stored.allocation;
+        history.Pair(draw, allocation);
+        CheckAllocation(draw, allocation);
+        if (!allocation.load) {
+            return 0;
+        }
+        const u32 index = NextParam();
+        WriteParam(index, allocation);
+        return index;
+    }
+    // A store: the draw has a parameter whatever the pairing finds (FlushPairing).
+    const u32 index = NextParam();
+    deferred.push_back({draw, stored.allocation.store, index});
+    return index;
+}
+
+void ObjectMotion::FlushPairing() {
+    if (deferred.empty()) {
+        return;
+    }
+    const u64 start = MotionCost::On() ? __rdtsc() : 0;
+    for (const auto& d : deferred) {
+        if (!d.index) {
+            CheckAllocation(d.draw, {});
+            continue;
+        }
+        Motion::History::Allocation allocation{d.store, 0, d.draw.vertices.count, d.draw.instances,
+                                               d.draw.vertices.first, d.draw.first_instance};
+        history.Pair(d.draw, allocation);
+        CheckAllocation(d.draw, allocation);
+        WriteParam(d.index, allocation);
+    }
+    if (start) {
+        MotionCost::Add(MotionCost::BFlushDraws, deferred.size());
+        MotionCost::Add(MotionCost::BFlushCycles, __rdtsc() - start);
+    }
+    deferred.clear();
+}
+
+u32 ObjectMotion::NextParam() {
     const u32 slot = u32(frame % FrameSlots);
-    const u32 index = 1 + slot * ParamsPerFrame + params_used++;
+    params_ticks[slot] = scheduler.CurrentTick();
+    return 1 + slot * ParamsPerFrame + params_used++;
+}
+
+void ObjectMotion::WriteParam(u32 index, const Motion::History::Allocation& allocation) {
+    const u32 flags = (allocation.store ? Shader::MotionVectors::FlagStore : 0) |
+                      (allocation.load ? Shader::MotionVectors::FlagLoad : 0);
     u32* param = params_mapped + index * 8;
     param[0] = allocation.store;
     param[1] = allocation.load;
@@ -212,8 +256,18 @@ u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
     param[5] = allocation.first_instance;
     param[6] = allocation.instances;
     param[7] = 0;
-    params_ticks[slot] = scheduler.CurrentTick();
-    return index;
+}
+
+void ObjectMotion::CheckAllocation(const DrawInfo& draw, const Motion::History::Allocation& allocation) {
+    if (!history_check) {
+        return;
+    }
+    const auto want = history_check->Prepare(draw);
+    ++history_checked;
+    history_differed += want.store != allocation.store || want.load != allocation.load ||
+                        want.vertices != allocation.vertices || want.instances != allocation.instances ||
+                        want.first_vertex != allocation.first_vertex ||
+                        want.first_instance != allocation.first_instance;
 }
 
 void ObjectMotion::EnsureImage(u32 width, u32 height) {
