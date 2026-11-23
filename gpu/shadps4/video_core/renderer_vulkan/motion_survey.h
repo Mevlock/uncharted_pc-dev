@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -45,6 +46,9 @@ public:
         uint32_t index_count{}, instances{}, first_instance{};
         uint32_t num_buffers{};
         bool images{}; ///< the vertex shader also reads images
+        const uint32_t* flat{}; ///< the vertex shader's flattened user data (its resource table as it read it)
+        uint32_t flat_size{};
+        bool cpu_written{}; ///< a large constant buffer has CPU writes the buffer cache has not taken yet
         std::array<Buffer, MaxBuffers> buffers{};
     };
 
@@ -124,6 +128,45 @@ public:
                     changed += (changed.empty() ? "" : "+") + std::to_string(b.size);
                 }
             }
+            // The flattened user data, word by word (the buffers' descriptors are in it too).
+            const uint32_t words = std::min<uint32_t>(d.flat_size, MaxFlat);
+            uint32_t lo = UINT32_MAX, hi = 0, n = 0;
+            if (rec.flat.size() == words) {
+                for (uint32_t i = 0; i < words; ++i) {
+                    if (rec.flat[i] != d.flat[i]) {
+                        lo = std::min(lo, i);
+                        hi = i;
+                        ++n;
+                    }
+                }
+            } else {
+                lo = 0, hi = words, n = words;
+            }
+            auto& fc = w.flats[d.flat_size];
+            ++fc.n;
+            fc.same += n == 0;
+            w.flat_same += n == 0;
+            w.flat_and_streams_same += n == 0 && streams_same && constants_same && !gpu;
+            if (n) {
+                char sig[64];
+                std::snprintf(sig, sizeof(sig), "%u words: %u-%u (%u)", d.flat_size, lo, hi, n);
+                auto& count = w.flat_patterns[sig];
+                if (++count <= 2 && samples < 40 && rec.flat.size() == words) {
+                    ++samples;
+                    std::string text;
+                    for (uint32_t i = lo; i <= hi && i < lo + 24; ++i) {
+                        char part[80];
+                        float a, b;
+                        std::memcpy(&a, &rec.flat[i], 4);
+                        std::memcpy(&b, &d.flat[i], 4);
+                        std::snprintf(part, sizeof(part), " [%u] %08x>%08x (%g>%g)", i, rec.flat[i], d.flat[i], a, b);
+                        text += part;
+                    }
+                    std::printf("Motion survey flat sample: vs %08x %s%s:%s\n", uint32_t(d.shader), sig,
+                                streams_same ? "" : " streams moved", text.c_str());
+                }
+            }
+            w.cpu_written += d.cpu_written;
             w.streams_same += streams_same;
             w.all_same += streams_same && constants_same && !gpu;
             if (!streams_same) {
@@ -136,6 +179,7 @@ public:
             rec.buffers[i].address = d.buffers[i].address;
             rec.buffers[i].content = d.buffers[i].content;
         }
+        rec.flat.assign(d.flat, d.flat + std::min<uint32_t>(d.flat_size, MaxFlat));
         rec.num_buffers = d.num_buffers;
         rec.frame = frame;
         if (layouts.size() < 60 && layouts.insert(d.shader).second) {
@@ -178,6 +222,30 @@ public:
             classes += part;
         }
         std::printf("Motion survey constants (by size)%s\n", classes.c_str());
+        std::string flats;
+        for (const auto& [size, c] : w.flats) {
+            char part[100];
+            std::snprintf(part, sizeof(part), " | %u words: %.0f a frame, same %.1f%%", size, c.n / f,
+                          pct(c.same, c.n));
+            flats += part;
+        }
+        std::vector<std::pair<uint64_t, std::string>> flat_top;
+        for (const auto& [name, n] : w.flat_patterns) {
+            flat_top.emplace_back(n, name);
+        }
+        std::sort(flat_top.rbegin(), flat_top.rend());
+        std::string changes;
+        for (size_t i = 0; i < flat_top.size() && i < 12; ++i) {
+            char part[120];
+            std::snprintf(part, sizeof(part), " | %s: %.1f%%", flat_top[i].second.c_str(),
+                          pct(flat_top[i].first, w.paired));
+            changes += part;
+        }
+        std::printf("Motion survey flat user data (of the paired draws): same %.1f%%, same with every other input "
+                    "%.1f%%; large constants with CPU writes pending %.1f%%; by size%s; changed words (first-last "
+                    "(count))%s\n",
+                    pct(w.flat_same, w.paired), pct(w.flat_and_streams_same, w.paired), pct(w.cpu_written, w.paired),
+                    flats.c_str(), changes.c_str());
         std::vector<std::pair<uint64_t, std::string>> top;
         for (const auto& [name, n] : w.patterns) {
             top.emplace_back(n, name);
@@ -213,6 +281,7 @@ private:
             uint64_t address{}, address2{}, content{};
         };
         std::array<Old, MaxBuffers> buffers{};
+        std::vector<uint32_t> flat;
         uint32_t num_buffers{};
         uint64_t frame{};
     };
@@ -225,10 +294,17 @@ private:
     };
     struct Window {
         uint64_t draws{}, paired{}, streams_same{}, all_same{}, key_static{}, key_twice{}, streak8{}, streak60{};
-        uint64_t gpu_inputs{}, images{};
+        uint64_t gpu_inputs{}, images{}, flat_same{}, flat_and_streams_same{}, cpu_written{};
+        struct Flat {
+            uint64_t n{}, same{};
+        };
+        std::map<uint32_t, Flat> flats;
+        std::map<std::string, uint64_t> flat_patterns;
         std::map<uint32_t, Class> classes;
         std::map<std::string, uint64_t> patterns;
     } w;
+    static constexpr uint32_t MaxFlat = 512;
+    uint32_t samples = 0;
     uint64_t frame = 2;
     std::vector<uint32_t> excluded;
     std::unordered_map<uint64_t, uint32_t> occurrences;

@@ -5384,8 +5384,14 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     memory->IsValidGpuMapping(out.address, 0) &&
                     memory->ClampRangeSize(out.address, out.size) == out.size) {
                     out.content = XXH3_64bits(reinterpret_cast<const void*>(out.address), out.size) | 1;
+                    if (out.size >= 64_KB) {
+                        survey.cpu_written |= buffer_cache.IsRegionCpuModified(out.address, out.size);
+                    }
                 }
             }
+            const auto flat = vs.FlatUserData();
+            survey.flat = flat.data();
+            survey.flat_size = u32(flat.size());
             motion_survey.OnDraw(survey);
         }
         push_data.motion_param = 0;
