@@ -283,6 +283,7 @@ public:
     };
     struct Stats {
         uint64_t draws{}, stored{}, loaded{}, unmatched{}, exhausted{}, invalid{}, still{};
+        uint64_t in_order{}, searched{}, indexes{}; ///< paired at the walk's position, through the index; indexes built
     } stats;
 
     // A small skeleton (weapon, prop; most are static world pieces) only needs history
@@ -334,6 +335,7 @@ public:
         if (cursor < previous.size() && previous[cursor].hash == hash && !previous[cursor].paired &&
             previous[cursor].draw == draw) {
             prev = &previous[cursor++];
+            ++stats.in_order;
             // Behind a draw found out of order, an earlier one of identical draws may still be unpaired: the
             // earliest goes first.
             if (index_built) {
@@ -345,6 +347,7 @@ public:
             }
         } else {
             prev = Find(hash, draw);
+            ++stats.searched;
         }
         Allocation result{0, 0, draw.vertices.count, draw.instances,
                           draw.vertices.first, draw.first_instance};
@@ -424,6 +427,7 @@ private:
     }
     void BuildIndex() {
         index_built = true;
+        ++stats.indexes;
         size_t size = 64;
         while (size < previous.size() * 2) {
             size *= 2;
@@ -478,6 +482,76 @@ private:
     };
     FlatMap<GateKey, uint64_t, GateHash> gate_previous, gate_current;
     FlatMap<GateKey, uint32_t, GateHash> gate_occurrences;
+};
+
+// The pairing of 0.3.6.68 (a table keyed by draw and occurrence: the k-th of identical draws of a frame takes the k-th's
+// store of the previous frame), kept as the reference History must equal: BB_MOTION_HISTORY_CHECK=1 (diagnosis) runs
+// it next to History on the real draws and counts allocations that differ; the motion-history test compares the two.
+class KeyedHistory {
+public:
+    explicit KeyedHistory(uint32_t capacity) : capacity{capacity} {}
+
+    void NextFrame() {
+        previous.swap(current);
+        current.clear();
+        ++frame;
+        used = 0;
+    }
+
+    History::Allocation Prepare(const Draw& draw) {
+        const size_t draw_hash = Hash::OfDraw(draw);
+        Key key{draw, 0};
+        Slot& head = current.At(key, Hash::WithOccurrence(draw_hash, 0));
+        key.occurrence = head.seen++;
+        const size_t key_hash = Hash::WithOccurrence(draw_hash, key.occurrence);
+        const uint64_t count = uint64_t(draw.vertices.count) * draw.instances;
+        if (!count || uint64_t(draw.vertices.first) + draw.vertices.count - 1 > INT32_MAX ||
+            uint64_t(draw.first_instance) + draw.instances > UINT32_MAX) {
+            return {};
+        }
+        const auto* prev = previous.find(key, key_hash);
+        History::Allocation result{0, 0, draw.vertices.count, draw.instances, draw.vertices.first,
+                                   draw.first_instance};
+        if (prev && prev->store) {
+            result.load = prev->store;
+        }
+        if (count <= capacity - used) {
+            result.store = 1 + uint32_t(frame & 1) * capacity + used;
+            used += uint32_t(count);
+            (key.occurrence ? current.At(key, key_hash) : head).store = result.store;
+        }
+        return result;
+    }
+
+private:
+    struct Key {
+        Draw draw;
+        uint32_t occurrence;
+        bool operator==(const Key&) const = default;
+    };
+    struct Hash {
+        static size_t OfDraw(const Draw& d) {
+            uint64_t h = 0;
+            const auto mix = [&](uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); };
+            mix(d.shader); mix(d.geometry); mix(d.indices); mix(d.topology);
+            mix(d.index_count); mix(d.instances); mix(d.first_instance);
+            mix(d.vertices.first); mix(d.vertices.count);
+            return size_t(h);
+        }
+        static size_t WithOccurrence(size_t h, uint32_t occurrence) {
+            return h ^ (occurrence + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+        }
+        size_t operator()(const Key& key) const {
+            return WithOccurrence(OfDraw(key.draw), key.occurrence);
+        }
+    };
+    struct Slot {
+        uint32_t store{};
+        uint32_t seen{};
+    };
+    uint32_t capacity{}, used{};
+    uint64_t frame{};
+    FlatMap<Key, Slot, Hash> previous, current;
 };
 
 } // namespace Vulkan::Motion

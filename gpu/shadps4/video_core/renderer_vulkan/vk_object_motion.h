@@ -9,6 +9,7 @@
 
 #include <array>
 #include <atomic>
+#include <memory>
 #include <cstdlib>
 #include "video_core/renderer_vulkan/motion_history.h"
 
@@ -35,6 +36,7 @@ enum Counter : u32 {
     BMotionDraws, BMotionCycles, ///< stage B: DrawRecord of motion draws
     BIdentity, BOffsets, BHistory, ///< stage B: the motion block's parts (motion draws)
     BAttach,                   ///< stage B: ObjectMotion::Attach
+    BPair,                     ///< stage B: History::Prepare (pairing) within the history part
     WDraws, WCycles,           ///< workers: prepared draws (PrepareGraphicsPipeline .. Ready)
     PrepUsed, PrepLate, PrepUnavailable, PrepChecksum, PrepRejected, ///< stage A: prepared draw outcome
     Count
@@ -98,7 +100,14 @@ public:
 
     /// Start of a frame (display pass).
     void OnFrameStart();
-    void InvalidateHistory() { history.NextFrame(); history.NextFrame(); }
+    void InvalidateHistory() {
+        history.NextFrame();
+        history.NextFrame();
+        if (history_check) {
+            history_check->NextFrame();
+            history_check->NextFrame();
+        }
+    }
 
     /// The motion image for the compose pass (layout General after this call) and whether it
     /// holds this frame's vectors at `width` x `height`.
@@ -126,6 +135,9 @@ private:
     // Positions (device local): two halves (current/previous frame) of vec4; element 0 is reserved.
     static constexpr u32 PositionsPerFrame = 4u << 20;
     Motion::History history{PositionsPerFrame};
+    /// BB_MOTION_HISTORY_CHECK=1 (diagnosis): 0.3.6.68's keyed pairing next to `history`, every allocation compared.
+    std::unique_ptr<Motion::KeyedHistory> history_check;
+    u64 history_checked = 0, history_differed = 0;
     Motion::IndexRangeCache index_ranges;
     std::array<u64, FrameSlots> params_ticks{};
     vk::Buffer params_buffer{};

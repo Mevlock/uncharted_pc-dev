@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <immintrin.h>
 
 #include <vk_mem_alloc.h>
 #include "bbport_settings.h"
@@ -85,6 +86,9 @@ ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
     Shader::MotionVectors::params_address = params_address;
     Shader::MotionVectors::positions_address = positions_address;
     enabled = true;
+    if (const char* check = std::getenv("BB_MOTION_HISTORY_CHECK"); check && check[0] == '1') {
+        history_check = std::make_unique<Motion::KeyedHistory>(PositionsPerFrame);
+    }
     // (The motion shaders embed these addresses: a twin the driver keeps from an earlier start is found again only
     // when they are the same.)
     std::printf("Object motion: on (%u vertices per frame; buffers at %llx, %llx)\n", PositionsPerFrame,
@@ -110,14 +114,16 @@ void ObjectMotion::OnFrameStart() {
         const auto& s = history.stats;
         std::printf("Object motion: %llu draws, %llu stored, %llu with history, %llu unmatched, "
                     "%llu capacity skips, %llu invalid, %llu still (600 frames); last frame %u/%u vertices; "
-                    "index ranges %llu reused, %llu scanned (%llu found changed), %zu cached\n",
+                    "index ranges %llu reused, %llu scanned (%llu found changed), %zu cached; paired %llu in order, "
+                    "%llu searched (%llu indexes)\n",
                     (unsigned long long)s.draws, (unsigned long long)s.stored,
                     (unsigned long long)s.loaded, (unsigned long long)s.unmatched,
                     (unsigned long long)s.exhausted, (unsigned long long)s.invalid,
                     (unsigned long long)s.still,
                     history.Used(), PositionsPerFrame, (unsigned long long)index_ranges.stats.hits,
                     (unsigned long long)index_ranges.stats.scans,
-                    (unsigned long long)index_ranges.stats.stale, index_ranges.Size());
+                    (unsigned long long)index_ranges.stats.stale, index_ranges.Size(), (unsigned long long)s.in_order,
+                    (unsigned long long)s.searched, (unsigned long long)s.indexes);
         index_ranges.stats = {};
         history.stats = {};
     }
@@ -140,6 +146,13 @@ void ObjectMotion::OnFrameStart() {
         }
     }
     history.NextFrame();
+    if (history_check) {
+        history_check->NextFrame();
+        if (frame % 600 == 0) {
+            std::printf("Object motion history check: %llu draws compared with the keyed pairing, %llu differed\n",
+                        (unsigned long long)history_checked, (unsigned long long)history_differed);
+        }
+    }
     ++frame;
     if (frame % Motion::IndexRangeCache::Unused == 0) {
         index_ranges.Trim(frame);
@@ -170,7 +183,19 @@ u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
     if (!enabled || BbToggle::Disabled(1u << 29) || params_used >= ParamsPerFrame) {
         return 0;
     }
+    const u64 pair_start = MotionCost::On() ? __rdtsc() : 0;
     const auto allocation = history.Prepare(draw);
+    if (pair_start) {
+        MotionCost::Add(MotionCost::BPair, __rdtsc() - pair_start);
+    }
+    if (history_check) {
+        const auto want = history_check->Prepare(draw);
+        ++history_checked;
+        history_differed += want.store != allocation.store || want.load != allocation.load ||
+                            want.vertices != allocation.vertices || want.instances != allocation.instances ||
+                            want.first_vertex != allocation.first_vertex ||
+                            want.first_instance != allocation.first_instance;
+    }
     u32 flags = (allocation.store ? Shader::MotionVectors::FlagStore : 0) |
                 (allocation.load ? Shader::MotionVectors::FlagLoad : 0);
     if (!flags) {

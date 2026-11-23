@@ -83,12 +83,14 @@ void RandomEquivalence(uint32_t seed) {
     }
     History history{110000};
     ReferenceHistory reference{110000};
+    KeyedHistory keyed{110000}; // the same, as BB_MOTION_HISTORY_CHECK runs it in the game
     uint64_t loads = 0, draws = 0;
     for (uint32_t frame = 0; frame < 300; ++frame) {
         const uint32_t skips = pick(40) == 0 ? 2 : 1;
         for (uint32_t s = 0; s < skips; ++s) {
             history.NextFrame();
             reference.NextFrame();
+            keyed.NextFrame();
         }
         // This frame's order: mostly the scene's, some draws culled, runs moved elsewhere, some swapped.
         std::vector<Draw> order;
@@ -119,6 +121,7 @@ void RandomEquivalence(uint32_t seed) {
         for (const auto& d : order) {
             const auto got = history.Prepare(d);
             const auto want = reference.Prepare(d);
+            assert(Same(keyed.Prepare(d), want));
             if (!Same(got, want)) {
                 std::printf("seed %u frame %u: store %u/%u load %u/%u\n", seed, frame, got.store, want.store,
                             got.load, want.load);
