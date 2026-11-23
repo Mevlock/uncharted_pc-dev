@@ -12,8 +12,10 @@
 #include "bbport_toggles.h"
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 
 namespace Vulkan {
+extern std::atomic<u64> g_flips; // vk_rasterizer.cpp
 SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r,
                            VideoCore::TextureCache& t)
     : SceneTargets(i, s, r, [&t](VideoCore::ImageId id, u64 uid) {
@@ -161,8 +163,14 @@ void SceneTargets::Copy(Entry& e, VideoCore::Image& original, bool to_native) {
     scheduler.EndRendering();
     const Runtime::TransferMark mark{runtime, to_native ? "scene proxy resolve" : "scene proxy fill",
                                      original};
-    if (debug) {
-        std::printf("Scene %s: %s %ux%u level %u\n", to_native ? "resolve" : "fill",
+    // FSR night (diagnosis): BB_SCENE_COPY_LOG=1: every fill / resolve of the frames 600n+1 (flips).
+    static const bool copy_log = std::getenv("BB_SCENE_COPY_LOG") != nullptr;
+    const u64 flip_now = g_flips.load(std::memory_order_relaxed);
+    static u32 copy_lines = 0;
+    if (debug || (copy_log && flip_now % 600 == 1 && copy_lines < 4000 && ++copy_lines)) {
+        std::printf("Scene %s: flip %llu %#llx %s %ux%u level %u\n", to_native ? "resolve" : "fill",
+                    static_cast<unsigned long long>(flip_now),
+                    static_cast<unsigned long long>(original.info.guest_address),
                     vk::to_string(original.info.pixel_format).c_str(), original.info.size.width,
                     original.info.size.height, e.level);
     }

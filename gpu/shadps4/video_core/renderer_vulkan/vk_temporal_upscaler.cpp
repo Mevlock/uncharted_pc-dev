@@ -2,6 +2,7 @@
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/motion_history.h"
+#include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/ui_composition.h"
 
@@ -1762,14 +1763,23 @@ void TemporalUpscaler::Run() {
         // Diagnosis (BB_DUMP_TRIGGER): this path's inputs and output, and the jitter the upscaler was told.
         if (const int dump = DumpFrame(); dump >= 0) {
             const bool packed = color.info.pixel_format == vk::Format::eB10G11R11UfloatPack32;
-            std::printf("Dump: frame %d jitter %.5f %.5f px, reset %d, input format %d\n", dump, jitter[0],
-                        jitter[1], int(reset), int(color.info.pixel_format));
+            std::printf("Dump: frame %d jitter %.5f %.5f px, reset %d, input format %d, depth %#llx %ux%u, color %#llx %ux%u\n", dump, jitter[0],
+                        jitter[1], int(reset), int(color.info.pixel_format),
+                        static_cast<unsigned long long>(depth.info.guest_address), depth.info.size.width,
+                        depth.info.size.height, static_cast<unsigned long long>(color.info.guest_address),
+                        color.info.size.width, color.info.size.height);
             DumpImages(instance, scheduler, cmdbuf, dump,
                        {{input_color, w, h, packed ? 4u : 8u, "input", packed ? "b10g11r11f" : "rgba16f"},
                         {vk::Image(motion_image), w, h, 4, "motion", "rg16f"},
                         {vk::Image(output_image), ow, oh, 8, "output", "rgba16f"}});
             DumpImages(instance, scheduler, cmdbuf, dump,
                        {{input_depth, w, h, 4, "depth", "f32", vk::ImageAspectFlagBits::eDepth}});
+            if (reduced && !packed) {
+                // The game's own (output-size) scene color and depth: what the stand-ins were filled from.
+                DumpImages(instance, scheduler, cmdbuf, dump,
+                           {{color.GetImage(), ow, oh, 8, "nativecolor", "rgba16f"},
+                            {depth.GetImage(), ow, oh, 4, "nativedepth", "f32", vk::ImageAspectFlagBits::eDepth}});
+            }
             if (input_stencil_view) {
                 DumpImages(instance, scheduler, cmdbuf, dump,
                            {{input_depth, w, h, 1, "stencil", "u8", vk::ImageAspectFlagBits::eStencil}});
@@ -1777,6 +1787,12 @@ void TemporalUpscaler::Run() {
             if (has_reactive) {
                 DumpImages(instance, scheduler, cmdbuf, dump,
                            {{vk::Image(reactive_image), w, h, 1, "reactive", "u8"}});
+            }
+            // The characters' own vectors (BB_CHARACTER_MOTION=1; layout General after the motion pass read them).
+            if (Shader::MotionVectors::characters) {
+                if (const vk::Image objects = camera_motion.ObjectMotionImage(w, h)) {
+                    DumpImages(instance, scheduler, cmdbuf, dump, {{objects, w, h, 16, "objects", "rgba32f"}});
+                }
             }
         }
         reset = false;
