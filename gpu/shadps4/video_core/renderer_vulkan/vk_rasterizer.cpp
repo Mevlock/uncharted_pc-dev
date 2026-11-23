@@ -3527,21 +3527,48 @@ struct DrawPartTimer {
     bool on;
     u64 last;
     u32 part = 0;
-    explicit DrawPartTimer(bool on_) : on(on_), last(on_ ? __rdtsc() : 0) {}
+    /// BB_MOTION_COST: the parts also by class (MotionCost::C0.. for G-buffer candidates, O0.. for the rest).
+    int cost_base = -1;
+    explicit DrawPartTimer(bool on_, int cost_base_ = -1)
+        : on(on_ || cost_base_ >= 0), last(on ? __rdtsc() : 0), cost_base(cost_base_), stats(on_) {}
+    bool stats;
+    void Add(u64 cycles) {
+        if (stats) {
+            g_draw_parts[part].fetch_add(cycles, std::memory_order_relaxed);
+        }
+        if (cost_base >= 0) {
+            MotionCost::Add(MotionCost::Counter(cost_base + part), cycles);
+        }
+    }
     void Next() {
         if (on) {
             const u64 now = __rdtsc();
-            g_draw_parts[part].fetch_add(now - last, std::memory_order_relaxed);
+            Add(now - last);
             last = now;
         }
         ++part;
     }
     ~DrawPartTimer() {
         if (on && part < g_draw_parts.size()) {
-            g_draw_parts[part].fetch_add(__rdtsc() - last, std::memory_order_relaxed);
+            Add(__rdtsc() - last);
         }
     }
 };
+/// BB_MOTION_COST: a draw that takes the motion twin with the character vectors on (the registers alone decide,
+/// PipelineCache::RefreshGraphicsKey's uncharted_gbuffer), so the same draws are timed with the vectors off.
+static bool GbufferCandidate(const AmdGpu::Regs& regs) {
+    if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable) {
+        return false;
+    }
+    u32 bound = 0;
+    for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+        bound += (regs.color_buffers[cb] && regs.color_target_mask.GetMask(cb)) ? 1 : 0;
+    }
+    return bound >= 1 && regs.depth_control.stencil_enable && regs.depth_control.depth_write_enable &&
+           !regs.color_buffers[Shader::MotionVectors::Output] && regs.depth_buffer.DepthValid() &&
+           regs.depth_buffer.NumSamples() == 1 && !regs.IsClipDisabled() &&
+           regs.stage_enable.raw == AmdGpu::ShaderStageEnable::VgtStages::Vs;
+}
 static bool DispatchStatsOn() {
     static const bool on = [] {
         const char* env = std::getenv("BB_DISPATCH_STATS");
@@ -4319,6 +4346,18 @@ void ReportMotionCost() {
                     prep ? 100.0 * c[MotionCost::PrepUnavailable] / prep : 0.0,
                     prep ? 100.0 * c[MotionCost::PrepChecksum] / prep : 0.0,
                     prep ? 100.0 * c[MotionCost::PrepRejected] / prep : 0.0);
+        const auto parts = [&](u32 base, u64 n) {
+            return std::array<double, 5>{ns_each(c[base], n), ns_each(c[base + 1], n), ns_each(c[base + 2], n),
+                                         ns_each(c[base + 3], n), ns_each(c[base + 4], n)};
+        };
+        const auto g = parts(MotionCost::C0, c[MotionCost::CDraws]);
+        const auto o = parts(MotionCost::O0, c[MotionCost::ODraws]);
+        std::printf("Motion cost parts (ns a draw: to binding, binding, to rendering, BeginRendering, rest): G-buffer "
+                    "%.0f draws %.0f %.0f %.0f %.0f %.0f = %.0f; others %.0f draws %.0f %.0f %.0f %.0f %.0f = %.0f; "
+                    "recording thread %.0f chunks %.0f us a frame\n",
+                    c[MotionCost::CDraws] / 600.0, g[0], g[1], g[2], g[3], g[4], g[0] + g[1] + g[2] + g[3] + g[4],
+                    c[MotionCost::ODraws] / 600.0, o[0], o[1], o[2], o[3], o[4], o[0] + o[1] + o[2] + o[3] + o[4],
+                    c[MotionCost::RChunks] / 600.0, us_frame(c[MotionCost::RCycles]));
     }
     tsc0 = tsc;
     t0 = now;
@@ -4759,7 +4798,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
     }
-    DrawPartTimer draw_parts{DispatchStatsOn()};
+    int cost_base = -1;
+    if (MotionCost::On()) {
+        const bool candidate = pipeline->GetGraphicsKey().motion_vectors || GbufferCandidate(Regs());
+        MotionCost::Add(candidate ? MotionCost::CDraws : MotionCost::ODraws, 1);
+        cost_base = candidate ? MotionCost::C0 : MotionCost::O0;
+    }
+    DrawPartTimer draw_parts{DispatchStatsOn(), cost_base};
     bind_prepared = used_prepared;
     motion_draw = pipeline->GetGraphicsKey().motion_vectors;
     motion_geometry = 0;

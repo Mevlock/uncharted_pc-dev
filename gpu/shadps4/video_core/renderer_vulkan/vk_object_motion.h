@@ -37,6 +37,9 @@ enum Counter : u32 {
     BIdentity, BOffsets, BHistory, ///< stage B: the motion block's parts (motion draws)
     BAttach,                   ///< stage B: ObjectMotion::Attach
     BPair,                     ///< stage B: History::Prepare (pairing) within the history part
+    CDraws, C0, C1, C2, C3, C4, ///< stage B: G-buffer candidates (twins, or the draws that would be): DrawRecord's parts
+    ODraws, O0, O1, O2, O3, O4, ///< stage B: the other draws, the same parts
+    RChunks, RCycles,          ///< the Vulkan recording thread: chunks executed and their time
     WDraws, WCycles,           ///< workers: prepared draws (PrepareGraphicsPipeline .. Ready)
     PrepUsed, PrepLate, PrepUnavailable, PrepChecksum, PrepRejected, ///< stage A: prepared draw outcome
     Count
