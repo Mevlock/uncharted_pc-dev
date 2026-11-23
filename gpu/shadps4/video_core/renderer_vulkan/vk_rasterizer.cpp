@@ -8877,15 +8877,17 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     // the post (FSR 3.1 / FSR 4 at Quality .. Performance) the game drew the whole scene at the output size and the
     // upscaler's input was a downsample of it (no GPU saving, a filtered image instead of jittered samples: grain and
     // crawling on fine detail, Nate's hair on U3's horse ride). The scene starts at the frame's first depth-writing pass
-    // into an output-size depth (velocity mode). BB_UNCHARTED_REDUCED=0: as before; =1: also in U2.
-    // Default: U1 and U3. U2 keeps the old order for now: its forward passes sample the full-size depth between
-    // depth-writing draws, so the stand-in is resolved 16 times a frame (U2 museum, FSR 3.1 Quality 3440, functional
-    // runs: 146 FPS against 167-175 with the old order; U1 and U3 run as before).
+    // into an output-size depth (velocity mode). BB_UNCHARTED_REDUCED=0: as before; =1: also in U1 and U2.
+    // Default: U3 only, the game it was measured on (#417 ride: FPS as the old order, no memory growth). U1 and U2 keep
+    // the old order until their stand-in copies are cut: U2's forward passes sample the full-size depth between
+    // depth-writing draws (16 resolves a frame; museum, FSR 3.1 Quality 3440: 146 FPS against 167-175); U1's scene
+    // colour and depth go back and forth ~16 times a frame (jungle: 203-219 FPS against 226-232). On this CPU-bound
+    // RTX 5080 that is a loss; a GPU-bound PC may gain from the smaller scene, not measured.
     static const int uncharted_reduced = [] {
         const char* env = std::getenv("BB_UNCHARTED_REDUCED");
         return env && env[0] ? (env[0] == '1' ? 1 : 0) : -1; // -1: by game
     }();
-    const bool reduced_here = uncharted_reduced == 1 || (uncharted_reduced == -1 && runtime_uncharted_game != 2);
+    const bool reduced_here = uncharted_reduced == 1 || (uncharted_reduced == -1 && runtime_uncharted_game == 3);
     {
         static int noted = -2;
         const int game = runtime_uncharted_game;
@@ -8893,7 +8895,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             noted = game;
             std::printf("Scene resolution: U%d's scene drawn at the render size before the post %s "
                         "(BB_UNCHARTED_REDUCED%s)\n", game, reduced_here ? "on" : "off",
-                        uncharted_reduced == -1 ? " unset: U1 and U3" : "");
+                        uncharted_reduced == -1 ? " unset: U3 only" : "");
         }
     }
     if (reduced_here && !scene_started && camera_motion->VelocityMode() && db_desc.first &&
