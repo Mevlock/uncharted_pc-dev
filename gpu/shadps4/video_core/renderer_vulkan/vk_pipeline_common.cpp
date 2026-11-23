@@ -11,6 +11,7 @@
 #include <boost/container/static_vector.hpp>
 
 #include "shader_recompiler/resource.h"
+#include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
@@ -179,6 +180,14 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushDat
     scheduler.Record([layout, stage_flags, push_data](vk::CommandBuffer cmdbuf) {
         cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(push_data), &push_data);
     });
+    if (motion_push) {
+        const Shader::MotionPushData motion{
+            u32(Shader::MotionVectors::params_address), u32(Shader::MotionVectors::params_address >> 32),
+            u32(Shader::MotionVectors::positions_address), u32(Shader::MotionVectors::positions_address >> 32)};
+        scheduler.Record([layout, stage_flags, motion](vk::CommandBuffer cmdbuf) {
+            cmdbuf.pushConstants(layout, stage_flags, Shader::MotionPushData::Offset, sizeof(motion), &motion);
+        });
+    }
 
     // bbport (BB_GPL): a split layout's set 1 (the pre-raster stages) comes from the descriptor heap; the
     // writes before `set1_first` are set 0 and take the usual path below.

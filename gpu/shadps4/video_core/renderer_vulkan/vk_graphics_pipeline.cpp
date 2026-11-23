@@ -121,13 +121,14 @@ GraphicsPipeline::GraphicsPipeline(
     for (const auto& rt : runtime_infos) {
         clip_jitter |= rt.hw_stage == Shader::HwStage::Vertex && rt.hw.vs.clip_jitter != 0;
     }
+    motion_push = key.motion_vectors != 0;
     BuildDescSetLayout(preloading);
     const auto debug_str = GetDebugString();
 
     const vk::PushConstantRange push_constants = {
         .stageFlags = AllGraphicsStageBits,
         .offset = 0,
-        .size = sizeof(Shader::PushData),
+        .size = u32(sizeof(Shader::PushData) + (motion_push ? sizeof(Shader::MotionPushData) : 0)),
     };
 
     // bbport (BB_GPL): a split layout has the pre-raster stages' set 1, made of independent sets: the shared
@@ -773,7 +774,7 @@ void GraphicsPipeline::BuildFromLibraries(
     const vk::PushConstantRange push_constants = {
         .stageFlags = AllGraphicsStageBits,
         .offset = 0,
-        .size = sizeof(Shader::PushData),
+        .size = u32(sizeof(Shader::PushData) + (motion_push ? sizeof(Shader::MotionPushData) : 0)),
     };
     const auto part_layout = [&](vk::DescriptorSetLayout set0, vk::DescriptorSetLayout set1) {
         const std::array<vk::DescriptorSetLayout, 2> sets = {set0, set1};

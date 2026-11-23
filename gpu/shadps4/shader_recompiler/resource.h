@@ -289,4 +289,17 @@ struct PushData {
 static_assert(sizeof(PushData) <= 128,
               "PushData size is greater than minimum size guaranteed by Vulkan spec");
 
+/// bbport (object motion): the motion buffers' device addresses, pushed after PushData for the pipelines with the
+/// motion attachment only (their layout's push range is 144 bytes; maxPushConstantsSize >= 144 is required for
+/// them). The motion vertex shader reads them here, so its SPIR-V does not depend on the session's addresses (they
+/// were constants in the code: a twin prepared by another process, the launcher's Prepare shaders, did not match the
+/// game's and the driver compiled it again in play).
+struct MotionPushData {
+    static constexpr u32 Index = PushData::SceneSizeIndex + 1; ///< its member of the push block
+    static constexpr u32 Offset = 128;
+    u32 params_lo, params_hi;       ///< MotionVectors::params_address
+    u32 positions_lo, positions_hi; ///< MotionVectors::positions_address
+};
+static_assert(sizeof(PushData) == MotionPushData::Offset && sizeof(MotionPushData) == 16);
+
 } // namespace Shader

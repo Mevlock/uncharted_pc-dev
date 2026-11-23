@@ -8,6 +8,7 @@
 #include <vk_mem_alloc.h>
 #include "bbport_settings.h"
 #include "bbport_toggles.h"
+#include "shader_recompiler/resource.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -62,6 +63,12 @@ ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
     const auto& features = instance.GetPhysicalDevice().getFeatures();
     if (!features.vertexPipelineStoresAndAtomics) {
         std::printf("Object motion: vertexPipelineStoresAndAtomics unsupported, off\n");
+        return;
+    }
+    // The motion pipelines push the buffers' addresses after the usual push constants (Shader::MotionPushData).
+    const u32 push_limit = instance.GetPhysicalDevice().getProperties().limits.maxPushConstantsSize;
+    if (push_limit < sizeof(Shader::PushData) + sizeof(Shader::MotionPushData)) {
+        std::printf("Object motion: push constants limited to %u bytes, off\n", push_limit);
         return;
     }
     void* mapped = nullptr;
