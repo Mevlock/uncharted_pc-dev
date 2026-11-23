@@ -5244,6 +5244,19 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // index list is not scanned (the cached scan cost ~70 ns a draw on the GPU thread, its page
     // checks more). Constant buffers (stride 16) and raw buffers (stride 0) are not streams.
     u32 stream_records = 0;
+    // BB_MOTION_COST: the last part of the draw in steps (MotionCost::CS0.. / OS0..).
+    const int split_base = cost_base < 0 ? -1 : cost_base == MotionCost::C0 ? MotionCost::CS0 : MotionCost::OS0;
+    u64 split_last = split_base >= 0 ? __rdtsc() : 0;
+    u32 split_step = 0;
+    const auto split = [&] {
+        if (split_base >= 0) {
+            const u64 now = __rdtsc();
+            MotionCost::Add(MotionCost::Counter(split_base + split_step), now - split_last);
+            split_last = now;
+        }
+        ++split_step;
+    };
+    split(); // CS0: BeginRendering's end to here
     const u64 motion_cost_t0 = motion_draw && MotionCost::On() ? __rdtsc() : 0;
     u64 motion_cost_t1 = 0, motion_cost_t2 = 0;
     if (motion_draw && Shader::MotionVectors::characters && !motion_geometry) {
@@ -5368,6 +5381,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         MotionCost::Add(MotionCost::BOffsets, motion_cost_t2 - motion_cost_t1);
         MotionCost::Add(MotionCost::BHistory, end - motion_cost_t2);
     }
+    split(); // CS1: the motion block
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};
@@ -5400,6 +5414,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (!batch_variant) {
         pipeline->BindResources(set_writes, push_data, set1_first_write);
     }
+    split(); // CS2: jitter, push constants and descriptors
     // bbport diagnosis (BB_JITTER_DIAG=1): depth-tested draws jittered, drawn before the scene
     // depth was known, or into another depth buffer, every 5 s.
     if (static const bool jitter_diag = std::getenv("BB_JITTER_DIAG") != nullptr;
@@ -5441,10 +5456,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             window = now;
         }
     }
+    split(); // CS3: to the dynamic state
     UpdateDynamicState(pipeline, is_indexed);
+    split(); // CS4: the dynamic state
     MarkPass(pipeline, state);
     FullBarrierBeforeDraw(scheduler);
     scheduler.BeginRendering(state);
+    split(); // CS5: pass, barrier, the scheduler's BeginRendering
     if (Scheduler::BreadcrumbsOn()) { // BB_GPU_BREADCRUMBS: the pass's shaders, listed with its number
         for (const auto* stage : pipeline->GetStages()) {
             if (stage) {

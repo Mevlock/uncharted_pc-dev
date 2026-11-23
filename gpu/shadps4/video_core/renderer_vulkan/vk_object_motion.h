@@ -40,6 +40,9 @@ enum Counter : u32 {
     CDraws, C0, C1, C2, C3, C4, ///< stage B: G-buffer candidates (twins, or the draws that would be): DrawRecord's parts
     ODraws, O0, O1, O2, O3, O4, ///< stage B: the other draws, the same parts
     RChunks, RCycles,          ///< the Vulkan recording thread: chunks executed and their time
+    /// DrawRecord's last part split (G-buffer class, then others): to the motion block, the motion block, jitter +
+    /// push/descriptors (Pipeline::BindResources), to the dynamic state, UpdateDynamicState, pass/barrier/BeginRendering
+    CS0, CS1, CS2, CS3, CS4, CS5, OS0, OS1, OS2, OS3, OS4, OS5,
     WDraws, WCycles,           ///< workers: prepared draws (PrepareGraphicsPipeline .. Ready)
     PrepUsed, PrepLate, PrepUnavailable, PrepChecksum, PrepRejected, ///< stage A: prepared draw outcome
     Count
