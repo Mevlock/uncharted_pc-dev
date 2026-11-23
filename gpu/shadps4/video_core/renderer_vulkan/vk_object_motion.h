@@ -10,6 +10,8 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <vector>
 #include <cstdlib>
 #include "video_core/renderer_vulkan/motion_history.h"
 
@@ -40,16 +42,49 @@ enum Counter : u32 {
     CDraws, C0, C1, C2, C3, C4, ///< stage B: G-buffer candidates (twins, or the draws that would be): DrawRecord's parts
     ODraws, O0, O1, O2, O3, O4, ///< stage B: the other draws, the same parts
     RChunks, RCycles,          ///< the Vulkan recording thread: chunks executed and their time
-    /// DrawRecord's last part split (G-buffer class, then others): to the motion block, the motion block, jitter +
-    /// push/descriptors (Pipeline::BindResources), to the dynamic state, UpdateDynamicState, pass/barrier/BeginRendering
-    CS0, CS1, CS2, CS3, CS4, CS5, OS0, OS1, OS2, OS3, OS4, OS5,
+    /// DrawRecord's last part split (G-buffer class, then others): to the motion block, the motion block, jitter,
+    /// push/descriptors (Pipeline::BindResources), to the dynamic state, UpdateDynamicState, pass/barrier/BeginRendering,
+    /// the draw's command, after it (to the function's end)
+    CS0, CS1, CS2, CS3, CS4, CS5, CS6, CS7, CS8, OS0, OS1, OS2, OS3, OS4, OS5, OS6, OS7, OS8,
+    /// Pipeline::BindResources by class (G-buffer, others): push constants, descriptors, the writes and descriptors
+    /// pushed, draws taking the descriptor-set path (no push descriptors), the push data's bytes
+    CB0, CB1, CB2, CB3, CB4, CB5, OB0, OB1, OB2, OB3, OB4, OB5,
     WDraws, WCycles,           ///< workers: prepared draws (PrepareGraphicsPipeline .. Ready)
     PrepUsed, PrepLate, PrepUnavailable, PrepChecksum, PrepRejected, ///< stage A: prepared draw outcome
     Count
 };
-inline std::array<std::atomic<u64>, Count> counters{};
+/// Each thread's own counters (only it writes them, with plain loads and stores: one shared array of atomics put
+/// lock-prefixed adds on cache lines the workers, stage A and stage B all wrote, and the timers measured that
+/// contention more than the code they timed). Totals() sums them; the report takes the difference to the last one.
+struct alignas(64) Block {
+    std::array<std::atomic<u64>, Count> v{};
+};
+inline std::mutex blocks_mutex;
+inline std::vector<Block*> blocks; ///< never freed: a thread's counters outlive it (a few hundred bytes a thread)
+inline Block& Local() {
+    thread_local Block* const block = [] {
+        auto* b = new Block;
+        std::scoped_lock lk{blocks_mutex};
+        blocks.push_back(b);
+        return b;
+    }();
+    return *block;
+}
+/// The class Pipeline::BindResources adds its parts to (CB0 / OB0; -1: not timed), set by DrawRecord around it.
+inline thread_local int bind_base = -1;
 inline void Add(Counter c, u64 v) {
-    counters[c].fetch_add(v, std::memory_order_relaxed);
+    auto& x = Local().v[c];
+    x.store(x.load(std::memory_order_relaxed) + v, std::memory_order_relaxed);
+}
+inline std::array<u64, Count> Totals() {
+    std::array<u64, Count> t{};
+    std::scoped_lock lk{blocks_mutex};
+    for (const Block* b : blocks) {
+        for (u32 i = 0; i < Count; ++i) {
+            t[i] += b->v[i].load(std::memory_order_relaxed);
+        }
+    }
+    return t;
 }
 } // namespace MotionCost
 

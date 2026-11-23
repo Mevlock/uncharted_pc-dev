@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <immintrin.h>
 #include <span>
 
 #include <boost/container/small_vector.hpp>
@@ -16,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"
 #include "video_core/renderer_vulkan/vk_guest_sync_stats.h"
+#include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
@@ -177,6 +179,30 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushDat
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
     const auto stage_flags = IsCompute() ? vk::ShaderStageFlagBits::eCompute : AllGraphicsStageBits;
     const vk::PipelineLayout layout = *pipeline_layout;
+    // BB_MOTION_COST: the parts by class (MotionCost::bind_base, set by DrawRecord).
+    struct BindTimer {
+        int base = MotionCost::bind_base;
+        u64 last = base >= 0 ? __rdtsc() : 0;
+        u32 part = 0;
+        void Next() {
+            if (base >= 0 && part < 2) {
+                const u64 now = __rdtsc();
+                MotionCost::Add(MotionCost::Counter(base + part), now - last);
+                last = now;
+            }
+            ++part;
+        }
+        void Count(u32 index, u64 value) const {
+            if (base >= 0) {
+                MotionCost::Add(MotionCost::Counter(base + index), value);
+            }
+        }
+        ~BindTimer() {
+            Next();
+        }
+    } bind_timer;
+    bind_timer.Count(5, motion_push ? sizeof(Shader::PushData) + sizeof(Shader::MotionPushData)
+                                    : sizeof(Shader::PushData));
     if (motion_push) {
         // The motion buffers' addresses follow the usual push constants: one push of both (a second recorded
         // command and push for them was stage B time on every G-buffer draw).
@@ -196,6 +222,17 @@ void Pipeline::BindResources(DescriptorWrites& set_writes, const Shader::PushDat
         scheduler.Record([layout, stage_flags, push_data](vk::CommandBuffer cmdbuf) {
             cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(push_data), &push_data);
         });
+    }
+    bind_timer.Next(); // part 0: the push constants
+    if (bind_timer.base >= 0) {
+        u64 descriptors = 0;
+        for (const auto& write : set_writes) {
+            descriptors += write.descriptorCount;
+        }
+        bind_timer.Count(2, set_writes.size());
+        bind_timer.Count(3, descriptors);
+        bind_timer.Count(4, uses_push_descriptors ? 0 : 1);
+        bind_timer.last = __rdtsc(); // the counting is not the descriptors' time
     }
 
     // bbport (BB_GPL): a split layout's set 1 (the pre-raster stages) comes from the descriptor heap; the

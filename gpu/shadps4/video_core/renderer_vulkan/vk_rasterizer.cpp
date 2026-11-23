@@ -4315,10 +4315,13 @@ void ReportMotionCost() {
     }
     const u64 tsc = __rdtsc();
     const auto now = std::chrono::steady_clock::now();
+    static std::array<u64, MotionCost::Count> last{};
+    const auto totals = MotionCost::Totals();
     std::array<u64, MotionCost::Count> c{};
     for (u32 i = 0; i < MotionCost::Count; ++i) {
-        c[i] = MotionCost::counters[i].exchange(0, std::memory_order_relaxed);
+        c[i] = totals[i] - last[i];
     }
+    last = totals;
     if (tsc0) {
         const double ns = std::chrono::duration<double, std::nano>(now - t0).count() / double(tsc - tsc0);
         const auto us_frame = [&](u64 cycles) { return double(cycles) * ns / 600.0 / 1000.0; };
@@ -4358,6 +4361,30 @@ void ReportMotionCost() {
                     c[MotionCost::CDraws] / 600.0, g[0], g[1], g[2], g[3], g[4], g[0] + g[1] + g[2] + g[3] + g[4],
                     c[MotionCost::ODraws] / 600.0, o[0], o[1], o[2], o[3], o[4], o[0] + o[1] + o[2] + o[3] + o[4],
                     c[MotionCost::RChunks] / 600.0, us_frame(c[MotionCost::RCycles]));
+        const auto steps = [&](u32 base, u64 n) {
+            std::array<double, 9> r{};
+            for (u32 i = 0; i < 9; ++i) {
+                r[i] = ns_each(c[base + i], n);
+            }
+            return r;
+        };
+        const auto gs = steps(MotionCost::CS0, c[MotionCost::CDraws]);
+        const auto os = steps(MotionCost::OS0, c[MotionCost::ODraws]);
+        std::printf("Motion cost rest steps (ns a draw: to motion, motion, jitter, push+descriptors, to dynamic state, "
+                    "dynamic state, pass+barrier+begin, draw command, after): G-buffer %.0f %.0f %.0f %.0f %.0f %.0f "
+                    "%.0f %.0f %.0f; others %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f\n",
+                    gs[0], gs[1], gs[2], gs[3], gs[4], gs[5], gs[6], gs[7], gs[8], os[0], os[1], os[2], os[3], os[4],
+                    os[5], os[6], os[7], os[8]);
+        const auto bind = [&](u32 base, u64 n) {
+            const double d = n ? double(n) : 1.0;
+            return std::array<double, 6>{ns_each(c[base], n), ns_each(c[base + 1], n), c[base + 2] / d,
+                                         c[base + 3] / d, 100.0 * c[base + 4] / d, c[base + 5] / d};
+        };
+        const auto gb = bind(MotionCost::CB0, c[MotionCost::CDraws]);
+        const auto ob = bind(MotionCost::OB0, c[MotionCost::ODraws]);
+        std::printf("Motion cost bind (a draw: push ns, descriptors ns, writes, descriptors, %% descriptor-set path, push "
+                    "bytes): G-buffer %.0f %.0f %.1f %.1f %.1f%% %.0f; others %.0f %.0f %.1f %.1f %.1f%% %.0f\n",
+                    gb[0], gb[1], gb[2], gb[3], gb[4], gb[5], ob[0], ob[1], ob[2], ob[3], ob[4], ob[5]);
     }
     tsc0 = tsc;
     t0 = now;
@@ -5246,16 +5273,24 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     u32 stream_records = 0;
     // BB_MOTION_COST: the last part of the draw in steps (MotionCost::CS0.. / OS0..).
     const int split_base = cost_base < 0 ? -1 : cost_base == MotionCost::C0 ? MotionCost::CS0 : MotionCost::OS0;
-    u64 split_last = split_base >= 0 ? __rdtsc() : 0;
-    u32 split_step = 0;
-    const auto split = [&] {
-        if (split_base >= 0) {
-            const u64 now = __rdtsc();
-            MotionCost::Add(MotionCost::Counter(split_base + split_step), now - split_last);
-            split_last = now;
+    struct SplitTimer {
+        int base;
+        u64 last = base >= 0 ? __rdtsc() : 0;
+        u32 step = 0;
+        void operator()() {
+            if (base >= 0) {
+                const u64 now = __rdtsc();
+                MotionCost::Add(MotionCost::Counter(base + step), now - last);
+                last = now;
+            }
+            ++step;
         }
-        ++split_step;
-    };
+        ~SplitTimer() {
+            if (step == 8) {
+                (*this)(); // CS8: after the draw's command, to the end
+            }
+        }
+    } split{split_base};
     split(); // CS0: BeginRendering's end to here
     const u64 motion_cost_t0 = motion_draw && MotionCost::On() ? __rdtsc() : 0;
     u64 motion_cost_t1 = 0, motion_cost_t2 = 0;
@@ -5411,10 +5446,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         draw_jitter = upscaler->Jitter();
     }
     ClipJitterPush(pipeline);
+    split(); // CS2: jitter
     if (!batch_variant) {
+        MotionCost::bind_base = split_base < 0 ? -1 : split_base == MotionCost::CS0 ? MotionCost::CB0 : MotionCost::OB0;
         pipeline->BindResources(set_writes, push_data, set1_first_write);
+        MotionCost::bind_base = -1;
     }
-    split(); // CS2: jitter, push constants and descriptors
+    split(); // CS3: push constants and descriptors
     // bbport diagnosis (BB_JITTER_DIAG=1): depth-tested draws jittered, drawn before the scene
     // depth was known, or into another depth buffer, every 5 s.
     if (static const bool jitter_diag = std::getenv("BB_JITTER_DIAG") != nullptr;
@@ -5456,13 +5494,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             window = now;
         }
     }
-    split(); // CS3: to the dynamic state
+    split(); // CS4: to the dynamic state
     UpdateDynamicState(pipeline, is_indexed);
-    split(); // CS4: the dynamic state
+    split(); // CS5: the dynamic state
     MarkPass(pipeline, state);
     FullBarrierBeforeDraw(scheduler);
     scheduler.BeginRendering(state);
-    split(); // CS5: pass, barrier, the scheduler's BeginRendering
+    split(); // CS6: pass, barrier, the scheduler's BeginRendering
     if (Scheduler::BreadcrumbsOn()) { // BB_GPU_BREADCRUMBS: the pass's shaders, listed with its number
         for (const auto* stage : pipeline->GetStages()) {
             if (stage) {
@@ -5508,6 +5546,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
         }
     });
+    split(); // CS7: the draw's command (offsets, pipeline and draw recorded)
     // bbport (scene HDR): the tone pass and the pass after it, drawn again into the HDR shadows.
     if (pipeline->GetHdrRole() != GraphicsPipeline::HdrRole::None && !batched) [[unlikely]] {
         RecordHdrShadow(*pipeline, state, is_indexed, num_indices, num_instances, first_vertex,
