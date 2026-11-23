@@ -1817,8 +1817,10 @@ void PipelineCache::WarmUpThread() {
     // bbport (object motion twins, step 5c): a preparation with the object motion buffers (Object motion: on, the
     // default with an upscaler) also prepares the G-buffer pipelines' motion twins, whether the characters' vectors
     // are on or not, and its marker says so (" motion-twins 1", after the cache versions: the launcher reads the words
-    // up to "cache <versions>"). A start with the vectors on needs that marker (a cache prepared without the twins is
-    // prepared again: only the twins are new then); one with them off takes either and never touches a twin.
+    // up to "cache <versions>"). With the object motion buffers a cache counts as prepared only with that marker,
+    // whether the vectors are on or not: one prepared without the twins (an earlier test build of this cache version,
+    // or a preparation without object motion) is prepared again once, on the page, where only the twins are new. A
+    // start without the buffers (no upscaler, Object motion off) takes either marker; it can draw no twin.
     const bool twins_possible = ship_list && Shader::MotionVectors::positions_address != 0;
     // The marker as it is: prepared for this list, these cache versions and this pack (`marker_ok`), with the twins
     // (`marker_twins`) or without.
@@ -1852,14 +1854,13 @@ void PipelineCache::WarmUpThread() {
         }
         // bbport (pack cache): the marker counts only for the pack it was written against (its second line, "pack
         // <id>"): a cleared pack, or one that lost records to damage, has a new id, so it is prepared again. Its third
-        // line is this port's identity. With the characters' vectors on it must name the motion twins too.
-        return !marker_ok || (Shader::MotionVectors::characters && twins_possible && !marker_twins);
+        // line is this port's identity. With the object motion buffers it must name the motion twins too.
+        return !marker_ok || (twins_possible && !marker_twins);
     }();
     const bool full_preparation = prep_screen || prepare_only;
-    // Step 5c runs on a full preparation (the vectors on or off), and for a start with the vectors on whose marker
-    // lacks the twins (on the page; BB_PREP_SCREEN=0: behind the game). A start with them off never touches a twin.
-    const bool prepare_twins =
-        twins_possible && (full_preparation || (Shader::MotionVectors::characters && !marker_twins));
+    // Step 5c runs on a full preparation (the vectors on or off) and whenever the marker lacks the twins (on the page;
+    // BB_PREP_SCREEN=0: behind the game). An ordinary start of a prepared cache never builds or waits for a twin.
+    const bool prepare_twins = twins_possible && (full_preparation || !marker_twins);
     bool twins_prepared = marker_twins; // the marker written at the end names the twins
     struct PrepScreenOff {
         ~PrepScreenOff() {
@@ -3104,14 +3105,17 @@ void PipelineCache::WarmUpThread() {
         // a twin is loaded from the driver's cache when its draw first comes, by a draw-preparation worker after it
         // handed the draw over (PipelineCache::BuildMotionTwin; the draw takes its ordinary pipeline meanwhile, the GPU
         // thread never builds or waits for a twin); with them off, a twin's stages are not even loaded (step 2).
-        // Built here again only when the driver compiles this start's stored pipelines again (its cache cold: the
-        // page shows) with the vectors on, so their twins do not compile in play either.
+        // Built here again only with the vectors on when the driver compiled this start's stored pipelines again
+        // (more than one in ten of them was not in its cache: a driver update, its cache cleared), so their twins do
+        // not compile in play either. (Not the page judge: a slow CPU raises the page with the driver's cache warm.)
         // (BB_MOTION_TWIN_PREP=0, a test of the fallback: no twins prepared, all of them made in play.)
         static const bool twin_prep = [] {
             const char* env = std::getenv("BB_MOTION_TWIN_PREP");
             return !(env && env[0] == '0');
         }();
-        const bool rebuild_twins = Shader::MotionVectors::characters && twins_possible && marker_twins && held_page;
+        const u64 compiled_now = PipelineBinaries::DriverCacheMisses() - driver_cache_misses_at_start;
+        const bool rebuild_twins = Shader::MotionVectors::characters && twins_possible && marker_twins &&
+                                   compiled_now * 10 > u64(num_pipelines.load());
         if (twin_prep && (prepare_twins || rebuild_twins)) {
             const double t_twin = elapsed_ms();
             constexpr u32 fs_slot = u32(Shader::SwStage::Fragment);
