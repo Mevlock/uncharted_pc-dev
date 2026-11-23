@@ -8,6 +8,8 @@
 #pragma once
 
 #include <array>
+#include <atomic>
+#include <cstdlib>
 #include "video_core/renderer_vulkan/motion_history.h"
 
 #include "common/types.h"
@@ -15,6 +17,32 @@
 #include "video_core/texture_cache/image.h"
 
 namespace Vulkan {
+
+/// bbport diagnosis (BB_MOTION_COST=1): CPU cycles of the object motion vectors on each thread (stage A's draw,
+/// stage B's draw recording and its motion part, the draw-preparation workers), printed every 600 frames.
+namespace MotionCost {
+inline bool On() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_MOTION_COST");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+enum Counter : u32 {
+    ADraws, ACycles,           ///< stage A: Rasterizer::Draw
+    BDraws, BCycles,           ///< stage B: DrawRecord (all draws)
+    BMotionDraws, BMotionCycles, ///< stage B: DrawRecord of motion draws
+    BIdentity, BOffsets, BHistory, ///< stage B: the motion block's parts (motion draws)
+    BAttach,                   ///< stage B: ObjectMotion::Attach
+    WDraws, WCycles,           ///< workers: prepared draws (PrepareGraphicsPipeline .. Ready)
+    PrepUsed, PrepLate, PrepUnavailable, PrepChecksum, PrepRejected, ///< stage A: prepared draw outcome
+    Count
+};
+inline std::array<std::atomic<u64>, Count> counters{};
+inline void Add(Counter c, u64 v) {
+    counters[c].fetch_add(v, std::memory_order_relaxed);
+}
+} // namespace MotionCost
 
 class Instance;
 class Scheduler;

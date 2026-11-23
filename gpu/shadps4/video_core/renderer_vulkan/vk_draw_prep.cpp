@@ -18,6 +18,8 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
+#include "video_core/renderer_vulkan/vk_object_motion.h"
+#include <immintrin.h>
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include <xxhash.h>
 
@@ -905,6 +907,7 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 prep_worker.stages.clear();
                 prep_worker.failed = false;
                 sel.draw_indirect_params = {};
+                const u64 cost_start = MotionCost::On() ? __rdtsc() : 0;
                 thread_local std::vector<PreparedDirectRead> direct_reads;
                 direct_reads.clear();
                 t_direct_reads = PrepDirectCheck() ? &direct_reads : nullptr;
@@ -940,6 +943,10 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 } else {
                     t_direct_reads = nullptr;
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);
+                }
+                if (cost_start) {
+                    MotionCost::Add(MotionCost::WDraws, 1);
+                    MotionCost::Add(MotionCost::WCycles, __rdtsc() - cost_start);
                 }
             }
             ++ordinal;

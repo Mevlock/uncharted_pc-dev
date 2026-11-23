@@ -4267,8 +4267,67 @@ static void WatchDrawIndices(const AmdGpu::Regs& regs) {
     seen.clear();
 }
 
+namespace {
+/// bbport diagnosis (BB_MOTION_COST=1): cycles of a scope into two MotionCost counters.
+struct MotionCostTimer {
+    MotionCost::Counter draws, cycles;
+    u64 start = MotionCost::On() ? __rdtsc() : 0;
+    ~MotionCostTimer() {
+        if (start) {
+            MotionCost::Add(draws, 1);
+            MotionCost::Add(cycles, __rdtsc() - start);
+        }
+    }
+};
+/// BB_MOTION_COST=1: every 600 frames, per frame: each thread's time and the motion parts per motion draw.
+void ReportMotionCost() {
+    static u64 frames = 0, tsc0 = 0;
+    static std::chrono::steady_clock::time_point t0{};
+    if (++frames % 600 != 0) {
+        return;
+    }
+    const u64 tsc = __rdtsc();
+    const auto now = std::chrono::steady_clock::now();
+    std::array<u64, MotionCost::Count> c{};
+    for (u32 i = 0; i < MotionCost::Count; ++i) {
+        c[i] = MotionCost::counters[i].exchange(0, std::memory_order_relaxed);
+    }
+    if (tsc0) {
+        const double ns = std::chrono::duration<double, std::nano>(now - t0).count() / double(tsc - tsc0);
+        const auto us_frame = [&](u64 cycles) { return double(cycles) * ns / 600.0 / 1000.0; };
+        const auto ns_each = [&](u64 cycles, u64 n) { return n ? double(cycles) * ns / double(n) : 0.0; };
+        const u64 prep = c[MotionCost::PrepUsed] + c[MotionCost::PrepLate] + c[MotionCost::PrepUnavailable] +
+                         c[MotionCost::PrepChecksum] + c[MotionCost::PrepRejected];
+        std::printf("Motion cost (per frame, 600 frames, %.1f fps): stage A %.0f draws %.0f us (%.0f ns each); stage B "
+                    "%.0f draws %.0f us (%.0f ns each) + %.0f motion draws %.0f us (%.0f ns each: identity %.1f, "
+                    "offsets %.1f, history %.1f, attach %.1f); workers %.0f draws %.0f us (%.0f ns each); prepared "
+                    "used %.1f%%, late %.1f%%, unavailable %.1f%%, checksum %.1f%%, rejected %.1f%%
+",
+                    600.0 / (std::chrono::duration<double>(now - t0).count()),
+                    c[MotionCost::ADraws] / 600.0, us_frame(c[MotionCost::ACycles]),
+                    ns_each(c[MotionCost::ACycles], c[MotionCost::ADraws]), c[MotionCost::BDraws] / 600.0,
+                    us_frame(c[MotionCost::BCycles]), ns_each(c[MotionCost::BCycles], c[MotionCost::BDraws]),
+                    c[MotionCost::BMotionDraws] / 600.0, us_frame(c[MotionCost::BMotionCycles]),
+                    ns_each(c[MotionCost::BMotionCycles], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BIdentity], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BOffsets], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BHistory], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BAttach], c[MotionCost::BMotionDraws]), c[MotionCost::WDraws] / 600.0,
+                    us_frame(c[MotionCost::WCycles]), ns_each(c[MotionCost::WCycles], c[MotionCost::WDraws]),
+                    prep ? 100.0 * c[MotionCost::PrepUsed] / prep : 0.0,
+                    prep ? 100.0 * c[MotionCost::PrepLate] / prep : 0.0,
+                    prep ? 100.0 * c[MotionCost::PrepUnavailable] / prep : 0.0,
+                    prep ? 100.0 * c[MotionCost::PrepChecksum] / prep : 0.0,
+                    prep ? 100.0 * c[MotionCost::PrepRejected] / prep : 0.0);
+    }
+    tsc0 = tsc;
+    t0 = now;
+}
+} // namespace
+
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
+    MotionCostTimer motion_cost_timer{MotionCost::ADraws, MotionCost::ACycles};
     BbStats::draws.fetch_add(1, std::memory_order_relaxed);
     WatchDrawIndices(Regs());
     WatchAaState(Regs());
@@ -4303,6 +4362,15 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
         draw_prep->Count(pipeline != nullptr &&
                          prepared->state.load(std::memory_order_acquire) == PreparedDraw::Ready &&
                          prepared->reg_checksum == liverpool->gfx_reg_checksum);
+        if (MotionCost::On()) {
+            const u32 state = prepared->state.load(std::memory_order_acquire);
+            MotionCost::Add(used_prepared                            ? MotionCost::PrepUsed
+                            : state == PreparedDraw::Pending         ? MotionCost::PrepLate
+                            : state == PreparedDraw::Unavailable     ? MotionCost::PrepUnavailable
+                            : prepared->reg_checksum != liverpool->gfx_reg_checksum ? MotionCost::PrepChecksum
+                                                                                    : MotionCost::PrepRejected,
+                            1);
+        }
     }
     if (!pipeline) {
         NoteNullPipelineDraw();
@@ -4597,6 +4665,10 @@ void Rasterizer::ClipJitterPush(const GraphicsPipeline* pipeline) {
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
+    MotionCostTimer motion_cost_timer{pipeline->GetGraphicsKey().motion_vectors ? MotionCost::BMotionDraws
+                                                                                 : MotionCost::BDraws,
+                                      pipeline->GetGraphicsKey().motion_vectors ? MotionCost::BMotionCycles
+                                                                                 : MotionCost::BCycles};
     if (GuestSync::On()) {
         GuestSync::NoteWork(false);
     }
@@ -4677,6 +4749,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             if (flip != motion_flip) {
                 motion_flip = flip;
                 object_motion->OnFrameStart();
+                if (MotionCost::On()) {
+                    ReportMotionCost();
+                }
             }
         }
         NoteFrameStart();
@@ -5124,6 +5199,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // index list is not scanned (the cached scan cost ~70 ns a draw on the GPU thread, its page
     // checks more). Constant buffers (stride 16) and raw buffers (stride 0) are not streams.
     u32 stream_records = 0;
+    const u64 motion_cost_t0 = motion_draw && MotionCost::On() ? __rdtsc() : 0;
+    u64 motion_cost_t1 = 0, motion_cost_t2 = 0;
     if (motion_draw && Shader::MotionVectors::characters && !motion_geometry) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         u64 hash = 0x6a09e667f3bcc909ULL;
@@ -5143,6 +5220,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         stream_records = records;
         motion_geometry = hash;
     }
+    motion_cost_t1 = motion_cost_t0 ? __rdtsc() : 0;
     if (motion_draw && motion_geometry) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         const auto [base_vertex, first_instance] =
@@ -5218,6 +5296,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     topology = scanned.topology;
                 }
             }
+            motion_cost_t2 = motion_cost_t0 ? __rdtsc() : 0;
             push_data.motion_param = object_motion->PrepareDraw({
                 .shader = vs.pgm_hash,
                 .geometry = motion_geometry,
@@ -5229,6 +5308,15 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 .vertices = range,
             });
         }
+    }
+    if (motion_cost_t0) {
+        const u64 end = __rdtsc();
+        if (!motion_cost_t2) {
+            motion_cost_t2 = end;
+        }
+        MotionCost::Add(MotionCost::BIdentity, motion_cost_t1 - motion_cost_t0);
+        MotionCost::Add(MotionCost::BOffsets, motion_cost_t2 - motion_cost_t1);
+        MotionCost::Add(MotionCost::BHistory, end - motion_cost_t2);
     }
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
@@ -9190,7 +9278,11 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     }
     // bbport: object motion vector attachment of G-buffer pipelines.
     if (key.motion_vectors) {
+        const u64 attach_start = MotionCost::On() ? __rdtsc() : 0;
         object_motion->Attach(state, state.width, state.height);
+        if (attach_start) {
+            MotionCost::Add(MotionCost::BAttach, __rdtsc() - attach_start);
+        }
     }
     return state;
 }
