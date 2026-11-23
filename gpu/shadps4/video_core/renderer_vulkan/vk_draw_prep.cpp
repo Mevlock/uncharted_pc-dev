@@ -942,7 +942,7 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                         if (StillGateOn()) {
                             const u64 still_start = cost_start ? __rdtsc() : 0;
                             for (const auto& stage : prep_worker.stages) {
-                                if (&prep_worker.infos.at(stage.program) != vs) {
+                                if (stage.hw_stage != Shader::HwStage::Vertex) {
                                     continue;
                                 }
                                 auto* still = stage.program->still.load(std::memory_order_acquire);
@@ -954,28 +954,14 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                                 if (still->state.load(std::memory_order_acquire) != Motion::StillProgram::Ready) {
                                     break;
                                 }
-                                // The mesh (its buffers' sizes and addresses), the indices and the draw's numbers.
+                                // The mesh (its buffers' sizes, addresses and the write counts of their memory's
+                                // regions), the indices and the draw's numbers.
                                 u64 seed = draw.motion_geometry ^ (addresses * 0x9e3779b97f4a7c15ULL);
                                 const auto mix = [&seed](u64 v) {
                                     seed = (seed ^ v) * 0xff51afd7ed558ccdULL;
                                     seed ^= seed >> 32;
                                 };
                                 mix(vs->pgm_hash);
-                                // The buffers' memory: the write counts of the regions they lie in (a buffer
-                                // rewritten in place, by the guest or the GPU, is another key).
-                                if (g_guest_write_epoch) {
-                                    u64 last_region = ~0ull;
-                                    for (const auto& resource : vs->buffers) {
-                                        if (resource.IsSpecial()) continue;
-                                        const auto buffer = resource.GetSharp(*vs);
-                                        if (!buffer.Valid()) continue;
-                                        const u64 first = buffer.base_address >> 22;
-                                        const u64 end = (buffer.base_address + buffer.GetSize() - 1) >> 22;
-                                        if (first == last_region && end == last_region) continue;
-                                        last_region = end;
-                                        mix(g_guest_write_epoch(buffer.base_address, buffer.GetSize()));
-                                    }
-                                }
                                 mix(regs->index_base_address.Address<VAddr>());
                                 mix(u64(regs->num_indices) << 32 | regs->num_instances.NumInstances());
                                 mix(u64(regs->index_offset) << 8 | u64(regs->index_buffer_type.index_type));

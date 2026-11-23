@@ -515,82 +515,103 @@ class StillDraws {
 public:
     /// Whether `key` was drawn in the previous frame; notes it for this one.
     bool Seen(uint64_t key) {
-        key |= 1; // 0 marks a free slot
-        if ((used + 1) * 2 > slots.size()) {
-            Rebuild(slots.size() * 2);
+        bool inserted = false;
+        Slot& slot = current.Insert(key, inserted);
+        if (inserted) {
+            slot.was = previous.Has(key);
         }
-        const size_t mask = slots.size() - 1;
-        for (size_t i = Start(key) & mask;; i = (i + 1) & mask) {
-            Slot& slot = slots[i];
-            if (slot.key == key) {
-                if (slot.last != frame) {
-                    slot.before = slot.last;
-                    slot.last = frame;
-                }
-                return slot.before + 1 == frame;
-            }
-            if (!slot.key) {
-                slot = {key, frame, NoFrame};
-                ++used;
-                return false;
-            }
-        }
+        return slot.was != 0;
     }
     void NextFrame() {
-        ++frame;
-        // Keys not drawn for a frame can never be "seen in the previous frame" again: dropped now and then.
-        if (frame % Trim == 0) {
-            Rebuild(slots.size());
-        }
+        previous.swap(current);
+        current.Clear();
     }
-    /// Two frames on at once: nothing of before counts (a cut, a gap in the frames).
+    /// Nothing of before counts (a cut, a gap in the frames).
     void Forget() {
-        frame += 2;
+        previous.Clear();
+        current.Clear();
     }
-    size_t Size() const { return used; }
+    size_t Size() const {
+        return previous.used + current.used;
+    }
 
 private:
-    static constexpr uint32_t NoFrame = UINT32_MAX - 1, Trim = 64;
+    // Two open-addressing tables, this frame's keys and the previous frame's, emptied by starting a new generation
+    // (as FlatMap): no memory is given back or taken per frame. (One table that dropped old keys by rebuilding
+    // itself every other frame took ~270 ns a draw at 1000 draws a frame: the new block's page faults.)
     struct Slot {
         uint64_t key{};
-        uint32_t last{};   ///< the last frame it was drawn in
-        uint32_t before{}; ///< the frame it was drawn in before that one (NoFrame: none)
+        uint32_t generation{};
+        uint32_t was{}; ///< the key was in the previous frame's table
     };
-    static size_t Start(uint64_t key) {
-        const uint64_t h = key * 0x9e3779b97f4a7c15ULL;
-        return size_t(h ^ (h >> 29));
-    }
-    void Rebuild(size_t size) {
-        std::vector<Slot> old(64);
-        old.swap(slots);
-        size_t live = 0;
-        for (const auto& slot : old) {
-            live += slot.key && slot.last + 1 >= frame;
+    struct Table {
+        std::vector<Slot> slots = std::vector<Slot>(2048);
+        size_t used = 0;
+        uint32_t generation = 1;
+
+        static size_t Start(uint64_t key) {
+            const uint64_t h = key * 0x9e3779b97f4a7c15ULL;
+            return size_t(h ^ (h >> 29));
         }
-        while (size > 64 && live * 4 < size) {
-            size /= 2;
-        }
-        while (live * 2 >= size) {
-            size *= 2;
-        }
-        slots.assign(size, Slot{});
-        used = 0;
-        const size_t mask = slots.size() - 1;
-        for (const auto& slot : old) {
-            if (!slot.key || slot.last + 1 < frame) {
-                continue;
+        bool Has(uint64_t key) const {
+            const size_t mask = slots.size() - 1;
+            for (size_t i = Start(key) & mask;; i = (i + 1) & mask) {
+                const Slot& slot = slots[i];
+                if (slot.generation != generation) {
+                    return false;
+                }
+                if (slot.key == key) {
+                    return true;
+                }
             }
-            size_t i = Start(slot.key) & mask;
-            while (slots[i].key) {
-                i = (i + 1) & mask;
-            }
-            slots[i] = slot;
-            ++used;
         }
-    }
-    std::vector<Slot> slots = std::vector<Slot>(1024);
-    size_t used = 0;
-    uint32_t frame = 2;
+        Slot& Insert(uint64_t key, bool& inserted) {
+            if ((used + 1) * 2 > slots.size()) {
+                Grow();
+            }
+            const size_t mask = slots.size() - 1;
+            for (size_t i = Start(key) & mask;; i = (i + 1) & mask) {
+                Slot& slot = slots[i];
+                if (slot.generation != generation) {
+                    slot = {key, generation, 0};
+                    ++used;
+                    inserted = true;
+                    return slot;
+                }
+                if (slot.key == key) {
+                    return slot;
+                }
+            }
+        }
+        void Grow() {
+            std::vector<Slot> old(slots.size() * 2);
+            old.swap(slots);
+            const uint32_t live = generation;
+            generation = 1;
+            used = 0;
+            for (const Slot& slot : old) {
+                if (slot.generation == live) {
+                    bool inserted = false;
+                    Insert(slot.key, inserted).was = slot.was;
+                }
+            }
+        }
+        void Clear() {
+            used = 0;
+            if (++generation == 0) { // wrapped: stale slots could look current
+                for (Slot& slot : slots) {
+                    slot.generation = 0;
+                }
+                generation = 1;
+            }
+        }
+        void swap(Table& other) noexcept {
+            slots.swap(other.slots);
+            std::swap(used, other.used);
+            std::swap(generation, other.generation);
+        }
+    };
+    Table previous, current;
 };
 
 // The pairing of 0.3.6.68 (a table keyed by draw and occurrence: the k-th of identical draws of a frame takes the k-th's

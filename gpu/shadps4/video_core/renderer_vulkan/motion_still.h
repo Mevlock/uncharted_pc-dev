@@ -161,6 +161,7 @@ struct StillProgram {
     };
     struct Variant {
         uint64_t config{};
+        PositionCode::Guards guards;   ///< the flat words (and values) that decide this configuration
         bool valid{};                  ///< false: the position's words are not known for it (never still)
         uint32_t words{};              ///< how many flat words the position reads
         std::vector<WordRun> key_runs; ///< those words without the camera's
@@ -178,7 +179,16 @@ struct StillProgram {
 
     /// State Ready: the variant of a draw's flat data; null when its position's words are not known.
     const Variant* VariantFor(std::span<const uint32_t> flat) {
-        const uint64_t config = code->Config(flat);
+        // A variant whose deciding words have this draw's values: no walk through the code (a few compares;
+        // walking it touches the program's whole SPIR-V, cold, on every draw: ~500 ns).
+        const uint32_t known = num_variants.load(std::memory_order_acquire);
+        for (uint32_t i = 0; i < known; ++i) {
+            if (variants[i].guards.Match(flat)) {
+                return variants[i].valid ? &variants[i] : nullptr;
+            }
+        }
+        PositionCode::Guards guards;
+        const uint64_t config = code->Config(flat, &guards);
         if (config == PositionCode::NoConfig) {
             return nullptr;
         }
@@ -201,6 +211,7 @@ struct StillProgram {
                 }
                 Variant& made = variants[count];
                 made.config = config;
+                made.guards = guards;
                 const auto inputs = code->Inputs(flat);
                 made.words = uint32_t(inputs.words.size());
                 made.valid = inputs.valid && WithoutCamera(inputs.words, view_at, proj_at, made.key_runs);

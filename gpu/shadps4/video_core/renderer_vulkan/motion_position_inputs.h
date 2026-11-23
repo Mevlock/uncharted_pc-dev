@@ -60,8 +60,28 @@ public:
     /// its first target, 2: its second, 3: both). Draws with the same value run the same blocks and so read the same
     /// words. NoConfig: not understood, or more blocks than the walk holds.
     static constexpr uint64_t NoConfig = ~0ull;
-    uint64_t Config(std::span<const uint32_t> flat) const {
+    /// The flat words the walk's decisions read, with their values: another draw whose flat data has the same
+    /// values there walks the same way (the walk reads nothing else), so it has the same Config without walking.
+    struct Guards {
+        static constexpr uint32_t Max = 8;
+        uint32_t count = 0; ///< Max + 1: more than fit (no match without walking)
+        uint16_t word[Max]{};
+        uint32_t value[Max]{};
+        bool Match(std::span<const uint32_t> flat) const {
+            if (count > Max) {
+                return false;
+            }
+            for (uint32_t i = 0; i < count; ++i) {
+                if (word[i] >= flat.size() || flat[word[i]] != value[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    };
+    uint64_t Config(std::span<const uint32_t> flat, Guards* guards = nullptr) const {
         Walk walk;
+        walk.guards = guards;
         return !why && Run(flat, walk) ? walk.config : NoConfig;
     }
 
@@ -119,6 +139,7 @@ private:
         uint64_t config = 0;
         uint8_t live[MaxBlocks]{};
         uint8_t taken[MaxBlocks]{}; ///< per block with a conditional branch that runs: 1, 2 or 3 (as in Config)
+        Guards* guards = nullptr;   ///< filled with the flat words the decisions read
     };
 
     PositionCode() = default;
@@ -340,7 +361,7 @@ private:
     }
 
     /// A value that flat words and constants alone decide: its 32 bits (a boolean: 0 or 1). False: not decided.
-    bool Value(uint32_t id, std::span<const uint32_t> flat, uint32_t& out, int depth = 0) const {
+    bool Value(uint32_t id, std::span<const uint32_t> flat, uint32_t& out, Guards* guards, int depth = 0) const {
         if (id >= def.size() || depth > 12) {
             return false;
         }
@@ -366,12 +387,22 @@ private:
                 return false;
             }
             out = flat[word];
+            if (guards) {
+                // (A word read twice is noted twice: harmless.)
+                if (guards->count < Guards::Max) {
+                    guards->word[guards->count] = uint16_t(word);
+                    guards->value[guards->count] = out;
+                    ++guards->count;
+                } else {
+                    guards->count = Guards::Max + 1;
+                }
+            }
             return true;
         }
         case OpBitcast:
-            return count == 4 && Value(w[3], flat, out, depth + 1);
+            return count == 4 && Value(w[3], flat, out, guards, depth + 1);
         case OpLogicalNot:
-            if (count != 4 || !Value(w[3], flat, a, depth + 1)) {
+            if (count != 4 || !Value(w[3], flat, a, guards, depth + 1)) {
                 return false;
             }
             out = !a;
@@ -381,7 +412,8 @@ private:
             if (count != 5) {
                 return false;
             }
-            const bool have_a = Value(w[3], flat, a, depth + 1), have_b = Value(w[4], flat, b, depth + 1);
+            const bool have_a = Value(w[3], flat, a, guards, depth + 1);
+            const bool have_b = Value(w[4], flat, b, guards, depth + 1);
             const bool absorbing = op == OpLogicalOr; // true decides an or, false an and
             if ((have_a && (a != 0) == absorbing) || (have_b && (b != 0) == absorbing)) {
                 out = absorbing;
@@ -397,7 +429,8 @@ private:
         case OpLogicalNotEqual:
         case OpIEqual:
         case OpINotEqual:
-            if (count != 5 || !Value(w[3], flat, a, depth + 1) || !Value(w[4], flat, b, depth + 1)) {
+            if (count != 5 || !Value(w[3], flat, a, guards, depth + 1) ||
+                !Value(w[4], flat, b, guards, depth + 1)) {
                 return false;
             }
             out = (op == OpLogicalEqual || op == OpIEqual) ? a == b : a != b;
@@ -406,7 +439,8 @@ private:
             break;
         }
         if (op >= OpFOrdEqual && op <= OpFUnordGreaterThanEqual) {
-            if (count != 5 || !Value(w[3], flat, a, depth + 1) || !Value(w[4], flat, b, depth + 1)) {
+            if (count != 5 || !Value(w[3], flat, a, guards, depth + 1) ||
+                !Value(w[4], flat, b, guards, depth + 1)) {
                 return false;
             }
             float x, y;
@@ -452,7 +486,7 @@ private:
                 }
             } else if (block.conditional) {
                 uint32_t value = 0;
-                const uint8_t taken = Value(block.condition, flat, value) ? (value ? 1 : 2) : 3;
+                const uint8_t taken = Value(block.condition, flat, value, walk.guards) ? (value ? 1 : 2) : 3;
                 walk.taken[at] = taken;
                 if (taken & 1) {
                     go(block.targets[0]);
