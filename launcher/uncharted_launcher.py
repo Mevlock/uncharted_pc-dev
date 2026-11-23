@@ -4269,8 +4269,14 @@ def log_header(settings, start=None):
                  else '; no shipped shader index: the game files are scanned once (Advanced override)'
                  if needs_index_scan(settings, start)
                  else '; shader preparation off: no index for it')
+    # The shader cache the game uses: BB_GPU_CACHE_DIR when the environment or the extra variables set it (run.py
+    # takes it as it is), else the port's own folder.
+    cache = os.environ.get('BB_GPU_CACHE_DIR') or DATA_DIR / 'user' / 'cache'
+    for item in str(settings.get('extra_env') or '').split():
+        if item.startswith('BB_GPU_CACHE_DIR='):
+            cache = item.split('=', 1)[1]
     return (f'Port: {NAME} {build} in {PORT_DIR}, starting {start}\n'
-            f'Folders: saves {saves}, shader cache {DATA_DIR / "user" / "cache"}\n{game}\n')
+            f'Folders: saves {saves}, shader cache {cache}\n{game}\n')
 
 
 def log_location(settings):
