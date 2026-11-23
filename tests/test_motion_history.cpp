@@ -106,6 +106,7 @@ struct VertexShader : Spv {
     uint32_t flat = Variable(12), position = Variable(3), other = Variable(3), push = Variable(9),
              stream = Variable(12), texture = Variable(0);
     uint32_t c[16];
+    uint32_t entry = 0;
     VertexShader() {
         Name(flat, "srt_flatbuf");
         Op(71, {position, 11, 0}); // BuiltIn Position
@@ -113,7 +114,8 @@ struct VertexShader : Spv {
             c[i] = Constant(i);
         }
         Op(54, {0, Id(), 0, 0}); // OpFunction
-        Op(248, {Id()});
+        entry = Id();
+        Op(248, {entry});
     }
     uint32_t Flat(uint32_t word) {
         return Value(61, {Value(65, {flat, c[0], c[word]})});
@@ -125,8 +127,9 @@ struct VertexShader : Spv {
     }
 };
 
-std::vector<uint16_t> PositionWords(const std::vector<uint32_t>& code, bool expect_valid = true) {
-    const auto inputs = PositionInputs::FromSpirv(code, "srt_flatbuf", 4, 4);
+std::vector<uint16_t> PositionWords(const std::vector<uint32_t>& code, bool expect_valid = true,
+                                    std::span<const uint32_t> flat = {}) {
+    const auto inputs = PositionCode::Parse(code, "srt_flatbuf", 4, 4)->Inputs(flat);
     assert(inputs.valid == expect_valid);
     return inputs.words;
 }
@@ -151,7 +154,41 @@ void PositionInputsTest() {
         v.Op(62, {v.other, v.Flat(13)});
         // The other push members (viewport, buffer offsets) are not user data.
         v.Op(62, {v.position, v.Value(61, {v.Value(65, {v.push, v.c[2]})})});
-        assert((PositionWords(v.End()) == std::vector<uint16_t>{3, 5, 9, 11}));
+        const auto code = v.End();
+        // Without flat data the branch runs both ways.
+        assert((PositionWords(code) == std::vector<uint16_t>{3, 5, 9, 11}));
+        // With it, word 9 decides: zero skips the block that reads word 11 (the wind's clock for what does not
+        // wave); word 9 itself stays an input.
+        std::vector<uint32_t> flat(16, 0);
+        assert((PositionWords(code, true, flat) == std::vector<uint16_t>{3, 5, 9}));
+        const auto parsed = PositionCode::Parse(code, "srt_flatbuf", 4, 4);
+        const uint64_t off = parsed->Config(flat);
+        flat[11] = 77; // not a branch's word: the same configuration
+        assert(parsed->Config(flat) == off);
+        flat[9] = 1;
+        assert(parsed->Config(flat) != off && parsed->Config(flat) != parsed->Config({}));
+        assert((PositionWords(code, true, flat) == std::vector<uint16_t>{3, 5, 9, 11}));
+    }
+    {
+        // Conditions of several comparisons: decided only when their flat words decide them.
+        VertexShader v;
+        const uint32_t less = v.Value(184, {v.Flat(8), v.c[1]});          // float(word 8) < float bits 1
+        const uint32_t unequal = v.Value(182, {v.Flat(9), v.c[0]});       // word 9 != 0.0
+        const uint32_t both = v.Value(168, {v.Value(167, {less, unequal})}); // !(less && unequal)
+        const uint32_t then_label = v.Id(), merge_label = v.Id();
+        v.Op(247, {merge_label, 0});
+        v.Op(250, {both, then_label, merge_label});
+        v.Op(248, {then_label});
+        const uint32_t inner = v.Flat(11);
+        v.Op(249, {merge_label});
+        v.Op(248, {merge_label});
+        v.Op(62, {v.position, v.Value(245, {inner, then_label, v.Flat(5), v.entry})});
+        const auto code = v.End();
+        std::vector<uint32_t> flat(16, 0);
+        // word 9 == 0.0: the and is false whatever word 8 is, the block runs: the first value of the phi.
+        assert((PositionWords(code, true, flat) == std::vector<uint16_t>{8, 9, 11}));
+        flat[9] = 0x3f800000u; // 1.0, and word 8 (0.0) below the constant's 1.4e-45: the block is skipped
+        assert((PositionWords(code, true, flat) == std::vector<uint16_t>{5, 8, 9}));
     }
     {
         // Through a variable: every store to it counts; a store through a chain into the position too.
@@ -195,7 +232,7 @@ void PositionInputsTest() {
         v.Op(62, {v.other, v.Flat(5)});
         PositionWords(v.End(), false);
     }
-    assert(!PositionInputs::FromSpirv(std::vector<uint32_t>{1, 2, 3}, "srt_flatbuf", 4, 4).valid);
+    assert(!PositionCode::Parse(std::vector<uint32_t>{1, 2, 3}, "srt_flatbuf", 4, 4)->Valid());
 }
 
 void CameraTest() {
@@ -234,11 +271,9 @@ void CameraTest() {
     turned[0] *= 1.01f;
     assert(!FindCamera(flat, words, turned, view_at, proj_at));
     assert(!FindCamera(flat, {words.begin(), words.begin() + 40}, clip, view_at, proj_at));
-    StillProgram program;
-    program.inputs.valid = true;
-    program.inputs.words = words;
-    assert(program.LearnCamera(flat, clip) && program.state == StillProgram::Ready);
-    assert((program.key_runs == std::vector<WordRun>{{8, 16}, {40, 4}, {60, 2}}));
+    std::vector<WordRun> runs;
+    assert(WithoutCamera(words, 24, 44, runs) && (runs == std::vector<WordRun>{{8, 16}, {40, 4}, {60, 2}}));
+    assert(!WithoutCamera({words.begin(), words.begin() + 40}, 24, 44, runs)); // a matrix not wholly read
     auto doubled = flat;
     doubled.resize(160, 0);
     std::memcpy(&doubled[100], view, sizeof(view));
@@ -381,7 +416,8 @@ int ListPositionInputs(int argc, char** argv) {
             }
             std::fclose(file);
         }
-        const auto inputs = PositionInputs::FromSpirv(code, "srt_flatbuf", 4, 4);
+        // (Without flat data: every branch both ways.)
+        const auto inputs = PositionCode::Parse(code, "srt_flatbuf", 4, 4)->Inputs({});
         std::printf("%s: ", argv[i]);
         if (!inputs.valid) {
             std::printf("no (%s)\n", inputs.why);

@@ -140,11 +140,12 @@ inline bool StillGateOn() {
 }
 /// A motion draw's keys from its program's still data (state Ready) and its vertex shader's flat data: `still`, a
 /// hash of `seed` (the mesh and the draw's numbers) and the position's flat words without the camera's; `camera`,
-/// a hash of the view and projection matrices (never 0). still = 0: the flat data is shorter than the program reads.
+/// a hash of the view and projection matrices (never 0). still = 0: no key (the position's words are not known for
+/// this draw's flat data).
 struct StillKeys {
     u64 still{}, camera{};
 };
-StillKeys MakeStillKeys(const Motion::StillProgram& program, std::span<const u32> flat, u64 seed);
+StillKeys MakeStillKeys(Motion::StillProgram& program, std::span<const u32> flat, u64 seed);
 struct RenderState;
 
 class ObjectMotion {

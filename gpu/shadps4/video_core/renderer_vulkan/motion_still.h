@@ -10,10 +10,13 @@
 // the camera motion pass reprojects with. Nothing is taken for the camera without that match.
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -114,34 +117,96 @@ inline bool FindCamera(std::span<const uint32_t> flat, const std::vector<uint16_
     return found == 1;
 }
 
-/// A vertex shader program's part of the still key. Created once per program (StillProgramOf); `inputs` never
-/// changes; the camera's place and `key_runs` are written once, before `state` leaves NoCamera.
+/// The words of `words` outside the two camera matrices, as runs; false when a matrix is not wholly among them.
+inline bool WithoutCamera(const std::vector<uint16_t>& words, uint16_t view_at, uint16_t proj_at,
+                          std::vector<WordRun>& runs) {
+    std::vector<uint16_t> rest;
+    uint32_t camera = 0;
+    for (const uint16_t word : words) {
+        if ((word >= view_at && word < view_at + 16u) || (word >= proj_at && word < proj_at + 16u)) {
+            ++camera;
+            continue;
+        }
+        rest.push_back(word);
+    }
+    runs = Runs(rest);
+    return camera == 32;
+}
+
+/// A vertex shader program's part of the still key. Created once per program (StillProgramOf) and never freed.
+/// `code` never changes; the camera's place is written once, before `state` leaves NoCamera; the variants (the
+/// position's words for each way the flat data lets the code run) are added as draws bring them, under the mutex,
+/// and read without it.
 struct StillProgram {
     enum State : uint8_t {
-        NoCamera, ///< the position's words are known, the camera's place among them is not yet
+        NoCamera, ///< the code is understood, the camera's place in its flat data is not known yet
         Ready,
         Unusable, ///< the code was not understood, or no camera was found in its flat data
     };
-    PositionInputs inputs;
-    std::vector<WordRun> key_runs; ///< the position's words without the camera's
-    uint16_t view_at = 0, proj_at = 0;
-    uint32_t tries = 0;            ///< draws looked at for the camera (the recording thread's)
-    std::atomic<uint8_t> state{NoCamera};
+    struct Variant {
+        uint64_t config{};
+        bool valid{};                  ///< false: the position's words are not known for it (never still)
+        uint32_t words{};              ///< how many flat words the position reads
+        std::vector<WordRun> key_runs; ///< those words without the camera's
+    };
+    static constexpr uint32_t MaxVariants = 8;
 
-    /// The recording thread, with a draw's flat data and the frame's velocity clip matrix.
-    bool LearnCamera(std::span<const uint32_t> flat, const float* clip, float* error = nullptr) {
+    std::unique_ptr<PositionCode> code;
+    const char* why = ""; ///< Unusable: the reason
+    uint16_t view_at = 0, proj_at = 0;
+    uint32_t tries = 0;   ///< draws looked at for the camera (the recording thread's)
+    std::atomic<uint8_t> state{NoCamera};
+    std::array<Variant, MaxVariants> variants;
+    std::atomic<uint32_t> num_variants{0};
+    std::mutex variants_mutex;
+
+    /// State Ready: the variant of a draw's flat data; null when its position's words are not known.
+    const Variant* VariantFor(std::span<const uint32_t> flat) {
+        const uint64_t config = code->Config(flat);
+        if (config == PositionCode::NoConfig) {
+            return nullptr;
+        }
+        const auto find = [&](uint32_t count) -> const Variant* {
+            for (uint32_t i = 0; i < count; ++i) {
+                if (variants[i].config == config) {
+                    return &variants[i];
+                }
+            }
+            return nullptr;
+        };
+        const Variant* variant = find(num_variants.load(std::memory_order_acquire));
+        if (!variant) {
+            std::scoped_lock lk{variants_mutex};
+            const uint32_t count = num_variants.load(std::memory_order_relaxed);
+            variant = find(count);
+            if (!variant) {
+                if (count == MaxVariants) {
+                    return nullptr;
+                }
+                Variant& made = variants[count];
+                made.config = config;
+                const auto inputs = code->Inputs(flat);
+                made.words = uint32_t(inputs.words.size());
+                made.valid = inputs.valid && WithoutCamera(inputs.words, view_at, proj_at, made.key_runs);
+                num_variants.store(count + 1, std::memory_order_release);
+                variant = &made;
+            }
+        }
+        return variant->valid ? variant : nullptr;
+    }
+
+    /// The recording thread, with a draw's flat data and the frame's velocity clip matrix: finds the camera's
+    /// place (state Ready). `words`: how many flat words the position reads for this draw.
+    bool LearnCamera(std::span<const uint32_t> flat, const float* clip, float* error = nullptr,
+                     size_t* words = nullptr) {
+        const auto inputs = code->Inputs(flat);
+        if (words) {
+            *words = inputs.words.size();
+        }
         uint16_t v = 0, p = 0;
-        if (!FindCamera(flat, inputs.words, clip, v, p, error)) {
+        if (!inputs.valid || !FindCamera(flat, inputs.words, clip, v, p, error)) {
             return false;
         }
-        std::vector<uint16_t> rest;
-        for (const uint16_t word : inputs.words) {
-            if ((word >= v && word < v + 16u) || (word >= p && word < p + 16u)) {
-                continue;
-            }
-            rest.push_back(word);
-        }
-        key_runs = Runs(rest);
         view_at = v;
         proj_at = p;
         state.store(Ready, std::memory_order_release);

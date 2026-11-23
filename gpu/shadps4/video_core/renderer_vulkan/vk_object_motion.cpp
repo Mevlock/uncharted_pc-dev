@@ -60,9 +60,10 @@ std::unordered_map<u64, std::unique_ptr<Motion::StillProgram>> still_programs;
 
 std::unique_ptr<Motion::StillProgram> AnalyzeStill(std::span<const u32> spv) {
     auto program = std::make_unique<Motion::StillProgram>();
-    program->inputs = Motion::PositionInputs::FromSpirv(spv, "srt_flatbuf", Shader::PushData::UdRegsIndex,
-                                                        Shader::NUM_USER_DATA_REGS / 4);
-    if (!program->inputs.valid) {
+    program->code = Motion::PositionCode::Parse(spv, "srt_flatbuf", Shader::PushData::UdRegsIndex,
+                                                Shader::NUM_USER_DATA_REGS / 4);
+    if (!program->code->Valid()) {
+        program->why = program->code->Why();
         program->state.store(Motion::StillProgram::Unusable, std::memory_order_release);
     }
     return program;
@@ -91,19 +92,23 @@ Motion::StillProgram& StillProgramOf(u64 pgm_hash) {
         program = AnalyzeStill(spv);
     } else {
         program = std::make_unique<Motion::StillProgram>();
-        program->inputs.why = "no stored code";
+        program->why = "no stored code";
         program->state.store(Motion::StillProgram::Unusable, std::memory_order_release);
     }
     std::scoped_lock lk{still_mutex};
     return *still_programs.try_emplace(pgm_hash, std::move(program)).first->second;
 }
 
-StillKeys MakeStillKeys(const Motion::StillProgram& program, std::span<const u32> flat, u64 seed) {
+StillKeys MakeStillKeys(Motion::StillProgram& program, std::span<const u32> flat, u64 seed) {
     if (flat.size() < program.view_at + 16u || flat.size() < program.proj_at + 16u) {
         return {};
     }
-    u64 h = seed;
-    for (const auto& run : program.key_runs) {
+    const auto* variant = program.VariantFor(flat);
+    if (!variant) {
+        return {};
+    }
+    u64 h = seed ^ (variant->config * 0x9e3779b97f4a7c15ULL);
+    for (const auto& run : variant->key_runs) {
         if (size_t(run.first) + run.count > flat.size()) {
             return {};
         }
@@ -184,18 +189,21 @@ void ObjectMotion::OnVelocityClip(const float* clip) {
         }
         static u32 lines = 0;
         float error = 0.0f;
-        if (program.LearnCamera(lesson.flat, clip, &error)) {
+        size_t words = 0;
+        if (program.LearnCamera(lesson.flat, clip, &error, &words)) {
             ++gate_stats.learned;
             if (lines < 16) {
                 ++lines;
                 std::string runs;
-                for (const auto& run : program.key_runs) {
-                    runs += " " + std::to_string(run.first) + "-" + std::to_string(run.first + run.count - 1);
+                if (const auto* variant = program.VariantFor(lesson.flat)) {
+                    for (const auto& run : variant->key_runs) {
+                        runs += " " + std::to_string(run.first) + "-" + std::to_string(run.first + run.count - 1);
+                    }
                 }
-                std::printf("Object motion gate: vs %08x: its position reads %zu of %zu flat words; view matrix at "
-                            "%u, projection at %u (error %.2g of a row); still key words:%s\n",
-                            u32(lesson.pgm_hash), program.inputs.words.size(), lesson.flat.size(),
-                            u32(program.view_at), u32(program.proj_at), error, runs.c_str());
+                std::printf("Object motion gate: vs %08x: this draw's position reads %zu of %zu flat words; view "
+                            "matrix at %u, projection at %u (error %.2g of a row); still key words:%s\n",
+                            u32(lesson.pgm_hash), words, lesson.flat.size(), u32(program.view_at),
+                            u32(program.proj_at), error, runs.c_str());
             }
         } else if (++program.tries >= 8) {
             program.state.store(Motion::StillProgram::Unusable, std::memory_order_release);
@@ -204,7 +212,7 @@ void ObjectMotion::OnVelocityClip(const float* clip) {
                 ++lines;
                 std::printf("Object motion gate: vs %08x: no camera found in its flat data (%zu position words, "
                             "closest pair off by %.3g of a row): its draws are never taken for still\n",
-                            u32(lesson.pgm_hash), program.inputs.words.size(), error);
+                            u32(lesson.pgm_hash), words, error);
             }
         }
     }
