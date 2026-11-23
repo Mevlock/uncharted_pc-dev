@@ -174,8 +174,9 @@ private:
     /// The next parameter of this frame's slot.
     u32 NextParam();
     void WriteParam(u32 index, const Motion::History::Allocation& allocation);
-    /// BB_MOTION_HISTORY_CHECK: the keyed pairing for the same draw, compared.
-    void CheckAllocation(const DrawInfo& draw, const Motion::History::Allocation& allocation);
+    /// BB_MOTION_HISTORY_CHECK: the keyed pairing for the same draw, compared, and the parameter index the draw got
+    /// (`index`, its push constant) with the one the pairing at the draw gave (an index only for a store or a load).
+    void CheckAllocation(const DrawInfo& draw, const Motion::History::Allocation& allocation, u32 index);
 
     const Instance& instance;
     Scheduler& scheduler;
@@ -190,7 +191,8 @@ private:
     Motion::History history{PositionsPerFrame};
     /// BB_MOTION_HISTORY_CHECK=1 (diagnosis): 0.3.6.68's keyed pairing next to `history`, every allocation compared.
     std::unique_ptr<Motion::KeyedHistory> history_check;
-    u64 history_checked = 0, history_differed = 0;
+    u64 history_checked = 0, history_differed = 0, index_differed = 0;
+    u32 check_params_used = 0; ///< the history check's parameter count of this frame
     Motion::IndexRangeCache index_ranges;
     /// Draws whose store is allocated and whose pairing and parameter wait for FlushPairing, in draw order (index 0:
     /// an invalid draw, kept only for the history check's order). The pairing was a third of a motion draw's cost on

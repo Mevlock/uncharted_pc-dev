@@ -151,8 +151,10 @@ void ObjectMotion::OnFrameStart() {
     if (history_check) {
         history_check->NextFrame();
         if (frame % 600 == 0) {
-            std::printf("Object motion history check: %llu draws compared with the keyed pairing, %llu differed\n",
-                        (unsigned long long)history_checked, (unsigned long long)history_differed);
+            std::printf("Object motion history check: %llu draws compared with the keyed pairing, %llu differed; "
+                        "%llu parameter indexes differed\n",
+                        (unsigned long long)history_checked, (unsigned long long)history_differed,
+                        (unsigned long long)index_differed);
         }
     }
     ++frame;
@@ -166,6 +168,7 @@ void ObjectMotion::OnFrameStart() {
         params_ticks[slot] = 0;
     }
     params_used = 0;
+    check_params_used = 0;
     written = false;
     scheduler.EndRendering();
     // Last frame's stores must be visible to this frame's loads. Also finish old reads
@@ -201,12 +204,11 @@ u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
         FlushPairing();
         auto allocation = stored.allocation;
         history.Pair(draw, allocation);
-        CheckAllocation(draw, allocation);
-        if (!allocation.load) {
-            return 0;
+        const u32 index = allocation.load ? NextParam() : 0;
+        CheckAllocation(draw, allocation, index);
+        if (index) {
+            WriteParam(index, allocation);
         }
-        const u32 index = NextParam();
-        WriteParam(index, allocation);
         return index;
     }
     // A store: the draw has a parameter whatever the pairing finds (FlushPairing).
@@ -222,13 +224,13 @@ void ObjectMotion::FlushPairing() {
     const u64 start = MotionCost::On() ? __rdtsc() : 0;
     for (const auto& d : deferred) {
         if (!d.index) {
-            CheckAllocation(d.draw, {});
+            CheckAllocation(d.draw, {}, 0);
             continue;
         }
         Motion::History::Allocation allocation{d.store, 0, d.draw.vertices.count, d.draw.instances,
                                                d.draw.vertices.first, d.draw.first_instance};
         history.Pair(d.draw, allocation);
-        CheckAllocation(d.draw, allocation);
+        CheckAllocation(d.draw, allocation, d.index);
         WriteParam(d.index, allocation);
     }
     if (start) {
@@ -258,7 +260,7 @@ void ObjectMotion::WriteParam(u32 index, const Motion::History::Allocation& allo
     param[7] = 0;
 }
 
-void ObjectMotion::CheckAllocation(const DrawInfo& draw, const Motion::History::Allocation& allocation) {
+void ObjectMotion::CheckAllocation(const DrawInfo& draw, const Motion::History::Allocation& allocation, u32 index) {
     if (!history_check) {
         return;
     }
@@ -268,6 +270,11 @@ void ObjectMotion::CheckAllocation(const DrawInfo& draw, const Motion::History::
                         want.vertices != allocation.vertices || want.instances != allocation.instances ||
                         want.first_vertex != allocation.first_vertex ||
                         want.first_instance != allocation.first_instance;
+    // The index before the pairing was deferred: the next of the frame's slot for a draw with a store or a load.
+    const u32 expected = want.store || want.load
+                             ? 1 + u32(frame % FrameSlots) * ParamsPerFrame + check_params_used++
+                             : 0;
+    index_differed += index != expected;
 }
 
 void ObjectMotion::EnsureImage(u32 width, u32 height) {
