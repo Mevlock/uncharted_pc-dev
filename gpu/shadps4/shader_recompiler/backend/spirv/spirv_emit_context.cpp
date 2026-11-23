@@ -822,8 +822,12 @@ void EmitContext::DefineOutputs() {
 
 void EmitContext::DefinePushDataBlock() {
     // Create push constants block for instance steps rates
-    const Id struct_type{Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4],
-                                         U32[4], U32[4], U32[4], U32[2], U32[1], U32[1]),
+    // bbport (object motion): the motion vertex shader's block goes on with the buffer addresses (MotionPushData).
+    const Id struct_type{Name(VertexMotion()
+                                  ? TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4], U32[4],
+                                               U32[4], U32[4], U32[2], U32[1], U32[1], U32[4])
+                                  : TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4], U32[4],
+                                               U32[4], U32[4], U32[2], U32[1], U32[1]),
                               "AuxData")};
     Decorate(struct_type, spv::Decoration::Block);
     MemberName(struct_type, PushData::XOffsetIndex, "xoffset");
@@ -852,6 +856,10 @@ void EmitContext::DefinePushDataBlock() {
     MemberDecorate(struct_type, PushData::MotionParamIndex, spv::Decoration::Offset, 120U);
     MemberName(struct_type, PushData::SceneSizeIndex, "scene_size");
     MemberDecorate(struct_type, PushData::SceneSizeIndex, spv::Decoration::Offset, 124U);
+    if (VertexMotion()) {
+        MemberName(struct_type, MotionPushData::Index, "motion_addresses");
+        MemberDecorate(struct_type, MotionPushData::Index, spv::Decoration::Offset, MotionPushData::Offset);
+    }
     push_data_block = DefineVar(struct_type, spv::StorageClass::PushConstant);
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);

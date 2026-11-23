@@ -97,6 +97,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.reactive = i != 0;
     } else if (key == "object_motion") {
         v.object_motion = i != 0;
+    } else if (key == "character_motion") {
+        v.character_motion = i != 0;
     } else if (key == "reactive_scale") {
         v.reactive_scale = Clamp(f, 0.0f, 16.0f);
     } else if (key == "reactive_threshold") {
@@ -216,6 +218,7 @@ void Load() {
         {"BB_REACTIVE", "reactive_mask"},             {"BB_REACTIVE_SCALE", "reactive_scale"},
         {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
         {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
+        {"BB_CHARACTER_MOTION", "character_motion"},
         {"BB_FRAME_GEN", "frame_gen"},              {"BB_FRAME_GEN_MULTIPLIER", "frame_gen_multiplier"},
         {"BB_HDR_PAPER_WHITE", "hdr_paper_white"},  {"BB_HDR_PEAK_NITS", "hdr_peak_nits"},
         {"BB_HDR_EXPOSURE", "hdr_exposure"},        {"BB_HDR_SATURATION", "hdr_saturation"},
@@ -238,6 +241,7 @@ void Load() {
     v.startup_preset = v.preset;
     v.startup_upscaler = v.upscaler;
     v.startup_object_motion = v.object_motion;
+    v.startup_character_motion = v.character_motion;
     for (int e = 0; e < EffectCount; ++e) {
         v.startup_effects[e] = v.effects[e];
     }
@@ -324,11 +328,12 @@ void Save() {
     std::fprintf(file,
                  "# bbport settings (in-game menu: Insert / L3+R3)\n"
                  "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%s\njitter=%d\n"
-                 "reactive_mask=%d\nobject_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\nreactive_max=%.2f\n"
+                 "reactive_mask=%d\nobject_motion=%d\ncharacter_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\n"
+                 "reactive_max=%.2f\n"
                  "debug_view=%d\nshow_fps=%d\nshow_fps_graph=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n",
                  UpscalerName(v.upscaler), v.preset.load(), int(v.sharpen.load()),
                  sharpness, int(v.jitter.load()), int(v.reactive.load()),
-                 int(v.object_motion.load()),
+                 int(v.object_motion.load()), int(v.character_motion.load()),
                  v.reactive_scale.load(), v.reactive_threshold.load(), v.reactive_max.load(),
                  v.debug_view.load(), int(v.show_fps.load()), int(v.show_fps_graph.load()),
                  int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));

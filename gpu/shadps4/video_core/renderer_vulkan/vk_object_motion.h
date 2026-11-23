@@ -84,6 +84,7 @@ private:
     VmaAllocation positions_allocation{};
 
     u64 frame = 0;
+    u64 twins_reported = 0; ///< twins loaded in play at the last object motion twins line
     u32 params_used = 0;
     VideoCore::UniqueImage image;
     vk::UniqueImageView view;

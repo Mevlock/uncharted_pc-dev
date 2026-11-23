@@ -42,6 +42,8 @@
 #include <sstream>
 #include <system_error>
 #include <thread>
+#include <algorithm>
+#include <string>
 #include <vector>
 #include <vk_mem_alloc.h>
 #ifdef MemoryBarrier
@@ -708,6 +710,59 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     if (frame_dump_trigger && frame_dump_poll++ % 30 == 0 && std::remove(frame_dump_trigger) == 0) {
         frame_dump_left = frame_dump_burst;
     }
+    // bbport (diagnosis, picture A/Bs that must show the same moment): counted in gameplay frames from the first one
+    // (frame_scene_count, below). BB_FRAME_DUMP_AT=<n>[,<n>...]: a burst of presented frames at each, and the
+    // upscaler's dump (BB_DUMP_TRIGGER's file is created). BB_FRAME_PAD_AT=<n>:<token>[,<n>:<token>...]: the
+    // tokens are written to BB_PAD_FILE at that frame (a pan that starts on the same frame in every run).
+    static u32 frame_scene_count = 0;
+    static u32 frame_scene_seen = ~0u;
+    if (frame_scene_count != frame_scene_seen) {
+        frame_scene_seen = frame_scene_count;
+        static const std::vector<u32> dump_at = [] {
+            std::vector<u32> at;
+            for (const char* p = std::getenv("BB_FRAME_DUMP_AT"); p && *p;) {
+                char* end = nullptr;
+                at.push_back(u32(std::strtoul(p, &end, 10)));
+                p = (end && *end == ',') ? end + 1 : nullptr;
+            }
+            return at;
+        }();
+        if (frame_scene_count && std::ranges::find(dump_at, frame_scene_count) != dump_at.end()) {
+            frame_dump_left = frame_dump_burst;
+            if (const char* up = std::getenv("BB_DUMP_TRIGGER")) {
+                if (FILE* f = std::fopen(up, "w")) {
+                    std::fclose(f);
+                }
+            }
+            std::printf("Frame dump: gameplay frame %u\n", frame_scene_count);
+        }
+        static const std::vector<std::pair<u32, std::string>> pad_at = [] {
+            std::vector<std::pair<u32, std::string>> at;
+            std::string all = std::getenv("BB_FRAME_PAD_AT") ? std::getenv("BB_FRAME_PAD_AT") : "";
+            for (size_t pos = 0; pos < all.size();) {
+                size_t end = all.find(',', pos);
+                if (end == std::string::npos) {
+                    end = all.size();
+                }
+                const std::string item = all.substr(pos, end - pos);
+                if (const size_t colon = item.find(':'); colon != std::string::npos) {
+                    at.emplace_back(u32(std::strtoul(item.c_str(), nullptr, 10)), item.substr(colon + 1));
+                }
+                pos = end + 1;
+            }
+            return at;
+        }();
+        for (const auto& [at, tokens] : pad_at) {
+            const char* pad_file = std::getenv("BB_PAD_FILE");
+            if (at == frame_scene_count && pad_file) {
+                if (FILE* f = std::fopen(pad_file, "w")) {
+                    std::fputs(tokens.c_str(), f);
+                    std::fclose(f);
+                }
+                std::printf("Frame pad: gameplay frame %u: '%s'\n", at, tokens.c_str());
+            }
+        }
+    }
     const bool frame_dump = frame_dump_left > 0;
     if (frame_dump) {
         --frame_dump_left;
@@ -724,6 +779,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     // bbport: a widened gameplay frame fills the window (runtime_ultrawide.c).
     const bool scene = rasterizer->TakeSceneFrame();
+    // (BB_FRAME_DUMP_AT / BB_FRAME_PAD_AT: gameplay frames since the first one; checked at the next frame.)
+    if (scene || frame_scene_count) {
+        ++frame_scene_count;
+    }
     if (runtime_ultrawide_fill) {
         static bool noted = false;
         if (scene && !noted) {

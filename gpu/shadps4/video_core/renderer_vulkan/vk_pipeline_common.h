@@ -98,6 +98,9 @@ protected:
     std::array<const Shader::Info*, Shader::MaxStageTypes> stages{};
     bool uses_push_descriptors{};
     bool split_sets{}; ///< bbport (BB_GPL): fragment set 0 (desc_layout) + pre-raster set 1 (pre_raster_layout)
+    /// bbport (object motion): a pipeline with the motion attachment: its push range goes on with the motion buffers'
+    /// addresses (Shader::MotionPushData, 16 bytes after PushData), pushed with every BindResources.
+    bool motion_push{};
     bool is_compute;
 };
 

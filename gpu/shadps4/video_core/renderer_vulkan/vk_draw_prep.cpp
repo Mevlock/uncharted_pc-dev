@@ -890,7 +890,9 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     prep_worker.stages.clear();
                     prep_worker.failed = false;
                     sel.draw_indirect_params = {};
-                    pipeline_cache.PrepareGraphicsPipeline(sel);
+                    if (pipeline_cache.PrepareGraphicsPipeline(sel)) {
+                        pipeline_cache.BuildMotionTwin(sel);
+                    }
                 }
                 ++ordinal;
                 return;
@@ -932,6 +934,9 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     draw.direct_reads = arena.AppendArray(direct_reads.data(), direct_reads.size());
                     draw.num_direct_reads = static_cast<u32>(direct_reads.size());
                     draw.state.store(PreparedDraw::Ready, std::memory_order_release);
+                    // bbport (object motion twins): the draw went out with its ordinary pipeline; its twin is loaded
+                    // now, for the draws to come (a no-op when it was there).
+                    pipeline_cache.BuildMotionTwin(sel);
                 } else {
                     t_direct_reads = nullptr;
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);

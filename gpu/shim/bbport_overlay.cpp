@@ -1401,7 +1401,9 @@ void Menu() {
         }
         ImGui::EndDisabled();
         ImGui::EndDisabled();
-        Checkbox(TI("Character motion vectors"), s.object_motion);
+        // The same setting as the launcher's "Character motion vectors" (bbport.ini character_motion): read once
+        // before the shader warm-up, so it applies after a restart (its twins are prepared either way: no page).
+        Checkbox(TI("Character motion vectors"), s.character_motion);
         Hint(T("Exact vectors for animated objects (applies after restarting the game)."));
         bool show_motion = s.debug_view == BbSettings::DebugMotion;
         if (ImGui::Checkbox(TI("Show the motion vectors"), &show_motion)) {
@@ -1410,7 +1412,7 @@ void Menu() {
         Hint(T("Red/green: horizontal/vertical motion (8 pixels = full brightness); blue: an exact "
                "object vector."));
     }
-    if (s.object_motion != s.startup_object_motion) {
+    if (s.object_motion != s.startup_object_motion || s.character_motion != s.startup_character_motion) {
         ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
                            "%s", T("Changes apply after restarting the game"));
         if (ImGui::Button(TI("Apply and restart the game"))) {

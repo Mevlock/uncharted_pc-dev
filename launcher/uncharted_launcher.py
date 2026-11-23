@@ -290,7 +290,7 @@ RESERVED_KEYS = {'Insert': 'Insert opens the in-game settings menu.',
                  'Alt_L': 'Left Alt frees the mouse cursor while held.'}
 
 APP_DEFAULTS = {'game_dir': '', 'game_dir_u1': '', 'game_dir_u2': '', 'game_dir_u3': '', 'user_dir': '', 'portable': False, 'start': 'u1', 'language': '1', 'ui_language': '', 'player_name': '',
-                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'frame_pacing': 'off', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False,
+                'fullscreen': False, 'pause_in_background': False, 'present_mode': 'Mailbox', 'frame_rate': '60', 'fps_limit': '0', 'frame_pacing': 'off', 'show_fps': False, 'hdr': 'off', 'hdr_tone': '2', 'hdr_peak_nits': '1000', 'hdr_paper_white': '203', 'bloom': True, 'depth_of_field': '1', 'skip_intro': False, 'job_threads': 'auto', 'unlock_chapters': False, 'unlock_rewards': False, 'prep_unknown_versions': False, 'skip_friends_notice': True, 'anisotropy': '0', 'full_res_textures': False, 'hires_shadows': False, 'character_motion': False,
                 'window_size': '1920x1080', 'render_resolution': '1080', 'ultrawide': 'auto', 'fov': '100', 'scaler': 'fsr1', 'sharpening': '500',
                 'anti_aliasing': 'off', 'dlss_model': 'default', 'aa_sharpness': 'auto', 'frame_generation': 'off', 'low_latency': '0',
                 'frame_gen_multiplier': '2', 'speakers': 'auto', 'extra_env': '', 'close_on_play': False,
@@ -473,7 +473,7 @@ SHADER_PACK = 'shaders.pack'  # the game's shader cache file in each cache folde
 
 # The game's shader cache versions (ShaderBinaryVersion.ShaderMetaVersion.PipelineKeyVersion in
 # vk_pipeline_serialization.cpp); tests/test_shader_cache_version.py fails when they differ.
-SHADER_CACHE_VERSIONS = '24.17.8'
+SHADER_CACHE_VERSIONS = '25.17.8'
 # The port's name in the pack header (bytes 32-47, zero-padded; cache_pack.h PortName). All zero: a pack of this port's
 # test builds before 2026-11-22. Any other name, or another magic: another program's file.
 SHADER_PACK_PORT = b'Uncharted PC'.ljust(16, b'\0')
@@ -981,6 +981,11 @@ def game_frame_cap(s):
             multiplier = 2
     cap = max(1, round(limit / multiplier))
     return cap if cap < game_environment_frame_rate(s) else 0
+
+
+# The characters' own motion vectors (bbport.ini character_motion; the in-game menu has the same checkbox).
+CHARACTER_MOTION_HINT = ('With DLSS or FSR: more accurate motion for characters, so moving characters smear less. '
+                         'A small CPU cost; applies at the next start.')
 
 
 def game_environment(s, start=None):
@@ -2166,6 +2171,7 @@ class Launcher:
         self.row(f, _('Anti-aliasing sharpness'), self.choice(f, 'aa_sharpness', AA_SHARPNESS, 34),
                  _('Sharpens the picture after the anti-aliasing (DLSS, FSR, TAA), which can look '
                    'slightly soft, most at the upscaled render resolutions.'))
+        self.check(f, 'character_motion', _('Character motion vectors'), _(CHARACTER_MOTION_HINT))
         self.section(f, _('Frame generation'))
         hint = _('Frames made between two of the game\'s, for smoother motion: 60 FPS shows as 120. '
                  'Use Mailbox or Immediate presentation and a display of at least that refresh rate. '
@@ -3047,6 +3053,8 @@ class Launcher:
         write_atomic(CONFIG_FILE, json.dumps(self.app, indent=2) + '\n')
         try:
             set_ini('show_fps', '1' if self.app['show_fps'] else '0')
+            # Read by the game at start (bbport.ini); the in-game menu's checkbox is the same setting.
+            set_ini('character_motion', '1' if self.app.get('character_motion') else '0')
         except OSError:
             pass
 
@@ -4263,8 +4271,14 @@ def log_header(settings, start=None):
                  else '; no shipped shader index: the game files are scanned once (Advanced override)'
                  if needs_index_scan(settings, start)
                  else '; shader preparation off: no index for it')
+    # The shader cache the game uses: BB_GPU_CACHE_DIR when the environment or the extra variables set it (run.py
+    # takes it as it is), else the port's own folder.
+    cache = os.environ.get('BB_GPU_CACHE_DIR') or DATA_DIR / 'user' / 'cache'
+    for item in str(settings.get('extra_env') or '').split():
+        if item.startswith('BB_GPU_CACHE_DIR='):
+            cache = item.split('=', 1)[1]
     return (f'Port: {NAME} {build} in {PORT_DIR}, starting {start}\n'
-            f'Folders: saves {saves}, shader cache {DATA_DIR / "user" / "cache"}\n{game}\n')
+            f'Folders: saves {saves}, shader cache {cache}\n{game}\n')
 
 
 def log_location(settings):

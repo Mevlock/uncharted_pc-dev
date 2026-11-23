@@ -8,8 +8,10 @@
 #include <vk_mem_alloc.h>
 #include "bbport_settings.h"
 #include "bbport_toggles.h"
+#include "shader_recompiler/resource.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
 namespace Vulkan {
@@ -63,6 +65,12 @@ ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
         std::printf("Object motion: vertexPipelineStoresAndAtomics unsupported, off\n");
         return;
     }
+    // The motion pipelines push the buffers' addresses after the usual push constants (Shader::MotionPushData).
+    const u32 push_limit = instance.GetPhysicalDevice().getProperties().limits.maxPushConstantsSize;
+    if (push_limit < sizeof(Shader::PushData) + sizeof(Shader::MotionPushData)) {
+        std::printf("Object motion: push constants limited to %u bytes, off\n", push_limit);
+        return;
+    }
     void* mapped = nullptr;
     u64 params_address = 0, positions_address = 0;
     if (!CreateBuffer(instance, vk::DeviceSize(1 + FrameSlots * ParamsPerFrame) * 32, true,
@@ -77,7 +85,10 @@ ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
     Shader::MotionVectors::params_address = params_address;
     Shader::MotionVectors::positions_address = positions_address;
     enabled = true;
-    std::printf("Object motion: on (%u vertices per frame)\n", PositionsPerFrame);
+    // (The motion shaders embed these addresses: a twin the driver keeps from an earlier start is found again only
+    // when they are the same.)
+    std::printf("Object motion: on (%u vertices per frame; buffers at %llx, %llx)\n", PositionsPerFrame,
+                (unsigned long long)params_address, (unsigned long long)positions_address);
 }
 
 ObjectMotion::~ObjectMotion() {
@@ -109,6 +120,24 @@ void ObjectMotion::OnFrameStart() {
                     (unsigned long long)index_ranges.stats.stale, index_ranges.Size());
         index_ranges.stats = {};
         history.stats = {};
+    }
+    // bbport (object motion twins): every 600 frames while twins come in: how many draws went out without theirs and
+    // what loading them cost (BuildMotionTwin); silent once nothing changes.
+    if (Shader::MotionVectors::characters && (frame % 600) == 0) {
+        const u64 gpu = g_twin_fallback_gpu.exchange(0, std::memory_order_relaxed);
+        const u64 worker = g_twin_fallback_worker.exchange(0, std::memory_order_relaxed);
+        const u64 built = g_twins_built_in_play.load(std::memory_order_relaxed);
+        if (gpu || worker || built != twins_reported) {
+            twins_reported = built;
+            std::printf("Object motion twins: %llu draws without their twin yet (%llu selected on the GPU thread, %llu "
+                        "by the workers; 600 frames); %llu twins loaded in play so far (%.1f ms in all, longest %.2f "
+                        "ms; the driver compiled %llu, %llu with shaders translated in play)\n",
+                        (unsigned long long)(gpu + worker), (unsigned long long)gpu, (unsigned long long)worker,
+                        (unsigned long long)built, double(g_twin_load_ns.load()) / 1e6,
+                        double(g_twin_load_max_ns.load()) / 1e6,
+                        (unsigned long long)g_twins_compiled_in_play.load(),
+                        (unsigned long long)g_twins_translated_in_play.load());
+        }
     }
     history.NextFrame();
     ++frame;

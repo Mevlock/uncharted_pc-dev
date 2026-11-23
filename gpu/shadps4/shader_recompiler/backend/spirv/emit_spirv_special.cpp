@@ -82,14 +82,20 @@ static void EmitVertexMotion(EmitContext& ctx) {
     // base + index * stride + extra: the offset in 32 bits (both buffers are far below 4 GiB), added to the low half
     // of the base with its carry into the high half (BilalReloaded's 0.7.1, his #273 #272). AMD's compiler (RX 6600
     // XT, RX 6800, Ryzen iGPU) dropped the high half of the same sum done in 64-bit integers: the parameter read
-    // lost its upper address bits and the device was lost on the first upscaled frame. The base stays one 64-bit
-    // constant, the stand-in PatchMotionAddresses swaps for the session's address.
-    const auto address = [&](u64 base, Id index, u32 stride, u32 extra = 0) {
+    // lost its upper address bits and the device was lost on the first upscaled frame. bbport (object motion twins):
+    // the bases are the session's addresses from the push constants (MotionPushData), not constants in the code.
+    const Id addresses = ctx.OpLoad(
+        ctx.U32[4], ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U32[4]),
+                                      ctx.push_data_block, ctx.ConstU32(MotionPushData::Index)));
+    const Id params_base = ctx.OpCompositeConstruct(ctx.U32[2], ctx.OpCompositeExtract(u32_type, addresses, 0u),
+                                                    ctx.OpCompositeExtract(u32_type, addresses, 1u));
+    const Id positions_base = ctx.OpCompositeConstruct(
+        ctx.U32[2], ctx.OpCompositeExtract(u32_type, addresses, 2u), ctx.OpCompositeExtract(u32_type, addresses, 3u));
+    const auto address = [&](Id halves, Id index, u32 stride, u32 extra = 0) {
         Id offset = ctx.OpIMul(u32_type, index, ctx.ConstU32(stride));
         if (extra) {
             offset = ctx.OpIAdd(u32_type, offset, ctx.ConstU32(extra));
         }
-        const Id halves = ctx.OpBitcast(ctx.U32[2], ctx.Constant(ctx.U64, base));
         const Id sum = ctx.OpIAddCarry(ctx.full_result_u32x2,
                                        ctx.OpCompositeExtract(u32_type, halves, 0u), offset);
         const Id low = ctx.OpCompositeExtract(u32_type, sum, 0u);
@@ -101,7 +107,7 @@ static void EmitVertexMotion(EmitContext& ctx) {
     const Id f32x4_ptr = ctx.TypePointer(spv::StorageClass::PhysicalStorageBuffer, ctx.F32[4]);
     const Id params = ctx.OpLoad(
         ctx.U32[4],
-        ctx.OpConvertUToPtr(u32x4_ptr, address(MotionVectors::ParamsPlaceholder, param_index, 32)),
+        ctx.OpConvertUToPtr(u32x4_ptr, address(params_base, param_index, 32)),
         spv::MemoryAccessMask::Aligned, 16u);
     const Id store_base = ctx.OpCompositeExtract(u32_type, params, 0u);
     const Id load_base = ctx.OpCompositeExtract(u32_type, params, 1u);
@@ -109,7 +115,7 @@ static void EmitVertexMotion(EmitContext& ctx) {
     const Id flags = ctx.OpCompositeExtract(u32_type, params, 3u);
     const Id offsets = ctx.OpLoad(
         ctx.U32[4], ctx.OpConvertUToPtr(u32x4_ptr,
-            address(MotionVectors::ParamsPlaceholder + 16, param_index, 32)),
+            address(params_base, param_index, 32, 16)),
         spv::MemoryAccessMask::Aligned, 16u);
     const Id first_vertex = ctx.OpCompositeExtract(u32_type, offsets, 0u);
     const Id first_instance = ctx.OpCompositeExtract(u32_type, offsets, 1u);
@@ -140,7 +146,7 @@ static void EmitVertexMotion(EmitContext& ctx) {
     const Id scope = ctx.ConstU32(static_cast<u32>(spv::Scope::Device));
     for (u32 i = 0; i < 4; ++i) {
         const Id ptr = ctx.OpConvertUToPtr(
-            scalar_ptr, address(MotionVectors::PositionsPlaceholder, store_index, 16, i * 4));
+            scalar_ptr, address(positions_base, store_index, 16, i * 4));
         const Id bits = ctx.OpBitcast(u32_type, ctx.OpCompositeExtract(ctx.F32[1], position, i));
         ctx.OpAtomicStore(ptr, scope, ctx.u32_zero_value, bits);
     }
@@ -153,7 +159,7 @@ static void EmitVertexMotion(EmitContext& ctx) {
     ctx.OpBranchConditional(do_load, load_label, load_merge);
     ctx.AddLabel(load_label);
     const Id loaded = ctx.OpLoad(
-        ctx.F32[4], ctx.OpConvertUToPtr(f32x4_ptr, address(MotionVectors::PositionsPlaceholder,
+        ctx.F32[4], ctx.OpConvertUToPtr(f32x4_ptr, address(positions_base,
             ctx.OpIAdd(u32_type, load_base, slot), 16)), spv::MemoryAccessMask::Aligned, 16u);
     ctx.OpBranch(load_merge);
     ctx.AddLabel(load_merge);

@@ -14,6 +14,7 @@
 #include "core/libraries/videoout/driver.h"
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
+#include "bbport_settings.h"
 #include "bbport_toggles.h"
 #include "bbport_trace.h"
 #include "bbport_keyicons.h"
@@ -717,6 +718,16 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         std::printf("Upscaler jitter: %s\n", Shader::ClipJitter::enabled ? "in the vertex shaders" : "viewport offset");
         // The driver, for the game-side patches (projection jitter itself is on with every GPU).
         runtime_gpu_nvidia = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ? 1 : 0;
+    }
+    // bbport (from BilalReloaded's Uncharted port, #84): the characters' own motion vectors with Uncharted's
+    // velocity-pass camera (vk_camera_motion.cpp): the setting "Character motion vectors" (launcher and in-game
+    // menu, bbport.ini character_motion; off by default; BB_CHARACTER_MOTION=0/1 overrides it), with an upscaler.
+    // Fixed before the warm-up, which loads the G-buffer pipelines' motion twins only when they are on.
+    {
+        const char* upscaler = std::getenv("BB_UPSCALER");
+        const char* velocity = std::getenv("BB_VELOCITY_PS");
+        Shader::MotionVectors::characters = !(upscaler && std::strcmp(upscaler, "none") == 0) && velocity &&
+                                            *velocity && BbSettings::Get().character_motion.load();
     }
     // bbport: from here the stored pipelines load on background threads (the motion shaders
     // among them need the buffer addresses fixed just above).
