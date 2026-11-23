@@ -8955,12 +8955,14 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
                           !same_size(texture_cache.GetImage(db_desc.first), 0))) {
         reduced = false;
     }
-    // FSR night (A/B, BB_SCENE_BOUND_DEPTH=1): a depth attachment this draw also samples stays native. Replaced by
-    // BB_SCENE_DEPTH_SAMPLE (the sampling no longer counts as a write): native, such passes alternated with reduced
-    // ones on U2's full-size depth (16 resolves + 14 refills a frame, ~10% slower).
+    // FSR night: a depth attachment this draw also samples (bound as a texture) stays native, as a bound colour target
+    // does. U3's half-size light passes attach and sample their depth and write its stencil: reduced, every pass
+    // resolved the stand-in for the native read (ride, FSR 3.1 Quality: host copies up to 18%, mean 128.6 low 50.0;
+    // with this rule 150.4 / 121.9). In U2 such passes alternate with depth-writing reduced ones on the full-size
+    // depth (16 resolves a frame), one reason U2 keeps the old order (BB_UNCHARTED_REDUCED). BB_SCENE_BOUND_DEPTH=0: off.
     static const bool bound_depth_native = [] {
         const char* env = std::getenv("BB_SCENE_BOUND_DEPTH");
-        return env && env[0] == '1';
+        return !(env && env[0] == '0');
     }();
     if (bound_depth_native && reduced && db_desc.first && texture_cache.GetImage(db_desc.first).binding.is_bound) {
         reduced = false;
