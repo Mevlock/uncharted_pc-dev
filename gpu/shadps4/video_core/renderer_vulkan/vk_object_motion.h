@@ -31,6 +31,10 @@ public:
 
     using DrawInfo = Motion::Draw;
     u32 PrepareDraw(const DrawInfo& draw);
+    /// bbport (BB_TWIN_USAGE_LOG): whether the last PrepareDraw gave its draw history (vectors from the last frame).
+    [[nodiscard]] bool LastDrawHadHistory() const noexcept {
+        return last_load;
+    }
     /// Small skeletons: whether the bone palette changed (Motion::History::Moving).
     bool Moving(const Motion::History::GateKey& key, u64 palette) {
         return history.Moving(key, palette);
@@ -86,6 +90,7 @@ private:
     u64 frame = 0;
     u64 twins_reported = 0; ///< twins loaded in play at the last object motion twins line
     u32 params_used = 0;
+    bool last_load = false; ///< LastDrawHadHistory
     VideoCore::UniqueImage image;
     vk::UniqueImageView view;
     u32 image_width = 0, image_height = 0;

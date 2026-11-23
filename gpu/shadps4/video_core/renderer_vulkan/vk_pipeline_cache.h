@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <shared_mutex>
+#include <string>
 #include <variant>
 #include <boost/container/static_vector.hpp>
 #include <tsl/robin_map.h>
@@ -161,6 +162,16 @@ inline std::atomic<u64> g_twin_fallback_gpu{0}, g_twin_fallback_worker{0}, g_twi
 inline std::atomic<bool> g_twin_stages_pending{false};
 inline std::atomic<u64> g_twin_load_ns{0}, g_twin_load_max_ns{0}, g_twins_compiled_in_play{0},
     g_twins_translated_in_play{0};
+
+/// bbport (object motion twins, diagnosis for narrowing the prepared twins): BB_TWIN_USAGE_LOG=<file> appends one
+/// line per distinct twin key a draw bound (and once more when one of its draws first had history), and per twin made
+/// in play; BB_TWIN_CANDIDATE_LOG=<file>: the preparation (step 5c) writes every graphics key with its candidate
+/// verdict. Both describe the key with DescribeTwinKey (the base key's fields, the motion attachment left out), for
+/// uncharted_autotest/session_tools/charmotion/twin_narrow.py.
+std::string DescribeTwinKey(const GraphicsPipelineKey& key);
+bool TwinUsageLogOn();
+/// `how`: "draw" (a draw bound the twin), "inplay-built" / "inplay-compiled" / "inplay-translated" (BuildMotionTwin).
+void NoteTwinUsage(const GraphicsPipelineKey& key, u64 vs_pgm, u64 ps_pgm, bool history, const char* how);
 
 /// bbport: held shared while a pipeline is created in a pipeline cache, alone while the driver's cache data is read.
 std::shared_mutex& PipelineCacheUse();

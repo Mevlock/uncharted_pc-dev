@@ -5230,6 +5230,21 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             });
         }
     }
+    // bbport (BB_TWIN_USAGE_LOG, narrowing the prepared twins): each twin a draw bound, once, and once more when one
+    // of its draws had history. (The GPU thread only: a map by pipeline, the key described on a change.)
+    if (motion_draw && TwinUsageLogOn()) {
+        static std::unordered_map<const GraphicsPipeline*, u8> twin_seen;
+        const bool history =
+            motion_geometry && push_data.motion_param != 0 && object_motion->LastDrawHadHistory();
+        u8& state = twin_seen[pipeline];
+        const u8 want = u8(1 | (history ? 2 : 0));
+        if ((state | want) != state) {
+            state |= want;
+            const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+            NoteTwinUsage(pipeline->GetGraphicsKey(), pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
+                          ps ? ps->pgm_hash : 0, history, "draw");
+        }
+    }
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};

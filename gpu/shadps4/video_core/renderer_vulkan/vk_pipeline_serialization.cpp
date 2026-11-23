@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <cstring>
@@ -3372,6 +3373,7 @@ void PipelineCache::WarmUpThread() {
                 }
             }
             const size_t first_twin = stored.size();
+            std::unordered_map<size_t, u64> twin_key_of; // (BB_TWIN_CANDIDATE_LOG) candidate -> its twin key's hash
             for (const size_t i : candidates) {
                 const auto& base = stored[i];
                 const auto* vs = twin_of.at(base.gkey.stage_hashes[vs_slot]);
@@ -3386,6 +3388,7 @@ void PipelineCache::WarmUpThread() {
                     key.stage_hashes[fs_slot] = fs->hash;
                 }
                 AddMotionAttachment(key);
+                twin_key_of.emplace(i, u64(std::hash<GraphicsPipelineKey>{}(key)));
                 if (!have.insert(key).second) {
                     continue;
                 }
@@ -3396,6 +3399,38 @@ void PipelineCache::WarmUpThread() {
                 twin.gkey = key;
                 twin.gsdata = base.gsdata;
                 stored.push_back(std::move(twin));
+            }
+            // BB_TWIN_CANDIDATE_LOG=<file> (diagnosis, narrowing the prepared twins): every graphics key of the
+            // cache, whether it is a candidate (cand=1, with its twin key's hash: the one a draw's twin has), its
+            // shaders' program hashes and DescribeTwinKey's fields (the same as BB_TWIN_USAGE_LOG's).
+            if (const char* dump = std::getenv("BB_TWIN_CANDIDATE_LOG"); dump && *dump) {
+                if (std::FILE* f = std::fopen(dump, "wb")) {
+                    const auto pgm = [&](u64 stage_hash) -> u64 {
+                        const auto it = by_hash.find(stage_hash);
+                        return it != by_hash.end() && it->second->owner ? it->second->owner->info.pgm_hash : 0;
+                    };
+                    std::fprintf(f, "start	%lld	keys	%zu	candidates	%zu
+",
+                                 static_cast<long long>(std::time(nullptr)), first_twin, candidates.size());
+                    for (size_t i = 0; i < first_twin; ++i) {
+                        const auto& entry = stored[i];
+                        if (!entry.parsed || entry.compute) {
+                            continue;
+                        }
+                        const auto it = twin_key_of.find(i);
+                        const auto& k = entry.gkey;
+                        std::fprintf(f,
+                                     "key	cand=%u	twin=%016llx	stored_twin=%u	gs=%u	vs=%016llx	ps=%016llx	%s
+",
+                                     u32(it != twin_key_of.end()),
+                                     static_cast<unsigned long long>(it != twin_key_of.end() ? it->second : 0),
+                                     u32(entry.twin), u32(!entry.gsdata.tcs.empty() || !entry.gsdata.tes.empty()),
+                                     static_cast<unsigned long long>(pgm(k.stage_hashes[vs_slot])),
+                                     static_cast<unsigned long long>(pgm(k.stage_hashes[fs_slot])),
+                                     DescribeTwinKey(k).c_str());
+                    }
+                    std::fclose(f);
+                }
             }
             std::vector<size_t> twin_keys;
             for (size_t i = 0; i < stored.size(); ++i) {

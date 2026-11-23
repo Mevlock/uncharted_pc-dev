@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <condition_variable>
 #include <cstring>
+#include <ctime>
+#include <string_view>
 #include <filesystem>
 #include <csetjmp>
 #include <fstream>
@@ -1043,7 +1045,9 @@ void PipelineCache::BuildMotionTwin(PipelineSelection& worker_sel) {
     // The twin's stages are looked up first (prepared: the shader preparation made them, step 5c); only a twin it did
     // not prepare has them translated now.
     bool ok = RefreshGraphicsKey(worker_sel);
+    bool translated = false; // (BB_TWIN_USAGE_LOG)
     if (ok && !worker.failed && !worker_sel.graphics_key.motion_vectors && worker_sel.twin_wanted) {
+        translated = true;
         worker_sel.twin_wanted = false;
         worker.stages.clear();
         g_twins_translated_in_play.fetch_add(1, std::memory_order_relaxed);
@@ -1071,8 +1075,15 @@ void PipelineCache::BuildMotionTwin(PipelineSelection& worker_sel) {
                  ns > max && !g_twin_load_max_ns.compare_exchange_weak(max, ns, std::memory_order_relaxed);) {
             }
             // (Another thread's compile in the same span counts too: an upper bound.)
-            if (PipelineBinaries::DriverCacheMisses() != misses) {
+            const bool compiled = PipelineBinaries::DriverCacheMisses() != misses;
+            if (compiled) {
                 g_twins_compiled_in_play.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (TwinUsageLogOn()) {
+                const auto* vs = worker_sel.infos[u32(Shader::SwStage::Vertex)];
+                const auto* ps = worker_sel.infos[u32(Shader::SwStage::Fragment)];
+                NoteTwinUsage(worker_sel.graphics_key, vs ? vs->pgm_hash : 0, ps ? ps->pgm_hash : 0, false,
+                              translated ? "inplay-translated" : compiled ? "inplay-compiled" : "inplay-built");
             }
         }
     }
@@ -1525,6 +1536,88 @@ void PipelineCache::PrepareComputePipeline(PipelineSelection& worker_sel) {
     }
     runtime_fault_recover = nullptr;
     ReleaseClaim(claim_id);
+}
+
+// bbport (object motion twins, diagnosis: BB_TWIN_USAGE_LOG / BB_TWIN_CANDIDATE_LOG, vk_pipeline_cache.h).
+template <typename T>
+static std::string TwinBytes(const T& value) {
+    std::string out;
+    const auto* bytes = reinterpret_cast<const u8*>(&value);
+    for (size_t i = sizeof(T); i-- > 0;) {
+        out += fmt::format("{:02x}", bytes[i]);
+    }
+    return out;
+}
+
+std::string DescribeTwinKey(const GraphicsPipelineKey& key) {
+    constexpr u32 mv = Shader::MotionVectors::Output;
+    const bool twin = key.motion_vectors != 0;
+    const u32 mrt = twin ? key.mrt_mask & ~(1u << mv) : key.mrt_mask;
+    u32 stages = 0;
+    for (u32 st = 0; st < MaxShaderStages; ++st) {
+        stages |= key.stage_hashes[st] ? 1u << st : 0;
+    }
+    u32 vbf = 0;
+    for (const auto format : key.vertex_buffer_formats) {
+        vbf += format != vk::Format::eUndefined;
+    }
+    u32 cb_mask = key.cb_shader_mask.raw;
+    if (twin) {
+        cb_mask &= ~(0xfu << (mv * 4));
+    }
+    std::string text = fmt::format(
+        "kh={:016x}\tnca={}\tmrt={:02x}\tntg={}\tz={}\tst={}\tns={}\tds={}\tprim={}\tpoly={}\tclip={}\tpvl={}\tdclip={}"
+        "\tdclamp={}\tlogic={:02x}\tcbm={:08x}\tui={}\tsplit={}\tpcp={}\tvbf={}\tstg={:02x}",
+        u64(std::hash<GraphicsPipelineKey>{}(key)), twin ? std::popcount(mrt) : key.num_color_attachments, mrt,
+        std::popcount(mrt), u32(key.z_format), u32(key.stencil_format), u32(key.num_samples), u32(key.depth_samples),
+        u32(key.prim_type), u32(key.polygon_mode), u32(key.clip_space), u32(key.provoking_vtx_last),
+        u32(key.depth_clip_enable), u32(key.depth_clamp_enable), u32(key.logic_op), cb_mask, key.ui_squeeze,
+        key.split_sets, key.patch_control_points, vbf, stages);
+    for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+        if (!(mrt & (1u << cb))) {
+            continue;
+        }
+        const auto& c = key.color_buffers[cb];
+        text += fmt::format("\tt{}={}.{}.{}.{}.{}.{}/b{}/w{:x}/s{}", cb, u32(c.data_format), u32(c.num_format),
+                            u32(c.num_conversion), u32(c.export_format), u32(c.blend_self_scale),
+                            TwinBytes(c.swizzle), TwinBytes(key.blend_controls[cb]), u32(key.write_masks[cb]),
+                            u32(key.color_samples[cb]));
+    }
+    return text;
+}
+
+bool TwinUsageLogOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_TWIN_USAGE_LOG");
+        return env && *env;
+    }();
+    return on;
+}
+
+void NoteTwinUsage(const GraphicsPipelineKey& key, u64 vs_pgm, u64 ps_pgm, bool history, const char* how) {
+    if (!TwinUsageLogOn()) {
+        return;
+    }
+    static std::mutex mutex;
+    static std::FILE* file = nullptr;
+    static std::unordered_map<u64, u32> seen; // line kind (how + history) -> once each
+    const u64 kh = std::hash<GraphicsPipelineKey>{}(key);
+    const u64 kind = kh ^ (std::hash<std::string_view>{}(how) * 0x9e3779b97f4a7c15ULL) ^ (history ? 0x5bd1e995ULL : 0);
+    std::scoped_lock lock{mutex};
+    if (!seen.emplace(kind, 1).second) {
+        return;
+    }
+    if (!file) {
+        file = std::fopen(std::getenv("BB_TWIN_USAGE_LOG"), "ab");
+        if (!file) {
+            return;
+        }
+        std::fprintf(file, "start\t%lld\n", static_cast<long long>(std::time(nullptr)));
+    }
+    std::fprintf(file, "use\thow=%s\thist=%u\tvs=%016llx\tps=%016llx\t%s\n", how, u32(history),
+                 static_cast<unsigned long long>(vs_pgm), static_cast<unsigned long long>(ps_pgm),
+                 DescribeTwinKey(key).c_str());
+    std::fflush(file);
 }
 
 void AddMotionAttachment(GraphicsPipelineKey& key) {
