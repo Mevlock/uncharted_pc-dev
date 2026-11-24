@@ -5245,6 +5245,24 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                           ps ? ps->pgm_hash : 0, history, "draw");
         }
     }
+    // (The same log, feature/charmotion-rule: each ordinary pipeline drawn with the scene depth, once per depth and
+    // stencil state, how=plain-s<stencil>w<depth write>e<depth test>f<depth function>: which keys never are motion
+    // draws.)
+    if (!motion_draw && TwinUsageLogOn()) {
+        static std::unordered_map<const GraphicsPipeline*, u64> plain_seen;
+        const auto& dc = regs.depth_control;
+        const u32 state = u32(dc.stencil_enable) | u32(dc.depth_write_enable) << 1 | u32(dc.depth_enable) << 2 |
+                          (u32(dc.depth_func) & 7) << 3;
+        u64& seen = plain_seen[pipeline];
+        if (!(seen & (1ULL << state)) && pipeline->GetGraphicsKey().z_format != AmdGpu::DepthBuffer::ZFormat::Invalid) {
+            seen |= 1ULL << state;
+            const auto* vs = pipeline->GetStages()[u32(Shader::SwStage::Vertex)];
+            const auto* ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+            const std::string how = fmt::format("plain-s{}w{}e{}f{}", u32(dc.stencil_enable), u32(dc.depth_write_enable),
+                                                u32(dc.depth_enable), u32(dc.depth_func) & 7);
+            NoteTwinUsage(pipeline->GetGraphicsKey(), vs ? vs->pgm_hash : 0, ps ? ps->pgm_hash : 0, false, how.c_str());
+        }
+    }
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
     draw_jitter = {};

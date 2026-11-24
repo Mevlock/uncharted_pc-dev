@@ -1620,6 +1620,86 @@ void NoteTwinUsage(const GraphicsPipelineKey& key, u64 vs_pgm, u64 ps_pgm, bool 
     std::fflush(file);
 }
 
+bool MotionTwinRuleTarget(AmdGpu::DepthBuffer::ZFormat z_format, AmdGpu::DepthBuffer::StencilFormat stencil_format,
+                          bool depth_clip_enable, const Shader::PsColorBuffer& target0, bool target0_blended,
+                          u32 target0_write_mask) {
+    // (Depth clipping is not part of the rule: the tours' twins all had it on, but the few keys of this class with
+    // it off, 24 of U3's 9,580, are kept as margin. The parameter stays for the log line.)
+    static_cast<void>(depth_clip_enable);
+    constexpr u32 all_channels = u32(vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+                                     vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA);
+    return z_format == AmdGpu::DepthBuffer::ZFormat::Z32Float &&
+           stencil_format != AmdGpu::DepthBuffer::StencilFormat::Invalid &&
+           target0.data_format == AmdGpu::DataFormat::Format16_16_16_16 &&
+           target0.num_format == AmdGpu::NumberFormat::Float && !target0_blended &&
+           target0_write_mask == all_channels;
+}
+
+bool TwinRuleColourMaps(const Shader::StageSpecialization& pixel_shader_spec) {
+    for (const auto& image : pixel_shader_spec.images) {
+        if (image.is_srgb || image.is_cube) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MotionTwinRuleShader(size_t samplers, bool colour_maps) {
+    return !(samplers >= 2 && colour_maps);
+}
+
+bool MotionTwinRuleKeyTarget(const GraphicsPipelineKey& key) {
+    // (A key holds a target's blend register only when it blends: all zero otherwise.)
+    static const AmdGpu::BlendControl no_blend{};
+    return (key.mrt_mask & 1u) != 0 &&
+           MotionTwinRuleTarget(key.z_format, key.stencil_format, key.depth_clip_enable != 0, key.color_buffers[0],
+                                std::memcmp(&key.blend_controls[0], &no_blend, sizeof(no_blend)) != 0,
+                                u32(key.write_masks[0]));
+}
+
+bool MotionTwinRule(const GraphicsPipelineKey& key, const Shader::Info* pixel_shader,
+                    const Shader::StageSpecialization* pixel_shader_spec) {
+    return MotionTwinRuleKeyTarget(key) && pixel_shader && pixel_shader_spec &&
+           MotionTwinRuleShader(pixel_shader->samplers.size(), TwinRuleColourMaps(*pixel_shader_spec));
+}
+
+void NoteTwinRuleOutside(AmdGpu::DepthBuffer::ZFormat z_format, AmdGpu::DepthBuffer::StencilFormat stencil_format,
+                         bool depth_clip_enable, const Shader::PsColorBuffer& t0, bool target0_blended,
+                         u32 target0_write_mask, const Shader::Info* pixel_shader, bool colour_maps) {
+    g_twin_rule_outside.fetch_add(1, std::memory_order_relaxed);
+    // The first selection of each kind (at most 32 kinds: the target's fields, or the pixel shader), so a log shows
+    // what the rule left out.
+    const u64 kind = pixel_shader ? pixel_shader->pgm_hash | 1ULL << 63
+                                  : u64(u32(z_format) | u32(stencil_format) << 2 | u32(depth_clip_enable) << 3 |
+                                        u32(target0_blended) << 4 | (target0_write_mask & 15u) << 6 |
+                                        u32(t0.data_format) << 10 | u32(t0.num_format) << 16);
+    static std::mutex mutex;
+    static std::vector<u64> seen;
+    static std::atomic<u32> kinds{0};
+    if (kinds.load(std::memory_order_relaxed) >= 32) {
+        return;
+    }
+    std::scoped_lock lock{mutex};
+    if (seen.size() >= 32 || std::ranges::find(seen, kind) != seen.end()) {
+        return;
+    }
+    seen.push_back(kind);
+    kinds.store(u32(seen.size()), std::memory_order_relaxed);
+    if (pixel_shader) {
+        std::printf("Motion twin rule: a G-buffer-like draw outside the rule takes its ordinary pipeline (no twin): its "
+                    "pixel shader %016llx has %zu samplers, %s, target mask %02x (a G-buffer shader writes target 0 "
+                    "and is not a lit-pass one: two or more samplers and a colour or environment map)\n",
+                    static_cast<unsigned long long>(pixel_shader->pgm_hash), pixel_shader->samplers.size(),
+                    colour_maps ? "reads a colour or environment map" : "no colour or environment map",
+                    u32(pixel_shader->mrt_mask));
+        return;
+    }
+    std::printf("Motion twin rule: a G-buffer-like draw outside the rule takes its ordinary pipeline (no twin): target 0 "
+                "format %u.%u, write mask %x, %s, depth format %u, stencil %u, depth clip %u\n",
+                u32(t0.data_format), u32(t0.num_format), target0_write_mask, target0_blended ? "blended" : "not blended",
+                u32(z_format), u32(stencil_format), u32(depth_clip_enable));
+}
+
 void AddMotionAttachment(GraphicsPipelineKey& key) {
     constexpr u32 mv = Shader::MotionVectors::Output;
     key.motion_vectors = 1;
@@ -1692,7 +1772,31 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     // shader preparation makes the twins of the shipped keys, vk_pipeline_serialization.cpp; one it did not make
     // was compiled in play, on this thread). The draw then has the camera's motion only for those frames (the
     // object motion pass ignores pixels whose stored depth is not the scene's).
-    const bool want_twin = motion_possible && Shader::MotionVectors::characters && !sel.no_motion;
+    // The twin rule (MotionTwinRule, vk_pipeline_cache.h): only a G-buffer draw has a twin, the same test the shader
+    // preparation applies to the keys (step 5c), here on the registers: target 0 as the first pass below fills it,
+    // its blending and write mask as the second pass does. A draw outside the rule is an ordinary draw from here on:
+    // no twin is looked up, wanted (BuildMotionTwin), translated or built for it, and it stores no vectors.
+    Shader::PsColorBuffer rule_target{};
+    bool rule_blended = false;
+    u32 rule_write_mask = 0;
+    bool in_rule = false;
+    if (motion_possible && Shader::MotionVectors::characters && !sel.no_motion) {
+        const auto& col_buf = regs.color_buffers[0];
+        const u32 target_mask = skip_cb_binding ? 0 : regs.color_target_mask.GetMask(0);
+        if (col_buf && target_mask) {
+            rule_target.data_format = col_buf.GetDataFmt();
+            rule_target.num_format = col_buf.GetNumberFmt();
+            rule_blended = regs.blend_control[0].enable && !col_buf.info.blend_bypass;
+            rule_write_mask = col_buf.Swizzle().ApplyMask(target_mask);
+        }
+        in_rule = MotionTwinRuleTarget(key.z_format, key.stencil_format, key.depth_clip_enable != 0, rule_target,
+                                       rule_blended, rule_write_mask);
+        if (!in_rule) {
+            NoteTwinRuleOutside(key.z_format, key.stencil_format, key.depth_clip_enable != 0, rule_target,
+                                rule_blended, rule_write_mask, nullptr);
+        }
+    }
+    const bool want_twin = in_rule;
     const bool force_twin = want_twin && sel.twin_build; // BuildMotionTwin (a worker): translate the twin now
     sel.twin_wanted = false;
     bool motion_first = want_twin;
@@ -1745,8 +1849,33 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         }
         return ok;
     };
+    const size_t rule_stages_mark = sel.worker ? sel.worker->stages.size() : 0;
     if (!refresh_stages()) {
         return false;
+    }
+    // The rule's part on the pixel shader, known once it is selected (the program's Info and the textures bound are
+    // the same for its ordinary and its motion variant): it writes target 0 and is not a lit-pass shader
+    // (MotionTwinRuleShader; GetProgram noted the variant's colour maps). A draw whose shader fails has no twin
+    // prepared: it goes back to the ordinary stages and wants no twin (nothing is translated or built for it, here
+    // or by BuildMotionTwin).
+    const auto* rule_shader = sel.infos[static_cast<u32>(Shader::SwStage::Fragment)];
+    if (want_twin && (sel.motion || sel.twin_wanted) &&
+        ((key.mrt_mask & 1u) == 0 || !rule_shader ||
+         !MotionTwinRuleShader(rule_shader->samplers.size(), sel.fs_colour_maps))) {
+        static const Shader::Info no_shader{};
+        NoteTwinRuleOutside(key.z_format, key.stencil_format, key.depth_clip_enable != 0, rule_target, rule_blended,
+                            rule_write_mask, rule_shader ? rule_shader : &no_shader, sel.fs_colour_maps);
+        sel.twin_wanted = false;
+        if (sel.motion) {
+            sel.motion = false;
+            motion_first = false;
+            if (sel.worker) {
+                sel.worker->stages.resize(rule_stages_mark);
+            }
+            if (!RefreshGraphicsStages(sel)) {
+                return false;
+            }
+        }
     }
     if (motion_possible) {
         const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
@@ -2478,6 +2607,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                                 const Shader::ShaderParams& params,
                                                 Shader::Backend::Bindings& binding) {
     auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
+    if (sw_stage == SwStage::Fragment) {
+        sel.fs_colour_maps = true; // (the twin rule: until this selection has its specialization)
+    }
     if (sel.worker) {
         // bbport: draw-preparation worker, with the worker's own Info copy. A program or
         // permutation that does not exist yet is translated here (the GPU thread then finds
@@ -2524,6 +2656,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             info.RefreshFlatBuf();
             auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
             runtime_fault_recover = nullptr;
+            if (sw_stage == SwStage::Fragment) {
+                sel.fs_colour_maps = TwinRuleColourMaps(spec);
+            }
             size_t perm_idx = 0;
             vk::ShaderModule module{};
             std::optional<Shader::Gcn::FetchShaderData> fetch_shader;
@@ -2590,6 +2725,9 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+    if (sw_stage == SwStage::Fragment) {
+        sel.fs_colour_maps = TwinRuleColourMaps(spec);
+    }
 
     size_t perm_idx = 0;
     vk::ShaderModule module{};

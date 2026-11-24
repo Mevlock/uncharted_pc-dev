@@ -116,6 +116,9 @@ struct PipelineSelection {
     bool no_motion = false;
     bool twin_wanted = false;
     bool twin_build = false; ///< a worker's BuildMotionTwin: the twin's stages are translated when missing
+    /// The twin rule's TwinRuleColourMaps of the pixel shader variant just selected (GetProgram); true until a
+    /// selection has worked it out (a program made in play on the GPU thread), so such a draw wants no twin.
+    bool fs_colour_maps = true;
     bool ui_squeeze = false; ///< bbport: ultrawide UI draw (UiSqueezeDraw)
     /// bbport (BB_GPL): select the split-layout variant: the pre-raster stages declare their resources in descriptor
     /// set 1, numbered from 0 (the fragment stage keeps set 0), so each half can be a pipeline library of its own.
@@ -162,6 +165,43 @@ inline std::atomic<u64> g_twin_fallback_gpu{0}, g_twin_fallback_worker{0}, g_twi
 inline std::atomic<bool> g_twin_stages_pending{false};
 inline std::atomic<u64> g_twin_load_ns{0}, g_twin_load_max_ns{0}, g_twins_compiled_in_play{0},
     g_twins_translated_in_play{0};
+
+/// bbport (object motion twins, the rule; uncharted_local_notes/cmrule_report.md): which draws are G-buffer draws
+/// and so have a motion twin. One rule for the shader preparation (step 5c builds a twin only for a key inside it)
+/// and for the game (RefreshGraphicsKey asks for a twin only inside it: a draw outside takes its ordinary pipeline,
+/// with no vectors stored, and no twin is ever looked up, translated or built for it):
+///   - colour target 0 is the G-buffer's: 16-bit float RGBA, written in full (all four channels) by the pixel
+///     shader, without blending;
+///   - the scene depth with its stencil (32-bit float depth, 8-bit stencil);
+///   - the pixel shader is not a lit-pass shader. The games draw the scene's geometry twice into that same target
+///     with that same state: the G-buffer pass (depth and stencil written: the motion draws) and the lit pass (never
+///     a motion draw). A pixel shader variant belongs to one pass, and a lit-pass one shows both of these: it samples
+///     through two or more samplers, and one of its textures is a colour map (sRGB) or an environment map (a cube).
+///     The G-buffer shaders of Uncharted 3 have one sampler at most (a few read their colour map's alpha); those of
+///     Uncharted 1 and 2 have up to three but read data maps only (normals, gloss). Either sign alone would cut
+///     more, but each holds in only one engine generation: a shader is left out only with both.
+/// The checkpoint tours of all three games (2026-11-23: 256 stops, 2,120 twins used) drew every one of their twins
+/// inside it; the keys outside are the lit pass and the blended, colour-only and depth-only passes (decals,
+/// transparent and emissive layers, UI, shadows), which never were motion draws. MotionTwinRuleTarget is the part a
+/// draw's registers give before its shaders are selected (MotionTwinRuleKeyTarget: the same on a key, with the pixel
+/// shader writing target 0); MotionTwinRuleShader the part its pixel shader variant gives (its sampler count and
+/// TwinRuleColourMaps of its specialization); MotionTwinRule all of it, on a key (`pixel_shader`,
+/// `pixel_shader_spec`: its pixel shader's Info and that variant's specialization, null when it has none).
+bool TwinRuleColourMaps(const Shader::StageSpecialization& pixel_shader_spec);
+bool MotionTwinRuleShader(size_t samplers, bool colour_maps);
+bool MotionTwinRuleKeyTarget(const GraphicsPipelineKey& key);
+bool MotionTwinRuleTarget(AmdGpu::DepthBuffer::ZFormat z_format, AmdGpu::DepthBuffer::StencilFormat stencil_format,
+                          bool depth_clip_enable, const Shader::PsColorBuffer& target0, bool target0_blended,
+                          u32 target0_write_mask);
+bool MotionTwinRule(const GraphicsPipelineKey& key, const Shader::Info* pixel_shader,
+                    const Shader::StageSpecialization* pixel_shader_spec);
+/// Selections whose registers allowed a motion draw (the G-buffer test of RefreshGraphicsKey) but which the rule
+/// left out (the motion twin rule log line; the first of each kind is logged with its fields; `pixel_shader`: the
+/// rule failed on the shader, else on the target).
+inline std::atomic<u64> g_twin_rule_outside{0};
+void NoteTwinRuleOutside(AmdGpu::DepthBuffer::ZFormat z_format, AmdGpu::DepthBuffer::StencilFormat stencil_format,
+                         bool depth_clip_enable, const Shader::PsColorBuffer& target0, bool target0_blended,
+                         u32 target0_write_mask, const Shader::Info* pixel_shader, bool colour_maps = false);
 
 /// bbport (object motion twins, diagnosis for narrowing the prepared twins): BB_TWIN_USAGE_LOG=<file> appends one
 /// line per distinct twin key a draw bound (and once more when one of its draws first had history), and per twin made

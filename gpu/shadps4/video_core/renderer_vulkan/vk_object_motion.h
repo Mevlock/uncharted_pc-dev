@@ -88,6 +88,7 @@ private:
     VmaAllocation positions_allocation{};
 
     u64 frame = 0;
+    u64 rule_outside_reported = 0; ///< g_twin_rule_outside at the last motion twin rule line
     u64 twins_reported = 0; ///< twins loaded in play at the last object motion twins line
     u32 params_used = 0;
     bool last_load = false; ///< LastDrawHadHistory
