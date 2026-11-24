@@ -50,6 +50,17 @@
 // bbport: the render size BB_RENDER_RES patched in (runtime_ultrawide.c), 0 without it.
 #include <immintrin.h>
 extern "C" unsigned runtime_render_width, runtime_render_height;
+// bbport (BB_SCENE_OWN_SIZE=1, runtime_scenesize.c): the game creates its scene targets at the render size while it
+// runs at the output size: the size of a full-size scene target then (0: the game's own size, above).
+extern "C" unsigned runtime_scene_own_width, runtime_scene_own_height;
+namespace {
+u32 SceneTargetWidth() {
+    return runtime_scene_own_width ? runtime_scene_own_width : runtime_render_width;
+}
+u32 SceneTargetHeight() {
+    return runtime_scene_own_height ? runtime_scene_own_height : runtime_render_height;
+}
+} // namespace
 extern "C" int runtime_ultrawide_fill;
 extern "C" int runtime_uncharted_game; // runtime_ultrawide.c: 1, 2, 3 once the game code is patched
 // src/runtime_file.c: movie streams (.bsf) opened so far.
@@ -1506,8 +1517,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // full-size depth buffer is nearly the render size: half-resolution passes (particles at
     // 1720x720 for 3440x1440) do not count.
     if (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid() &&
-        regs.depth_buffer.Pitch() >= std::max(1280u, runtime_render_width * 7 / 8) &&
-        regs.depth_buffer.Height() >= std::max(720u, runtime_render_height * 7 / 8)) {
+        regs.depth_buffer.Pitch() >= std::max(1280u, SceneTargetWidth() * 7 / 8) &&
+        regs.depth_buffer.Height() >= std::max(720u, SceneTargetHeight() * 7 / 8)) {
         g_frame_scene_draws.fetch_add(1, std::memory_order_relaxed);
     } else if (regs.color_buffers[0] &&
                FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address())) {
@@ -1543,8 +1554,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // Uncharted: no G-buffer of 5 targets. The frame's first pass at the display size that
         // is depth-only (U1's prepass) or draws RGBA16F color (U2's first scene pass) holds the
         // scene depth. The display size: 1920x1080, or the size BB_RENDER_RES patched in.
-        const u32 display_w = runtime_render_width ? runtime_render_width : 1920u;
-        const u32 display_h = runtime_render_height ? runtime_render_height : 1080u;
+        const u32 display_w = SceneTargetWidth() ? SceneTargetWidth() : 1920u;
+        const u32 display_h = SceneTargetHeight() ? SceneTargetHeight() : 1080u;
         const auto& depth = texture_cache.GetImage(db_desc.first);
         bool scene_pass = !cb_descs[0].first;
         if (cb_descs[0].first) {

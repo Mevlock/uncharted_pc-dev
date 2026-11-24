@@ -56,6 +56,9 @@ void runtime_ultrawide_select(int wide) {
 /* A writable page within 2 GiB of the code (rel32 from the stubs): from the pool reserved near the
  * image before the GPU started (`code` is the image). */
 void *runtime_near_image_alloc(size_t size); /* runtime_memory.c */
+/* The scene at its own size (runtime_scenesize.c, BB_SCENE_OWN_SIZE=1). */
+int runtime_scenesize_pair2(unsigned *width, unsigned *height);
+void runtime_scenesize_patch(uint8_t *code, uint64_t size);
 static float *alloc_near(uint8_t *code, uint64_t size) {
     (void)code;
     (void)size;
@@ -859,7 +862,11 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
         if (m == 0x40) init_block = p;
         const uint32_t w8 = width / 8, h4 = height / 4;
         if (!strchr(skip, '1')) { memcpy(p + 7 * 0 + 3, &width, 4); memcpy(p + 7 * 1 + 3, &height, 4); }
-        if (!strchr(skip, '2')) { memcpy(p + 7 * 3 + 3, &width, 4); memcpy(p + 7 * 4 + 3, &height, 4); }
+        /* Pair 2 (the frame's screen-scale constants, the shadow resolves: scene only) is the scene's size when the
+         * game draws its scene at the render size (runtime_scenesize.c). */
+        unsigned width2 = width, height2 = height;
+        runtime_scenesize_pair2(&width2, &height2);
+        if (!strchr(skip, '2')) { memcpy(p + 7 * 3 + 3, &width2, 4); memcpy(p + 7 * 4 + 3, &height2, 4); }
         if (!strchr(skip, '3')) { memcpy(p + 7 * 6 + 3, &width, 4); memcpy(p + 7 * 7 + 3, &height, 4); }
         /* BB_RENDER_RES_ASPECT (diagnosis): the aspect stored with pair 2 (+0x20) and/or pair 3
          * (+0x2c) becomes width / height instead of 16:9. */
@@ -1200,6 +1207,7 @@ void runtime_patch_resolution(uint8_t *code, uint64_t size, uint64_t image_end) 
     }
     if (crosshairs) printf("Render resolution: aiming crosshair kept at its 1080p size (%d)\n", crosshairs);
     res_shadow(code, size, init_block);
+    if (blocks > 0) runtime_scenesize_patch(code, size);
     runtime_render_resolution = blocks > 0;
     if (runtime_render_resolution) {
         runtime_render_width = width;

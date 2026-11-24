@@ -1049,11 +1049,16 @@ static void install_game_callbacks(Segment *segments, uint64_t ns, uint64_t imag
     /* The mouse in the menus (runtime_menumouse.c, by antikmewzik): the sites of the code found here. */
     runtime_menumouse_prepare(image,image_size);
     const RuntimeGuestCallback *menu=runtime_menumouse_callbacks(&menu_count);
+    /* The scene at its own size (runtime_scenesize.c, BB_SCENE_OWN_SIZE=1): the target setup and its creators. */
+    size_t scene_count=0;
+    runtime_scenesize_prepare(image,image_size);
+    const RuntimeGuestCallback *scene=runtime_scenesize_callbacks(&scene_count);
     /* A patch in two parts (a stub in a dead path, ", stub)", then the jump or call to it, ", jump)" or ", call)",
      * the next entry): the jump goes in only after its stub did. */
     int stub_in=0;
-    for (size_t i=0;i<count+look_count+menu_count;++i) {
-        const RuntimeGuestCallback *c=i<count ? &callbacks[i] : i<count+look_count ? &look[i-count] : &menu[i-count-look_count];
+    for (size_t i=0;i<count+look_count+menu_count+scene_count;++i) {
+        const RuntimeGuestCallback *c=i<count ? &callbacks[i] : i<count+look_count ? &look[i-count] :
+                                      i<count+look_count+menu_count ? &menu[i-count-look_count] : &scene[i-count-look_count-menu_count];
         const int is_stub=strstr(c->name,", stub)")!=NULL;
         const int needs_stub=strstr(c->name,", jump)")!=NULL || strstr(c->name,", call)")!=NULL;
         if (is_stub) stub_in=0;
@@ -1411,6 +1416,7 @@ static const volatile uint64_t *frame_clock_now;
 static uint64_t frame_clock_logged=UINT64_MAX;
 static void __attribute__((ms_abi)) game_frame_start(uint64_t rdi, uint64_t rsi, uint64_t base, uint64_t r14) {
     (void)rdi; (void)rsi; (void)base; (void)r14;
+    runtime_scenesize_frame();
     const uint64_t frame=*game_frame_count;
     if (frame_start_sleeps) {
         const volatile uint64_t *kicked=runtime_draw_frame_number;

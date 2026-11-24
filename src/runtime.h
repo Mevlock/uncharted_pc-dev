@@ -199,6 +199,13 @@ typedef struct {
     const unsigned char *patch;
 } RuntimeGuestCallback;
 const RuntimeGuestCallback *runtime_guest_callbacks(size_t *count);
+/* The scene at its own size (runtime_scenesize.c, BB_SCENE_OWN_SIZE=1): prepare finds the code, the callbacks are its
+ * hooks, pair2 and patch are called by runtime_patch_resolution, frame once per game frame. */
+void runtime_scenesize_prepare(unsigned char *image, uint64_t size);
+const RuntimeGuestCallback *runtime_scenesize_callbacks(size_t *count);
+int runtime_scenesize_pair2(unsigned *width, unsigned *height);
+void runtime_scenesize_patch(uint8_t *code, uint64_t size);
+void runtime_scenesize_frame(void);
 /* A callback's view of the guest's saved xmm register `x` (0-7; 4 floats), written back when the callback returns. */
 float *runtime_callback_xmm(const uint64_t *regs, int x);
 /* BB_PAD_TIMING=1 (diagnosis): blocking waits noted per thread (name, start, duration); the pad
