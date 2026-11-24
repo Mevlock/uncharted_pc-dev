@@ -1,4 +1,4 @@
-/* PROTOTYPE (BB_SCENE_OWN_SIZE=1, off by default): the game draws its own scene at the render size.
+/* BB_SCENE_OWN_SIZE (on for FSR 3.1 / FSR 4 at the scaled modes; 0: off): the game draws its own scene at the render size.
  *
  * With the upscale before the game's post-processing (BB_SCALED_BEFORE_POST: FSR 3.1 / FSR 4) the game runs at the
  * OUTPUT size (display config, HUD, gameplay screen maths, post-processing) and so far the renderer swapped reduced
@@ -105,6 +105,36 @@ static const Readers readers[] = {
       0xeb84ee,                        /* particles: pair 3 */
       0xf560a6, 0xf57104,              /* ambient pass: pair 1 */
       0x105610b, 0x1056244, 0x1056581, 0x10566b1}}, /* lens flares: pair 1 */
+    /* The same render code in Uncharted 2 and 1 (the sites matched by their instruction streams, fss_match.py;
+     * Uncharted 1 has three deferred light functions). Their lens flare code differs: not listed. */
+    {"Uncharted 2 1.02", 0x12483f4,
+     {0xcfa4ce,                        /* deferred runtime lights */
+      0xcfe176, 0xcffafb,              /* light tiles */
+      0xc5916e,                        /* particles */
+      0xcf72e6, 0xcf8344}},            /* ambient pass */
+    {"Uncharted 1 1.02", 0xe76e74,
+     {0x5e6ba1, 0x5e7145, 0x5e7795,    /* deferred runtime lights */
+      0x5ea33f, 0x5ebb85,              /* light tiles */
+      0x554c6e,                        /* particles */
+      0x5e3e36, 0x5e4e94}},            /* ambient pass */
+    /* The 1.00 programs (another compiler run: the deferred light code is split into more functions; every pair 3
+     * reader of that block is listed). */
+    {"Uncharted 3 1.00", 0x164931c,
+     {0x5fbb96, 0x5fbdb1, 0x5fcb91, 0x5fe9b9, /* deferred runtime lights */
+      0x6004d2, 0x601a86,              /* light tiles */
+      0x56d6c5,                        /* particles */
+      0x5f834a, 0x5f90b1,              /* ambient pass */
+      0x6dc42e, 0x6dd7ff, 0x6dd952, 0x6ddd02, 0x6de259, 0x6de2e3}}, /* lens flares */
+    {"Uncharted 2 1.00", 0x115e94c,
+     {0x652476, 0x652691, 0x653471, 0x6552b9, /* deferred runtime lights */
+      0x656d91, 0x6582ac,              /* light tiles */
+      0x5c5115,                        /* particles */
+      0x64ecba, 0x64fa21}},            /* ambient pass */
+    {"Uncharted 1 1.00", 0xd5c2fc,
+     {0x4be0f6, 0x4be30d, 0x4bf0b1, 0x4bffe4, 0x4c0482, 0x4c1769, /* deferred runtime lights */
+      0x4c324b, 0x4c476d,              /* light tiles */
+      0x4378d5,                        /* particles */
+      0x4bb63a, 0x4bc3a1}},            /* ambient pass */
 };
 
 static const unsigned char prologue[6] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57}; /* push rbp; mov rbp, rsp; push r15 */
@@ -196,7 +226,11 @@ static size_t site_count;
 /* Finds the pieces (before the game callbacks go in). */
 void runtime_scenesize_prepare(unsigned char *base, uint64_t size) {
     const char *env = getenv("BB_SCENE_OWN_SIZE"), *scene = getenv("BB_SCENE_SIZE"), *output = getenv("BB_RENDER_RES");
-    if (!env || env[0] != '1') return;
+    /* Unset: on for FSR 3.1 / FSR 4 at a scaled mode (the upscale before the post-processing, BB_SCENE_SIZE set at
+     * process start); 1: on for any upscaler with that order; 0: off (the renderer's stand-ins, as before). */
+    const char *upscaler = getenv("BB_UPSCALER");
+    const int fsr = upscaler && (!strcmp(upscaler, "fsr3") || !strcmp(upscaler, "fsr4") || !strcmp(upscaler, "fsr411"));
+    if (env && env[0] ? env[0] != '1' : !(fsr && scene)) return;
     if (!scene || !output || sscanf(scene, "%ux%u", &scene_w, &scene_h) != 2 ||
         sscanf(output, "%ux%u", &output_w, &output_h) != 2) {
         printf("Scene size: BB_SCENE_OWN_SIZE needs the upscale before the post-processing (a render size below the "

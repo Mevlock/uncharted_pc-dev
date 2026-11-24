@@ -471,6 +471,7 @@ private:
     vk::UniqueImageView post_depth_attachment;
     std::array<u8, 2> post_wrote{}; ///< [colour, depth]: 1 written by a compute pass, 2 by a render pass since the last barrier
     bool EnsurePostCopies(u32 w, u32 h, vk::Format depth);
+    bool post_depth_drawn = false; ///< this frame's depth copy was made by a draw (no blit of the format)
     vk::ImageView PostColorView(vk::Format format, vk::ComponentMapping mapping);
     vk::ImageView PostDepthView(bool stencil, vk::ComponentMapping mapping);
     void PostBarrier(u32 index, bool attachment, bool storage);

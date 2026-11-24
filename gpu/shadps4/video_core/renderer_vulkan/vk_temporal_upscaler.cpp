@@ -1565,15 +1565,13 @@ void TemporalUpscaler::Run() {
     // The game's own scene size (OwnScene): the scene colour is the render size; the output is the game's size, written
     // to the output-size copy the post-processing reads (with a copy of the depth).
     bool own = OwnScene() && iw == runtime_scene_own_width && ih == runtime_scene_own_height;
-    if (own && !depth_blit) {
-        static bool said = false;
-        if (!said) {
-            said = true;
-            std::printf("Scene size: this GPU cannot blit the depth format: no output-size copies, the upscaler only "
-                        "anti-aliases the render-size scene\n");
-        }
-        own = false;
-    }
+    // The depth copy: a blit where the GPU can blit the depth format (NVIDIA), else a full-screen draw writing depth
+    // and stencil (AMD has no blit of D32_SFLOAT_S8_UINT). BB_SCENE_DEPTH_COPY=draw: the draw everywhere (tests).
+    static const bool depth_draw_forced = [] {
+        const char* env = std::getenv("BB_SCENE_DEPTH_COPY");
+        return env && !std::strcmp(env, "draw");
+    }();
+    const bool depth_draw = own && (!depth_blit || depth_draw_forced);
     const u32 ow = own ? render_width : iw, oh = own ? render_height : ih;
     const bool reduced = ReducedScene(color) && scene_targets.EligibleScene(depth);
     const u32 w = reduced ? scene_targets.Size().width : iw;
@@ -1596,8 +1594,43 @@ void TemporalUpscaler::Run() {
         failed = true;
         return;
     }
+    post_depth_drawn = false;
     if (own) {
         EnsurePostCopies(ow, oh, depth.info.pixel_format);
+        if (depth_draw) {
+            static bool said = false;
+            if (!said) {
+                said = true;
+                std::printf("Scene size: the depth copy is made by a draw (%s)\n",
+                            depth_blit ? "BB_SCENE_DEPTH_COPY=draw" : "this GPU cannot blit the depth format");
+            }
+            const auto aspect = vk::ImageAspectFlagBits::eDepth |
+                (post_depth_format == vk::Format::eD32SfloatS8Uint ? vk::ImageAspectFlagBits::eStencil
+                                                                 : vk::ImageAspectFlags{});
+            const auto barrier = [&](vk::ImageLayout from, vk::ImageLayout to) {
+                const vk::ImageMemoryBarrier2 b{
+                    .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                    .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                    .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                    .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                    .oldLayout = from,
+                    .newLayout = to,
+                    .image = vk::Image(post_depth),
+                    .subresourceRange = {aspect, 0, 1, 0, 1},
+                };
+                scheduler.Record([b](vk::CommandBuffer cmd) {
+                    cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+                });
+            };
+            scheduler.EndRendering();
+            runtime.Transit(&depth, vk::ImageLayout::eShaderReadOnlyOptimal, vk::PipelineStageFlagBits2::eFragmentShader,
+                            vk::AccessFlagBits2::eShaderSampledRead);
+            runtime.FlushBarriers();
+            barrier(vk::ImageLayout::eUndefined, vk::ImageLayout::eDepthStencilAttachmentOptimal);
+            scene_targets.ResampleDepth(depth.GetImage(), vk::Image(post_depth), depth, vk::Extent2D{ow, oh});
+            barrier(vk::ImageLayout::eDepthStencilAttachmentOptimal, vk::ImageLayout::eGeneral);
+            post_depth_drawn = true;
+        }
     }
     UseProjectionJitter(w, h);
     {
@@ -1851,8 +1884,10 @@ void TemporalUpscaler::Run() {
             // replaced by the upscaler's output) and the depth with its stencil, nearest.
             runtime.Transit(&color, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer,
                             vk::AccessFlagBits2::eTransferRead);
-            runtime.Transit(&depth, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer,
-                            vk::AccessFlagBits2::eTransferRead);
+            if (!post_depth_drawn) {
+                runtime.Transit(&depth, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer,
+                                vk::AccessFlagBits2::eTransferRead);
+            }
             runtime.FlushBarriers();
             const auto depth_aspect = vk::ImageAspectFlagBits::eDepth |
                 (post_depth_format == vk::Format::eD32SfloatS8Uint ? vk::ImageAspectFlagBits::eStencil
@@ -1883,14 +1918,16 @@ void TemporalUpscaler::Run() {
             };
             copy_barrier(vk::Image(post_color), vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eUndefined,
                          vk::ImageLayout::eTransferDstOptimal);
-            copy_barrier(vk::Image(post_depth), depth_aspect, vk::ImageLayout::eUndefined,
-                         vk::ImageLayout::eTransferDstOptimal);
             stretch(color.GetImage(), vk::Image(post_color), vk::ImageAspectFlagBits::eColor, vk::Filter::eLinear);
-            stretch(depth.GetImage(), vk::Image(post_depth), depth_aspect, vk::Filter::eNearest);
             copy_barrier(vk::Image(post_color), vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eTransferDstOptimal,
                          vk::ImageLayout::eGeneral);
-            copy_barrier(vk::Image(post_depth), depth_aspect, vk::ImageLayout::eTransferDstOptimal,
-                         vk::ImageLayout::eGeneral);
+            if (!post_depth_drawn) {
+                copy_barrier(vk::Image(post_depth), depth_aspect, vk::ImageLayout::eUndefined,
+                             vk::ImageLayout::eTransferDstOptimal);
+                stretch(depth.GetImage(), vk::Image(post_depth), depth_aspect, vk::Filter::eNearest);
+                copy_barrier(vk::Image(post_depth), depth_aspect, vk::ImageLayout::eTransferDstOptimal,
+                             vk::ImageLayout::eGeneral);
+            }
             merge_target = PostColorView(vk::Format::eR16G16B16A16Sfloat, {});
             post_color_id = scene_color;
             post_depth_id = camera_motion.Depth();
@@ -3761,6 +3798,9 @@ vk::ImageView TemporalUpscaler::PostDepthView(bool stencil, vk::ComponentMapping
         if (entry.format == key && entry.mapping == mapping) {
             return *entry.view;
         }
+    }
+    if (stencil) {
+        std::printf("Scene size: the game samples the scene depth copy's stencil\n");
     }
     auto view = Check(instance.GetDevice().createImageViewUnique({
         .image = vk::Image(post_depth),

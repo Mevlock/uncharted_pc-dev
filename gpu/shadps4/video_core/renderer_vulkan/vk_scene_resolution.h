@@ -77,6 +77,13 @@ public:
         return !copying && tracked.contains(image_uid);
     }
     void ResolveAll();
+    /// bbport (the game's own scene size, TemporalUpscaler::OnSceneStart): a depth (and stencil) image stretched into
+    /// another image of its format by a full-screen draw that writes the depth and the stencil (nearest), for GPUs
+    /// that cannot blit the format (AMD: D32_SFLOAT_S8_UINT). `src` in ShaderReadOnlyOptimal, `dst` in
+    /// DepthStencilAttachmentOptimal; `original` is the cache image `src` belongs to (format, aspects).
+    void ResampleDepth(vk::Image src, vk::Image dst, const VideoCore::Image& original, vk::Extent2D dst_size) {
+        Resample(src, dst, original, dst_size);
+    }
     /// Once per shown frame: drops the stand-ins of native images the texture cache no longer has (freed when the GPU
     /// is past this point). They were kept until a size change: U1 and U2 replace scene-size images during play, and
     /// their orphaned stand-ins filled the video memory (12.3 of 9.3 GiB, texture eviction, 6-17 FPS).
