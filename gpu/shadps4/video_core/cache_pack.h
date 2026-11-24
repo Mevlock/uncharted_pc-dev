@@ -123,6 +123,11 @@ public:
     [[nodiscard]] uint64_t EndOffset() const {
         return end_.load(std::memory_order_acquire);
     }
+    /// Bytes appended since the last flush (Sync): what a flush now has to put on the disk. The writer flushes in
+    /// steps as it appends, so this stays small and no flush ever has a whole preparation's appends to write at once.
+    [[nodiscard]] uint64_t UnsyncedBytes() const {
+        return unsynced_bytes_.load(std::memory_order_relaxed);
+    }
     [[nodiscard]] uint64_t DeadBytes() const {
         return dead_bytes_.load(std::memory_order_relaxed);
     }
@@ -136,6 +141,11 @@ public:
     /// Test hook: called before each write's system call with the bytes about to be written; returning a smaller
     /// count writes only that many (a simulated crash or a full disk). Never set in the game.
     std::function<size_t(uint64_t offset, size_t size)> test_write_limit;
+    /// Test hooks (0: off; set before the pack is used from other threads): each write sleeps this long first, with
+    /// the writer's lock held as a slow write holds it (BB_PACK_WRITE_DELAY_MS); each flush sleeps this long per MB
+    /// appended since the last one, as a slow drive takes for them (BB_PACK_SYNC_DELAY_MS_PER_MB).
+    uint32_t test_write_delay_ms = 0;
+    uint32_t test_sync_delay_ms_per_mb = 0;
 
 private:
     struct Entry {
@@ -164,6 +174,7 @@ private:
     std::atomic<uint64_t> end_{0};
     std::atomic<uint64_t> dead_bytes_{0};
     std::atomic<uint64_t> same_skipped_{0};
+    std::atomic<uint64_t> unsynced_bytes_{0}; ///< appended since the last flush
     uint64_t synced_end_ = 0; ///< the end at the last flush (under write_mutex_); 0: never flushed
     mutable std::shared_mutex mutex_;  ///< index and file identity (shared: reads; unique: index changes, Clear)
     std::mutex write_mutex_;           ///< one append at a time

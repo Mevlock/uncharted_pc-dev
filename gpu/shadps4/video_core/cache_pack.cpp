@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstring>
 #include <random>
+#include <thread>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -436,6 +437,9 @@ bool PackFile::ReadAt(uint64_t offset, void* dst, size_t size) const {
 }
 
 bool PackFile::WriteAt(uint64_t offset, const void* src, size_t size) {
+    if (test_write_delay_ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(test_write_delay_ms)); // a slow write (test hook)
+    }
     if (test_write_limit) {
         const size_t allowed = std::min(size, test_write_limit(offset, size));
         if (allowed < size) {
@@ -772,6 +776,7 @@ bool PackFile::AppendRecord(uint16_t type, uint16_t flags, std::string_view name
         }
         end_.store(at + rec, std::memory_order_release);
     }
+    unsynced_bytes_.fetch_add(rec, std::memory_order_relaxed);
     return true;
 }
 
@@ -853,10 +858,16 @@ bool PackFile::Sync() {
     if (synced_end_ == end_.load(std::memory_order_relaxed)) {
         return true; // nothing written since the last flush (a flush of an unchanged file still costs the drive)
     }
+    if (test_sync_delay_ms_per_mb) {
+        // A slow flush (test hook): as long as a drive of that speed takes for what is not on it yet.
+        const uint64_t ms = unsynced_bytes_.load(std::memory_order_relaxed) * test_sync_delay_ms_per_mb / (1u << 20);
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    }
     if (!SyncNative(WRITE_H)) {
         return false;
     }
     synced_end_ = end_.load(std::memory_order_relaxed);
+    unsynced_bytes_.store(0, std::memory_order_relaxed);
     return true;
 }
 
@@ -898,6 +909,7 @@ bool PackFile::Clear() {
     index_.clear();
     dead_bytes_ = 0;
     end_ = HeaderSize;
+    unsynced_bytes_.store(0, std::memory_order_relaxed);
     return true;
 }
 
@@ -983,6 +995,7 @@ bool PackFile::CompactLocked() {
         index_.erase(copy);
     }
     end_ = written;
+    unsynced_bytes_.store(0, std::memory_order_relaxed); // the new file was flushed before the rename
     dead_bytes_ = 0;
     return true;
 }

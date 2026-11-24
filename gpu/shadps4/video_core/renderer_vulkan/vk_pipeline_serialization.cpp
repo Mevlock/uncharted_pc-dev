@@ -3789,11 +3789,25 @@ void PipelineCache::WarmUpThread() {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
+        // bbport (pack flush in steps): saved means on the disk. The writer flushed the pack in steps while it
+        // appended (cache_storage.cpp, SyncStepBytes); the last part is flushed here, still under the page, so the
+        // prepared marker's own flush right after the page has nothing left to write. (0.3.6.68: the whole first
+        // start, ~600 MB, was flushed by the marker behind the game's level load: 15.7 s on a nearly full drive,
+        // frames of 8.9 s.) Not when the page handed the rest to the background: the writer goes on in steps.
+        double flush_ms = -1.0;
+        if (db.PendingWrites() == 0) {
+            const double t_flush = elapsed_ms();
+            db.Sync();
+            flush_ms = elapsed_ms() - t_flush;
+        }
         db.SetUnthrottled(false);
         BbOverlay::SetShaderPreparation(0, 0, 0);
         const u32 left = db.PendingWrites();
         std::printf("Preparation: %u of %u shader files saved under the page in %.0f ms", total - std::min(left, total),
                     total, elapsed_ms() - t_save);
+        if (flush_ms >= 0.0) {
+            std::printf(" (the last flush to the disk %.0f ms of it)", flush_ms);
+        }
         if (left) {
             std::printf(" (%s: the rest behind the game)", handed ? handed : "stopped");
         }

@@ -28,7 +28,9 @@
 #include <future>
 #include <mutex>
 #include <queue>
+#include <memory>
 #include <string>
+#include <unordered_map>
 
 namespace {
 
@@ -85,6 +87,83 @@ const WriteDelay& TestWriteDelay() {
 std::atomic<u64> num_started{};
 
 Storage::Pack::PackFile pack;
+
+// bbport (pack flush in steps): the writer flushes the pack to the disk each time this much has been appended since
+// the last flush (BB_PACK_SYNC_STEP_MB, default 8; 0: never, only the flushes before a prepared marker and at the
+// exit, as 0.3.6.68 did). Windows keeps appends in memory until a flush: a first start's ~600 MB were "saved under the
+// page" in a moment, and the one flush before the prepared marker (FlushFileBuffers) then put all of it on the drive
+// right after the page, behind the game's level load: 15.7 s on a player's nearly full drive, the game's own file
+// calls waiting behind it (frames of 8.9 s and 1.3 s). In steps, the drive's work is done while the page counts the
+// saves (its time and its slow-disk rules see it), and what a flush behind the game can have to write is one step.
+u64 SyncStepBytes() {
+    static const u64 step = [] {
+        u64 mb = 8;
+        if (const char* env = std::getenv("BB_PACK_SYNC_STEP_MB")) {
+            mb = std::strtoull(env, nullptr, 10);
+            std::printf("Test: BB_PACK_SYNC_STEP_MB=%llu%s\n", static_cast<unsigned long long>(mb),
+                        mb ? "" : " (the pack is flushed only before the prepared marker and at the exit)");
+        }
+        return mb << 20;
+    }();
+    return step;
+}
+// The session's flushes, for the exit line (PrintWriteStats).
+std::atomic<u64> flushes{0}, flush_ns{0}, flush_max_ns{0};
+
+/// Flushes the pack, timed (every flush: the writer's steps, the page's, the marker's, the exit's).
+bool SyncPack() {
+    if (pack.UnsyncedBytes() == 0) {
+        return pack.Sync(); // nothing appended since the last one: not counted
+    }
+    const s64 t0 = NowNs();
+    const bool ok = pack.Sync();
+    const u64 ns = u64(NowNs() - t0);
+    ++flushes;
+    flush_ns += ns;
+    for (u64 max = flush_max_ns.load(); ns > max && !flush_max_ns.compare_exchange_weak(max, ns);) {
+    }
+    return ok;
+}
+
+// bbport (pending blobs): what is queued for the writer but not in the pack yet, by type and name, so a load between a
+// save and its write gets the saved data from memory (it found nothing before, or the older record) and never depends
+// on how far the writer is. `data` empty pointer: a queued removal. `seq`: the newest queued request of the name; the
+// writer takes the entry out when the request it has just done is still that one.
+struct PendingBlob {
+    std::shared_ptr<const std::vector<u8>> data;
+    u64 seq;
+};
+std::mutex pending_mutex;
+std::unordered_map<std::string, PendingBlob> pending;
+u64 pending_seq = 0;
+
+std::string PendingKey(Storage::BlobType type, const std::string& name) {
+    std::string key(1, char('0' + u32(type)));
+    key += name;
+    return key;
+}
+u64 AddPending(Storage::BlobType type, const std::string& name, std::shared_ptr<const std::vector<u8>> data) {
+    std::scoped_lock lk{pending_mutex};
+    const u64 seq = ++pending_seq;
+    pending.insert_or_assign(PendingKey(type, name), PendingBlob{std::move(data), seq});
+    return seq;
+}
+void DonePending(Storage::BlobType type, const std::string& name, u64 seq) {
+    std::scoped_lock lk{pending_mutex};
+    if (const auto it = pending.find(PendingKey(type, name)); it != pending.end() && it->second.seq == seq) {
+        pending.erase(it);
+    }
+}
+/// True when a save or removal of the name is queued; `data` then holds the saved blob (empty pointer: removed).
+bool FindPending(Storage::BlobType type, const std::string& name, std::shared_ptr<const std::vector<u8>>& data) {
+    std::scoped_lock lk{pending_mutex};
+    const auto it = pending.find(PendingKey(type, name));
+    if (it == pending.end()) {
+        return false;
+    }
+    data = it->second.data;
+    return true;
+}
 constexpr const char* PackName = "shaders.pack";
 // This build's prepared markers: "shaders.pack.prepared_<list>" (cache_storage.h, MarkerPath). Earlier builds of this
 // port wrote "prepared_<list>" (one line); other builds sharing the folder name may write files of that name too.
@@ -151,6 +230,11 @@ void ProcessIO(const std::stop_token& stoken) {
             }
             request();
             request.get_future().wait();
+            // The flush in steps (SyncStepBytes), inside the write's time: a slow flush counts as a slow write (the
+            // page's and the throttle's rules).
+            if (const u64 step = SyncStepBytes(); step && pack.UnsyncedBytes() >= step) {
+                SyncPack();
+            }
             busy_since.store(0, std::memory_order_relaxed);
             const s64 end_ns = NowNs();
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -739,6 +823,22 @@ void DataBase::Open() {
         }
     }
 
+    // bbport (test only, off by default): BB_PACK_WRITE_DELAY_MS=<ms>: every write to the pack takes <ms> longer, with
+    // the writer's lock held (a slow drive's writes; nothing of the game may wait for one).
+    // BB_PACK_SYNC_DELAY_MS_PER_MB=<ms>: every flush takes <ms> longer per MB appended since the last flush (26: the
+    // player's drive that took 15.7 s for 600 MB). With BB_PACK_SYNC_STEP_MB=0 that is 0.3.6.68's one long flush behind
+    // the game; with the steps it is spread over the saving under the page.
+    if (const char* env = std::getenv("BB_PACK_WRITE_DELAY_MS")) {
+        pack.test_write_delay_ms = u32(std::strtoul(env, nullptr, 10));
+        std::printf("Test: BB_PACK_WRITE_DELAY_MS: every pack write takes %u ms longer\n", pack.test_write_delay_ms);
+    }
+    if (const char* env = std::getenv("BB_PACK_SYNC_DELAY_MS_PER_MB")) {
+        pack.test_sync_delay_ms_per_mb = u32(std::strtoul(env, nullptr, 10));
+        std::printf("Test: BB_PACK_SYNC_DELAY_MS_PER_MB: every pack flush takes %u ms longer per MB not flushed yet\n",
+                    pack.test_sync_delay_ms_per_mb);
+    }
+    SyncStepBytes();
+
     io_worker = std::jthread{[](std::stop_token stoken) { ProcessIO(stoken); }};
     opened = true;
 }
@@ -770,12 +870,18 @@ static std::array<u64, 5> same_by_type{};
 static std::string same_names;
 static std::mutex same_mutex;
 
-static void QueueWrite(BlobType type, const std::string& name, std::vector<u8>&& data) {
-    auto request = std::packaged_task<void()>{[type, name, data = std::move(data)]() {
+static void QueueWrite(BlobType type, const std::string& name, std::vector<u8>&& bytes) {
+    // Held in memory until it is in the pack: loads meanwhile get it from there (FindPending).
+    auto blob = std::make_shared<const std::vector<u8>>(std::move(bytes));
+    const u64 seq = AddPending(type, name, blob);
+    auto request = std::packaged_task<void()>{[type, name, blob = std::move(blob), seq]() {
+        const auto& data = *blob;
         const s64 t0 = NowNs();
         const u64 same_before = pack.SameSkipped();
         const bool ok = pack.Put(PackType(type), name, data.data(), data.size());
         const u64 ns = u64(NowNs() - t0);
+        // In the pack's index now (or not saved: loads get what the pack holds, as before): out of the pending ones.
+        DonePending(type, name, seq);
         if (ok && pack.SameSkipped() != same_before) {
             std::scoped_lock lk{same_mutex};
             const u32 t = u32(type);
@@ -833,6 +939,14 @@ void DataBase::Load(BlobType type, const std::string& name, std::vector<u8>& dat
     if (!opened) {
         return;
     }
+    if (std::shared_ptr<const std::vector<u8>> queued; FindPending(type, name, queued)) {
+        if (queued) {
+            data = *queued;
+        } else {
+            data.clear(); // a queued removal
+        }
+        return;
+    }
     if (!pack.Get(PackType(type), name, data)) {
         data.clear();
     }
@@ -843,7 +957,8 @@ void DataBase::Load(BlobType type, const std::string& name, std::vector<u32>& da
         return;
     }
     std::vector<u8> bytes;
-    if (!pack.Get(PackType(type), name, bytes)) {
+    Load(type, name, bytes);
+    if (bytes.empty()) {
         data.clear();
         return;
     }
@@ -873,8 +988,14 @@ std::vector<std::string> DataBase::ListBlobNames(BlobType type) {
 }
 
 u64 DataBase::BlobSize(BlobType type, const std::string& name) {
+    if (!opened) {
+        return 0;
+    }
+    if (std::shared_ptr<const std::vector<u8>> queued; FindPending(type, name, queued)) {
+        return queued ? queued->size() : 0;
+    }
     u64 size = 0;
-    if (!opened || !pack.Find(PackType(type), name, &size, nullptr)) {
+    if (!pack.Find(PackType(type), name, &size, nullptr)) {
         return 0;
     }
     return size;
@@ -940,7 +1061,8 @@ void DataBase::PrintWriteStats() const {
     std::scoped_lock lk{same_mutex};
     std::printf("Shader cache: this session appended %llu blobs (%.1f MB) to %s: %.0f ms of writes in all, the "
                 "longest %.1f ms, %llu over 5 ms; %llu not saved; %llu saved again unchanged, not appended (%llu "
-                "meta, %llu spv, %llu key, %llu profile, %llu pipeline binary%s%s)\n",
+                "meta, %llu spv, %llu key, %llu profile, %llu pipeline binary%s%s); flushed to the disk %llu times, "
+                "%.0f ms in all, the longest %.0f ms\n",
                 static_cast<unsigned long long>(appended.load()), double(appended_bytes.load()) / (1024.0 * 1024.0),
                 PackName, double(append_ns.load()) / 1e6, double(append_max_ns.load()) / 1e6,
                 static_cast<unsigned long long>(appends_over_5ms.load()),
@@ -948,7 +1070,9 @@ void DataBase::PrintWriteStats() const {
                 static_cast<unsigned long long>(pack.SameSkipped()),
                 static_cast<unsigned long long>(same_by_type[0]), static_cast<unsigned long long>(same_by_type[1]),
                 static_cast<unsigned long long>(same_by_type[2]), static_cast<unsigned long long>(same_by_type[3]),
-                static_cast<unsigned long long>(same_by_type[4]), same_names.empty() ? "" : ": ", same_names.c_str());
+                static_cast<unsigned long long>(same_by_type[4]), same_names.empty() ? "" : ": ", same_names.c_str(),
+                static_cast<unsigned long long>(flushes.load()), double(flush_ns.load()) / 1e6,
+                double(flush_max_ns.load()) / 1e6);
     std::fflush(stdout);
 }
 
@@ -957,7 +1081,7 @@ bool DataBase::Sync() {
         return false;
     }
     const s64 t0 = NowNs();
-    const bool ok = pack.Sync();
+    const bool ok = SyncPack();
     if (const double ms = double(NowNs() - t0) / 1e6; ms >= 20.0) {
         std::printf("Shader cache: flushing %s to the disk took %.0f ms\n", PackName, ms);
     }
@@ -1007,10 +1131,12 @@ void DataBase::Remove(BlobType type, const std::string& name) {
     if (!opened) {
         return;
     }
-    auto request = std::packaged_task<void()>{[type, name]() {
+    const u64 seq = AddPending(type, name, nullptr); // loads find it gone from now on
+    auto request = std::packaged_task<void()>{[type, name, seq]() {
         if (pack.IsWriter()) {
             pack.Erase(PackType(type), name);
         }
+        DonePending(type, name, seq);
     }};
     Enqueue(std::move(request));
 }
