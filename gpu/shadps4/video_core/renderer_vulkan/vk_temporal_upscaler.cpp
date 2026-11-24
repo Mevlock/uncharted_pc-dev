@@ -54,6 +54,7 @@ extern "C" float* runtime_projection_jitter_slot; // runtime_ultrawide.c (protot
 extern "C" float* runtime_projection_jitter_table;
 extern "C" volatile uint32_t* runtime_projection_jitter_phases;
 extern "C" const volatile uint32_t* runtime_projection_jitter_frame;
+extern "C" unsigned runtime_scene_own_width, runtime_scene_own_height; // runtime_scenesize.c (BB_SCENE_OWN_SIZE=1)
 extern "C" int runtime_uncharted_game;            // runtime_ultrawide.c: 1, 2, 3 once the game code is patched
 static int g_frames_since_cut = 100000; // bbport: frames since the last camera cut (dumps)
 void BbDrawLogNote(const char* text); // vk_rasterizer.cpp
@@ -527,6 +528,10 @@ float Halton(u32 index, u32 base) {
 }
 } // namespace
 
+bool TemporalUpscaler::OwnScene() const noexcept {
+    return EarlyScaled() && runtime_scene_own_width != 0;
+}
+
 bool TemporalUpscaler::ReducedScene(const VideoCore::Image& color) const {
     return (!scaled_session || EarlyScaled()) && scene_targets.Reduced() &&
            scene_targets.EligibleScene(color);
@@ -537,11 +542,13 @@ bool TemporalUpscaler::RasterScaling() const {
 }
 
 u32 TemporalUpscaler::SceneWidth() const {
+    if (OwnScene()) return runtime_scene_own_width; // the game's own scene targets, no stand-ins
     return EarlyScaled() ? scene_targets.Size().width
            : Scaled() || early_native ? render_width : scene_targets.Size().width;
 }
 
 u32 TemporalUpscaler::SceneHeight() const {
+    if (OwnScene()) return runtime_scene_own_height;
     return EarlyScaled() ? scene_targets.Size().height
            : Scaled() || early_native ? render_height : scene_targets.Size().height;
 }
@@ -667,8 +674,9 @@ bool TemporalUpscaler::OnFrameStart() {
     }
     // DLSS rework 12: the scene's stand-ins at the wanted size while the upscaler is on.
     if (EarlyScaled()) {
-        scene_targets.SetSize(active ? SceneResolution::Size{early_scene_width, early_scene_height}
-                                     : scene_targets.Native());
+        // (the game's own scene size, OwnScene: the game's targets are that size, no stand-ins)
+        scene_targets.SetSize(active && !OwnScene() ? SceneResolution::Size{early_scene_width, early_scene_height}
+                                                    : scene_targets.Native());
     }
     BbSettings::Get().active_render_width = SceneWidth();
     BbSettings::Get().active_render_height = SceneHeight();
@@ -1553,12 +1561,25 @@ void TemporalUpscaler::Run() {
     }
     auto& color = texture_cache.GetImage(scene_color);
     auto& depth = texture_cache.GetImage(camera_motion.Depth());
-    const u32 ow = color.info.size.width, oh = color.info.size.height;
+    const u32 iw = color.info.size.width, ih = color.info.size.height;
+    // The game's own scene size (OwnScene): the scene colour is the render size; the output is the game's size, written
+    // to the output-size copy the post-processing reads (with a copy of the depth).
+    bool own = OwnScene() && iw == runtime_scene_own_width && ih == runtime_scene_own_height;
+    if (own && !depth_blit) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            std::printf("Scene size: this GPU cannot blit the depth format: no output-size copies, the upscaler only "
+                        "anti-aliases the render-size scene\n");
+        }
+        own = false;
+    }
+    const u32 ow = own ? render_width : iw, oh = own ? render_height : ih;
     const bool reduced = ReducedScene(color) && scene_targets.EligibleScene(depth);
-    const u32 w = reduced ? scene_targets.Size().width : ow;
-    const u32 h = reduced ? scene_targets.Size().height : oh;
+    const u32 w = reduced ? scene_targets.Size().width : iw;
+    const u32 h = reduced ? scene_targets.Size().height : ih;
     if (color.info.pixel_format != vk::Format::eR16G16B16A16Sfloat ||
-        depth.info.size.width != ow || depth.info.size.height != oh ||
+        depth.info.size.width != iw || depth.info.size.height != ih ||
         !(color.usage_flags & vk::ImageUsageFlagBits::eStorage)) {
         // bbport: say so once: this path silently did nothing in U1/U2 at native before the
         // launcher passed BB_OUTPUT_RES there (no anti-aliasing, only the jitter).
@@ -1574,6 +1595,9 @@ void TemporalUpscaler::Run() {
     if (!EnsureResources(w, h, ow, oh, true)) {
         failed = true;
         return;
+    }
+    if (own) {
+        EnsurePostCopies(ow, oh, depth.info.pixel_format);
     }
     UseProjectionJitter(w, h);
     {
@@ -1821,12 +1845,71 @@ void TemporalUpscaler::Run() {
         own_barrier(vk::Image(output_image), vk::ImageLayout::eGeneral, all, rw,
                     vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                     vk::AccessFlagBits2::eShaderRead);
-        runtime.Transit(&color, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
-                        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
-        runtime.FlushBarriers();
+        vk::ImageView merge_target = color_view;
+        if (own) {
+            // The output-size copies: the scene colour stretched (its alpha is what the merge below keeps; the RGB is
+            // replaced by the upscaler's output) and the depth with its stencil, nearest.
+            runtime.Transit(&color, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer,
+                            vk::AccessFlagBits2::eTransferRead);
+            runtime.Transit(&depth, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eTransfer,
+                            vk::AccessFlagBits2::eTransferRead);
+            runtime.FlushBarriers();
+            const auto depth_aspect = vk::ImageAspectFlagBits::eDepth |
+                (post_depth_format == vk::Format::eD32SfloatS8Uint ? vk::ImageAspectFlagBits::eStencil
+                                                                 : vk::ImageAspectFlags{});
+            const auto copy_barrier = [&](vk::Image image, vk::ImageAspectFlags aspect, vk::ImageLayout from,
+                                          vk::ImageLayout to) {
+                const vk::ImageMemoryBarrier2 barrier{
+                    .srcStageMask = all,
+                    .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                    .dstStageMask = all,
+                    .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                    .oldLayout = from,
+                    .newLayout = to,
+                    .image = image,
+                    .subresourceRange = {aspect, 0, 1, 0, 1},
+                };
+                cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier});
+            };
+            const auto stretch = [&](vk::Image from, vk::Image to, vk::ImageAspectFlags aspect, vk::Filter filter) {
+                const vk::ImageBlit region{
+                    .srcSubresource = {aspect, 0, 0, 1},
+                    .srcOffsets = std::array{vk::Offset3D{0, 0, 0}, vk::Offset3D{s32(iw), s32(ih), 1}},
+                    .dstSubresource = {aspect, 0, 0, 1},
+                    .dstOffsets = std::array{vk::Offset3D{0, 0, 0}, vk::Offset3D{s32(ow), s32(oh), 1}},
+                };
+                cmdbuf.blitImage(from, vk::ImageLayout::eTransferSrcOptimal, to, vk::ImageLayout::eTransferDstOptimal,
+                                 region, filter);
+            };
+            copy_barrier(vk::Image(post_color), vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eUndefined,
+                         vk::ImageLayout::eTransferDstOptimal);
+            copy_barrier(vk::Image(post_depth), depth_aspect, vk::ImageLayout::eUndefined,
+                         vk::ImageLayout::eTransferDstOptimal);
+            stretch(color.GetImage(), vk::Image(post_color), vk::ImageAspectFlagBits::eColor, vk::Filter::eLinear);
+            stretch(depth.GetImage(), vk::Image(post_depth), depth_aspect, vk::Filter::eNearest);
+            copy_barrier(vk::Image(post_color), vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eTransferDstOptimal,
+                         vk::ImageLayout::eGeneral);
+            copy_barrier(vk::Image(post_depth), depth_aspect, vk::ImageLayout::eTransferDstOptimal,
+                         vk::ImageLayout::eGeneral);
+            merge_target = PostColorView(vk::Format::eR16G16B16A16Sfloat, {});
+            post_color_id = scene_color;
+            post_depth_id = camera_motion.Depth();
+            post_wrote = {1, 0}; // the merge below writes the colour copy
+            static bool said = false;
+            if (!said) {
+                said = true;
+                std::printf("Scene size: the post-processing reads output-size copies of the scene colour (the "
+                            "upscaler's output, %ux%u -> %ux%u) and the scene depth\n", iw, ih, ow, oh);
+            }
+            post_phase = true;
+        } else {
+            runtime.Transit(&color, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                            vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+            runtime.FlushBarriers();
+        }
         const vk::DescriptorImageInfo out_info{.imageView = *output_view,
                                                .imageLayout = vk::ImageLayout::eGeneral};
-        const vk::DescriptorImageInfo scene_info{.imageView = color_view,
+        const vk::DescriptorImageInfo scene_info{.imageView = merge_target,
                                                  .imageLayout = vk::ImageLayout::eGeneral};
         const vk::DescriptorImageInfo mask_info{.imageView = *reactive_view,
                                                 .imageLayout = vk::ImageLayout::eGeneral};
@@ -3606,8 +3689,130 @@ vk::ImageView TemporalUpscaler::Mirror(vk::Image image, std::vector<MirrorView>&
     return handle;
 }
 
+bool TemporalUpscaler::EnsurePostCopies(u32 w, u32 h, vk::Format depth) {
+    if (post_color && post_depth && w == post_width && h == post_height && depth == post_depth_format) {
+        return true;
+    }
+    scheduler.Finish();
+    const auto device = instance.GetDevice();
+    post_phase = false;
+    post_color_views.clear();
+    post_depth_views.clear();
+    post_depth_attachment.reset();
+    post_color = VideoCore::UniqueImage(device, instance.GetAllocator());
+    post_color.Create(vk::ImageCreateInfo{
+        .flags = vk::ImageCreateFlagBits::eMutableFormat,
+        .imageType = vk::ImageType::e2D,
+        .format = vk::Format::eR16G16B16A16Sfloat,
+        .extent = {w, h, 1},
+        .mipLevels = 1, .arrayLayers = 1, .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
+                 vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst |
+                 vk::ImageUsageFlagBits::eTransferSrc,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    });
+    post_depth = VideoCore::UniqueImage(device, instance.GetAllocator());
+    post_depth.Create(vk::ImageCreateInfo{
+        .imageType = vk::ImageType::e2D,
+        .format = depth,
+        .extent = {w, h, 1},
+        .mipLevels = 1, .arrayLayers = 1, .samples = vk::SampleCountFlagBits::e1,
+        .tiling = vk::ImageTiling::eOptimal,
+        .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eSampled |
+                 vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc,
+        .initialLayout = vk::ImageLayout::eUndefined,
+    });
+    const auto aspect = vk::ImageAspectFlagBits::eDepth |
+        (depth == vk::Format::eD32SfloatS8Uint ? vk::ImageAspectFlagBits::eStencil : vk::ImageAspectFlags{});
+    post_depth_attachment = Check(device.createImageViewUnique({
+        .image = vk::Image(post_depth), .viewType = vk::ImageViewType::e2D,
+        .format = depth, .subresourceRange = {aspect, 0, 1, 0, 1},
+    }));
+    post_width = w;
+    post_height = h;
+    post_depth_format = depth;
+    std::printf("Scene size: output-size copies of the scene colour and depth made (%ux%u)\n", w, h);
+    return true;
+}
+
+vk::ImageView TemporalUpscaler::PostColorView(vk::Format format, vk::ComponentMapping mapping) {
+    for (const auto& entry : post_color_views) {
+        if (entry.format == format && entry.mapping == mapping) {
+            return *entry.view;
+        }
+    }
+    auto view = Check(instance.GetDevice().createImageViewUnique({
+        .image = vk::Image(post_color),
+        .viewType = vk::ImageViewType::e2D,
+        .format = format,
+        .components = mapping,
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    }));
+    const vk::ImageView handle = *view;
+    post_color_views.push_back({format, mapping, std::move(view)});
+    return handle;
+}
+
+vk::ImageView TemporalUpscaler::PostDepthView(bool stencil, vk::ComponentMapping mapping) {
+    // (the entry's format field: S8 for the stencil aspect, the image's format for the depth aspect)
+    const vk::Format key = stencil ? vk::Format::eS8Uint : post_depth_format;
+    for (const auto& entry : post_depth_views) {
+        if (entry.format == key && entry.mapping == mapping) {
+            return *entry.view;
+        }
+    }
+    auto view = Check(instance.GetDevice().createImageViewUnique({
+        .image = vk::Image(post_depth),
+        .viewType = vk::ImageViewType::e2D,
+        .format = post_depth_format,
+        .components = mapping,
+        .subresourceRange = {stencil ? vk::ImageAspectFlagBits::eStencil : vk::ImageAspectFlagBits::eDepth, 0, 1, 0, 1},
+    }));
+    const vk::ImageView handle = *view;
+    post_depth_views.push_back({key, mapping, std::move(view)});
+    return handle;
+}
+
+void TemporalUpscaler::PostBarrier(u32 index, bool attachment, bool storage) {
+    // The copies stay in the General layout; a use after a write of another kind waits for it.
+    u8& wrote = post_wrote[index];
+    if (attachment ? (wrote & 1) != 0 : wrote != 0) {
+        scheduler.EndRendering();
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .image = index ? vk::Image(post_depth) : vk::Image(post_color),
+            .subresourceRange = {index ? vk::ImageAspectFlagBits::eDepth |
+                                             (post_depth_format == vk::Format::eD32SfloatS8Uint
+                                                  ? vk::ImageAspectFlagBits::eStencil : vk::ImageAspectFlags{})
+                                       : vk::ImageAspectFlags(vk::ImageAspectFlagBits::eColor),
+                                 0, 1, 0, 1},
+        };
+        scheduler.Record([b](vk::CommandBuffer cmd) {
+            cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        });
+        wrote = 0;
+    }
+    if (attachment) {
+        wrote |= 2;
+    } else if (storage) {
+        wrote |= 1;
+    }
+}
+
 bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
                                      const VideoCore::ImageViewInfo& view_info, Target& target) {
+    if (post_phase && color == post_color_id) {
+        PostBarrier(0, true, false);
+        BbDrawLogNote(" [TO-SCENE-COPY]");
+        target = {PostColorView(view_info.format, {}), vk::ImageLayout::eGeneral, post_width, post_height, false, true};
+        return true;
+    }
     if (ui_phase && color == ui_color) {
         if (velocity_ui && draw_vs == 0xf585649du) {
             // Uncharted 3's full-screen copies of the display buffer after the UI (to another
@@ -3681,6 +3886,12 @@ bool TemporalUpscaler::RedirectColor(VideoCore::ImageId color,
 
 bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target,
                                      bool color_to_ui) {
+    if (post_phase && depth == post_depth_id) {
+        PostBarrier(1, true, false);
+        BbDrawLogNote(" [DEPTH-TO-SCENE-COPY]");
+        target = {*post_depth_attachment, vk::ImageLayout::eGeneral, post_width, post_height, false, true};
+        return true;
+    }
     // Uncharted's UI phase lasts into the next frame's scene, whose draws use the scene depth:
     // that depth is never redirected (a depth-only pass would otherwise go to ui_depth_image).
     // In velocity mode only a pass whose color goes to the UI image too (UI tested against the
@@ -3729,7 +3940,17 @@ bool TemporalUpscaler::RedirectDepth(VideoCore::ImageId depth, Target& target,
 
 bool TemporalUpscaler::RedirectSampled(VideoCore::ImageId image,
                                        const VideoCore::ImageViewInfo& info, vk::ImageView& view,
-                                       vk::ImageLayout& layout) {
+                                       vk::ImageLayout& layout, bool storage) {
+    if (post_phase && (image == post_color_id || image == post_depth_id)) {
+        const bool depth = image == post_depth_id;
+        PostBarrier(depth, false, storage);
+        BbDrawLogNote(depth ? " [READS-DEPTH-COPY]" : storage ? " [STORAGE-SCENE-COPY]" : " [READS-SCENE-COPY]");
+        view = depth ? PostDepthView(info.format == vk::Format::eS8Uint &&
+                                         post_depth_format == vk::Format::eD32SfloatS8Uint, info.mapping)
+                     : PostColorView(info.format, info.mapping);
+        layout = vk::ImageLayout::eGeneral;
+        return true;
+    }
     if (!display_redirect || image != ui_color) {
         return false;
     }

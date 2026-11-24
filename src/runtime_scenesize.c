@@ -19,7 +19,12 @@
  *    only) is the render size (runtime_patch_resolution);
  *  - the scene passes that read the first or third pair (deferred lights, particles, the ambient pass, lens flares)
  *    read the scene copy instead (a per-program list of the config's load sites, each checked to be one).
- * BB_SCENE_OWN_PARTS=<letters> (tests): t target setup, c output class, 2 pair 2, r readers (default: all).
+ * As built now (the default, parts sc2r): the target setup keeps reading the game's config (the output size), so
+ * everything it sizes itself stays output-size (the buffers it allocates without the creators too: the exposure
+ * metering's row buffer was one, and at the scene's size the picture came out 8% (Quality) to 19% (Performance)
+ * too bright), and the creator hook gives the targets that are NOT of the output class the scene's size.
+ * BB_SCENE_OWN_PARTS=<letters> (tests): s as above, or t: the target setup reads the scene copy and the hook puts the
+ * output class back to the output size; c output class, 2 pair 2, r readers.
  * BB_SCENE_OWN_CLASS=+c4,-c73,+d2 (tests): ids added to / taken from the output class.
  * BB_SCENE_OWN_READERS=<hex,hex,...> (tests): the reader sites, instead of the program's list. */
 #include "runtime.h"
@@ -41,7 +46,7 @@ static unsigned char *image;
 static uint8_t *config, *scene_config;
 static uint64_t setup_start, setup_end, setup_lea, creators[2];
 static unsigned scene_w, scene_h, output_w, output_h;
-static const char *parts = "tc2r";
+static const char *parts = "sc2r";
 static uint8_t output_class[2][MAX_TARGETS]; /* [depth][id] */
 static struct { uint8_t depth; uint16_t id; uint8_t *entry; } created[MAX_TARGETS];
 static int created_count, entries_logged;
@@ -139,7 +144,19 @@ static void create(int depth, uint64_t rdi, const uint64_t *regs) {
     unsigned nw = w, nh = h;
     const int output = id < MAX_TARGETS && output_class[depth][id];
     const char *how = "scene";
-    if (output) {
+    if (part('s')) {
+        /* The setup works with the output size: a scene target's screen-derived size becomes the scene's. */
+        if (output) how = "output";
+        else {
+            how = "scene, size kept (not a screen size)";
+            for (unsigned k = 0; k < 4 && nw == w && nh == h; ++k)
+                if (w == output_w >> k && h == output_h >> k) { nw = scene_w >> k; nh = scene_h >> k; how = "scene"; }
+            /* the light tile grid: 64-pixel tiles, rounded up */
+            if (nw == w && nh == h && w == (output_w + 63) / 64 && h == (output_h + 63) / 64) {
+                nw = (scene_w + 63) / 64; nh = (scene_h + 63) / 64; how = "scene";
+            }
+        }
+    } else if (output) {
         how = "output, size kept (not a screen size)";
         for (unsigned k = 0; k < 4 && nw == w && nh == h; ++k)
             if (w == scene_w >> k && h == scene_h >> k) { nw = output_w >> k; nh = output_h >> k; how = "output"; }
@@ -294,8 +311,8 @@ static int redirect(uint8_t *code, uint64_t at) {
 void runtime_scenesize_patch(uint8_t *code, uint64_t size) {
     if (!runtime_scene_own_size) return;
     int setup = 0, done = 0, wanted = 0;
-    if (part('t')) {
-        setup = redirect(code, setup_lea);
+    if (part('t') && !part('s')) setup = redirect(code, setup_lea);
+    if (part('t') || part('s')) {
         runtime_scene_own_width = scene_w;
         runtime_scene_own_height = scene_h;
     }

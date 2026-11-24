@@ -84,7 +84,7 @@ public:
     /// bbport: the state RedirectColor/RedirectDepth/RasterScaling depend on, for memoizing a
     /// draw's render state (Rasterizer::BeginRendering).
     [[nodiscard]] u64 RedirectState() const noexcept {
-        return u64(ui_phase) | u64(display_redirect) << 1 | u64(done_this_frame) << 2 |
+        return u64(ui_phase) | u64(display_redirect) << 1 | u64(done_this_frame) << 2 | u64(post_phase) << 3 |
                u64(ui_color.index) << 8 | u64(ui_depth.index) << 36;
     }
 
@@ -119,6 +119,9 @@ public:
         vk::ImageLayout layout;
         u32 width, height;
         bool native_ui = false;
+        /// The output-size copy of the scene colour or depth (the game's own scene size, OnSceneStart): a pass whose
+        /// colour target is output-size already keeps its viewport.
+        bool post_copy = false;
     };
     /// Render target redirection (UI passes, display pass): false when not redirected.
     /// `view` is the game's view of the image: redirected views mirror its format (sRGB) and,
@@ -129,11 +132,22 @@ public:
     bool RedirectDepth(VideoCore::ImageId depth, Target& target, bool color_to_ui);
     /// A sampled image replaced by the upscaled frame (the display pass).
     bool RedirectSampled(VideoCore::ImageId image, const VideoCore::ImageViewInfo& info,
-                         vk::ImageView& view, vk::ImageLayout& layout);
+                         vk::ImageView& view, vk::ImageLayout& layout, bool storage = false);
     /// Whether RedirectSampled would replace `image` (it may record a barrier then).
     [[nodiscard]] bool RedirectsSampled(VideoCore::ImageId image) const {
-        return display_redirect && image == ui_color;
+        return (display_redirect && image == ui_color) ||
+               (post_phase && (image == post_color_id || image == post_depth_id));
     }
+    /// bbport (BB_SCENE_OWN_SIZE=1, runtime_scenesize.c): the game draws its scene into render-size targets of its
+    /// own while it runs at the output size. From the upscale (Run, before the post-processing) until the next
+    /// frame's scene starts, the scene colour and the scene depth are replaced by output-size copies wherever the
+    /// game binds them (RedirectColor / RedirectDepth / RedirectSampled): the upscaler's output with the scene's
+    /// alpha, and a nearest blit of the depth and stencil. The post-processing, the HUD and the depth-tested
+    /// draws after it then work at the output size as at Native.
+    void OnSceneStart() noexcept {
+        post_phase = false;
+    }
+    [[nodiscard]] bool OwnScene() const noexcept;
 
     /// Presenter: the output-size display buffer standing in for the guest one at `address`.
     struct Display {
@@ -447,6 +461,19 @@ private:
     };
     vk::ImageView Mirror(vk::Image image, std::vector<MirrorView>& views, vk::Format format,
                          vk::ComponentMapping mapping);
+    // The output-size copies of the scene colour and depth (OnSceneStart's comment).
+    bool post_phase = false;
+    VideoCore::ImageId post_color_id{}, post_depth_id{};
+    VideoCore::UniqueImage post_color, post_depth;
+    vk::Format post_depth_format = vk::Format::eUndefined;
+    u32 post_width = 0, post_height = 0;
+    std::vector<MirrorView> post_color_views, post_depth_views;
+    vk::UniqueImageView post_depth_attachment;
+    std::array<u8, 2> post_wrote{}; ///< [colour, depth]: 1 written by a compute pass, 2 by a render pass since the last barrier
+    bool EnsurePostCopies(u32 w, u32 h, vk::Format depth);
+    vk::ImageView PostColorView(vk::Format format, vk::ComponentMapping mapping);
+    vk::ImageView PostDepthView(bool stencil, vk::ComponentMapping mapping);
+    void PostBarrier(u32 index, bool attachment, bool storage);
     std::vector<MirrorView> ui_views;
     struct DisplayImage {
         VideoCore::UniqueImage image;

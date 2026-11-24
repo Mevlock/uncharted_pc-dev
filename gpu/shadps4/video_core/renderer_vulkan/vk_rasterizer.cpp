@@ -1567,6 +1567,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             (depth.info.pixel_format == vk::Format::eD32SfloatS8Uint ||
              depth.info.pixel_format == vk::Format::eD32Sfloat)) {
             camera_motion->OnGBufferPass(db_desc.first);
+            upscaler->OnSceneStart(); // the last frame's output-size scene copies are over
         }
     }
     if (upscaler->Enabled() && cb_descs[0].first) {
@@ -6046,6 +6047,15 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
                                                                  sharp.GetSize())),
                             int(buffer_cache.IsRegionCpuModified(sharp.base_address,
                                                                  sharp.GetSize())));
+                // (its constants: a small buffer the shader only reads, as floats)
+                if (!desc.is_written && sharp.base_address && sharp.GetSize() <= 256) {
+                    std::string values;
+                    const auto* f = reinterpret_cast<const float*>(sharp.base_address);
+                    for (u32 k = 0; k < sharp.GetSize() / 4; ++k) {
+                        values += fmt::format(" {:g}", f[k]);
+                    }
+                    std::printf("Trace cs %08x buffer %u values:%s\n", u32(cs.pgm_hash), i, values.c_str());
+                }
             }
         }
     }
@@ -8564,7 +8574,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             vk::ImageLayout layout = image.backing->state.layout;
             if (upscaler->Enabled()) {
                 // bbport: the display pass reads the upscaled frame (scaled presets).
-                upscaler->RedirectSampled(image_id, image_view.info, view, layout);
+                upscaler->RedirectSampled(image_id, image_view.info, view, layout, is_storage);
             }
             image_infos.emplace_back(VK_NULL_HANDLE, view, layout);
             if (set_ok && binding_index < resolved.size()) {
@@ -8888,7 +8898,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     attachment_feedback_loop = false;
     using VulkanUpscalerTarget = TemporalUpscaler::Target;
     VulkanUpscalerTarget redirect{};
-    bool color_redirected = false, depth_redirected = false;
+    bool color_redirected = false, depth_redirected = false, post_mixed = false;
     std::pair<u32, u32> guest_extent{1, 1};
     std::pair<vk::ImageView, vk::ImageLayout> original_color{};
     const auto& regs = Regs();
@@ -9187,7 +9197,19 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             VulkanUpscalerTarget depth_redirect;
             depth_redirected = upscaler->RedirectDepth(image_id, depth_redirect, color_redirected);
             if (depth_redirected) {
-                guest_extent = {image.info.size.width, image.info.size.height};
+                // (an output-size copy of the scene depth under a colour target that is output-size itself: the
+                // pass's viewport is that target's already)
+                post_mixed = depth_redirect.post_copy && !color_redirected && cb_descs[0].first;
+                if (post_mixed) {
+                    const auto& color = texture_cache.GetImage(cb_descs[0].first);
+                    post_mixed = color.info.size.width == depth_redirect.width &&
+                                 color.info.size.height == depth_redirect.height;
+                }
+                if (post_mixed) {
+                    guest_extent = {depth_redirect.width, depth_redirect.height};
+                } else {
+                    guest_extent = {image.info.size.width, image.info.size.height};
+                }
                 attachment.image_view = depth_redirect.view;
                 attachment.image_layout = depth_redirect.layout;
                 redirect = depth_redirect;
@@ -9206,8 +9228,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             color_targets += state.color_attachments[cb].image_view ? 1 : 0;
         }
         const bool has_depth = bool(db_desc.first);
-        if ((color_targets > 0 && !color_redirected) || (has_depth && !depth_redirected) ||
-            color_targets > 1) {
+        if (!post_mixed && ((color_targets > 0 && !color_redirected) || (has_depth && !depth_redirected) ||
+                            color_targets > 1)) {
             static u32 warned = 0;
             if (warned < 8) {
                 ++warned;
