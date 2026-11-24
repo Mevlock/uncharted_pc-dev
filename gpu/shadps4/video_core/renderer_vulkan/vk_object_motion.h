@@ -14,6 +14,7 @@
 #include <vector>
 #include <cstdlib>
 #include <span>
+#include <immintrin.h>
 #include "video_core/renderer_vulkan/motion_history.h"
 #include "video_core/renderer_vulkan/motion_still.h"
 
@@ -21,6 +22,10 @@
 #include "shader_recompiler/info.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/texture_cache/image.h"
+
+namespace AmdGpu {
+union Regs;
+}
 
 namespace Vulkan {
 
@@ -57,8 +62,47 @@ enum Counter : u32 {
     BGate, BGated,             ///< stage B: the still-draw gate's time (all motion draws) and the draws it took
     WStillDraws, WStill,       ///< workers: still keys made and their time
     BGateSeen,                 ///< stage B: the still table's part of the gate
+    /// Workers: a prepared draw's parts (WorkerSplit::Part, in its order) by class: G-buffer candidates (the twins,
+    /// or with the vectors off the draws that would take one), then the others.
+    GWDraws, GW0, GWLast = GW0 + 12, NWDraws, NW0, NWLast = NW0 + 12,
     Count
 };
+/// A draw that takes the motion twin with the character vectors on (the registers alone decide,
+/// PipelineCache::RefreshGraphicsKey's uncharted_gbuffer), so the same draws are timed with the vectors off.
+bool GbufferCandidate(const AmdGpu::Regs& regs);
+/// A draw-preparation worker's time on the draw it prepares, in parts; the worker adds them to its class's
+/// counters when the draw is done. The pipeline cache's parts find it through `worker_split` (null: not timed).
+struct WorkerSplit {
+    enum Part : u32 {
+        Key,          ///< PipelineCache::RefreshGraphicsKey (the stage programs' parts below are inside it)
+        Lookup,       ///< the selected pipeline looked up in the pipeline table
+        Ensure,       ///< EnsureWorkerPipeline
+        Stages,       ///< the stages' flat data copied, their resources' sharps and hashes (PrepareResources)
+        Identity,     ///< the motion draw's identity and place
+        VertexInputs, ///< PrepareVertexInputs
+        HandOver,     ///< the direct reads, the draw marked ready, BuildMotionTwin
+        ProgramFind,  ///< GetProgram: the program in the program table
+        InfoFlat,     ///< GetProgram: the worker's Info and its flat data
+        Spec,         ///< GetProgram: the stage's specialization
+        PermFind,     ///< GetProgram: the permutation with that specialization
+        PermCompares, ///< (a count) specializations compared for it
+        Programs,     ///< (a count) GetProgram calls
+        Parts
+    };
+    std::array<u64, Parts> v{};
+    u64 last = 0;
+    void Start() {
+        v = {};
+        last = __rdtsc();
+    }
+    void Mark(Part part) {
+        const u64 now = __rdtsc();
+        v[part] += now - last;
+        last = now;
+    }
+};
+static_assert(WorkerSplit::Parts == 13);
+inline thread_local WorkerSplit* worker_split = nullptr;
 /// Each thread's own counters (only it writes them, with plain loads and stores: one shared array of atomics put
 /// lock-prefixed adds on cache lines the workers, stage A and stage B all wrote, and the timers measured that
 /// contention more than the code they timed). Totals() sums them; the report takes the difference to the last one.
@@ -148,14 +192,33 @@ inline u64 MotionDrawIdentity(const Shader::Info& vs, u32& records, u64* address
 Motion::StillProgram& StillProgramOf(u64 pgm_hash);
 /// A vertex shader's SPIR-V as translated in this session (before the program's first draw).
 void NoteVertexShaderCode(u64 pgm_hash, std::span<const u32> spv);
-/// Whether the still-draw gate is on (BB_MOTION_GATE=0: off, every motion draw keeps its history).
+/// The still data of the program when it was made already (a draw-preparation worker makes it at the program's
+/// first twin draw); null otherwise. Any thread.
+Motion::StillProgram* FindStillProgram(u64 pgm_hash);
+/// Whether the still-draw gate is on: BB_MOTION_GATE=1 (off by default: exact, but its decision costs the draw
+/// recording thread what the skipped history saved; BB_MOTION_GATE_CHECK needs it).
 inline bool StillGateOn() {
     static const bool on = [] {
         const char* env = std::getenv("BB_MOTION_GATE");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
+/// Whether a motion draw's place enters its pairing with the previous frame (Motion::Draw::placement).
+/// BB_MOTION_PLACEMENT=0 (diagnosis): no draw has a place, the pairing is 0.3.6.68's (BB_MOTION_HISTORY_CHECK then
+/// counts no difference).
+inline bool PlacementOn() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_MOTION_PLACEMENT");
         return !(env && env[0] == '0');
     }();
     return on;
 }
+/// Where a motion draw's object stands (Motion::Draw::placement), from its program's still data (state Ready) and
+/// its vertex shader's flat data: a hash of the flat words its positions read without the camera's (the object
+/// matrix, the wind's constants of a draw that waves, ...), the same every frame for an object that stands still. 0:
+/// not known (the position's words are not known for this draw's flat data).
+u64 MakePlacement(Motion::StillProgram& program, std::span<const u32> flat);
 /// A motion draw's keys from its program's still data (state Ready) and its vertex shader's flat data: `still`, a
 /// hash of `seed` (the mesh and the draw's numbers) and the position's flat words without the camera's; `camera`,
 /// a hash of the view and projection matrices (never 0). still = 0: no key (the position's words are not known for
@@ -220,6 +283,9 @@ public:
     void CountNoKey() noexcept {
         ++gate_stats.no_key;
     }
+    /// The place (MakePlacement) of a motion draw that was not prepared, from its vertex shader's flat data; 0 while
+    /// its program's still data is not there or not ready (its camera place is then learned from this draw).
+    u64 PlacementOf(const Shader::Info& vs);
 
     /// Start of a frame (display pass).
     void OnFrameStart();
@@ -280,6 +346,7 @@ private:
         DrawInfo draw;
         u32 store;
         u32 index;
+        u32 load; ///< FlushPairing: the partner's store
     };
     std::vector<Deferred> deferred;
     // The still-draw gate (motion_history.h StillDraws, motion_still.h).
@@ -295,6 +362,14 @@ private:
         std::vector<u32> flat;
     };
     std::vector<CameraLesson> lessons;    ///< this frame's draws of programs without a camera place
+    /// PlacementOf: the still data of the vertex programs last asked for (the recording thread's own).
+    struct StillSlot {
+        u64 pgm_hash{};
+        Motion::StillProgram* program{};
+    };
+    std::array<StillSlot, 256> still_slots{};
+    u64 history_flushes = 0; ///< FlushPairing calls with draws (600 frames)
+    u64 placed = 0, unplaced = 0; ///< motion draws with a place and without (600 frames)
     struct GateStats {
         u64 draws{}, still{}, moved{}, other_camera{}, frame_unconfirmed{}, no_key{};
         u64 confirmed{}, refuted{}, no_pass{};

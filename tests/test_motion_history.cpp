@@ -432,6 +432,240 @@ int ListPositionInputs(int argc, char** argv) {
     return 0;
 }
 
+// The pairing rule with the draws' places (motion_history.h, History), written out plainly: no walk, no bit tables,
+// no indexes. A batch's draws, in order, each take the first unpaired draw of the previous frame that is the same
+// and stands at the same place; then those left over, in order, each take the first unpaired one of their shape.
+class PlainPairing {
+public:
+    explicit PlainPairing(uint32_t capacity) : capacity{capacity} {}
+    void NextFrame() {
+        previous.swap(current);
+        current.clear();
+        ++frame;
+        used = 0;
+    }
+    /// The loads of a batch's draws (all valid, the capacity never runs out).
+    std::vector<uint32_t> Batch(const std::vector<Draw>& draws) {
+        std::vector<uint32_t> loads(draws.size(), 0);
+        std::vector<size_t> rest;
+        for (size_t i = 0; i < draws.size(); ++i) {
+            const uint32_t count = draws[i].vertices.count * draws[i].instances;
+            assert(count && count <= capacity - used);
+            current.push_back({draws[i], 1 + uint32_t(frame & 1) * capacity + used, false});
+            used += count;
+            bool found = false;
+            for (auto& prev : previous) {
+                if (!prev.paired && prev.draw == draws[i]) {
+                    prev.paired = found = true;
+                    loads[i] = prev.store;
+                    break;
+                }
+            }
+            if (!found) {
+                rest.push_back(i);
+            }
+        }
+        for (const size_t i : rest) {
+            for (auto& prev : previous) {
+                if (!prev.paired && prev.draw.SameShape(draws[i])) {
+                    prev.paired = true;
+                    loads[i] = prev.store;
+                    break;
+                }
+            }
+        }
+        return loads;
+    }
+
+private:
+    struct Item {
+        Draw draw;
+        uint32_t store;
+        bool paired;
+    };
+    uint32_t capacity{}, used{};
+    uint64_t frame{};
+    std::vector<Item> previous, current;
+};
+
+// Instances of a few meshes at their own places: most stand still, some move every frame, some move now and then,
+// some have no known place; every frame the order changes (runs moved, draws swapped: the game sorts by distance),
+// the camera culls some and uncovers others, new instances appear. History, run in batches as ObjectMotion runs it
+// (PairExact for each draw, PairRest at the batch's end), must give every draw the load of the plain rule. With one
+// batch a frame (`whole_frames`: the game submits once a frame) an instance that stood still over two frames it was
+// drawn in must load its own store of the frame before, whatever the others did: the k-th of a mesh's draws took the
+// k-th of the frame before, wherever each stood, before the place counted.
+void RandomPlacement(uint32_t seed, uint32_t objects, bool whole_frames) {
+    std::mt19937 rng{seed};
+    const auto pick = [&](uint32_t n) { return uint32_t(rng() % n); };
+    enum Kind : uint32_t { Stands, Moves, MovesAtTimes, NoPlace };
+    struct Object {
+        Draw draw{};
+        Kind kind = Stands;
+        uint32_t last_store = 0; ///< its store in the frame before (0: not drawn then)
+        uint64_t last_placement = 0;
+    };
+    std::vector<Draw> meshes;
+    for (uint32_t i = 0; i < 1 + objects / 8; ++i) {
+        meshes.push_back({.shader = pick(40), .geometry = 1 + i, .indices = 0x1000ull * pick(50), .topology = 0,
+                          .index_count = 3 * (1 + pick(100)), .instances = 1, .first_instance = 0,
+                          .vertices = {0, 1 + pick(20)}});
+    }
+    uint64_t next_place = 1;
+    const auto make = [&] {
+        Object o;
+        o.draw = meshes[pick(uint32_t(meshes.size()))];
+        o.kind = pick(10) < 6 ? Stands : Kind(1 + pick(3));
+        o.draw.placement = o.kind == NoPlace ? 0 : next_place++;
+        return o;
+    };
+    std::vector<Object> scene;
+    for (uint32_t i = 0; i < objects; ++i) {
+        scene.push_back(make());
+    }
+    const uint32_t capacity = 1u << 22;
+    History history{capacity};
+    PlainPairing plain{capacity};
+    uint64_t draws = 0, still_pairs = 0, loads = 0;
+    for (uint32_t frame = 0; frame < 200; ++frame) {
+        const bool skipped = pick(40) == 0;
+        for (uint32_t s = 0; s < (skipped ? 2u : 1u); ++s) {
+            history.NextFrame();
+            plain.NextFrame();
+        }
+        if (skipped) {
+            for (auto& o : scene) {
+                o.last_store = 0;
+            }
+        }
+        // The scene changes: objects move, a few leave for good, a few new ones come.
+        for (auto& o : scene) {
+            if (o.kind == Moves || (o.kind == MovesAtTimes && pick(3) == 0)) {
+                o.draw.placement = next_place++;
+            }
+        }
+        for (uint32_t n = pick(4); n-- > 0;) {
+            scene[pick(uint32_t(scene.size()))] = make();
+        }
+        // This frame's order and the draws the camera leaves out.
+        std::vector<uint32_t> order;
+        for (uint32_t i = 0; i < scene.size(); ++i) {
+            if (pick(10) != 0) {
+                order.push_back(i);
+            } else {
+                scene[i].last_store = 0;
+            }
+        }
+        for (uint32_t m = pick(4); m-- > 0 && order.size() > 20;) {
+            const uint32_t at = pick(uint32_t(order.size()) - 10), len = 1 + pick(10);
+            std::vector<uint32_t> run(order.begin() + at, order.begin() + at + len);
+            order.erase(order.begin() + at, order.begin() + at + len);
+            order.insert(order.begin() + pick(uint32_t(order.size())), run.begin(), run.end());
+        }
+        for (uint32_t m = pick(8); m-- > 0;) {
+            std::swap(order[pick(uint32_t(order.size()))], order[pick(uint32_t(order.size()))]);
+        }
+        // In batches.
+        size_t at = 0;
+        while (at < order.size()) {
+            size_t end = order.size();
+            if (!whole_frames) {
+                end = std::min(order.size(), at + 1 + pick(uint32_t(order.size())));
+            }
+            std::vector<Draw> batch;
+            std::vector<History::Allocation> got;
+            for (size_t i = at; i < end; ++i) {
+                batch.push_back(scene[order[i]].draw);
+                auto stored = history.Allocate(batch.back());
+                assert(stored.valid && stored.allocation.store);
+                got.push_back(stored.allocation);
+            }
+            for (size_t i = 0; i < batch.size(); ++i) {
+                history.PairExact(batch[i], got[i], uint32_t(i));
+            }
+            history.PairRest([&](uint32_t tag, uint32_t load) { got[tag].load = load; });
+            assert(history.Waiting() == 0);
+            const auto want = plain.Batch(batch);
+            for (size_t i = 0; i < batch.size(); ++i) {
+                Object& o = scene[order[at + i]];
+                if (got[i].load != want[i]) {
+                    std::printf("placement seed %u frame %u draw %zu: load %u, the plain rule %u\n", seed, frame,
+                                at + i, got[i].load, want[i]);
+                    assert(false);
+                }
+                if (whole_frames && o.last_store && o.draw.placement && o.draw.placement == o.last_placement) {
+                    assert(got[i].load == o.last_store); // it stood still: its own positions
+                    ++still_pairs;
+                }
+                loads += got[i].load != 0;
+                ++draws;
+                o.last_store = got[i].store;
+                o.last_placement = o.draw.placement;
+            }
+            at = end;
+        }
+    }
+    if (seed <= 2) {
+        const auto& s = history.stats;
+        std::printf("placement seed %u (%u objects, %s): %llu of %llu draws with history; %llu still instances "
+                    "checked against their own store; %llu in order, %llu searched (%llu indexes), %llu moved (%llu "
+                    "in order, %llu indexes by shape, %llu from a draw that had stood), %llu found their partner taken\n",
+                    seed, objects, whole_frames ? "one batch a frame" : "random batches", (unsigned long long)loads,
+                    (unsigned long long)draws, (unsigned long long)still_pairs, (unsigned long long)s.in_order,
+                    (unsigned long long)s.searched, (unsigned long long)s.indexes, (unsigned long long)s.moved,
+                    (unsigned long long)s.moved_in_order, (unsigned long long)s.shape_indexes,
+                    (unsigned long long)s.moved_from_still, (unsigned long long)s.taken);
+    }
+    assert(history.stats.loaded == loads);
+    assert(!whole_frames || history.stats.taken == 0);
+}
+
+// Two instances of one mesh that change their order in the frame: the case of the market's two far objects
+// (vectors 100-280 px long on things that stood still). By order alone each takes the other's positions.
+void SwappedInstances() {
+    const Draw mesh{.shader = 7, .geometry = 9, .indices = 0x4000, .topology = 0, .index_count = 300, .instances = 1,
+                    .first_instance = 0, .vertices = {0, 100}};
+    Draw left = mesh, right = mesh;
+    left.placement = 0x1111;
+    right.placement = 0x2222;
+    History history{1u << 20};
+    KeyedHistory keyed{1u << 20};
+    history.NextFrame();
+    keyed.NextFrame();
+    const auto left0 = history.Prepare(left), right0 = history.Prepare(right);
+    const auto keyed_left0 = keyed.Prepare(left), keyed_right0 = keyed.Prepare(right);
+    history.NextFrame();
+    keyed.NextFrame();
+    // The right one first now.
+    const auto right1 = history.Prepare(right), left1 = history.Prepare(left);
+    assert(right1.load == right0.store && left1.load == left0.store);
+    const auto keyed_right1 = keyed.Prepare(right), keyed_left1 = keyed.Prepare(left);
+    assert(keyed_right1.load == keyed_left0.store && keyed_left1.load == keyed_right0.store); // 0.3.6.68: swapped
+    history.NextFrame();
+    // The left one culled, a third one uncovered before the right one: nobody takes another's positions.
+    Draw third = mesh;
+    third.placement = 0x3333;
+    History::Allocation third2 = history.Allocate(third).allocation, right2 = history.Allocate(right).allocation;
+    const bool third_final = history.PairExact(third, third2, 0);
+    const bool right_final = history.PairExact(right, right2, 1);
+    history.PairRest([&](uint32_t tag, uint32_t load) { (tag == 0 ? third2 : right2).load = load; });
+    assert(!third_final && right_final && right2.load == right1.store);
+    assert(third2.load == left1.store); // the one left over of its shape: the left one may have moved there
+    history.NextFrame();
+    // All three stand: each its own.
+    const auto third3 = history.Prepare(third), right3 = history.Prepare(right);
+    assert(third3.load == third2.store && right3.load == right2.store);
+    history.NextFrame();
+    // An instance that moves pairs with itself while the other stands, whatever the order.
+    Draw moved = third;
+    moved.placement = 0x4444;
+    History::Allocation right4 = history.Allocate(right).allocation, moved4 = history.Allocate(moved).allocation;
+    history.PairExact(right, right4, 0);
+    history.PairExact(moved, moved4, 1);
+    history.PairRest([&](uint32_t tag, uint32_t load) { (tag == 0 ? right4 : moved4).load = load; });
+    assert(right4.load == right3.store && moved4.load == third3.store);
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) {
         return ListPositionInputs(argc, argv);
@@ -507,6 +741,11 @@ int main(int argc, char** argv) {
 
     for (uint32_t seed = 1; seed <= 64; ++seed) {
         RandomEquivalence(seed);
+    }
+    // Instances of one mesh pair by where they stand (History's two passes against the plain rule).
+    SwappedInstances();
+    for (uint32_t seed = 1; seed <= 48; ++seed) {
+        RandomPlacement(seed, seed % 4 == 0 ? 2500 : 300, seed % 2 == 1);
     }
 
     History overflow(32);
@@ -609,5 +848,5 @@ int main(int argc, char** argv) {
     assert(JitterPhases(960, 1920) == 32);
     assert(JitterPhases(640, 1920) == 72);
     assert(JitterPhases(0, 1920) == 8);
-    std::puts("Motion history: PASS (ranges, restart, offsets, matching, in-order = keyed pairing, capacity, gating, still draws, position inputs, camera place, index cache, jitter)");
+    std::puts("Motion history: PASS (ranges, restart, offsets, matching, in-order = keyed pairing, instances by place, capacity, gating, still draws, position inputs, camera place, index cache, jitter)");
 }

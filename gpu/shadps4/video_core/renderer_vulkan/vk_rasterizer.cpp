@@ -3557,9 +3557,7 @@ struct DrawPartTimer {
         }
     }
 };
-/// BB_MOTION_COST: a draw that takes the motion twin with the character vectors on (the registers alone decide,
-/// PipelineCache::RefreshGraphicsKey's uncharted_gbuffer), so the same draws are timed with the vectors off.
-static bool GbufferCandidate(const AmdGpu::Regs& regs) {
+bool MotionCost::GbufferCandidate(const AmdGpu::Regs& regs) {
     if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable) {
         return false;
     }
@@ -4353,9 +4351,31 @@ void ReportMotionCost() {
                     prep ? 100.0 * c[MotionCost::PrepUnavailable] / prep : 0.0,
                     prep ? 100.0 * c[MotionCost::PrepChecksum] / prep : 0.0,
                     prep ? 100.0 * c[MotionCost::PrepRejected] / prep : 0.0);
+        // The workers' parts of a prepared draw, by class.
+        const auto worker = [&](const char* name, u32 draws, u32 base) {
+            const u64 n = c[draws];
+            const auto part = [&](u32 p) { return ns_each(c[base + p], n); };
+            const double programs = n ? double(c[base + MotionCost::WorkerSplit::Programs]) / double(n) : 0.0;
+            const double compares = c[base + MotionCost::WorkerSplit::Programs]
+                                        ? double(c[base + MotionCost::WorkerSplit::PermCompares]) /
+                                              double(c[base + MotionCost::WorkerSplit::Programs])
+                                        : 0.0;
+            using P = MotionCost::WorkerSplit;
+            std::printf("Motion cost workers %s: %.0f draws a frame, ns a draw: key %.0f (in it, for %.1f stage "
+                        "programs: find %.0f, info+flat %.0f, specialization %.0f, permutation %.0f with %.2f compares "
+                        "each), pipeline lookup %.0f, ensure %.0f, stages+resources %.0f, identity+place %.0f, vertex "
+                        "inputs %.0f, hand-over %.0f = %.0f\n",
+                        name, double(n) / 600.0, part(P::Key), programs, part(P::ProgramFind), part(P::InfoFlat),
+                        part(P::Spec), part(P::PermFind), compares, part(P::Lookup), part(P::Ensure), part(P::Stages),
+                        part(P::Identity), part(P::VertexInputs), part(P::HandOver),
+                        part(P::Key) + part(P::Lookup) + part(P::Ensure) + part(P::Stages) + part(P::Identity) +
+                            part(P::VertexInputs) + part(P::HandOver));
+        };
+        worker("G-buffer", MotionCost::GWDraws, MotionCost::GW0);
+        worker("others", MotionCost::NWDraws, MotionCost::NW0);
         if (c[MotionCost::BGate] || c[MotionCost::WStillDraws]) {
             std::printf("Motion cost gate: %.1f ns a motion draw on stage B (the still table %.1f), %.0f still draws a "
-                        "frame; workers: %.0f still keys a frame, %.0f ns each\n",
+                        "frame; workers: %.0f places (with the gate: and still keys) a frame, %.0f ns each\n",
                         ns_each(c[MotionCost::BGate], c[MotionCost::BMotionDraws]),
                         ns_each(c[MotionCost::BGateSeen], c[MotionCost::BMotionDraws]),
                         c[MotionCost::BGated] / 600.0, c[MotionCost::WStillDraws] / 600.0,
@@ -4842,7 +4862,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
     int cost_base = -1;
     if (MotionCost::On()) {
-        const bool candidate = pipeline->GetGraphicsKey().motion_vectors || GbufferCandidate(Regs());
+        const bool candidate = pipeline->GetGraphicsKey().motion_vectors || MotionCost::GbufferCandidate(Regs());
         MotionCost::Add(candidate ? MotionCost::CDraws : MotionCost::ODraws, 1);
         cost_base = candidate ? MotionCost::C0 : MotionCost::O0;
     }
@@ -5356,6 +5376,22 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             push_data.motion_param = 0;
         }
     }
+    // bbport (object motion): where the draw's object stands (Motion::Draw::placement), for its pairing with the
+    // previous frame: the worker's for a prepared draw (the same flat data), made here for one that was not. A
+    // program whose camera place is not known yet learns it from this draw at the frame's velocity pass.
+    u64 motion_placement = 0;
+    if (motion_draw && motion_geometry && !ceiling_gated && Shader::MotionVectors::characters && PlacementOn()) {
+        const auto* still_program = draw_prepared ? draw_prepared->still_program : nullptr;
+        if (!still_program) {
+            motion_placement = object_motion->PlacementOf(pipeline->GetStage(Shader::SwStage::Vertex));
+        } else if (draw_prepared->placement) {
+            motion_placement = draw_prepared->placement;
+        } else if (still_program->state.load(std::memory_order_relaxed) == Motion::StillProgram::NoCamera) {
+            const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+            object_motion->LearnCameraFrom(vs_info.pgm_hash, const_cast<Motion::StillProgram&>(*still_program),
+                                           vs_info.FlatUserData());
+        }
+    }
     // bbport (still draws): a prepared draw whose still key was drawn in the frame before stands still: the camera
     // pass gives its motion, it takes no store, history or parameter (ObjectMotion::Still). A draw without a key
     // (not prepared, or its program's position inputs or camera place are not known) keeps its history.
@@ -5517,6 +5553,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 .instances = regs.num_instances.NumInstances(),
                 .first_instance = first_instance,
                 .vertices = range,
+                .placement = motion_placement,
             });
         }
     }

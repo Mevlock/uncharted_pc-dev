@@ -119,6 +119,59 @@ StillKeys MakeStillKeys(Motion::StillProgram& program, std::span<const u32> flat
     return {h ? h : 1, camera ? camera : 1};
 }
 
+Motion::StillProgram* FindStillProgram(u64 pgm_hash) {
+    std::scoped_lock lk{still_mutex};
+    const auto it = still_programs.find(pgm_hash);
+    return it != still_programs.end() ? it->second.get() : nullptr;
+}
+
+u64 MakePlacement(Motion::StillProgram& program, std::span<const u32> flat) {
+    const auto* variant = program.VariantFor(flat);
+    if (!variant) {
+        return 0;
+    }
+    // (A multiply-mix over word pairs, not XXH3: several short runs, once for every motion draw.)
+    u64 h = variant->config * 0x9e3779b97f4a7c15ULL + 0x6a09e667f3bcc909ULL;
+    const auto mix = [&h](u64 v) {
+        h = (h ^ v) * 0xff51afd7ed558ccdULL;
+        h ^= h >> 32;
+    };
+    for (const auto& run : variant->key_runs) {
+        if (size_t(run.first) + run.count > flat.size()) {
+            return 0;
+        }
+        const u32* word = flat.data() + run.first;
+        u32 left = run.count;
+        for (; left >= 2; left -= 2, word += 2) {
+            u64 pair;
+            std::memcpy(&pair, word, sizeof(pair));
+            mix(pair);
+        }
+        if (left) {
+            mix(*word);
+        }
+    }
+    return h ? h : 1;
+}
+
+u64 ObjectMotion::PlacementOf(const Shader::Info& vs) {
+    auto& slot = still_slots[(vs.pgm_hash * 0x9e3779b97f4a7c15ULL) >> 56];
+    if (slot.pgm_hash != vs.pgm_hash || !slot.program) {
+        slot = {vs.pgm_hash, FindStillProgram(vs.pgm_hash)};
+        if (!slot.program) {
+            return 0;
+        }
+    }
+    const auto state = slot.program->state.load(std::memory_order_acquire);
+    if (state == Motion::StillProgram::Ready) {
+        return MakePlacement(*slot.program, vs.FlatUserData());
+    }
+    if (state == Motion::StillProgram::NoCamera) {
+        LearnCameraFrom(vs.pgm_hash, *slot.program, vs.FlatUserData());
+    }
+    return 0;
+}
+
 bool ObjectMotion::Still(const Motion::StillProgram& program, std::span<const u32> flat, u64 still_key,
                          u64 camera_key) {
     ++gate_stats.draws;
@@ -166,10 +219,10 @@ void ObjectMotion::LearnCameraFrom(u64 pgm_hash, Motion::StillProgram& program, 
 }
 
 void ObjectMotion::OnVelocityClip(const float* clip) {
-    if (!gate_enabled) {
+    if (!enabled) {
         return;
     }
-    if (frame_camera_key && !frame_camera_checked) {
+    if (gate_enabled && frame_camera_key && !frame_camera_checked) {
         frame_camera_checked = true;
         float error = 0.0f;
         if (Motion::ProductIs(frame_camera.data(), frame_camera.data() + 16, clip, Motion::CameraTolerance,
@@ -296,7 +349,9 @@ void ObjectMotion::OnFrameStart() {
         std::printf("Object motion: %llu draws, %llu stored, %llu with history, %llu unmatched, "
                     "%llu capacity skips, %llu invalid, %llu still (600 frames); last frame %u/%u vertices; "
                     "index ranges %llu reused, %llu scanned (%llu found changed), %zu cached; paired %llu in order, "
-                    "%llu searched (%llu indexes)\n",
+                    "%llu searched (%llu indexes); %llu moved (%llu in order, %llu indexes by shape, %llu from a "
+                    "draw that had stood), %llu found their partner taken; %llu draws with a place, %llu without; "
+                    "%llu pairing batches\n",
                     (unsigned long long)s.draws, (unsigned long long)s.stored,
                     (unsigned long long)s.loaded, (unsigned long long)s.unmatched,
                     (unsigned long long)s.exhausted, (unsigned long long)s.invalid,
@@ -304,9 +359,14 @@ void ObjectMotion::OnFrameStart() {
                     history.Used(), PositionsPerFrame, (unsigned long long)index_ranges.stats.hits,
                     (unsigned long long)index_ranges.stats.scans,
                     (unsigned long long)index_ranges.stats.stale, index_ranges.Size(), (unsigned long long)s.in_order,
-                    (unsigned long long)s.searched, (unsigned long long)s.indexes);
+                    (unsigned long long)s.searched, (unsigned long long)s.indexes, (unsigned long long)s.moved,
+                    (unsigned long long)s.moved_in_order, (unsigned long long)s.shape_indexes,
+                    (unsigned long long)s.moved_from_still, (unsigned long long)s.taken, (unsigned long long)placed,
+                    (unsigned long long)unplaced,
+                    (unsigned long long)history_flushes);
         index_ranges.stats = {};
         history.stats = {};
+        placed = unplaced = history_flushes = 0;
     }
     // bbport (object motion twins): every 600 frames while twins come in: how many draws went out without theirs and
     // what loading them cost (BuildMotionTwin); silent once nothing changes.
@@ -346,15 +406,16 @@ void ObjectMotion::OnFrameStart() {
         still.NextFrame();
         frame_camera_key = 0;
         frame_camera_checked = false;
-        lessons.clear();
     }
+    lessons.clear();
     history.NextFrame();
     if (history_check) {
         history_check->NextFrame();
         if (frame % 600 == 0) {
-            std::printf("Object motion history check: %llu draws compared with the keyed pairing, %llu differed; "
-                        "%llu parameter indexes differed\n",
+            std::printf("Object motion history check: %llu draws compared with the keyed pairing (0.3.6.68's, by "
+                        "order alone), %llu differed (%s); %llu parameter indexes differed\n",
                         (unsigned long long)history_checked, (unsigned long long)history_differed,
+                        PlacementOn() ? "draws the place pairs otherwise" : "BB_MOTION_PLACEMENT=0: none expected",
                         (unsigned long long)index_differed);
         }
     }
@@ -389,6 +450,7 @@ u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
     if (!enabled || BbToggle::Disabled(1u << 29) || params_used >= ParamsPerFrame) {
         return 0;
     }
+    ++(draw.placement ? placed : unplaced);
     const u64 allocate_start = MotionCost::On() ? __rdtsc() : 0;
     const auto stored = history.Allocate(draw);
     if (allocate_start) {
@@ -396,7 +458,7 @@ u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
     }
     if (!stored.valid) {
         if (history_check) {
-            deferred.push_back({draw, 0, 0}); // the keyed pairing counts it too, in order
+            deferred.push_back({draw, 0, 0, 0}); // the keyed pairing counts it too, in order
         }
         return 0;
     }
@@ -414,7 +476,7 @@ u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
     }
     // A store: the draw has a parameter whatever the pairing finds (FlushPairing).
     const u32 index = NextParam();
-    deferred.push_back({draw, stored.allocation.store, index});
+    deferred.push_back({draw, stored.allocation.store, index, 0});
     return index;
 }
 
@@ -423,16 +485,32 @@ void ObjectMotion::FlushPairing() {
         return;
     }
     const u64 start = MotionCost::On() ? __rdtsc() : 0;
-    for (const auto& d : deferred) {
+    ++history_flushes;
+    const auto allocation_of = [](const Deferred& d) {
+        return Motion::History::Allocation{d.store, d.load, d.draw.vertices.count, d.draw.instances,
+                                           d.draw.vertices.first, d.draw.first_instance};
+    };
+    // The batch's draws that stand where one stood (History::PairExact), then the rest among what is left.
+    for (u32 i = 0; i < deferred.size(); ++i) {
+        auto& d = deferred[i];
         if (!d.index) {
-            CheckAllocation(d.draw, {}, 0);
             continue;
         }
-        Motion::History::Allocation allocation{d.store, 0, d.draw.vertices.count, d.draw.instances,
-                                               d.draw.vertices.first, d.draw.first_instance};
-        history.Pair(d.draw, allocation);
-        CheckAllocation(d.draw, allocation, d.index);
-        WriteParam(d.index, allocation);
+        auto allocation = allocation_of(d);
+        if (history.PairExact(d.draw, allocation, i)) {
+            d.load = allocation.load;
+            WriteParam(d.index, allocation);
+        }
+    }
+    history.PairRest([&](u32 i, u32 load) {
+        auto& d = deferred[i];
+        d.load = load;
+        WriteParam(d.index, allocation_of(d));
+    });
+    if (history_check) {
+        for (const auto& d : deferred) {
+            CheckAllocation(d.draw, d.index ? allocation_of(d) : Motion::History::Allocation{}, d.index);
+        }
     }
     if (start) {
         MotionCost::Add(MotionCost::BFlushDraws, deferred.size());

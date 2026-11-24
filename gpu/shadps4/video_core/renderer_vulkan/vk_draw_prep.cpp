@@ -908,6 +908,12 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 prep_worker.failed = false;
                 sel.draw_indirect_params = {};
                 const u64 cost_start = MotionCost::On() ? __rdtsc() : 0;
+                MotionCost::WorkerSplit split;
+                bool prepared = false;
+                if (cost_start) {
+                    split.Start();
+                    MotionCost::worker_split = &split;
+                }
                 thread_local std::vector<PreparedDirectRead> direct_reads;
                 direct_reads.clear();
                 t_direct_reads = PrepDirectCheck() ? &direct_reads : nullptr;
@@ -929,17 +935,23 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                                          arena);
                     }
                     draw.vertex.valid = false;
+                    if (cost_start) {
+                        split.Mark(MotionCost::WorkerSplit::Stages);
+                    }
                     const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
                     draw.motion_geometry = 0;
                     draw.motion_records = 0;
                     draw.still_key = 0;
                     draw.camera_key = 0;
                     draw.still_program = nullptr;
+                    draw.placement = 0;
                     if (vs && sel.graphics_key.motion_vectors && Shader::MotionVectors::characters) {
+                        const bool gate = StillGateOn();
                         u64 addresses = 0;
-                        draw.motion_geometry = MotionDrawIdentity(*vs, draw.motion_records, &addresses);
-                        // bbport (still draws): the draw's still key, from its vertex program's still data.
-                        if (StillGateOn()) {
+                        draw.motion_geometry = MotionDrawIdentity(*vs, draw.motion_records, gate ? &addresses : nullptr);
+                        // bbport (object motion): where the draw's object stands, from its vertex program's still
+                        // data (and, with the still-draw gate on, the draw's still key).
+                        if (PlacementOn() || gate) {
                             const u64 still_start = cost_start ? __rdtsc() : 0;
                             for (const auto& stage : prep_worker.stages) {
                                 if (stage.hw_stage != Shader::HwStage::Vertex) {
@@ -952,6 +964,12 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                                 }
                                 draw.still_program = still;
                                 if (still->state.load(std::memory_order_acquire) != Motion::StillProgram::Ready) {
+                                    break;
+                                }
+                                if (PlacementOn()) {
+                                    draw.placement = MakePlacement(*still, *stage.flat);
+                                }
+                                if (!gate) {
                                     break;
                                 }
                                 // The mesh (its buffers' sizes, addresses and the write counts of their memory's
@@ -985,8 +1003,14 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                             }
                         }
                     }
+                    if (cost_start) {
+                        split.Mark(MotionCost::WorkerSplit::Identity);
+                    }
                     if (vs && sel.fetch_shader) {
                         PrepareVertexInputs(*vs, *sel.fetch_shader, *regs, draw.vertex, arena);
+                    }
+                    if (cost_start) {
+                        split.Mark(MotionCost::WorkerSplit::VertexInputs);
                     }
                     t_direct_reads = nullptr;
                     draw.direct_reads = arena.AppendArray(direct_reads.data(), direct_reads.size());
@@ -995,13 +1019,25 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     // bbport (object motion twins): the draw went out with its ordinary pipeline; its twin is loaded
                     // now, for the draws to come (a no-op when it was there).
                     pipeline_cache.BuildMotionTwin(sel);
+                    prepared = true;
                 } else {
                     t_direct_reads = nullptr;
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);
                 }
                 if (cost_start) {
+                    MotionCost::worker_split = nullptr;
                     MotionCost::Add(MotionCost::WDraws, 1);
                     MotionCost::Add(MotionCost::WCycles, __rdtsc() - cost_start);
+                    if (prepared) {
+                        split.Mark(MotionCost::WorkerSplit::HandOver);
+                        const bool candidate =
+                            sel.graphics_key.motion_vectors || MotionCost::GbufferCandidate(*regs);
+                        MotionCost::Add(candidate ? MotionCost::GWDraws : MotionCost::NWDraws, 1);
+                        const u32 base = candidate ? MotionCost::GW0 : MotionCost::NW0;
+                        for (u32 part = 0; part < MotionCost::WorkerSplit::Parts; ++part) {
+                            MotionCost::Add(MotionCost::Counter(base + part), split.v[part]);
+                        }
+                    }
                 }
             }
             ++ordinal;

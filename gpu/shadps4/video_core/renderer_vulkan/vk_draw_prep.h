@@ -118,6 +118,9 @@ struct PreparedDraw {
     u64 still_key{};
     u64 camera_key{};
     const Motion::StillProgram* still_program{};
+    /// bbport (object motion): where a motion twin's object stands (MakePlacement; 0: not known), for its pairing
+    /// with the previous frame's draw at the same place.
+    u64 placement{};
     GraphicsPipelineKey key{};
     u32 num_stages{};
     std::array<PreparedStage, MaxShaderStages> stages{};

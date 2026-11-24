@@ -999,34 +999,47 @@ bool PipelineCache::PrepareGraphicsPipeline(PipelineSelection& worker_sel) {
     worker.compile = worker_compile;
     worker_sel.twin_build = false;
     worker_sel.no_motion = false;
+    auto* const split = MotionCost::worker_split;
     if (!RefreshGraphicsKey(worker_sel) || worker.failed) {
         return false;
     }
+    if (split) {
+        split->Mark(MotionCost::WorkerSplit::Key);
+    }
+    // The selected pipeline in the pipeline table, looked up once a draw: a twin's answer (built or not) is also
+    // EnsureWorkerPipeline's (there or not). (The twin's own lookup before that one's was a second shared lock and
+    // a second hash of the key on every twin draw of every worker.)
+    enum class Entry { Absent, Refused, Built };
+    const auto lookup = [&] {
+        std::shared_lock lock{pipelines_mutex};
+        const auto it = graphics_pipelines.find(worker_sel.graphics_key);
+        return it == graphics_pipelines.end() ? Entry::Absent : it->second ? Entry::Built : Entry::Refused;
+    };
+    Entry entry = lookup();
     // bbport (object motion twins): a twin whose stages are there but which is not built yet is built after the
     // draw is handed over too (BuildMotionTwin): the draw goes out with its ordinary pipeline now.
-    if (worker_sel.graphics_key.motion_vectors && Shader::MotionVectors::characters) {
-        bool built = false;
-        {
-            std::shared_lock lock{pipelines_mutex};
-            const auto it = graphics_pipelines.find(worker_sel.graphics_key);
-            built = it != graphics_pipelines.end() && it->second;
+    if (worker_sel.graphics_key.motion_vectors && Shader::MotionVectors::characters && entry != Entry::Built) {
+        worker.stages.clear();
+        worker_sel.no_motion = true;
+        const bool ok = RefreshGraphicsKey(worker_sel);
+        worker_sel.no_motion = false;
+        if (!ok || worker.failed) {
+            return false;
         }
-        if (!built) {
-            worker.stages.clear();
-            worker_sel.no_motion = true;
-            const bool ok = RefreshGraphicsKey(worker_sel);
-            worker_sel.no_motion = false;
-            if (!ok || worker.failed) {
-                return false;
-            }
-            worker_sel.twin_wanted = true;
-        }
+        worker_sel.twin_wanted = true;
+        entry = lookup();
     }
     if (worker_sel.twin_wanted) {
         g_twin_fallback_worker.fetch_add(1, std::memory_order_relaxed);
     }
-    if (worker.compile) {
+    if (split) {
+        split->Mark(MotionCost::WorkerSplit::Lookup);
+    }
+    if (worker.compile && entry == Entry::Absent) {
         EnsureWorkerPipeline(worker_sel);
+    }
+    if (split) {
+        split->Mark(MotionCost::WorkerSplit::Ensure);
     }
     return true;
 }
@@ -2397,6 +2410,16 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         // permutation that does not exist yet is translated here (the GPU thread then finds
         // it ready) when the worker may compile; otherwise the draw is left to the GPU thread.
         auto& worker = *sel.worker;
+        // BB_MOTION_COST: the worker's parts of this stage program (MotionCost::WorkerSplit).
+        auto* const split = MotionCost::worker_split;
+        u64 lap_start = split ? __rdtsc() : 0;
+        const auto lap = [&](MotionCost::WorkerSplit::Part part) {
+            if (split) {
+                const u64 now = __rdtsc();
+                split->v[part] += now - lap_start;
+                lap_start = now;
+            }
+        };
         for (int attempt = 0; attempt < 3; ++attempt) {
             const Program* program = nullptr;
             {
@@ -2406,6 +2429,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                     program = found_program->second.get();
                 }
             }
+            lap(MotionCost::WorkerSplit::ProgramFind);
             if (!program && sel.twin_lookup) {
                 sel.twin_missing = true; // the ordinary selection follows (RefreshGraphicsKey)
                 return {};
@@ -2436,8 +2460,10 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             }
             runtime_fault_recover = &recover;
             info.RefreshFlatBuf();
+            lap(MotionCost::WorkerSplit::InfoFlat);
             auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
             runtime_fault_recover = nullptr;
+            lap(MotionCost::WorkerSplit::Spec);
             size_t perm_idx = 0;
             vk::ShaderModule module{};
             std::optional<Shader::Gcn::FetchShaderData> fetch_shader;
@@ -2452,7 +2478,12 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                     fetch_shader = it->spec.fetch_shader_data;
                     NoteStartReuse(params.hash, perm_idx, it->spec, spec);
                 }
+                if (split) {
+                    split->v[MotionCost::WorkerSplit::PermCompares] += found ? perm_idx + 1 : program->modules.size();
+                    ++split->v[MotionCost::WorkerSplit::Programs];
+                }
             }
+            lap(MotionCost::WorkerSplit::PermFind);
             if (!found && sel.twin_lookup) {
                 sel.twin_missing = true;
                 return {};
