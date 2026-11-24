@@ -139,6 +139,18 @@ void ObjectMotion::OnFrameStart() {
                         (unsigned long long)g_twins_translated_in_play.load());
         }
     }
+    // bbport (object motion twins, the rule): how many selections the twin rule left out (G-buffer-like by their
+    // registers, outside MotionTwinRule: ordinary pipelines, no twin): once after the first 600 frames, then every
+    // 6000 frames while the number grows.
+    if (Shader::MotionVectors::characters && frame != 0 && (frame == 600 || (frame % 6000) == 0)) {
+        const u64 outside = g_twin_rule_outside.load(std::memory_order_relaxed);
+        if (frame == 600 || outside != rule_outside_reported) {
+            rule_outside_reported = outside;
+            std::printf("Motion twin rule: %llu selections outside the rule so far (G-buffer-like draws that took "
+                        "their ordinary pipeline; no twin is built for them), frame %llu\n",
+                        (unsigned long long)outside, (unsigned long long)frame);
+        }
+    }
     history.NextFrame();
     ++frame;
     if (frame % Motion::IndexRangeCache::Unused == 0) {
@@ -167,10 +179,12 @@ void ObjectMotion::OnFrameStart() {
 }
 
 u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
+    last_load = false;
     if (!enabled || BbToggle::Disabled(1u << 29) || params_used >= ParamsPerFrame) {
         return 0;
     }
     const auto allocation = history.Prepare(draw);
+    last_load = allocation.load != 0;
     u32 flags = (allocation.store ? Shader::MotionVectors::FlagStore : 0) |
                 (allocation.load ? Shader::MotionVectors::FlagLoad : 0);
     if (!flags) {

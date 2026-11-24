@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <cstring>
@@ -149,7 +150,12 @@ static thread_local SavedInputs t_saved_inputs{};
 static std::mutex deferred_marker_mutex;
 /// bbport (object motion twins): the prepared marker's words for a cache whose G-buffer pipelines' motion twins are
 /// prepared too (WarmUpThread, step 5c).
-static constexpr const char* MotionTwinsStamp = " motion-twins 1";
+static constexpr const char* MotionTwinsStamp = " motion-twins 2";
+/// The stamp of the 0.3.6.68 test builds before the twin rule (MotionTwinRule, vk_pipeline_cache.h): every key that
+/// could be a G-buffer draw by its depth and stages had a twin. Such a cache is prepared for everything but the twins:
+/// its preparation page comes once, builds the twins inside the rule (from the driver's cache) and removes the stored
+/// twins outside it.
+static constexpr const char* MotionTwinsStampAll = " motion-twins 1";
 static std::filesystem::path deferred_marker;
 static std::string deferred_stamp;
 static bool deferred_marker_announce = false; // the preparation (page or prepare-only) armed it: say if it fails
@@ -1836,7 +1842,7 @@ void PipelineCache::WarmUpThread() {
             pack_line == "pack " + pack_id && std::getline(marker, identity) &&
             identity == Storage::DataBase::MarkerIdentity) {
             marker_twins = stamp == prepared_stamp + MotionTwinsStamp;
-            marker_ok = marker_twins || stamp == prepared_stamp;
+            marker_ok = marker_twins || stamp == prepared_stamp || stamp == prepared_stamp + MotionTwinsStampAll;
         }
     }
     // BB_PREPARE_ONLY=1 (the launcher's Prepare shaders button): no window and no game, the progress goes to the
@@ -3195,6 +3201,18 @@ void PipelineCache::WarmUpThread() {
             std::deque<TwinStage> twin_stages;
             std::unordered_map<u64, TwinStage*> twin_of; // base stage hash -> its twin (null: none)
             std::vector<size_t> candidates;
+            std::unordered_set<size_t> rule_outside; // (BB_TWIN_CANDIDATE_LOG: out=1)
+            // Keys that could be G-buffer draws by their depth and stages, outside the twin rule: by their target
+            // (blended, colour-only, depth-only passes) / by their pixel shader (the lit pass).
+            u32 rule_skipped_target = 0, rule_skipped_shader = 0;
+            const auto pixel_shader_of = [&](const GraphicsPipelineKey& k) -> const LoadedStage* {
+                const auto it = by_hash.find(k.stage_hashes[fs_slot]);
+                return it != by_hash.end() && it->second->owner && it->second->spec.Valid() ? it->second : nullptr;
+            };
+            const auto in_rule = [&](const GraphicsPipelineKey& k) {
+                const auto* ps = pixel_shader_of(k);
+                return MotionTwinRule(k, ps ? &ps->owner->info : nullptr, ps ? &ps->spec : nullptr);
+            };
             const auto twin_stage = [&](u64 base_hash, Shader::HwStage want) -> TwinStage* {
                 if (const auto it = twin_of.find(base_hash); it != twin_of.end()) {
                     return it->second;
@@ -3236,6 +3254,13 @@ void PipelineCache::WarmUpThread() {
                                  entry.gsdata.tcs.empty() && entry.gsdata.tes.empty();
                 for (u32 st = 0; candidate && st < MaxShaderStages; ++st) {
                     candidate = !k.stage_hashes[st] || st == vs_slot || st == fs_slot;
+                }
+                // The twin rule (MotionTwinRule, vk_pipeline_cache.h): only a G-buffer draw's key has a twin; the game
+                // asks for no twin outside it (RefreshGraphicsKey), so none is translated or built here either.
+                if (candidate && !in_rule(k)) {
+                    ++(MotionTwinRuleKeyTarget(k) ? rule_skipped_shader : rule_skipped_target);
+                    rule_outside.insert(i);
+                    candidate = false;
                 }
                 if (!candidate || !twin_stage(k.stage_hashes[vs_slot], Shader::HwStage::Vertex) ||
                     (k.stage_hashes[fs_slot] && !twin_stage(k.stage_hashes[fs_slot], Shader::HwStage::Fragment))) {
@@ -3284,13 +3309,18 @@ void PipelineCache::WarmUpThread() {
                     by_hash.emplace(twin.hash, &stage);
                 }
             }
+            // (The stage each hash must be, as the variant ship's read: two shaders can share a hash. U3's vertex
+            // shader 000000008e11813d did not get its twin here, the first copy found being U2's pixel shader, so the
+            // twin was translated and compiled in play at the London valve room.)
             std::set<u64> twin_wanted;
+            std::unordered_map<u64, u32> twin_types;
             for (const auto& v : twin_listed) {
                 twin_wanted.insert(v.hash);
+                twin_types.try_emplace(v.hash, ShaderTypeOf(v.spec.runtime_info.hw_stage));
             }
             u64 twin_scanned = 0;
             std::unordered_map<u64, std::vector<u32>> twin_registers;
-            const auto twin_code = ReadGameShaderCode(twin_wanted, &twin_scanned, &twin_registers);
+            const auto twin_code = ReadGameShaderCode(twin_wanted, &twin_scanned, &twin_registers, &twin_types);
             const double t_twin_read = elapsed_ms();
             std::atomic<u32> twins_built{0}, twins_failed{0}, twins_progress{0};
             std::vector<std::pair<u64, LoadedStage*>> twin_new_stages;
@@ -3372,6 +3402,7 @@ void PipelineCache::WarmUpThread() {
                 }
             }
             const size_t first_twin = stored.size();
+            std::unordered_map<size_t, u64> twin_key_of; // (BB_TWIN_CANDIDATE_LOG) candidate -> its twin key's hash
             for (const size_t i : candidates) {
                 const auto& base = stored[i];
                 const auto* vs = twin_of.at(base.gkey.stage_hashes[vs_slot]);
@@ -3386,6 +3417,7 @@ void PipelineCache::WarmUpThread() {
                     key.stage_hashes[fs_slot] = fs->hash;
                 }
                 AddMotionAttachment(key);
+                twin_key_of.emplace(i, u64(std::hash<GraphicsPipelineKey>{}(key)));
                 if (!have.insert(key).second) {
                     continue;
                 }
@@ -3397,8 +3429,106 @@ void PipelineCache::WarmUpThread() {
                 twin.gsdata = base.gsdata;
                 stored.push_back(std::move(twin));
             }
+            // BB_TWIN_CANDIDATE_LOG=<file> (diagnosis, narrowing the prepared twins): every graphics key of the
+            // cache, whether it is a candidate (cand=1, with its twin key's hash: the one a draw's twin has), its
+            // shaders' program hashes and DescribeTwinKey's fields (the same as BB_TWIN_USAGE_LOG's).
+            if (const char* dump = std::getenv("BB_TWIN_CANDIDATE_LOG"); dump && *dump) {
+                if (std::FILE* f = std::fopen(dump, "wb")) {
+                    const auto pgm = [&](u64 stage_hash) -> u64 {
+                        const auto it = by_hash.find(stage_hash);
+                        return it != by_hash.end() && it->second->owner ? it->second->owner->info.pgm_hash : 0;
+                    };
+                    std::fprintf(f, "start\t%lld\tkeys\t%zu\tcandidates\t%zu\n",
+                                 static_cast<long long>(std::time(nullptr)), first_twin, candidates.size());
+                    for (size_t i = 0; i < first_twin; ++i) {
+                        const auto& entry = stored[i];
+                        if (!entry.parsed || entry.compute) {
+                            continue;
+                        }
+                        const auto it = twin_key_of.find(i);
+                        const auto& k = entry.gkey;
+                        // (feature/charmotion-rule: the shaders' resources too, for rules on shader properties:
+                        // buffers b, of them written w, images i, samplers s, attributes loaded l and stored o,
+                        // discard d, the pixel shader's own target mask m.)
+                        const auto describe = [&](u64 stage_hash) -> std::string {
+                            const auto sit = by_hash.find(stage_hash);
+                            if (sit == by_hash.end() || !sit->second->owner) {
+                                return "-";
+                            }
+                            const auto& info = sit->second->owner->info;
+                            u32 written = 0, loads = 0, stores = 0;
+                            for (const auto& buffer : info.buffers) {
+                                written += buffer.is_written;
+                            }
+                            for (size_t a = 0; a < Shader::IR::NumAttributes; ++a) {
+                                loads += info.loads.flags[a] != 0;
+                                stores += info.stores.flags[a] != 0;
+                            }
+                            // (More for the rule's study: images that are depth-compared D, read at native size N,
+                            // arrays A; depth-compare samplers C; image queries Q, gathers G, constant reads R; then
+                            // the attributes loaded L= and stored O= by index, IR::Attribute.)
+                            u32 img_depth = 0, img_native = 0, img_array = 0, samp_depth = 0;
+                            for (const auto& image : info.images) {
+                                img_depth += image.is_depth;
+                                img_native += image.needs_native;
+                                img_array += image.is_array;
+                            }
+                            for (const auto& sampler : info.samplers) {
+                                samp_depth += sampler.is_depth;
+                            }
+                            std::string attrs = ".L";
+                            for (size_t a = 0; a < Shader::IR::NumAttributes; ++a) {
+                                if (info.loads.flags[a]) {
+                                    attrs += fmt::format("_{}", a);
+                                }
+                            }
+                            attrs += ".O";
+                            for (size_t a = 0; a < Shader::IR::NumAttributes; ++a) {
+                                if (info.stores.flags[a]) {
+                                    attrs += fmt::format("_{}", a);
+                                }
+                            }
+                            // (And of this variant's specialization: sRGB textures S, cubes U.)
+                            u32 img_srgb = 0, img_cube = 0;
+                            for (const auto& image : sit->second->spec.images) {
+                                img_srgb += image.is_srgb;
+                                img_cube += image.is_cube;
+                            }
+                            return fmt::format("b{}.w{}.i{}.s{}.l{}.o{}.d{}.m{:02x}.D{}.N{}.A{}.C{}.Q{}.G{}.R{}.S{}.U{}{}",
+                                               info.buffers.size(), written, info.images.size(), info.samplers.size(),
+                                               loads, stores, u32(info.has_discard), u32(info.mrt_mask), img_depth,
+                                               img_native, img_array, samp_depth, u32(info.has_image_query),
+                                               u32(info.has_image_gather), u32(info.has_readconst), img_srgb, img_cube,
+                                               attrs);
+                        };
+                        std::fprintf(f,
+                                     "key\tcand=%u\tout=%u\ttwin=%016llx\tstored_twin=%u\tgs=%u\tvs=%016llx\tps=%016llx\t%s"
+                                     "\tvsi=%s\tpsi=%s\n",
+                                     u32(it != twin_key_of.end()), u32(rule_outside.contains(i)),
+                                     static_cast<unsigned long long>(it != twin_key_of.end() ? it->second : 0),
+                                     u32(entry.twin), u32(!entry.gsdata.tcs.empty() || !entry.gsdata.tes.empty()),
+                                     static_cast<unsigned long long>(pgm(k.stage_hashes[vs_slot])),
+                                     static_cast<unsigned long long>(pgm(k.stage_hashes[fs_slot])),
+                                     DescribeTwinKey(k).c_str(), describe(k.stage_hashes[vs_slot]).c_str(),
+                                     describe(k.stage_hashes[fs_slot]).c_str());
+                    }
+                    std::fclose(f);
+                }
+            }
+            // The stored twins outside the rule (a cache of a test build before the rule) are never drawn again:
+            // not built, and removed from the cache.
+            std::atomic<u32> removed_outside{0};
             std::vector<size_t> twin_keys;
             for (size_t i = 0; i < stored.size(); ++i) {
+                // (A stored twin whose pixel shader variant is not in the cache cannot be judged by its shader: it
+                // is not built anyway.)
+                const auto* twin_ps = stored[i].twin && stored[i].parsed ? pixel_shader_of(stored[i].gkey) : nullptr;
+                if (stored[i].twin && stored[i].parsed &&
+                    (!MotionTwinRuleKeyTarget(stored[i].gkey) || (twin_ps && !in_rule(stored[i].gkey)))) {
+                    remove_key(i, removed_outside);
+                    stored[i].parsed = false;
+                    continue;
+                }
                 if (stored[i].twin) {
                     twin_keys.push_back(i);
                 }
@@ -3417,6 +3547,12 @@ void PipelineCache::WarmUpThread() {
             building_twins.store(false, std::memory_order_relaxed);
             BbOverlay::SetShaderPreparation(0, 0, 0);
             twins_prepared = twins_prepared || prepare_twins;
+            std::printf("Motion twin rule: %zu keys inside the rule get a twin; %u keys outside it are skipped (they could "
+                        "be G-buffer draws by their depth and stages, but are not: %u by their pixel shader, the lit "
+                        "pass; %u by their target, the blended, colour-only and depth-only passes); %u stored twins "
+                        "outside the rule removed\n",
+                        candidates.size(), rule_skipped_shader + rule_skipped_target, rule_skipped_shader,
+                        rule_skipped_target, removed_outside.load());
             std::printf("Motion twins%s: %zu keys can be G-buffer draws; %zu twin stages (%u in the cache, %zu to "
                         "translate: %u new, %u failed); %zu twin keys (%zu new, %u stored), %u pipelines built (the "
                         "driver compiled %llu); in %.0f ms (code read %.0f ms, translation %.0f ms, pipelines %.0f "
