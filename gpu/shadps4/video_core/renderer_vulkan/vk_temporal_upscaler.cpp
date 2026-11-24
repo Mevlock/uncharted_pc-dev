@@ -345,6 +345,7 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     BbSettings::ConfigureUpscalerSupport(instance.IsFsr4Int8Supported(),
                                          instance.IsFsr411Supported());
     fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
+    upscaler_in_use = BbSettings::Get().upscaler.load();
     {
         const Dlss* dlss = Dlss::Get();
         static std::string problem;
@@ -428,7 +429,7 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
     if (enabled) {
         std::printf("Upscaler: FSR 3.1 available (%s) on scene color before compute shader "
                     "%016llx\n",
-                    BbSettings::Get().upscaler != BbSettings::UpscalerOff ? "on" : "off",
+                    upscaler_in_use != BbSettings::UpscalerOff ? "on" : "off",
                     static_cast<unsigned long long>(trigger_hash));
     }
     // bbport: scene HDR (HdrScene): with the port's HDR10 output in Uncharted 2, on the upscaled
@@ -479,18 +480,18 @@ TemporalUpscaler::~TemporalUpscaler() {
 bool TemporalUpscaler::Active() const {
     // Toggle 1 << 24 switches it off at run time (A/B); history restarts after.
     return enabled && !failed &&
-           (BbSettings::Get().upscaler == BbSettings::UpscalerFsr3 ||
-            BbSettings::IsFsr4(BbSettings::Get().upscaler) ||
-            BbSettings::Get().upscaler == BbSettings::UpscalerTaa ||
-            BbSettings::Get().upscaler == BbSettings::UpscalerDlss ||
-            BbSettings::Get().upscaler == BbSettings::UpscalerXess) &&
+           (upscaler_in_use == BbSettings::UpscalerFsr3 ||
+            BbSettings::IsFsr4(upscaler_in_use) ||
+            upscaler_in_use == BbSettings::UpscalerTaa ||
+            upscaler_in_use == BbSettings::UpscalerDlss ||
+            upscaler_in_use == BbSettings::UpscalerXess) &&
            !BbToggle::Disabled(1u << 24);
 }
 
 bool TemporalUpscaler::ReactiveOn() const {
     // FSR 4 takes no reactive mask: the opaque snapshot and the mask pass would be wasted.
     return BbSettings::Get().reactive && !BbToggle::Disabled(1u << 27) && !UseFsr4() && !UseDlss() && !UseXess() &&
-           BbSettings::Get().upscaler != BbSettings::UpscalerTaa;
+           upscaler_in_use != BbSettings::UpscalerTaa;
 }
 
 void TemporalUpscaler::OnSceneColor(VideoCore::ImageId color) {
@@ -553,6 +554,32 @@ u32 TemporalUpscaler::SceneHeight() const {
            : Scaled() || early_native ? render_height : scene_targets.Size().height;
 }
 
+void TemporalUpscaler::TakeUpscalerChoice() {
+    // bbport: the choice (the overlay, BB_PRESET_FILE) changes at any moment; the upscaler in use changes here only,
+    // and never between a frame's velocity pass (BeforeDisplayPass: EnsureResources for the upscaler of that moment)
+    // and its upscale (RunScaledVelocity). The setting was read again at each use: a change in between (the preset
+    // file is read by OnFrameStart, right after BeforeDisplayPass in the same draw) recorded the upscale with the new
+    // choice on the old one's resources. DLSS, FSR or XeSS -> TAA: RecordTaa's barrier on the TAA history images that
+    // were never made (null handles: a read fault inside the NVIDIA driver, 0.3.6.68 and before); DLSS, FSR 4, XeSS
+    // or TAA -> FSR 3.1: a dispatch on the FSR 3 context that was not made.
+    if (velocity_pending) {
+        return; // taken over once this frame is upscaled, or by the next frame's velocity pass
+    }
+    const int chosen = BbSettings::Get().upscaler.load();
+    if (chosen == upscaler_in_use) {
+        return;
+    }
+    // A failed provider keeps a fatal flag internally; a user retry gets a fresh context.
+    scheduler.Finish();
+    fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
+    if (BbSettings::IsFsr4(chosen)) BbSettings::Get().fsr4_problem = nullptr;
+    fsr4_failed = false; // retry after a menu change
+    // The same for an upscaler that could not run here (TAA at an upscaled render size: EnsureResources): the next
+    // choice starts afresh (the upscaling stayed off until "Off" was chosen once).
+    failed = false;
+    upscaler_in_use = chosen;
+}
+
 bool TemporalUpscaler::OnFrameStart() {
     // bbport: BB_PRESET_FILE=<file> holding a preset number, read about once a second: switches
     // the preset like the menu does (scripted tests of live preset changes).
@@ -576,6 +603,7 @@ bool TemporalUpscaler::OnFrameStart() {
             std::fclose(f);
         }
     }
+    TakeUpscalerChoice();
     // bbport (DLSS rework 3d): Uncharted 1 keeps the upscaler on the finished frame at Native unless
     // BB_NATIVE_BEFORE_POST=1: before the post-processing its still picture measured about 4% softer
     // than 0.3.6.57 even with the final-frame sharpening (U2 and U3: equal or crisper). The game is
@@ -636,10 +664,10 @@ bool TemporalUpscaler::OnFrameStart() {
     const bool native_only = camera_motion.VelocityMode() && !velocity_scaled;
     BbSettings::Get().game_size_only.store(native_only, std::memory_order_relaxed);
     const int preset = native_only ? 0 : BbSettings::RenderPreset();
-    if (applied_preset != preset || settings.upscaler == BbSettings::UpscalerOff) failed = false;
+    if (applied_preset != preset || upscaler_in_use == BbSettings::UpscalerOff) failed = false;
     const bool active = Active();
     const bool jitter_on = active && settings.jitter && !BbToggle::Disabled(1u << 25);
-    const int upscaler = settings.upscaler.load();
+    const int upscaler = upscaler_in_use;
     const int output = native_only ? BbSettings::OutputDefault : settings.output_res.load();
     const bool output_changed = !scaled_session && !custom_output && applied_output != output;
     if (output_changed) {
@@ -651,13 +679,6 @@ bool TemporalUpscaler::OnFrameStart() {
     }
     const bool changed = output_changed || applied_preset != preset || active != last_active ||
                          jitter_on != last_jitter || applied_upscaler != upscaler;
-    if (applied_upscaler != upscaler) {
-        // A failed provider keeps a fatal flag internally; a user retry gets a fresh context.
-        scheduler.Finish();
-        fsr4 = std::make_unique<Fsr4Upscaler>(instance, scheduler);
-        if (BbSettings::IsFsr4(upscaler)) BbSettings::Get().fsr4_problem = nullptr;
-    }
-    if (applied_upscaler != upscaler) fsr4_failed = false; // retry after a menu change
     // Dynamic scene resolution scaling (live preset switching) works on all GPUs.
     // On GPUs without D32S8 blit support, UI depth is cleared instead of copied from scene.
     if (!scaled_session) {
@@ -746,7 +767,7 @@ bool TemporalUpscaler::OnFrameStart() {
     jitter_flip = flip;
     jitter_index = jitter_index % phases + 1;
     jitter = {Halton(jitter_index, 2) - 0.5f, Halton(jitter_index, 3) - 0.5f};
-    if (fade_was_resetting && FadeNoJitter() && BbSettings::Get().upscaler == BbSettings::UpscalerDlss) {
+    if (fade_was_resetting && FadeNoJitter() && upscaler_in_use == BbSettings::UpscalerDlss) {
         jitter = {};
     }
     // bbport (DLSS rework 5, opt-in BB_JITTER_FADE=1): the jitter shrinks while the camera moves:
@@ -884,7 +905,7 @@ void TemporalUpscaler::OnDispatch(u64 cs_hash) {
 bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     // DLSS and XeSS, like FSR 4, have their own context: no portable FSR 3 context is made.
     const bool use_fsr4 = UseFsr4() || UseDlss() || UseXess();
-    const bool use_taa = BbSettings::Get().upscaler == BbSettings::UpscalerTaa;
+    const bool use_taa = upscaler_in_use == BbSettings::UpscalerTaa;
     if (use_taa && (w != ow || h != oh)) {
         std::printf("TAA: remove BB_RENDER_RES to use native-resolution TAA\n");
         return false;
@@ -1554,7 +1575,7 @@ bool TemporalUpscaler::RecordReactive(vk::ImageView color_view) {
 
 void TemporalUpscaler::Run() {
     if (auto* profiler = GpuProfiler::Get()) {
-        const char* label = BbSettings::Get().upscaler == BbSettings::UpscalerTaa
+        const char* label = upscaler_in_use == BbSettings::UpscalerTaa
             ? "upscaler Run (TAA)" : "upscaler Run (FSR)";
         profiler->Mark(0xF5A0'0000ull ^ std::hash<std::string_view>{}(label),
                        [label] { return std::string{label}; });
@@ -1636,7 +1657,7 @@ void TemporalUpscaler::Run() {
     {
         // bbport: the mode this path runs, once per change (tests can confirm FSR 4 / TAA / DLSS).
         static int last_mode = -1;
-        const int mode = BbSettings::Get().upscaler;
+        const int mode = upscaler_in_use;
         if (mode != last_mode) {
             last_mode = mode;
             std::printf("Upscaler: %s on the scene, %ux%u -> %ux%u\n",
@@ -1721,7 +1742,7 @@ void TemporalUpscaler::Run() {
         g_frames_since_cut = 0;
         g_fade_cut_ns.store(1, std::memory_order_relaxed); // a new fade-in window (FadeReset)
     }
-    if (BbSettings::Get().upscaler != BbSettings::UpscalerTaa) {
+    if (upscaler_in_use != BbSettings::UpscalerTaa) {
         ClampSceneEdges(cmdbuf, input_color, w, h);
     }
     const bool has_reactive = mask_ready || RecordReactive(input_color_view);
@@ -1729,7 +1750,7 @@ void TemporalUpscaler::Run() {
     const float frame_ms = FrameMs();
 
     bool dispatched = false;
-    if (BbSettings::Get().upscaler == BbSettings::UpscalerTaa) {
+    if (upscaler_in_use == BbSettings::UpscalerTaa) {
         RecordTaa(cmdbuf, input_color_view, input_depth_view);
         dispatched = true;
     } else if (UseFsr4()) {
@@ -1867,7 +1888,7 @@ void TemporalUpscaler::Run() {
             return v;
         }();
         sharpen_pending = false;
-        if (BbSettings::Get().upscaler != BbSettings::UpscalerTaa) {
+        if (upscaler_in_use != BbSettings::UpscalerTaa) {
             if (early_native && after_post && hudless_hash && !sharpen_display_failed) {
                 sharpen_pending = true;
             } else {
@@ -2133,7 +2154,7 @@ bool TemporalUpscaler::HdrEarlyFrame(VideoCore::ImageId color) {
                     vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
     runtime.FlushBarriers();
     const auto cmdbuf = scheduler.CommandBuffer();
-    const bool sharpen = sharpen_pending && BbSettings::Get().upscaler != BbSettings::UpscalerTaa;
+    const bool sharpen = sharpen_pending && upscaler_in_use != BbSettings::UpscalerTaa;
     if (sharpen) {
         ExtraSharpen(cmdbuf, vk::Image(scene_shadow.image), false, w, h, *scene_shadow.view);
         static bool told = false;
@@ -2260,7 +2281,7 @@ std::array<u32, 2> TemporalUpscaler::SceneSize(u32 w, u32 h) const {
 }
 
 float TemporalUpscaler::SceneMipBias() const {
-    if (!Active() || BbSettings::Get().upscaler == BbSettings::UpscalerTaa) return 0.0f;
+    if (!Active() || upscaler_in_use == BbSettings::UpscalerTaa) return 0.0f;
     const float render = float(BbSettings::Get().active_render_width.load());
     const float output = float(Scaled() || early_native ? target_width : 1920u);
     const float ratio = render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
@@ -2624,7 +2645,7 @@ void TemporalUpscaler::RunUiOnly(VideoCore::ImageId color_id, VideoCore::ImageId
 
 void TemporalUpscaler::RunScaled() {
     if (auto* profiler = GpuProfiler::Get()) {
-        const char* label = BbSettings::Get().upscaler == BbSettings::UpscalerTaa
+        const char* label = upscaler_in_use == BbSettings::UpscalerTaa
             ? "upscaler RunScaled (TAA)" : "upscaler RunScaled (FSR)";
         profiler->Mark(0xF5A0'0000ull ^ std::hash<std::string_view>{}(label),
                        [label] { return std::string{label}; });
@@ -2747,12 +2768,12 @@ bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::I
 
     // bbport: FSR 4 writes its HDR-format output, copied into the output-size UI image.
     if (UseFsr4() || UseDlss() || UseXess() ||
-        BbSettings::Get().upscaler == BbSettings::UpscalerTaa) {
+        upscaler_in_use == BbSettings::UpscalerTaa) {
         barrier(vk::Image(output_image), vk::ImageAspectFlagBits::eColor,
                 vk::ImageLayout::eUndefined, all, vk::AccessFlagBits2::eNone,
                 vk::ImageLayout::eGeneral, all, rw);
         bool ok4 = true;
-        if (BbSettings::Get().upscaler == BbSettings::UpscalerTaa) {
+        if (upscaler_in_use == BbSettings::UpscalerTaa) {
             RecordTaa(cmdbuf, color_view, depth_view);
         } else if (UseDlss()) {
             ok4 = RecordDlss(cmdbuf,
@@ -2775,7 +2796,7 @@ bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::I
                             oh, frame_ms);
         }
         if (ok4) {
-            if (BbSettings::Get().upscaler != BbSettings::UpscalerTaa) {
+            if (upscaler_in_use != BbSettings::UpscalerTaa) {
                 ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
             }
             if (hdr_input) {
@@ -2838,7 +2859,7 @@ bool TemporalUpscaler::DispatchToUi(vk::CommandBuffer cmdbuf, const VideoCore::I
                                {{depth_image, source_width, source_height, 1, "stencil", "u8",
                                  vk::ImageAspectFlagBits::eStencil}});
                 }
-                if (BbSettings::Get().upscaler == BbSettings::UpscalerTaa &&
+                if (upscaler_in_use == BbSettings::UpscalerTaa &&
                     std::getenv("BB_TAA_DIAGNOSTICS")) {
                     DumpImages(instance, scheduler, cmdbuf, dump,
                                {{vk::Image(taa_history[taa_next]),ow,oh,16,
@@ -2940,6 +2961,7 @@ void TemporalUpscaler::BeforeDisplayPass(VAddr display) {
         return;
     }
     velocity_pending = false;
+    TakeUpscalerChoice(); // before this frame's resources and velocity are made for it
     // Drawn again by this frame's pass after the tone pass. Not the motion blur shadows: this
     // runs at that pass's own start, after the blur (they are cleared after the upscale, or by
     // HdrEarlyFrame where the upscale ran before the post-processing).
@@ -3388,7 +3410,7 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
     // instead of the 8-bit frame by DLSS, FSR 4, XeSS or TAA (FSR 3's context reads the 8-bit
     // frame). Its history holds one domain: a switch resets it.
     const bool hdr_upscaler = UseDlss() || UseFsr4() || UseXess() ||
-                              BbSettings::Get().upscaler == BbSettings::UpscalerTaa;
+                              upscaler_in_use == BbSettings::UpscalerTaa;
     const bool hdr_input = hdr_scene && hdr_upscaler && scene_shadow.drawn &&
                            scene_shadow.width == iw && scene_shadow.height == ih;
     if (hdr_scene && scene_shadow.drawn && !hdr_upscaler) {
@@ -3416,7 +3438,7 @@ void TemporalUpscaler::RunScaledVelocity(VideoCore::ImageId source, VideoCore::I
     }
     // The edge clamp (DLSS rework 1b) on the image the upscaler reads: the HDR scene, or the
     // 8-bit frame.
-    if (BbSettings::Get().upscaler != BbSettings::UpscalerTaa) {
+    if (upscaler_in_use != BbSettings::UpscalerTaa) {
         if (hdr_input) {
             ClampSceneEdges(cmdbuf, vk::Image(scene_shadow.image), w, h);
         } else if ((color.usage_flags & vk::ImageUsageFlagBits::eTransferSrc) &&
@@ -4098,7 +4120,7 @@ bool TemporalUpscaler::DisplayOverride(VAddr address, Display& display) {
 namespace Vulkan {
 
 bool TemporalUpscaler::UseFsr4() const {
-    const int selected = BbSettings::Get().upscaler;
+    const int selected = upscaler_in_use;
     const bool supported = selected == BbSettings::UpscalerFsr411
                                ? instance.IsFsr411Supported()
                                : instance.IsFsr4Int8Supported();
@@ -4172,7 +4194,7 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
 
 bool TemporalUpscaler::UseDlss() const {
     const Dlss* dlss = Dlss::Get();
-    return BbSettings::Get().upscaler == BbSettings::UpscalerDlss && dlss && dlss->Available() &&
+    return upscaler_in_use == BbSettings::UpscalerDlss && dlss && dlss->Available() &&
            !dlss_failed;
 }
 
@@ -4457,7 +4479,7 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
 
 bool TemporalUpscaler::UseXess() const {
     const Xess* xess = Xess::Get();
-    return BbSettings::Get().upscaler == BbSettings::UpscalerXess && xess && xess->Available() &&
+    return upscaler_in_use == BbSettings::UpscalerXess && xess && xess->Available() &&
            !xess_failed;
 }
 
