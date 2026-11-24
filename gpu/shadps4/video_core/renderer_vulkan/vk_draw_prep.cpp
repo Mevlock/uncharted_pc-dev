@@ -18,6 +18,8 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
+#include "video_core/renderer_vulkan/vk_object_motion.h"
+#include <immintrin.h>
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include <xxhash.h>
 
@@ -905,6 +907,13 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 prep_worker.stages.clear();
                 prep_worker.failed = false;
                 sel.draw_indirect_params = {};
+                const u64 cost_start = MotionCost::On() ? __rdtsc() : 0;
+                MotionCost::WorkerSplit split;
+                bool prepared = false;
+                if (cost_start) {
+                    split.Start();
+                    MotionCost::worker_split = &split;
+                }
                 thread_local std::vector<PreparedDirectRead> direct_reads;
                 direct_reads.clear();
                 t_direct_reads = PrepDirectCheck() ? &direct_reads : nullptr;
@@ -926,9 +935,91 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                                          arena);
                     }
                     draw.vertex.valid = false;
+                    if (cost_start) {
+                        split.Mark(MotionCost::WorkerSplit::Stages);
+                    }
                     const auto* vs = sel.infos[static_cast<u32>(Shader::SwStage::Vertex)];
+                    draw.motion_geometry = 0;
+                    draw.motion_records = 0;
+                    draw.still_key = 0;
+                    draw.camera_key = 0;
+                    draw.still_program = nullptr;
+                    draw.placement = 0;
+                    if (vs && sel.graphics_key.motion_vectors && Shader::MotionVectors::characters) {
+                        const bool gate = StillGateOn();
+                        u64 addresses = 0;
+                        // (The vertex stage's sharps as PrepareResources just read them.)
+                        const AmdGpu::Buffer* sharps = nullptr;
+                        for (u32 i = 0; i < draw.num_stages; ++i) {
+                            if (draw.stages[i].hw_stage == Shader::HwStage::Vertex &&
+                                draw.stages[i].num_buffers == vs->buffers.size()) {
+                                sharps = draw.stages[i].buffer_sharps;
+                            }
+                        }
+                        draw.motion_geometry =
+                            MotionDrawIdentity(*vs, draw.motion_records, gate ? &addresses : nullptr, sharps);
+                        // bbport (object motion): where the draw's object stands, from its vertex program's still
+                        // data (and, with the still-draw gate on, the draw's still key).
+                        if (PlacementOn() || gate) {
+                            const u64 still_start = cost_start ? __rdtsc() : 0;
+                            for (const auto& stage : prep_worker.stages) {
+                                if (stage.hw_stage != Shader::HwStage::Vertex) {
+                                    continue;
+                                }
+                                auto* still = stage.program->still.load(std::memory_order_acquire);
+                                if (!still) {
+                                    still = &StillProgramOf(vs->pgm_hash);
+                                    stage.program->still.store(still, std::memory_order_release);
+                                }
+                                draw.still_program = still;
+                                if (still->state.load(std::memory_order_acquire) != Motion::StillProgram::Ready) {
+                                    break;
+                                }
+                                if (PlacementOn()) {
+                                    draw.placement = MakePlacement(*still, *stage.flat);
+                                }
+                                if (!gate) {
+                                    break;
+                                }
+                                // The mesh (its buffers' sizes, addresses and the write counts of their memory's
+                                // regions), the indices and the draw's numbers.
+                                u64 seed = draw.motion_geometry ^ (addresses * 0x9e3779b97f4a7c15ULL);
+                                const auto mix = [&seed](u64 v) {
+                                    seed = (seed ^ v) * 0xff51afd7ed558ccdULL;
+                                    seed ^= seed >> 32;
+                                };
+                                mix(vs->pgm_hash);
+                                mix(regs->index_base_address.Address<VAddr>());
+                                mix(u64(regs->num_indices) << 32 | regs->num_instances.NumInstances());
+                                mix(u64(regs->index_offset) << 8 | u64(regs->index_buffer_type.index_type));
+                                if (sel.fetch_shader) {
+                                    const auto user_data = vs->UserData();
+                                    if (sel.fetch_shader->vertex_offset_sgpr != -1) {
+                                        mix(user_data[sel.fetch_shader->vertex_offset_sgpr]);
+                                    }
+                                    if (sel.fetch_shader->instance_offset_sgpr != -1) {
+                                        mix(u64(user_data[sel.fetch_shader->instance_offset_sgpr]) << 32);
+                                    }
+                                }
+                                const auto keys = MakeStillKeys(*still, *stage.flat, seed);
+                                draw.still_key = keys.still;
+                                draw.camera_key = keys.camera;
+                                break;
+                            }
+                            if (still_start) {
+                                MotionCost::Add(MotionCost::WStillDraws, 1);
+                                MotionCost::Add(MotionCost::WStill, __rdtsc() - still_start);
+                            }
+                        }
+                    }
+                    if (cost_start) {
+                        split.Mark(MotionCost::WorkerSplit::Identity);
+                    }
                     if (vs && sel.fetch_shader) {
                         PrepareVertexInputs(*vs, *sel.fetch_shader, *regs, draw.vertex, arena);
+                    }
+                    if (cost_start) {
+                        split.Mark(MotionCost::WorkerSplit::VertexInputs);
                     }
                     t_direct_reads = nullptr;
                     draw.direct_reads = arena.AppendArray(direct_reads.data(), direct_reads.size());
@@ -937,9 +1028,25 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     // bbport (object motion twins): the draw went out with its ordinary pipeline; its twin is loaded
                     // now, for the draws to come (a no-op when it was there).
                     pipeline_cache.BuildMotionTwin(sel);
+                    prepared = true;
                 } else {
                     t_direct_reads = nullptr;
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);
+                }
+                if (cost_start) {
+                    MotionCost::worker_split = nullptr;
+                    MotionCost::Add(MotionCost::WDraws, 1);
+                    MotionCost::Add(MotionCost::WCycles, __rdtsc() - cost_start);
+                    if (prepared) {
+                        split.Mark(MotionCost::WorkerSplit::HandOver);
+                        const bool candidate =
+                            sel.graphics_key.motion_vectors || MotionCost::GbufferCandidate(*regs);
+                        MotionCost::Add(candidate ? MotionCost::GWDraws : MotionCost::NWDraws, 1);
+                        const u32 base = candidate ? MotionCost::GW0 : MotionCost::NW0;
+                        for (u32 part = 0; part < MotionCost::WorkerSplit::Parts; ++part) {
+                            MotionCost::Add(MotionCost::Counter(base + part), split.v[part]);
+                        }
+                    }
                 }
             }
             ++ordinal;

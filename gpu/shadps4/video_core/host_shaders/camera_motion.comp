@@ -33,6 +33,8 @@ layout(push_constant) uniform Constants {
                        // 2 view z / 50, 3 reprojected previous frame, 4 |difference|
                        // Bits 8/9 (modes 2 and 4): stencil_offset applies to the pixels with
                        // stencil bits 0xc0 (8) or without them (9).
+                       // Bit 10 (mode 4, diagnosis BB_MOTION_GATE_CHECK): the output is the object
+                       // vector minus the camera's where a draw wrote one, zero elsewhere.
     vec4 stencil_offset; // xyz: previous clip x, y, w offset (the velocity pass's c56..c58 world
                          // offset through the previous clip rows); w: stencil pixels per pixel
 };
@@ -137,14 +139,20 @@ void main() {
         // vertices (previous minus current clip position, pixels, b = valid, a = the depth it was
         // drawn at). A later draw over the pixel leaves another depth: then the camera's motion
         // of that surface stays.
+        vec2 check_difference = vec2(0.0);
         if (base_mode == 4 && depth < 1.0 && all(lessThan(pixel, textureSize(object_tex, 0)))) {
             const vec4 object_motion = texelFetch(object_tex, pixel, 0);
             const float object_z = prev_proj.y / (object_motion.a - prev_proj.x);
             if (object_motion.b > 0.99 && !any(isnan(object_motion.rg)) &&
                 !any(isinf(object_motion.rg)) &&
                 abs(object_z - view_z) <= 0.01 * abs(view_z) + 1e-3) {
+                check_difference = object_motion.rg + jitter_change - result;
                 result = object_motion.rg + jitter_change;
             }
+        }
+        if ((mode & 0x400u) != 0u) {
+            imageStore(motion_img, pixel, vec4(check_difference, 0.0, 0.0));
+            return;
         }
         // bbport: previous_uv - scene_uv cancels near 0.5: float rounding left +-0.0002 px that
         // alternated column by column with the camera still. DLSS (transformer) drew that field as

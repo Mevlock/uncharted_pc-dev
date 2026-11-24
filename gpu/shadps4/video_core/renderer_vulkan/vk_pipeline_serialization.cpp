@@ -322,6 +322,22 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
                                        std::move(spv));
 }
 
+bool LoadStoredShaderBinary(u64 pgm_hash, std::vector<u32>& spv) {
+    auto& db = Storage::DataBase::Instance();
+    if (!db.IsOpened()) {
+        return false;
+    }
+    // Any permutation: they differ in their specialisation, not in what the code reads.
+    for (size_t perm_idx = 0; perm_idx < Program::MaxPermutations; ++perm_idx) {
+        spv.clear();
+        db.Load(Storage::BlobType::ShaderBinary, BinaryName(pgm_hash, perm_idx), spv);
+        if (!spv.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// bbport (shader variant list): the translation inputs stored with a variant's meta.
 struct ShaderInputs {
     bool present = false;

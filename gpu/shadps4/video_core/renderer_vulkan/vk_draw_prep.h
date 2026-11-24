@@ -35,6 +35,10 @@
 
 namespace Vulkan {
 
+namespace Motion {
+struct StillProgram; // motion_still.h
+}
+
 struct PreparedStage {
     const Program* program;
     u64 hash;
@@ -102,7 +106,21 @@ bool PrepDirectCheck();
 struct PreparedDraw {
     enum : u32 { Pending = 0, Ready = 1, Unavailable = 2 };
     std::atomic<u32> state{Pending};
+    /// bbport (object motion): a motion twin's draw identity and longest vertex stream (MotionDrawIdentity; both 0:
+    /// not a twin, or not computed), so the recording thread does not walk the vertex shader's buffers again. Next to
+    /// the state and checksum, on the cache line read first.
+    u32 motion_records{};
     u64 reg_checksum{};
+    u64 motion_geometry{};
+    /// bbport (still draws): a motion twin's still key (everything its positions follow from but the camera and the
+    /// draw's index offset; 0: none, the draw keeps its history) and the hash of its camera matrices, with its
+    /// vertex program's still data (vk_object_motion.h MakeStillKeys).
+    u64 still_key{};
+    u64 camera_key{};
+    const Motion::StillProgram* still_program{};
+    /// bbport (object motion): where a motion twin's object stands (MakePlacement; 0: not known), for its pairing
+    /// with the previous frame's draw at the same place.
+    u64 placement{};
     GraphicsPipelineKey key{};
     u32 num_stages{};
     std::array<PreparedStage, MaxShaderStages> stages{};

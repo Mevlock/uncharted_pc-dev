@@ -801,6 +801,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // bbport: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
+        object_motion->FlushPairing(); // the motion parameters this submission's draws read
         runtime.FlushBarriers(GuestSync::SiteSubmit);
         buffer_cache.SubmitPendingArenaBinds(info);
     });
@@ -823,6 +824,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     g_prepared_read_pending = [](VAddr address, u64 size) {
         return busy_check->OnStageA() && !busy_check->DrawPipeIdle() && busy_check->PendingWriteOverlaps(address, size);
     };
+    // bbport (still draws): the workers' still keys take in the write counts of the regions a draw's buffers lie in.
+    g_guest_write_epoch = [](VAddr address, u64 size) { return busy_check->buffer_cache.WriteEpoch(address, size); };
     if (ud_read_sync) {
         Shader::g_ud_table_read = [](u64 address, u64 size) {
             if (CaptureDirectRead(address, size)) {
@@ -3540,21 +3543,46 @@ struct DrawPartTimer {
     bool on;
     u64 last;
     u32 part = 0;
-    explicit DrawPartTimer(bool on_) : on(on_), last(on_ ? __rdtsc() : 0) {}
+    /// BB_MOTION_COST: the parts also by class (MotionCost::C0.. for G-buffer candidates, O0.. for the rest).
+    int cost_base = -1;
+    explicit DrawPartTimer(bool on_, int cost_base_ = -1)
+        : on(on_ || cost_base_ >= 0), last(on ? __rdtsc() : 0), cost_base(cost_base_), stats(on_) {}
+    bool stats;
+    void Add(u64 cycles) {
+        if (stats) {
+            g_draw_parts[part].fetch_add(cycles, std::memory_order_relaxed);
+        }
+        if (cost_base >= 0) {
+            MotionCost::Add(MotionCost::Counter(cost_base + part), cycles);
+        }
+    }
     void Next() {
         if (on) {
             const u64 now = __rdtsc();
-            g_draw_parts[part].fetch_add(now - last, std::memory_order_relaxed);
+            Add(now - last);
             last = now;
         }
         ++part;
     }
     ~DrawPartTimer() {
         if (on && part < g_draw_parts.size()) {
-            g_draw_parts[part].fetch_add(__rdtsc() - last, std::memory_order_relaxed);
+            Add(__rdtsc() - last);
         }
     }
 };
+bool MotionCost::GbufferCandidate(const AmdGpu::Regs& regs) {
+    if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable) {
+        return false;
+    }
+    u32 bound = 0;
+    for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+        bound += (regs.color_buffers[cb] && regs.color_target_mask.GetMask(cb)) ? 1 : 0;
+    }
+    return bound >= 1 && regs.depth_control.stencil_enable && regs.depth_control.depth_write_enable &&
+           !regs.color_buffers[Shader::MotionVectors::Output] && regs.depth_buffer.DepthValid() &&
+           regs.depth_buffer.NumSamples() == 1 && !regs.IsClipDisabled() &&
+           regs.stage_enable.raw == AmdGpu::ShaderStageEnable::VgtStages::Vs;
+}
 static bool DispatchStatsOn() {
     static const bool on = [] {
         const char* env = std::getenv("BB_DISPATCH_STATS");
@@ -4280,8 +4308,137 @@ static void WatchDrawIndices(const AmdGpu::Regs& regs) {
     seen.clear();
 }
 
+namespace {
+/// bbport diagnosis (BB_MOTION_COST=1): cycles of a scope into two MotionCost counters.
+struct MotionCostTimer {
+    MotionCost::Counter draws, cycles;
+    u64 start = MotionCost::On() ? __rdtsc() : 0;
+    ~MotionCostTimer() {
+        if (start) {
+            MotionCost::Add(draws, 1);
+            MotionCost::Add(cycles, __rdtsc() - start);
+        }
+    }
+};
+/// BB_MOTION_COST=1: every 600 frames, per frame: each thread's time and the motion parts per motion draw.
+void ReportMotionCost() {
+    static u64 frames = 0, tsc0 = 0;
+    static std::chrono::steady_clock::time_point t0{};
+    if (++frames % 600 != 0) {
+        return;
+    }
+    const u64 tsc = __rdtsc();
+    const auto now = std::chrono::steady_clock::now();
+    static std::array<u64, MotionCost::Count> last{};
+    const auto totals = MotionCost::Totals();
+    std::array<u64, MotionCost::Count> c{};
+    for (u32 i = 0; i < MotionCost::Count; ++i) {
+        c[i] = totals[i] - last[i];
+    }
+    last = totals;
+    if (tsc0) {
+        const double ns = std::chrono::duration<double, std::nano>(now - t0).count() / double(tsc - tsc0);
+        const auto us_frame = [&](u64 cycles) { return double(cycles) * ns / 600.0 / 1000.0; };
+        const auto ns_each = [&](u64 cycles, u64 n) { return n ? double(cycles) * ns / double(n) : 0.0; };
+        const u64 prep = c[MotionCost::PrepUsed] + c[MotionCost::PrepLate] + c[MotionCost::PrepUnavailable] +
+                         c[MotionCost::PrepChecksum] + c[MotionCost::PrepRejected];
+        std::printf("Motion cost (per frame, 600 frames, %.1f fps): stage A %.0f draws %.0f us (%.0f ns each); stage B "
+                    "%.0f draws %.0f us (%.0f ns each) + %.0f motion draws %.0f us (%.0f ns each: identity %.1f, "
+                    "offsets %.1f, history %.1f (allocation %.1f), attach %.1f; paired later %.1f ns a draw); workers %.0f draws %.0f us (%.0f ns each); prepared "
+                    "used %.1f%%, late %.1f%%, unavailable %.1f%%, checksum %.1f%%, rejected %.1f%%\n",
+                    600.0 / (std::chrono::duration<double>(now - t0).count()),
+                    c[MotionCost::ADraws] / 600.0, us_frame(c[MotionCost::ACycles]),
+                    ns_each(c[MotionCost::ACycles], c[MotionCost::ADraws]), c[MotionCost::BDraws] / 600.0,
+                    us_frame(c[MotionCost::BCycles]), ns_each(c[MotionCost::BCycles], c[MotionCost::BDraws]),
+                    c[MotionCost::BMotionDraws] / 600.0, us_frame(c[MotionCost::BMotionCycles]),
+                    ns_each(c[MotionCost::BMotionCycles], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BIdentity], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BOffsets], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BHistory], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BPair], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BAttach], c[MotionCost::BMotionDraws]),
+                    ns_each(c[MotionCost::BFlushCycles], c[MotionCost::BFlushDraws]), c[MotionCost::WDraws] / 600.0,
+                    us_frame(c[MotionCost::WCycles]), ns_each(c[MotionCost::WCycles], c[MotionCost::WDraws]),
+                    prep ? 100.0 * c[MotionCost::PrepUsed] / prep : 0.0,
+                    prep ? 100.0 * c[MotionCost::PrepLate] / prep : 0.0,
+                    prep ? 100.0 * c[MotionCost::PrepUnavailable] / prep : 0.0,
+                    prep ? 100.0 * c[MotionCost::PrepChecksum] / prep : 0.0,
+                    prep ? 100.0 * c[MotionCost::PrepRejected] / prep : 0.0);
+        // The workers' parts of a prepared draw, by class.
+        const auto worker = [&](const char* name, u32 draws, u32 base) {
+            const u64 n = c[draws];
+            const auto part = [&](u32 p) { return ns_each(c[base + p], n); };
+            const double programs = n ? double(c[base + MotionCost::WorkerSplit::Programs]) / double(n) : 0.0;
+            const double compares = c[base + MotionCost::WorkerSplit::Programs]
+                                        ? double(c[base + MotionCost::WorkerSplit::PermCompares]) /
+                                              double(c[base + MotionCost::WorkerSplit::Programs])
+                                        : 0.0;
+            using P = MotionCost::WorkerSplit;
+            std::printf("Motion cost workers %s: %.0f draws a frame, ns a draw: key %.0f (in it, for %.1f stage "
+                        "programs: find %.0f, info+flat %.0f, specialization %.0f, permutation %.0f with %.2f compares "
+                        "each), pipeline lookup %.0f, ensure %.0f, stages+resources %.0f, identity+place %.0f, vertex "
+                        "inputs %.0f, hand-over %.0f = %.0f\n",
+                        name, double(n) / 600.0, part(P::Key), programs, part(P::ProgramFind), part(P::InfoFlat),
+                        part(P::Spec), part(P::PermFind), compares, part(P::Lookup), part(P::Ensure), part(P::Stages),
+                        part(P::Identity), part(P::VertexInputs), part(P::HandOver),
+                        part(P::Key) + part(P::Lookup) + part(P::Ensure) + part(P::Stages) + part(P::Identity) +
+                            part(P::VertexInputs) + part(P::HandOver));
+        };
+        worker("G-buffer", MotionCost::GWDraws, MotionCost::GW0);
+        worker("others", MotionCost::NWDraws, MotionCost::NW0);
+        if (c[MotionCost::BGate] || c[MotionCost::WStillDraws]) {
+            std::printf("Motion cost gate: %.1f ns a motion draw on stage B (the still table %.1f), %.0f still draws a "
+                        "frame; workers: %.0f places (with the gate: and still keys) a frame, %.0f ns each\n",
+                        ns_each(c[MotionCost::BGate], c[MotionCost::BMotionDraws]),
+                        ns_each(c[MotionCost::BGateSeen], c[MotionCost::BMotionDraws]),
+                        c[MotionCost::BGated] / 600.0, c[MotionCost::WStillDraws] / 600.0,
+                        ns_each(c[MotionCost::WStill], c[MotionCost::WStillDraws]));
+        }
+        const auto parts = [&](u32 base, u64 n) {
+            return std::array<double, 5>{ns_each(c[base], n), ns_each(c[base + 1], n), ns_each(c[base + 2], n),
+                                         ns_each(c[base + 3], n), ns_each(c[base + 4], n)};
+        };
+        const auto g = parts(MotionCost::C0, c[MotionCost::CDraws]);
+        const auto o = parts(MotionCost::O0, c[MotionCost::ODraws]);
+        std::printf("Motion cost parts (ns a draw: to binding, binding, to rendering, BeginRendering, rest): G-buffer "
+                    "%.0f draws %.0f %.0f %.0f %.0f %.0f = %.0f; others %.0f draws %.0f %.0f %.0f %.0f %.0f = %.0f; "
+                    "recording thread %.0f chunks %.0f us a frame\n",
+                    c[MotionCost::CDraws] / 600.0, g[0], g[1], g[2], g[3], g[4], g[0] + g[1] + g[2] + g[3] + g[4],
+                    c[MotionCost::ODraws] / 600.0, o[0], o[1], o[2], o[3], o[4], o[0] + o[1] + o[2] + o[3] + o[4],
+                    c[MotionCost::RChunks] / 600.0, us_frame(c[MotionCost::RCycles]));
+        const auto steps = [&](u32 base, u64 n) {
+            std::array<double, 9> r{};
+            for (u32 i = 0; i < 9; ++i) {
+                r[i] = ns_each(c[base + i], n);
+            }
+            return r;
+        };
+        const auto gs = steps(MotionCost::CS0, c[MotionCost::CDraws]);
+        const auto os = steps(MotionCost::OS0, c[MotionCost::ODraws]);
+        std::printf("Motion cost rest steps (ns a draw: to motion, motion, jitter, push+descriptors, to dynamic state, "
+                    "dynamic state, pass+barrier+begin, draw command, after): G-buffer %.0f %.0f %.0f %.0f %.0f %.0f "
+                    "%.0f %.0f %.0f; others %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f\n",
+                    gs[0], gs[1], gs[2], gs[3], gs[4], gs[5], gs[6], gs[7], gs[8], os[0], os[1], os[2], os[3], os[4],
+                    os[5], os[6], os[7], os[8]);
+        const auto bind = [&](u32 base, u64 n) {
+            const double d = n ? double(n) : 1.0;
+            return std::array<double, 6>{ns_each(c[base], n), ns_each(c[base + 1], n), c[base + 2] / d,
+                                         c[base + 3] / d, 100.0 * c[base + 4] / d, c[base + 5] / d};
+        };
+        const auto gb = bind(MotionCost::CB0, c[MotionCost::CDraws]);
+        const auto ob = bind(MotionCost::OB0, c[MotionCost::ODraws]);
+        std::printf("Motion cost bind (a draw: push ns, descriptors ns, writes, descriptors, %% descriptor-set path, push "
+                    "bytes): G-buffer %.0f %.0f %.1f %.1f %.1f%% %.0f; others %.0f %.0f %.1f %.1f %.1f%% %.0f\n",
+                    gb[0], gb[1], gb[2], gb[3], gb[4], gb[5], ob[0], ob[1], ob[2], ob[3], ob[4], ob[5]);
+    }
+    tsc0 = tsc;
+    t0 = now;
+}
+} // namespace
+
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
+    MotionCostTimer motion_cost_timer{MotionCost::ADraws, MotionCost::ACycles};
     BbStats::draws.fetch_add(1, std::memory_order_relaxed);
     WatchDrawIndices(Regs());
     WatchAaState(Regs());
@@ -4316,6 +4473,15 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
         draw_prep->Count(pipeline != nullptr &&
                          prepared->state.load(std::memory_order_acquire) == PreparedDraw::Ready &&
                          prepared->reg_checksum == liverpool->gfx_reg_checksum);
+        if (MotionCost::On()) {
+            const u32 state = prepared->state.load(std::memory_order_acquire);
+            MotionCost::Add(used_prepared                            ? MotionCost::PrepUsed
+                            : state == PreparedDraw::Pending         ? MotionCost::PrepLate
+                            : state == PreparedDraw::Unavailable     ? MotionCost::PrepUnavailable
+                            : prepared->reg_checksum != liverpool->gfx_reg_checksum ? MotionCost::PrepChecksum
+                                                                                    : MotionCost::PrepRejected,
+                            1);
+        }
     }
     if (!pipeline) {
         NoteNullPipelineDraw();
@@ -4610,6 +4776,10 @@ void Rasterizer::ClipJitterPush(const GraphicsPipeline* pipeline) {
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
+    MotionCostTimer motion_cost_timer{pipeline->GetGraphicsKey().motion_vectors ? MotionCost::BMotionDraws
+                                                                                 : MotionCost::BDraws,
+                                      pipeline->GetGraphicsKey().motion_vectors ? MotionCost::BMotionCycles
+                                                                                 : MotionCost::BCycles};
     if (GuestSync::On()) {
         GuestSync::NoteWork(false);
     }
@@ -4691,6 +4861,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             if (flip != motion_flip) {
                 motion_flip = flip;
                 object_motion->OnFrameStart();
+                if (Motion::Survey::On()) {
+                    motion_survey.NextFrame();
+                }
+                if (MotionCost::On()) {
+                    ReportMotionCost();
+                }
             }
         }
         NoteFrameStart();
@@ -4698,7 +4874,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
     }
-    DrawPartTimer draw_parts{DispatchStatsOn()};
+    int cost_base = -1;
+    if (MotionCost::On()) {
+        const bool candidate = pipeline->GetGraphicsKey().motion_vectors || MotionCost::GbufferCandidate(Regs());
+        MotionCost::Add(candidate ? MotionCost::CDraws : MotionCost::ODraws, 1);
+        cost_base = candidate ? MotionCost::C0 : MotionCost::O0;
+    }
+    DrawPartTimer draw_parts{DispatchStatsOn(), cost_base};
     bind_prepared = used_prepared;
     motion_draw = pipeline->GetGraphicsKey().motion_vectors;
     motion_geometry = 0;
@@ -5138,26 +5320,127 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // index list is not scanned (the cached scan cost ~70 ns a draw on the GPU thread, its page
     // checks more). Constant buffers (stride 16) and raw buffers (stride 0) are not streams.
     u32 stream_records = 0;
-    if (motion_draw && Shader::MotionVectors::characters && !motion_geometry) {
-        const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
-        u64 hash = 0x6a09e667f3bcc909ULL;
-        u32 records = 0;
-        for (const auto& resource : vs.buffers) {
-            if (resource.IsSpecial()) continue;
-            const auto buffer = resource.GetSharp(vs);
-            if (!buffer.Valid()) continue;
-            // (A multiply-mix, not XXH3: once per buffer of every G-buffer draw.)
-            hash = (hash ^ (u64(buffer.num_records) << 32 | buffer.GetStride())) *
-                   0x9e3779b97f4a7c15ULL;
-            hash ^= hash >> 29;
-            if (buffer.GetStride() != 16 && buffer.GetStride() != 0) {
-                records = std::max<u32>(records, buffer.num_records);
+    // BB_MOTION_COST: the last part of the draw in steps (MotionCost::CS0.. / OS0..).
+    const int split_base = cost_base < 0 ? -1 : cost_base == MotionCost::C0 ? MotionCost::CS0 : MotionCost::OS0;
+    struct SplitTimer {
+        int base;
+        u64 last = base >= 0 ? __rdtsc() : 0;
+        u32 step = 0;
+        void operator()() {
+            if (base >= 0) {
+                const u64 now = __rdtsc();
+                MotionCost::Add(MotionCost::Counter(base + step), now - last);
+                last = now;
+            }
+            ++step;
+        }
+        ~SplitTimer() {
+            if (step == 8) {
+                (*this)(); // CS8: after the draw's command, to the end
             }
         }
-        stream_records = records;
-        motion_geometry = hash;
+    } split{split_base};
+    split(); // CS0: BeginRendering's end to here
+    const u64 motion_cost_t0 = motion_draw && MotionCost::On() ? __rdtsc() : 0;
+    u64 motion_cost_t1 = 0, motion_cost_t2 = 0;
+    if (motion_draw && Shader::MotionVectors::characters && !motion_geometry) {
+        // The draw-preparation worker's when the draw was prepared (the same sharps: its flattened user data matched).
+        if (draw_prepared && draw_prepared->motion_geometry) {
+            motion_geometry = draw_prepared->motion_geometry;
+            stream_records = draw_prepared->motion_records;
+            // BB_MOTION_IDENTITY_CHECK=1 (diagnosis): computed here as well and compared.
+            static const bool check = [] {
+                const char* env = std::getenv("BB_MOTION_IDENTITY_CHECK");
+                return env && env[0] == '1';
+            }();
+            if (check) {
+                static u64 checked = 0, differed = 0;
+                u32 records = 0;
+                const u64 hash = MotionDrawIdentity(pipeline->GetStage(Shader::SwStage::Vertex), records);
+                differed += hash != motion_geometry || records != stream_records;
+                if ((++checked & 0x3ffff) == 0) {
+                    std::printf("Object motion identity check: %llu prepared draws, %llu differed\n",
+                                (unsigned long long)checked, (unsigned long long)differed);
+                }
+            }
+        } else {
+            motion_geometry = MotionDrawIdentity(pipeline->GetStage(Shader::SwStage::Vertex), stream_records);
+        }
     }
-    if (motion_draw && motion_geometry) {
+    motion_cost_t1 = motion_cost_t0 ? __rdtsc() : 0;
+    // BB_MOTION_GATE_CEILING=<percent> (measurement only, the vectors are WRONG with it): that share of the motion
+    // draws (picked by mesh, the same ones every frame) goes out without store, history and parameter, as a draw
+    // gated for standing still would: the most a still-draw gate with a free decision can save on this thread.
+    static const u32 gate_ceiling = [] {
+        const char* env = std::getenv("BB_MOTION_GATE_CEILING");
+        const u32 percent = env ? u32(std::strtoul(env, nullptr, 10)) : 0;
+        if (percent) {
+            std::printf("Object motion: BB_MOTION_GATE_CEILING=%u: %u%% of the motion draws without history "
+                        "(measurement only, wrong vectors)\n", percent, percent);
+        }
+        return percent;
+    }();
+    bool ceiling_gated = false;
+    if (gate_ceiling && motion_draw && motion_geometry) {
+        u64 h = (motion_geometry ^ regs.index_base_address.Address<VAddr>() ^ u64(regs.num_indices) << 40) *
+                0x9e3779b97f4a7c15ULL;
+        h ^= h >> 32;
+        ceiling_gated = h % 100 < gate_ceiling;
+        if (ceiling_gated) {
+            push_data.motion_param = 0;
+        }
+    }
+    // bbport (object motion): where the draw's object stands (Motion::Draw::placement), for its pairing with the
+    // previous frame: the worker's for a prepared draw (the same flat data), made here for one that was not. A
+    // program whose camera place is not known yet learns it from this draw at the frame's velocity pass.
+    u64 motion_placement = 0;
+    if (motion_draw && motion_geometry && !ceiling_gated && Shader::MotionVectors::characters && PlacementOn()) {
+        const auto* still_program = draw_prepared ? draw_prepared->still_program : nullptr;
+        if (!still_program) {
+            motion_placement = object_motion->PlacementOf(pipeline->GetStage(Shader::SwStage::Vertex));
+        } else if (draw_prepared->placement) {
+            motion_placement = draw_prepared->placement;
+        } else if (still_program->state.load(std::memory_order_relaxed) == Motion::StillProgram::NoCamera) {
+            const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+            object_motion->LearnCameraFrom(vs_info.pgm_hash, const_cast<Motion::StillProgram&>(*still_program),
+                                           vs_info.FlatUserData());
+        }
+    }
+    // bbport (still draws): a prepared draw whose still key was drawn in the frame before stands still: the camera
+    // pass gives its motion, it takes no store, history or parameter (ObjectMotion::Still). A draw without a key
+    // (not prepared, or its program's position inputs or camera place are not known) keeps its history.
+    bool still_draw = false;
+    if (motion_draw && motion_geometry && !ceiling_gated && Shader::MotionVectors::characters &&
+        object_motion->GateEnabled()) {
+        const u64 gate_start = motion_cost_t0 ? __rdtsc() : 0;
+        const auto* still_program = draw_prepared ? draw_prepared->still_program : nullptr;
+        if (still_program && draw_prepared->still_key) {
+            const auto flat = pipeline->GetStage(Shader::SwStage::Vertex).FlatUserData();
+            const u64 key = draw_prepared->still_key ^ ((u64(index_offset) << 1 | u64(is_indexed)) *
+                                                        0x9e3779b97f4a7c15ULL);
+            still_draw = object_motion->Still(*still_program, flat, key, draw_prepared->camera_key);
+        } else {
+            object_motion->CountNoKey();
+            if (still_program && still_program->state.load(std::memory_order_relaxed) ==
+                                     Motion::StillProgram::NoCamera) {
+                const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+                object_motion->LearnCameraFrom(vs_info.pgm_hash, const_cast<Motion::StillProgram&>(*still_program),
+                                               vs_info.FlatUserData());
+            }
+        }
+        // BB_MOTION_GATE_CHECK=1 (diagnosis): the other way round, only the still draws keep their vectors.
+        if (object_motion->GateCheck() ? !still_draw : still_draw) {
+            push_data.motion_param = 0;
+            still_draw = true;
+        } else {
+            still_draw = false;
+        }
+        if (gate_start) {
+            MotionCost::Add(MotionCost::BGate, __rdtsc() - gate_start);
+            MotionCost::Add(MotionCost::BGated, still_draw);
+        }
+    }
+    if (motion_draw && motion_geometry && !ceiling_gated && !still_draw) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         const auto [base_vertex, first_instance] =
             GetDrawOffsets(regs, vs, pipeline->GetFetchShader());
@@ -5194,6 +5477,48 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 palette = XXH3_64bits_withSeed(reinterpret_cast<const void*>(address), size,
                                                palette);
             }
+        }
+        // BB_MOTION_STATIC_LOG=1 (diagnosis): the draw's inputs for the survey of draws that do not move.
+        if (Motion::Survey::On()) {
+            Motion::Survey::Draw survey{.shader = vs.pgm_hash,
+                                        .geometry = motion_geometry,
+                                        .indices = index_address,
+                                        .index_count = regs.num_indices,
+                                        .instances = regs.num_instances.NumInstances(),
+                                        .first_instance = first_instance,
+                                        .images = !vs.images.empty()};
+            for (const auto& resource : vs.buffers) {
+                if (resource.IsSpecial() || survey.num_buffers == Motion::Survey::MaxBuffers) continue;
+                const auto buffer = resource.GetSharp(vs);
+                if (!buffer.Valid()) continue;
+                auto& out = survey.buffers[survey.num_buffers++];
+                out.size = buffer.GetSize();
+                out.stride = buffer.GetStride();
+                out.address = buffer.base_address;
+                out.gpu_written = buffer_cache.IsRegionGpuModified(out.address, out.size);
+                if ((out.stride == 16 || out.stride == 0) && out.size && out.size <= 1_MB &&
+                    memory->IsValidGpuMapping(out.address, 0) &&
+                    memory->ClampRangeSize(out.address, out.size) == out.size) {
+                    if (out.size >= 64_KB) {
+                        // A large table: hashed once a frame (15 us a draw otherwise).
+                        static VAddr big_address = 0;
+                        static u64 big_frame = ~0ull, big_hash = 0;
+                        survey.cpu_written |= buffer_cache.IsRegionCpuModified(out.address, out.size);
+                        if (big_address != out.address || big_frame != motion_survey.Frame()) {
+                            big_address = out.address;
+                            big_frame = motion_survey.Frame();
+                            big_hash = XXH3_64bits(reinterpret_cast<const void*>(out.address), out.size) | 1;
+                        }
+                        out.content = big_hash;
+                    } else {
+                        out.content = XXH3_64bits(reinterpret_cast<const void*>(out.address), out.size) | 1;
+                    }
+                }
+            }
+            const auto flat = vs.FlatUserData();
+            survey.flat = flat.data();
+            survey.flat_size = u32(flat.size());
+            motion_survey.OnDraw(survey);
         }
         push_data.motion_param = 0;
         if (!gated || object_motion->Moving({.shader = vs.pgm_hash,
@@ -5232,6 +5557,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     topology = scanned.topology;
                 }
             }
+            motion_cost_t2 = motion_cost_t0 ? __rdtsc() : 0;
             push_data.motion_param = object_motion->PrepareDraw({
                 .shader = vs.pgm_hash,
                 .geometry = motion_geometry,
@@ -5241,9 +5567,20 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 .instances = regs.num_instances.NumInstances(),
                 .first_instance = first_instance,
                 .vertices = range,
+                .placement = motion_placement,
             });
         }
     }
+    if (motion_cost_t0) {
+        const u64 end = __rdtsc();
+        if (!motion_cost_t2) {
+            motion_cost_t2 = end;
+        }
+        MotionCost::Add(MotionCost::BIdentity, motion_cost_t1 - motion_cost_t0);
+        MotionCost::Add(MotionCost::BOffsets, motion_cost_t2 - motion_cost_t1);
+        MotionCost::Add(MotionCost::BHistory, end - motion_cost_t2);
+    }
+    split(); // CS1: the motion block
     // bbport (BB_TWIN_USAGE_LOG, narrowing the prepared twins): each twin a draw bound, once, and once more when one
     // of its draws had history. (The GPU thread only: a map by pipeline, the key described on a change.)
     if (motion_draw && TwinUsageLogOn()) {
@@ -5306,9 +5643,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         draw_jitter = upscaler->Jitter();
     }
     ClipJitterPush(pipeline);
+    split(); // CS2: jitter
     if (!batch_variant) {
+        MotionCost::bind_base = split_base < 0 ? -1 : split_base == MotionCost::CS0 ? MotionCost::CB0 : MotionCost::OB0;
         pipeline->BindResources(set_writes, push_data, set1_first_write);
+        MotionCost::bind_base = -1;
     }
+    split(); // CS3: push constants and descriptors
     // bbport diagnosis (BB_JITTER_DIAG=1): depth-tested draws jittered, drawn before the scene
     // depth was known, or into another depth buffer, every 5 s.
     if (static const bool jitter_diag = std::getenv("BB_JITTER_DIAG") != nullptr;
@@ -5350,10 +5691,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             window = now;
         }
     }
+    split(); // CS4: to the dynamic state
     UpdateDynamicState(pipeline, is_indexed);
+    split(); // CS5: the dynamic state
     MarkPass(pipeline, state);
     FullBarrierBeforeDraw(scheduler);
     scheduler.BeginRendering(state);
+    split(); // CS6: pass, barrier, the scheduler's BeginRendering
     if (Scheduler::BreadcrumbsOn()) { // BB_GPU_BREADCRUMBS: the pass's shaders, listed with its number
         for (const auto* stage : pipeline->GetStages()) {
             if (stage) {
@@ -5399,6 +5743,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
         }
     });
+    split(); // CS7: the draw's command (offsets, pipeline and draw recorded)
     // bbport (scene HDR): the tone pass and the pass after it, drawn again into the HDR shadows.
     if (pipeline->GetHdrRole() != GraphicsPipeline::HdrRole::None && !batched) [[unlikely]] {
         RecordHdrShadow(*pipeline, state, is_indexed, num_indices, num_instances, first_vertex,
@@ -5428,6 +5773,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 memory->IsValidGpuMapping(sharp.base_address, bytes)) {
                 camera_motion->OnVelocityConstants(
                     reinterpret_cast<const float*>(sharp.base_address), bytes / sizeof(float));
+                // bbport (still draws): its world-to-clip rows (c24..c39) confirm the camera this frame's draws
+                // were drawn with.
+                object_motion->OnVelocityClip(reinterpret_cast<const float*>(sharp.base_address) + 24);
             }
         }
     }
@@ -9334,7 +9682,11 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     }
     // bbport: object motion vector attachment of G-buffer pipelines.
     if (key.motion_vectors) {
+        const u64 attach_start = MotionCost::On() ? __rdtsc() : 0;
         object_motion->Attach(state, state.width, state.height);
+        if (attach_start) {
+            MotionCost::Add(MotionCost::BAttach, __rdtsc() - attach_start);
+        }
     }
     return state;
 }

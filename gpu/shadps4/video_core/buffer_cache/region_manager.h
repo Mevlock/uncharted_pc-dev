@@ -97,6 +97,8 @@ public:
             CountWriteFaults(start_page, end_page);
         }
         if constexpr (enable) {
+            // bbport (still draws): any write the tracker learns of, the guest's or the GPU's.
+            writes.fetch_add(1, std::memory_order_relaxed);
             bits.SetRange(start_page, end_page);
             if constexpr (type == Type::GPU) {
                 const u32 frame = g_guest_frames.load(std::memory_order_relaxed);
@@ -233,6 +235,10 @@ public:
     }
 
     LockType lock;
+    /// bbport (still draws): how often pages of this region were marked written (by the guest: a write fault or an
+    /// invalidation; by the GPU: a write recorded). A buffer in a region whose count stands still was not written
+    /// through anything the tracker sees. Read without the lock (MemoryTracker::WriteEpoch).
+    std::atomic<u32> writes{0};
 
 private:
     /**

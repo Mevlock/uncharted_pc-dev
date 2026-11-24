@@ -43,6 +43,20 @@ public:
             });
     }
 
+    /// bbport (still draws): the sum of the write counts (RegionManager::writes) of the 4 MiB regions the range
+    /// lies in: it changes when the guest or the GPU wrote there. Lock-free, any thread (region managers are never
+    /// freed).
+    u64 WriteEpoch(VAddr cpu_addr, u64 size) noexcept {
+        u64 epoch = 0;
+        const u64 last = (cpu_addr + (size ? size - 1 : 0)) >> TRACKER_HIGHER_PAGE_BITS;
+        for (u64 page = cpu_addr >> TRACKER_HIGHER_PAGE_BITS; page <= last && page < NUM_HIGH_PAGES; ++page) {
+            if (const auto* manager = top_tier[page]) {
+                epoch += manager->writes.load(std::memory_order_relaxed);
+            }
+        }
+        return epoch;
+    }
+
     /// Mark region as CPU modified, notifying the device_tracker about this change
     void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
         IteratePages<false>(dirty_cpu_addr, query_size,

@@ -31,6 +31,8 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_draw_pipe.h"
 #include "bbport_threads.h"
+#include <immintrin.h>
+#include "video_core/renderer_vulkan/vk_object_motion.h"
 
 #include <chrono>
 
@@ -707,7 +709,12 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
         }
         // current_cmdbuf only changes after SyncRecording(), which waits for this thread.
         BbTrace::Record(BbTrace::ChunkBegin);
+        const u64 cost_start = MotionCost::On() ? __rdtsc() : 0;
         chunk->Execute(current_cmdbuf);
+        if (cost_start) {
+            MotionCost::Add(MotionCost::RChunks, 1);
+            MotionCost::Add(MotionCost::RCycles, __rdtsc() - cost_start);
+        }
         BbTrace::Record(BbTrace::ChunkEnd);
         {
             std::scoped_lock lk{recorder_mutex};

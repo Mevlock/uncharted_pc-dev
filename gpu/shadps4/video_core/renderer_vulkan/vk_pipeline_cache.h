@@ -52,6 +52,9 @@ void LoopCountPoll(); ///< BB_LOOP_COUNT: names the shaders that recorded a long
 class Instance;
 class Scheduler;
 class ShaderCache;
+namespace Motion {
+struct StillProgram; // motion_still.h
+}
 
 struct Program {
     struct Module {
@@ -67,6 +70,8 @@ struct Program {
     /// bbport: `info` as translated, for draw-preparation workers (they must not read `info`,
     /// whose user data the GPU thread rewrites every draw). Guarded by programs_mutex.
     std::unique_ptr<Shader::Info> info_template;
+    /// bbport (still draws): a vertex program's still data (StillProgramOf), looked up once.
+    mutable std::atomic<Motion::StillProgram*> still{nullptr};
 
     Program() = default;
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)
@@ -82,6 +87,10 @@ struct Program {
         modules[perm_idx] = {module, std::move(spec)};
     }
 };
+
+/// bbport (still draws): a stored SPIR-V binary of program `pgm_hash` (any of its permutations) from the shader
+/// cache; false when it holds none. Any thread.
+bool LoadStoredShaderBinary(u64 pgm_hash, std::vector<u32>& spv);
 
 struct DrawIndirectParams {
     u16 vertex_sgpr_offset;
@@ -139,8 +148,16 @@ struct PrepWorker {
         VAddr pgm_base;
         const std::vector<u32>* flat;
     };
+    /// The worker's copy of a program's Info, with the permutation its last draw of the program took: compared
+    /// first (as the GPU thread's Program::last_used). The motion twins' permutations stand behind the ordinary
+    /// ones in a program's list: found by walking it, a twin draw compared ~12 specializations for each of its
+    /// stage programs (~280 ns of a twin draw's preparation), an ordinary draw 2.
+    struct Info : Shader::Info {
+        explicit Info(const Shader::Info& info) : Shader::Info(info) {}
+        size_t last_perm = 0;
+    };
     // Node-based: stages keep pointers to these Infos while later stages are inserted.
-    std::unordered_map<const Program*, Shader::Info> infos;
+    std::unordered_map<const Program*, Info> infos;
     boost::container::static_vector<Stage, MaxShaderStages> stages;
     bool failed = false;
     bool compile = false; ///< may translate missing programs and build pipelines

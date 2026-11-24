@@ -168,6 +168,8 @@ public:
 
     /// Return true when a region is modified from the GPU
     [[nodiscard]] bool IsRegionGpuModified(VAddr addr, size_t size);
+    /// bbport (still draws): MemoryTracker::WriteEpoch (any thread).
+    [[nodiscard]] u64 WriteEpoch(VAddr addr, size_t size);
     /// bbport (native batch): the arena an address lies in (one buffer per arena page).
     [[nodiscard]] u64 ArenaKey(VAddr addr) const noexcept {
         return addr >> arena_page_bits;
