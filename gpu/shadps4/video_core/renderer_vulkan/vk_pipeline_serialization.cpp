@@ -3309,13 +3309,18 @@ void PipelineCache::WarmUpThread() {
                     by_hash.emplace(twin.hash, &stage);
                 }
             }
+            // (The stage each hash must be, as the variant ship's read: two shaders can share a hash. U3's vertex
+            // shader 000000008e11813d did not get its twin here, the first copy found being U2's pixel shader, so the
+            // twin was translated and compiled in play at the London valve room.)
             std::set<u64> twin_wanted;
+            std::unordered_map<u64, u32> twin_types;
             for (const auto& v : twin_listed) {
                 twin_wanted.insert(v.hash);
+                twin_types.try_emplace(v.hash, ShaderTypeOf(v.spec.runtime_info.hw_stage));
             }
             u64 twin_scanned = 0;
             std::unordered_map<u64, std::vector<u32>> twin_registers;
-            const auto twin_code = ReadGameShaderCode(twin_wanted, &twin_scanned, &twin_registers);
+            const auto twin_code = ReadGameShaderCode(twin_wanted, &twin_scanned, &twin_registers, &twin_types);
             const double t_twin_read = elapsed_ms();
             std::atomic<u32> twins_built{0}, twins_failed{0}, twins_progress{0};
             std::vector<std::pair<u64, LoadedStage*>> twin_new_stages;
