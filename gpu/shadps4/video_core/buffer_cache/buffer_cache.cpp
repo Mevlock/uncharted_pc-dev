@@ -3261,6 +3261,10 @@ bool BufferCache::IsRegionGpuModified(VAddr addr, size_t size) {
     return memory_tracker->IsRegionGpuModified(addr, size);
 }
 
+u64 BufferCache::WriteEpoch(VAddr addr, size_t size) {
+    return memory_tracker->WriteEpoch(addr, size);
+}
+
 void BufferCache::ProcessFaultBuffer() {
     fault_manager->ProcessFaultBuffer();
 }

@@ -812,6 +812,8 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     g_prepared_read_pending = [](VAddr address, u64 size) {
         return busy_check->OnStageA() && !busy_check->DrawPipeIdle() && busy_check->PendingWriteOverlaps(address, size);
     };
+    // bbport (still draws): the workers' still keys take in the write counts of the regions a draw's buffers lie in.
+    g_guest_write_epoch = [](VAddr address, u64 size) { return busy_check->buffer_cache.WriteEpoch(address, size); };
     if (ud_read_sync) {
         Shader::g_ud_table_read = [](u64 address, u64 size) {
             if (CaptureDirectRead(address, size)) {
@@ -4351,6 +4353,14 @@ void ReportMotionCost() {
                     prep ? 100.0 * c[MotionCost::PrepUnavailable] / prep : 0.0,
                     prep ? 100.0 * c[MotionCost::PrepChecksum] / prep : 0.0,
                     prep ? 100.0 * c[MotionCost::PrepRejected] / prep : 0.0);
+        if (c[MotionCost::BGate] || c[MotionCost::WStillDraws]) {
+            std::printf("Motion cost gate: %.1f ns a motion draw on stage B (the still table %.1f), %.0f still draws a "
+                        "frame; workers: %.0f still keys a frame, %.0f ns each\n",
+                        ns_each(c[MotionCost::BGate], c[MotionCost::BMotionDraws]),
+                        ns_each(c[MotionCost::BGateSeen], c[MotionCost::BMotionDraws]),
+                        c[MotionCost::BGated] / 600.0, c[MotionCost::WStillDraws] / 600.0,
+                        ns_each(c[MotionCost::WStill], c[MotionCost::WStillDraws]));
+        }
         const auto parts = [&](u32 base, u64 n) {
             return std::array<double, 5>{ns_each(c[base], n), ns_each(c[base + 1], n), ns_each(c[base + 2], n),
                                          ns_each(c[base + 3], n), ns_each(c[base + 4], n)};
@@ -4817,6 +4827,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             if (flip != motion_flip) {
                 motion_flip = flip;
                 object_motion->OnFrameStart();
+                if (Motion::Survey::On()) {
+                    motion_survey.NextFrame();
+                }
                 if (MotionCost::On()) {
                     ReportMotionCost();
                 }
@@ -5321,7 +5334,63 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     motion_cost_t1 = motion_cost_t0 ? __rdtsc() : 0;
-    if (motion_draw && motion_geometry) {
+    // BB_MOTION_GATE_CEILING=<percent> (measurement only, the vectors are WRONG with it): that share of the motion
+    // draws (picked by mesh, the same ones every frame) goes out without store, history and parameter, as a draw
+    // gated for standing still would: the most a still-draw gate with a free decision can save on this thread.
+    static const u32 gate_ceiling = [] {
+        const char* env = std::getenv("BB_MOTION_GATE_CEILING");
+        const u32 percent = env ? u32(std::strtoul(env, nullptr, 10)) : 0;
+        if (percent) {
+            std::printf("Object motion: BB_MOTION_GATE_CEILING=%u: %u%% of the motion draws without history "
+                        "(measurement only, wrong vectors)\n", percent, percent);
+        }
+        return percent;
+    }();
+    bool ceiling_gated = false;
+    if (gate_ceiling && motion_draw && motion_geometry) {
+        u64 h = (motion_geometry ^ regs.index_base_address.Address<VAddr>() ^ u64(regs.num_indices) << 40) *
+                0x9e3779b97f4a7c15ULL;
+        h ^= h >> 32;
+        ceiling_gated = h % 100 < gate_ceiling;
+        if (ceiling_gated) {
+            push_data.motion_param = 0;
+        }
+    }
+    // bbport (still draws): a prepared draw whose still key was drawn in the frame before stands still: the camera
+    // pass gives its motion, it takes no store, history or parameter (ObjectMotion::Still). A draw without a key
+    // (not prepared, or its program's position inputs or camera place are not known) keeps its history.
+    bool still_draw = false;
+    if (motion_draw && motion_geometry && !ceiling_gated && Shader::MotionVectors::characters &&
+        object_motion->GateEnabled()) {
+        const u64 gate_start = motion_cost_t0 ? __rdtsc() : 0;
+        const auto* still_program = draw_prepared ? draw_prepared->still_program : nullptr;
+        if (still_program && draw_prepared->still_key) {
+            const auto flat = pipeline->GetStage(Shader::SwStage::Vertex).FlatUserData();
+            const u64 key = draw_prepared->still_key ^ ((u64(index_offset) << 1 | u64(is_indexed)) *
+                                                        0x9e3779b97f4a7c15ULL);
+            still_draw = object_motion->Still(*still_program, flat, key, draw_prepared->camera_key);
+        } else {
+            object_motion->CountNoKey();
+            if (still_program && still_program->state.load(std::memory_order_relaxed) ==
+                                     Motion::StillProgram::NoCamera) {
+                const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
+                object_motion->LearnCameraFrom(vs_info.pgm_hash, const_cast<Motion::StillProgram&>(*still_program),
+                                               vs_info.FlatUserData());
+            }
+        }
+        // BB_MOTION_GATE_CHECK=1 (diagnosis): the other way round, only the still draws keep their vectors.
+        if (object_motion->GateCheck() ? !still_draw : still_draw) {
+            push_data.motion_param = 0;
+            still_draw = true;
+        } else {
+            still_draw = false;
+        }
+        if (gate_start) {
+            MotionCost::Add(MotionCost::BGate, __rdtsc() - gate_start);
+            MotionCost::Add(MotionCost::BGated, still_draw);
+        }
+    }
+    if (motion_draw && motion_geometry && !ceiling_gated && !still_draw) {
         const auto& vs = pipeline->GetStage(Shader::SwStage::Vertex);
         const auto [base_vertex, first_instance] =
             GetDrawOffsets(regs, vs, pipeline->GetFetchShader());
@@ -5358,6 +5427,48 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 palette = XXH3_64bits_withSeed(reinterpret_cast<const void*>(address), size,
                                                palette);
             }
+        }
+        // BB_MOTION_STATIC_LOG=1 (diagnosis): the draw's inputs for the survey of draws that do not move.
+        if (Motion::Survey::On()) {
+            Motion::Survey::Draw survey{.shader = vs.pgm_hash,
+                                        .geometry = motion_geometry,
+                                        .indices = index_address,
+                                        .index_count = regs.num_indices,
+                                        .instances = regs.num_instances.NumInstances(),
+                                        .first_instance = first_instance,
+                                        .images = !vs.images.empty()};
+            for (const auto& resource : vs.buffers) {
+                if (resource.IsSpecial() || survey.num_buffers == Motion::Survey::MaxBuffers) continue;
+                const auto buffer = resource.GetSharp(vs);
+                if (!buffer.Valid()) continue;
+                auto& out = survey.buffers[survey.num_buffers++];
+                out.size = buffer.GetSize();
+                out.stride = buffer.GetStride();
+                out.address = buffer.base_address;
+                out.gpu_written = buffer_cache.IsRegionGpuModified(out.address, out.size);
+                if ((out.stride == 16 || out.stride == 0) && out.size && out.size <= 1_MB &&
+                    memory->IsValidGpuMapping(out.address, 0) &&
+                    memory->ClampRangeSize(out.address, out.size) == out.size) {
+                    if (out.size >= 64_KB) {
+                        // A large table: hashed once a frame (15 us a draw otherwise).
+                        static VAddr big_address = 0;
+                        static u64 big_frame = ~0ull, big_hash = 0;
+                        survey.cpu_written |= buffer_cache.IsRegionCpuModified(out.address, out.size);
+                        if (big_address != out.address || big_frame != motion_survey.Frame()) {
+                            big_address = out.address;
+                            big_frame = motion_survey.Frame();
+                            big_hash = XXH3_64bits(reinterpret_cast<const void*>(out.address), out.size) | 1;
+                        }
+                        out.content = big_hash;
+                    } else {
+                        out.content = XXH3_64bits(reinterpret_cast<const void*>(out.address), out.size) | 1;
+                    }
+                }
+            }
+            const auto flat = vs.FlatUserData();
+            survey.flat = flat.data();
+            survey.flat_size = u32(flat.size());
+            motion_survey.OnDraw(survey);
         }
         push_data.motion_param = 0;
         if (!gated || object_motion->Moving({.shader = vs.pgm_hash,
@@ -5578,6 +5689,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 memory->IsValidGpuMapping(sharp.base_address, bytes)) {
                 camera_motion->OnVelocityConstants(
                     reinterpret_cast<const float*>(sharp.base_address), bytes / sizeof(float));
+                // bbport (still draws): its world-to-clip rows (c24..c39) confirm the camera this frame's draws
+                // were drawn with.
+                object_motion->OnVelocityClip(reinterpret_cast<const float*>(sharp.base_address) + 24);
             }
         }
     }

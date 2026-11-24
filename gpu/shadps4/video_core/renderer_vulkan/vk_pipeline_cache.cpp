@@ -38,6 +38,7 @@
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/motion_history.h"
 #include "video_core/renderer_vulkan/vk_draw_prep.h"
+#include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_binary.h"
@@ -2136,6 +2137,12 @@ vk::ShaderModule PipelineCache::TranslateModule(Shader::Info& info,
         module = CompileSPV(*patch, instance.GetDevice());
     } else {
         module = CompileSPV(spv, instance.GetDevice());
+    }
+
+    // bbport (still draws): what a vertex shader's position reads, for the program's still data (its binary may
+    // not be in the shader cache yet when its first draw comes).
+    if (info.hw_stage == HwStage::Vertex && Shader::MotionVectors::characters) {
+        NoteVertexShaderCode(info.pgm_hash, spv);
     }
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);

@@ -7,7 +7,10 @@
 #include <random>
 #include <tuple>
 #include <vector>
+#include <cstring>
+#include <initializer_list>
 #include "gpu/shadps4/video_core/renderer_vulkan/motion_history.h"
+#include "gpu/shadps4/video_core/renderer_vulkan/motion_still.h"
 
 using namespace Vulkan::Motion;
 
@@ -56,6 +59,232 @@ private:
     std::map<std::pair<Key, uint32_t>, uint32_t> previous, current;
     std::map<Key, uint32_t> seen;
 };
+
+// A few SPIR-V instructions put together by hand, for PositionInputs (only what it reads: no valid module).
+struct Spv {
+    std::vector<uint32_t> words{0x07230203u, 0x00010600u, 0, 0, 0};
+    uint32_t next = 1;
+    uint32_t Id() {
+        return next++;
+    }
+    void Op(uint32_t op, std::initializer_list<uint32_t> operands) {
+        words.push_back(uint32_t(operands.size() + 1) << 16 | op);
+        words.insert(words.end(), operands);
+    }
+    /// An instruction with a result: its id.
+    uint32_t Value(uint32_t op, std::initializer_list<uint32_t> operands) {
+        const uint32_t id = Id();
+        words.push_back(uint32_t(operands.size() + 3) << 16 | op);
+        words.push_back(0); // the type: not read
+        words.push_back(id);
+        words.insert(words.end(), operands);
+        return id;
+    }
+    void Name(uint32_t id, const char* name) {
+        const size_t length = std::strlen(name) / 4 + 1;
+        std::vector<uint32_t> text(length, 0);
+        std::memcpy(text.data(), name, std::strlen(name));
+        words.push_back(uint32_t(length + 2) << 16 | 5);
+        words.push_back(id);
+        words.insert(words.end(), text.begin(), text.end());
+    }
+    uint32_t Constant(uint32_t value) {
+        return Value(43, {value});
+    }
+    uint32_t Variable(uint32_t storage) {
+        return Value(59, {storage});
+    }
+    std::vector<uint32_t> Done() {
+        words[3] = next;
+        return words;
+    }
+};
+
+// The shape of Uncharted's vertex shaders: constants from the flat data, a pointer word loaded and never used, a
+// branch on a flat word, a stream read at an index from a user-data register, another output from another word.
+struct VertexShader : Spv {
+    uint32_t flat = Variable(12), position = Variable(3), other = Variable(3), push = Variable(9),
+             stream = Variable(12), texture = Variable(0);
+    uint32_t c[16];
+    uint32_t entry = 0;
+    VertexShader() {
+        Name(flat, "srt_flatbuf");
+        Op(71, {position, 11, 0}); // BuiltIn Position
+        for (uint32_t i = 0; i < 16; ++i) {
+            c[i] = Constant(i);
+        }
+        Op(54, {0, Id(), 0, 0}); // OpFunction
+        entry = Id();
+        Op(248, {entry});
+    }
+    uint32_t Flat(uint32_t word) {
+        return Value(61, {Value(65, {flat, c[0], c[word]})});
+    }
+    std::vector<uint32_t> End() {
+        Op(253, {});
+        Op(56, {});
+        return Done();
+    }
+};
+
+std::vector<uint16_t> PositionWords(const std::vector<uint32_t>& code, bool expect_valid = true,
+                                    std::span<const uint32_t> flat = {}) {
+    const auto inputs = PositionCode::Parse(code, "srt_flatbuf", 4, 4)->Inputs(flat);
+    assert(inputs.valid == expect_valid);
+    return inputs.words;
+}
+
+void PositionInputsTest() {
+    {
+        VertexShader v;
+        const uint32_t object = v.Flat(5);
+        v.Flat(7); // a pointer word: read, used by nothing
+        const uint32_t condition = v.Value(171, {v.Flat(9), v.c[0]});
+        const uint32_t then_label = v.Id(), merge_label = v.Id();
+        v.Op(247, {merge_label, 0});
+        v.Op(250, {condition, then_label, merge_label});
+        v.Op(248, {then_label});
+        const uint32_t waved = v.Value(128, {object, v.Flat(11)});
+        v.Op(249, {merge_label});
+        v.Op(248, {merge_label});
+        const uint32_t phi = v.Value(245, {waved, then_label, object, 0});
+        const uint32_t reg = v.Value(61, {v.Value(65, {v.push, v.c[4], v.c[3]})}); // user-data register 3
+        const uint32_t vertex = v.Value(61, {v.Value(65, {v.stream, v.c[0], reg})});
+        v.Op(62, {v.position, v.Value(128, {phi, vertex})});
+        v.Op(62, {v.other, v.Flat(13)});
+        // The other push members (viewport, buffer offsets) are not user data.
+        v.Op(62, {v.position, v.Value(61, {v.Value(65, {v.push, v.c[2]})})});
+        const auto code = v.End();
+        // Without flat data the branch runs both ways.
+        assert((PositionWords(code) == std::vector<uint16_t>{3, 5, 9, 11}));
+        // With it, word 9 decides: zero skips the block that reads word 11 (the wind's clock for what does not
+        // wave); word 9 itself stays an input.
+        std::vector<uint32_t> flat(16, 0);
+        assert((PositionWords(code, true, flat) == std::vector<uint16_t>{3, 5, 9}));
+        const auto parsed = PositionCode::Parse(code, "srt_flatbuf", 4, 4);
+        const uint64_t off = parsed->Config(flat);
+        flat[11] = 77; // not a branch's word: the same configuration
+        assert(parsed->Config(flat) == off);
+        flat[9] = 1;
+        assert(parsed->Config(flat) != off && parsed->Config(flat) != parsed->Config({}));
+        assert((PositionWords(code, true, flat) == std::vector<uint16_t>{3, 5, 9, 11}));
+    }
+    {
+        // Conditions of several comparisons: decided only when their flat words decide them.
+        VertexShader v;
+        const uint32_t less = v.Value(184, {v.Flat(8), v.c[1]});          // float(word 8) < float bits 1
+        const uint32_t unequal = v.Value(182, {v.Flat(9), v.c[0]});       // word 9 != 0.0
+        const uint32_t both = v.Value(168, {v.Value(167, {less, unequal})}); // !(less && unequal)
+        const uint32_t then_label = v.Id(), merge_label = v.Id();
+        v.Op(247, {merge_label, 0});
+        v.Op(250, {both, then_label, merge_label});
+        v.Op(248, {then_label});
+        const uint32_t inner = v.Flat(11);
+        v.Op(249, {merge_label});
+        v.Op(248, {merge_label});
+        v.Op(62, {v.position, v.Value(245, {inner, then_label, v.Flat(5), v.entry})});
+        const auto code = v.End();
+        std::vector<uint32_t> flat(16, 0);
+        // word 9 == 0.0: the and is false whatever word 8 is, the block runs: the first value of the phi.
+        assert((PositionWords(code, true, flat) == std::vector<uint16_t>{8, 9, 11}));
+        flat[9] = 0x3f800000u; // 1.0, and word 8 (0.0) below the constant's 1.4e-45: the block is skipped
+        assert((PositionWords(code, true, flat) == std::vector<uint16_t>{5, 8, 9}));
+    }
+    {
+        // Through a variable: every store to it counts; a store through a chain into the position too.
+        VertexShader v;
+        const uint32_t local = v.Variable(7);
+        v.Op(62, {local, v.Flat(5)});
+        v.Op(62, {local, v.Flat(6)});
+        v.Op(62, {v.Value(65, {v.position, v.c[1]}), v.Value(61, {local})});
+        v.Op(62, {v.other, v.Flat(13)});
+        assert((PositionWords(v.End()) == std::vector<uint16_t>{5, 6}));
+    }
+    {
+        // The position read back and stored again (the emitter's viewport and motion code): the first store counts.
+        VertexShader v;
+        v.Op(62, {v.position, v.Flat(5)});
+        v.Op(62, {v.position, v.Value(128, {v.Value(61, {v.position}), v.c[1]})});
+        assert((PositionWords(v.End()) == std::vector<uint16_t>{5}));
+    }
+    {
+        VertexShader v; // a texture
+        v.Op(62, {v.position, v.Value(61, {v.texture})});
+        PositionWords(v.End(), false);
+    }
+    {
+        VertexShader v; // a read through a device address
+        v.Op(62, {v.position, v.Value(61, {v.Value(120, {v.Flat(5)})})});
+        PositionWords(v.End(), false);
+    }
+    {
+        VertexShader v; // a flat word at a computed index
+        v.Op(62, {v.position, v.Value(61, {v.Value(65, {v.flat, v.c[0], v.Flat(5)})})});
+        PositionWords(v.End(), false);
+    }
+    {
+        VertexShader v; // a call
+        v.Op(62, {v.position, v.Value(57, {v.Id()})});
+        PositionWords(v.End(), false);
+    }
+    {
+        VertexShader v; // no position stored
+        v.Op(62, {v.other, v.Flat(5)});
+        PositionWords(v.End(), false);
+    }
+    assert(!PositionCode::Parse(std::vector<uint32_t>{1, 2, 3}, "srt_flatbuf", 4, 4)->Valid());
+}
+
+void CameraTest() {
+    // Flat data of 80 words: the object matrix at 10..21, the view at 24..39, the projection at 44..59.
+    std::vector<uint32_t> flat(80, 0);
+    const auto put = [&flat](size_t at, std::initializer_list<float> values) {
+        for (const float value : values) {
+            std::memcpy(&flat[at++], &value, 4);
+        }
+    };
+    put(10, {1, 0, 0, 5, 0, 1, 0, 6, 0, 0, 1, 7});
+    const float view[16] = {0.8f, 0, -0.6f, 12.5f, 0, 1, 0, -3.25f, 0.6f, 0, 0.8f, -140.0f, 0, 0, 0, 1};
+    const float proj[16] = {1.3f, 0, 0.002f, 0, 0, 2.3f, -0.001f, 0, 0, 0, -1.0001f, -0.2f, 0, 0, -1, 0};
+    std::memcpy(&flat[24], view, sizeof(view));
+    std::memcpy(&flat[44], proj, sizeof(proj));
+    float clip[16];
+    for (int r = 0; r < 4; ++r) {
+        for (int col = 0; col < 4; ++col) {
+            double sum = 0; // the game's own product: another order and precision than ProductIs
+            for (int k = 3; k >= 0; --k) {
+                sum += double(proj[r * 4 + k]) * double(view[k * 4 + col]);
+            }
+            clip[r * 4 + col] = float(sum);
+        }
+    }
+    std::vector<uint16_t> words;
+    for (uint16_t w = 8; w < 62; ++w) {
+        words.push_back(w);
+    }
+    uint16_t view_at = 0, proj_at = 0;
+    assert(FindCamera(flat, words, clip, view_at, proj_at) && view_at == 24 && proj_at == 44);
+    assert(ProductIs(&flat[24], &flat[44], clip, CameraTolerance));
+    // Another camera (a turn of a hundredth), a truncated word list, a second copy of the pair: no camera.
+    float turned[16];
+    std::memcpy(turned, clip, sizeof(clip));
+    turned[0] *= 1.01f;
+    assert(!FindCamera(flat, words, turned, view_at, proj_at));
+    assert(!FindCamera(flat, {words.begin(), words.begin() + 40}, clip, view_at, proj_at));
+    std::vector<WordRun> runs;
+    assert(WithoutCamera(words, 24, 44, runs) && (runs == std::vector<WordRun>{{8, 16}, {40, 4}, {60, 2}}));
+    assert(!WithoutCamera({words.begin(), words.begin() + 40}, 24, 44, runs)); // a matrix not wholly read
+    auto doubled = flat;
+    doubled.resize(160, 0);
+    std::memcpy(&doubled[100], view, sizeof(view));
+    std::memcpy(&doubled[120], proj, sizeof(proj));
+    auto more = words;
+    for (uint16_t w = 100; w < 136; ++w) {
+        more.push_back(w);
+    }
+    assert(!FindCamera(doubled, more, clip, view_at, proj_at));
+    assert((Runs({1, 2, 3, 7, 9, 10}) == std::vector<WordRun>{{1, 3}, {7, 1}, {9, 2}}));
+}
 
 bool Same(const History::Allocation& a, const History::Allocation& b) {
     return a.store == b.store && a.load == b.load && a.vertices == b.vertices && a.instances == b.instances &&
@@ -175,7 +404,38 @@ void RandomEquivalence(uint32_t seed) {
 }
 } // namespace
 
-int main() {
+// With SPIR-V files as arguments (a local shader cache's binaries): each file's position inputs on a line, for a
+// look at real shaders; no checks.
+int ListPositionInputs(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        std::vector<uint32_t> code;
+        if (FILE* file = std::fopen(argv[i], "rb")) {
+            uint32_t word = 0;
+            while (std::fread(&word, 4, 1, file) == 1) {
+                code.push_back(word);
+            }
+            std::fclose(file);
+        }
+        // (Without flat data: every branch both ways.)
+        const auto inputs = PositionCode::Parse(code, "srt_flatbuf", 4, 4)->Inputs({});
+        std::printf("%s: ", argv[i]);
+        if (!inputs.valid) {
+            std::printf("no (%s)\n", inputs.why);
+            continue;
+        }
+        std::printf("%zu words:", inputs.words.size());
+        for (const auto& run : Runs(inputs.words)) {
+            std::printf(run.count > 1 ? " %u-%u" : " %u", unsigned(run.first), unsigned(run.first + run.count - 1));
+        }
+        std::printf("\n");
+    }
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1) {
+        return ListPositionInputs(argc, argv);
+    }
     const std::array<uint16_t, 5> indices{1000, 1007, 1002, 1007, UINT16_MAX};
     const auto range = IndexedRange(std::span(indices), -900, true);
     assert(range.first == 100 && range.count == 8);
@@ -299,10 +559,55 @@ int main() {
     ranges.Trim(IndexRangeCache::Revalidate + IndexRangeCache::Unused + 1);
     assert(ranges.Size() == 0);
 
+    // Still draws: a key counts when it was drawn in the frame before, however often and in whatever order.
+    {
+        StillDraws still;
+        still.NextFrame();
+        assert(!still.Seen(10) && !still.Seen(10) && !still.Seen(0)); // new this frame, twice the same answer
+        still.NextFrame();
+        assert(still.Seen(0) && still.Seen(10) && still.Seen(10) && !still.Seen(20));
+        still.NextFrame();
+        assert(still.Seen(20) && still.Seen(10));
+        still.NextFrame(); // 20 moved away (another key), 10 not drawn
+        assert(!still.Seen(30));
+        still.NextFrame();
+        assert(!still.Seen(20) && !still.Seen(10) && still.Seen(30)); // back after a frame away: not still
+        still.NextFrame();
+        assert(still.Seen(20) && still.Seen(10) && still.Seen(30));
+        still.Forget(); // a cut
+        still.NextFrame();
+        assert(!still.Seen(20) && !still.Seen(10));
+        // Against a plain model over many frames, with the table growing, trimming and shrinking.
+        StillDraws table;
+        std::map<uint64_t, uint32_t> last; // key -> the last frame drawn
+        std::mt19937_64 rng{7};
+        for (uint32_t frame = 1; frame <= 400; ++frame) {
+            table.NextFrame();
+            const uint32_t draws = frame % 50 < 25 ? 3000 : 40;
+            std::map<uint64_t, bool> answers;
+            for (uint32_t i = 0; i < draws; ++i) {
+                // Most keys repeat from frame to frame; some change every frame.
+                const uint64_t key = rng() % 4 ? (rng() % 2500) * 2 : rng() * 2;
+                const auto it = last.find(key);
+                const bool expected = answers.contains(key) ? answers[key]
+                                                             : it != last.end() && it->second + 1 == frame;
+                answers.emplace(key, expected);
+                assert(table.Seen(key) == expected);
+            }
+            for (const auto& [key, answer] : answers) {
+                last[key] = frame;
+            }
+            assert(table.Size() <= 2 * 3000 + 64 * 3000);
+        }
+    }
+
+    PositionInputsTest();
+    CameraTest();
+
     assert(JitterPhases(1920, 1920) == 8);
     assert(JitterPhases(1280, 1920) == 18);
     assert(JitterPhases(960, 1920) == 32);
     assert(JitterPhases(640, 1920) == 72);
     assert(JitterPhases(0, 1920) == 8);
-    std::puts("Motion history: PASS (ranges, restart, offsets, matching, in-order = keyed pairing, capacity, gating, index cache, jitter)");
+    std::puts("Motion history: PASS (ranges, restart, offsets, matching, in-order = keyed pairing, capacity, gating, still draws, position inputs, camera place, index cache, jitter)");
 }

@@ -35,6 +35,10 @@
 
 namespace Vulkan {
 
+namespace Motion {
+struct StillProgram; // motion_still.h
+}
+
 struct PreparedStage {
     const Program* program;
     u64 hash;
@@ -108,6 +112,12 @@ struct PreparedDraw {
     u32 motion_records{};
     u64 reg_checksum{};
     u64 motion_geometry{};
+    /// bbport (still draws): a motion twin's still key (everything its positions follow from but the camera and the
+    /// draw's index offset; 0: none, the draw keeps its history) and the hash of its camera matrices, with its
+    /// vertex program's still data (vk_object_motion.h MakeStillKeys).
+    u64 still_key{};
+    u64 camera_key{};
+    const Motion::StillProgram* still_program{};
     GraphicsPipelineKey key{};
     u32 num_stages{};
     std::array<PreparedStage, MaxShaderStages> stages{};

@@ -51,6 +51,9 @@ void LoopCountPoll(); ///< BB_LOOP_COUNT: names the shaders that recorded a long
 class Instance;
 class Scheduler;
 class ShaderCache;
+namespace Motion {
+struct StillProgram; // motion_still.h
+}
 
 struct Program {
     struct Module {
@@ -66,6 +69,8 @@ struct Program {
     /// bbport: `info` as translated, for draw-preparation workers (they must not read `info`,
     /// whose user data the GPU thread rewrites every draw). Guarded by programs_mutex.
     std::unique_ptr<Shader::Info> info_template;
+    /// bbport (still draws): a vertex program's still data (StillProgramOf), looked up once.
+    mutable std::atomic<Motion::StillProgram*> still{nullptr};
 
     Program() = default;
     Program(Shader::HwStage stage, Shader::SwStage l_stage, Shader::ShaderParams params)
@@ -81,6 +86,10 @@ struct Program {
         modules[perm_idx] = {module, std::move(spec)};
     }
 };
+
+/// bbport (still draws): a stored SPIR-V binary of program `pgm_hash` (any of its permutations) from the shader
+/// cache; false when it holds none. Any thread.
+bool LoadStoredShaderBinary(u64 pgm_hash, std::vector<u32>& spv);
 
 struct DrawIndirectParams {
     u16 vertex_sgpr_offset;

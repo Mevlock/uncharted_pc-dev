@@ -504,6 +504,116 @@ private:
     FlatMap<GateKey, uint32_t, GateHash> gate_occurrences;
 };
 
+// Draws that do not move. A draw's still key is a hash of everything its vertex positions follow from but the camera
+// (its mesh and its object's constants, ObjectMotion's caller builds it). A key that was also drawn in the frame
+// before belongs to an object that stood where it stands now: its motion is the camera's, which the camera pass gives
+// exactly, so the draw needs no store, no history and no parameter. An object that starts to move has a new key at
+// once (its first moving frame has no stored positions to compare with: the camera's motion for that one frame, as
+// for a draw that appears); the frame it stops, its key repeats and it is still again. No order between draws and no
+// count of identical draws enters: the same key twice in a frame is the same answer twice.
+class StillDraws {
+public:
+    /// Whether `key` was drawn in the previous frame; notes it for this one.
+    bool Seen(uint64_t key) {
+        bool inserted = false;
+        Slot& slot = current.Insert(key, inserted);
+        if (inserted) {
+            slot.was = previous.Has(key);
+        }
+        return slot.was != 0;
+    }
+    void NextFrame() {
+        previous.swap(current);
+        current.Clear();
+    }
+    /// Nothing of before counts (a cut, a gap in the frames).
+    void Forget() {
+        previous.Clear();
+        current.Clear();
+    }
+    size_t Size() const {
+        return previous.used + current.used;
+    }
+
+private:
+    // Two open-addressing tables, this frame's keys and the previous frame's, emptied by starting a new generation
+    // (as FlatMap): no memory is given back or taken per frame. (One table that dropped old keys by rebuilding
+    // itself every other frame took ~270 ns a draw at 1000 draws a frame: the new block's page faults.)
+    struct Slot {
+        uint64_t key{};
+        uint32_t generation{};
+        uint32_t was{}; ///< the key was in the previous frame's table
+    };
+    struct Table {
+        std::vector<Slot> slots = std::vector<Slot>(2048);
+        size_t used = 0;
+        uint32_t generation = 1;
+
+        static size_t Start(uint64_t key) {
+            const uint64_t h = key * 0x9e3779b97f4a7c15ULL;
+            return size_t(h ^ (h >> 29));
+        }
+        bool Has(uint64_t key) const {
+            const size_t mask = slots.size() - 1;
+            for (size_t i = Start(key) & mask;; i = (i + 1) & mask) {
+                const Slot& slot = slots[i];
+                if (slot.generation != generation) {
+                    return false;
+                }
+                if (slot.key == key) {
+                    return true;
+                }
+            }
+        }
+        Slot& Insert(uint64_t key, bool& inserted) {
+            if ((used + 1) * 2 > slots.size()) {
+                Grow();
+            }
+            const size_t mask = slots.size() - 1;
+            for (size_t i = Start(key) & mask;; i = (i + 1) & mask) {
+                Slot& slot = slots[i];
+                if (slot.generation != generation) {
+                    slot = {key, generation, 0};
+                    ++used;
+                    inserted = true;
+                    return slot;
+                }
+                if (slot.key == key) {
+                    return slot;
+                }
+            }
+        }
+        void Grow() {
+            std::vector<Slot> old(slots.size() * 2);
+            old.swap(slots);
+            const uint32_t live = generation;
+            generation = 1;
+            used = 0;
+            for (const Slot& slot : old) {
+                if (slot.generation == live) {
+                    bool inserted = false;
+                    Insert(slot.key, inserted).was = slot.was;
+                }
+            }
+        }
+        void Clear() {
+            used = 0;
+            if (++generation == 0) { // wrapped: stale slots could look current
+                for (Slot& slot : slots) {
+                    slot.generation = 0;
+                }
+                generation = 1;
+            }
+        }
+        void swap(Table& other) noexcept {
+            slots.swap(other.slots);
+            std::swap(used, other.used);
+            std::swap(generation, other.generation);
+        }
+    };
+    Table previous, current;
+};
+
 // The pairing of 0.3.6.68 (a table keyed by draw and occurrence: the k-th of identical draws of a frame takes the k-th's
 // store of the previous frame), kept as the reference History must equal: BB_MOTION_HISTORY_CHECK=1 (diagnosis) runs
 // it next to History on the real draws and counts allocations that differ; the motion-history test compares the two.

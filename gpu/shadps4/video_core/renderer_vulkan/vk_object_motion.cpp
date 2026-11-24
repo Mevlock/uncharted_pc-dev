@@ -5,8 +5,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <immintrin.h>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 #include <vk_mem_alloc.h>
+#include <xxhash.h>
 #include "bbport_settings.h"
 #include "bbport_toggles.h"
 #include "shader_recompiler/resource.h"
@@ -50,7 +54,177 @@ bool CreateBuffer(const Instance& instance, vk::DeviceSize size, bool host, vk::
     return address != 0;
 }
 
+// The still data of the vertex shader programs, by program hash. Entries are never removed.
+std::mutex still_mutex;
+std::unordered_map<u64, std::unique_ptr<Motion::StillProgram>> still_programs;
+
+std::unique_ptr<Motion::StillProgram> AnalyzeStill(std::span<const u32> spv) {
+    auto program = std::make_unique<Motion::StillProgram>();
+    program->code = Motion::PositionCode::Parse(spv, "srt_flatbuf", Shader::PushData::UdRegsIndex,
+                                                Shader::NUM_USER_DATA_REGS / 4);
+    if (!program->code->Valid()) {
+        program->why = program->code->Why();
+        program->state.store(Motion::StillProgram::Unusable, std::memory_order_release);
+    }
+    return program;
+}
+
 } // namespace
+
+void NoteVertexShaderCode(u64 pgm_hash, std::span<const u32> spv) {
+    auto program = AnalyzeStill(spv);
+    std::scoped_lock lk{still_mutex};
+    still_programs.try_emplace(pgm_hash, std::move(program));
+}
+
+Motion::StillProgram& StillProgramOf(u64 pgm_hash) {
+    {
+        std::scoped_lock lk{still_mutex};
+        if (const auto it = still_programs.find(pgm_hash); it != still_programs.end()) {
+            return *it->second;
+        }
+    }
+    // Not translated in this session: its stored binary (read outside the lock; another thread may do the same,
+    // the first result stays).
+    std::vector<u32> spv;
+    std::unique_ptr<Motion::StillProgram> program;
+    if (LoadStoredShaderBinary(pgm_hash, spv)) {
+        program = AnalyzeStill(spv);
+    } else {
+        program = std::make_unique<Motion::StillProgram>();
+        program->why = "no stored code";
+        program->state.store(Motion::StillProgram::Unusable, std::memory_order_release);
+    }
+    std::scoped_lock lk{still_mutex};
+    return *still_programs.try_emplace(pgm_hash, std::move(program)).first->second;
+}
+
+StillKeys MakeStillKeys(Motion::StillProgram& program, std::span<const u32> flat, u64 seed) {
+    if (flat.size() < program.view_at + 16u || flat.size() < program.proj_at + 16u) {
+        return {};
+    }
+    const auto* variant = program.VariantFor(flat);
+    if (!variant) {
+        return {};
+    }
+    u64 h = seed ^ (variant->config * 0x9e3779b97f4a7c15ULL);
+    for (const auto& run : variant->key_runs) {
+        if (size_t(run.first) + run.count > flat.size()) {
+            return {};
+        }
+        h = XXH3_64bits_withSeed(flat.data() + run.first, size_t(run.count) * 4, h);
+    }
+    const u64 view = XXH3_64bits(flat.data() + program.view_at, 64);
+    const u64 camera = XXH3_64bits_withSeed(flat.data() + program.proj_at, 64, view);
+    return {h ? h : 1, camera ? camera : 1};
+}
+
+bool ObjectMotion::Still(const Motion::StillProgram& program, std::span<const u32> flat, u64 still_key,
+                         u64 camera_key) {
+    ++gate_stats.draws;
+    if (!frame_camera_key) {
+        // The frame's camera: the one its first draw with a key was drawn with (MakeStillKeys checked the size).
+        frame_camera_key = camera_key;
+        std::memcpy(frame_camera.data(), flat.data() + program.view_at, 64);
+        std::memcpy(frame_camera.data() + 16, flat.data() + program.proj_at, 64);
+        frame_camera_checked = false;
+    }
+    if (camera_key != frame_camera_key) {
+        // Another camera than the frame's: the camera pass does not know it. Not noted either: the draw is not
+        // still in the next frame, whatever camera it has then.
+        ++gate_stats.other_camera;
+        return false;
+    }
+    // Noted every frame, also while the gate may not act on it.
+    const u64 seen_start = MotionCost::On() ? __rdtsc() : 0;
+    const bool seen = still.Seen(still_key);
+    if (seen_start) {
+        MotionCost::Add(MotionCost::BGateSeen, __rdtsc() - seen_start);
+    }
+    if (camera_confirmed_frame + 1 != frame) {
+        ++gate_stats.frame_unconfirmed; // the frame before had no velocity pass, or another camera than its draws
+        return false;
+    }
+    if (!seen) {
+        ++gate_stats.moved;
+        return false;
+    }
+    ++gate_stats.still;
+    return true;
+}
+
+void ObjectMotion::LearnCameraFrom(u64 pgm_hash, Motion::StillProgram& program, std::span<const u32> flat) {
+    if (lessons.size() >= 4) {
+        return;
+    }
+    for (const auto& lesson : lessons) {
+        if (lesson.program == &program) {
+            return;
+        }
+    }
+    lessons.push_back({pgm_hash, &program, {flat.begin(), flat.end()}});
+}
+
+void ObjectMotion::OnVelocityClip(const float* clip) {
+    if (!gate_enabled) {
+        return;
+    }
+    if (frame_camera_key && !frame_camera_checked) {
+        frame_camera_checked = true;
+        float error = 0.0f;
+        if (Motion::ProductIs(frame_camera.data(), frame_camera.data() + 16, clip, Motion::CameraTolerance,
+                              &error)) {
+            camera_confirmed_frame = frame;
+            ++gate_stats.confirmed;
+            gate_stats.worst_error = std::max(gate_stats.worst_error, error);
+        } else {
+            static u32 lines = 0;
+            if (++gate_stats.refuted && lines < 8) {
+                ++lines;
+                std::printf("Object motion gate: the frame's draws have another camera than its velocity pass "
+                            "(error %.3g of a row): no still draws in the next frame\n", error);
+            }
+        }
+    }
+    for (auto& lesson : lessons) {
+        auto& program = *lesson.program;
+        if (program.state.load(std::memory_order_relaxed) != Motion::StillProgram::NoCamera) {
+            continue;
+        }
+        static u32 lines = 0;
+        float error = 0.0f;
+        size_t words = 0;
+        u32 matches[9]{};
+        if (program.LearnCamera(lesson.flat, clip, &error, &words, matches)) {
+            ++gate_stats.learned;
+            if (lines < 16) {
+                ++lines;
+                std::string runs;
+                if (const auto* variant = program.VariantFor(lesson.flat)) {
+                    for (const auto& run : variant->key_runs) {
+                        runs += " " + std::to_string(run.first) + "-" + std::to_string(run.first + run.count - 1);
+                    }
+                }
+                std::printf("Object motion gate: vs %08x: this draw's position reads %zu of %zu flat words; view "
+                            "matrix at %u, projection at %u (error %.2g of a row); still key words:%s\n",
+                            u32(lesson.pgm_hash), words, lesson.flat.size(), u32(program.view_at),
+                            u32(program.proj_at), error, runs.c_str());
+            }
+        } else if (++program.tries >= 8) {
+            program.state.store(Motion::StillProgram::Unusable, std::memory_order_release);
+            ++gate_stats.unusable;
+            if (lines < 16) {
+                ++lines;
+                std::printf("Object motion gate: vs %08x: no camera found in its flat data (%zu position words, "
+                            "closest pair off by %.3g of a row; %u pairs match: %u/%u %u/%u %u/%u): its draws are "
+                            "never taken for still\n",
+                            u32(lesson.pgm_hash), words, error, matches[0], matches[1], matches[2], matches[3],
+                            matches[4], matches[5], matches[6]);
+            }
+        }
+    }
+    lessons.clear();
+}
 
 ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
     : instance{instance_}, scheduler{scheduler_} {
@@ -87,6 +261,11 @@ ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
     Shader::MotionVectors::params_address = params_address;
     Shader::MotionVectors::positions_address = positions_address;
     enabled = true;
+    {
+        const char* check = std::getenv("BB_MOTION_GATE_CHECK");
+        gate_enabled = StillGateOn();
+        gate_check = gate_enabled && check && check[0] == '1';
+    }
     if (const char* check = std::getenv("BB_MOTION_HISTORY_CHECK"); check && check[0] == '1') {
         history_check = std::make_unique<Motion::KeyedHistory>(PositionsPerFrame);
     }
@@ -146,6 +325,28 @@ void ObjectMotion::OnFrameStart() {
                         (unsigned long long)g_twins_compiled_in_play.load(),
                         (unsigned long long)g_twins_translated_in_play.load());
         }
+    }
+    if (gate_enabled) {
+        gate_stats.no_pass += frame_camera_key && !frame_camera_checked;
+        if ((BbStats::enabled || MotionCost::On()) && (frame % 600) == 0 && (gate_stats.draws || gate_stats.no_key)) {
+            const auto& g = gate_stats;
+            std::printf("Motion gate (per frame, 600 frames): %.1f motion draws, %.1f still (no store, history or "
+                        "parameter%s), %.1f moved, %.1f another camera, %.1f in frames after an unconfirmed one, %.1f "
+                        "without a key; frames: %llu camera confirmed by the velocity pass (worst error %.2g of a "
+                        "row), %llu refuted, %llu without a pass; programs: %u cameras found, %u unusable; %zu keys "
+                        "held\n",
+                        double(g.draws + g.no_key) / 600.0, double(g.still) / 600.0,
+                        gate_check ? "; CHECK: only these keep their vectors" : "", double(g.moved) / 600.0,
+                        double(g.other_camera) / 600.0, double(g.frame_unconfirmed) / 600.0,
+                        double(g.no_key) / 600.0, (unsigned long long)g.confirmed, double(g.worst_error),
+                        (unsigned long long)g.refuted, (unsigned long long)g.no_pass, g.learned, g.unusable,
+                        still.Size());
+            gate_stats = {};
+        }
+        still.NextFrame();
+        frame_camera_key = 0;
+        frame_camera_checked = false;
+        lessons.clear();
     }
     history.NextFrame();
     if (history_check) {
