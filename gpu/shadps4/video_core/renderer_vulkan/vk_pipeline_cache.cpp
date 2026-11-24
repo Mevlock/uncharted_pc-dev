@@ -2470,16 +2470,22 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
             bool found = false;
             {
                 std::shared_lock lk{programs_mutex};
-                const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
+                // The permutation this worker's last draw of the program took, first.
+                const size_t last = it_info->second.last_perm;
+                const bool again = last < program->modules.size() && program->modules[last].spec == spec;
+                const auto it = again ? program->modules.begin() + last
+                                      : std::ranges::find(program->modules, spec, &Program::Module::spec);
                 if (it != program->modules.end()) {
                     found = true;
                     perm_idx = std::distance(program->modules.begin(), it);
+                    it_info->second.last_perm = perm_idx;
                     module = it->module;
                     fetch_shader = it->spec.fetch_shader_data;
                     NoteStartReuse(params.hash, perm_idx, it->spec, spec);
                 }
                 if (split) {
-                    split->v[MotionCost::WorkerSplit::PermCompares] += found ? perm_idx + 1 : program->modules.size();
+                    split->v[MotionCost::WorkerSplit::PermCompares] +=
+                        again ? 1 : 1 + (found ? perm_idx + 1 : program->modules.size());
                     ++split->v[MotionCost::WorkerSplit::Programs];
                 }
             }

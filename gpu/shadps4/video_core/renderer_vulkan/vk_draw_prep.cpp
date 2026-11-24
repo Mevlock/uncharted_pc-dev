@@ -948,7 +948,16 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     if (vs && sel.graphics_key.motion_vectors && Shader::MotionVectors::characters) {
                         const bool gate = StillGateOn();
                         u64 addresses = 0;
-                        draw.motion_geometry = MotionDrawIdentity(*vs, draw.motion_records, gate ? &addresses : nullptr);
+                        // (The vertex stage's sharps as PrepareResources just read them.)
+                        const AmdGpu::Buffer* sharps = nullptr;
+                        for (u32 i = 0; i < draw.num_stages; ++i) {
+                            if (draw.stages[i].hw_stage == Shader::HwStage::Vertex &&
+                                draw.stages[i].num_buffers == vs->buffers.size()) {
+                                sharps = draw.stages[i].buffer_sharps;
+                            }
+                        }
+                        draw.motion_geometry =
+                            MotionDrawIdentity(*vs, draw.motion_records, gate ? &addresses : nullptr, sharps);
                         // bbport (object motion): where the draw's object stands, from its vertex program's still
                         // data (and, with the still-draw gate on, the draw's still key).
                         if (PlacementOn() || gate) {

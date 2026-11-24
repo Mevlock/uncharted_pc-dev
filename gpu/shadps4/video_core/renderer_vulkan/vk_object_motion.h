@@ -153,13 +153,17 @@ inline u64 (*g_guest_write_epoch)(VAddr address, u64 size) = nullptr;
 /// `addresses` (still draws): a hash of the same buffers' addresses as well, the draw's mesh in guest memory, and
 /// of the write counts of the regions they lie in (a buffer rewritten in place, by the guest or the GPU, hashes
 /// differently).
-inline u64 MotionDrawIdentity(const Shader::Info& vs, u32& records, u64* addresses = nullptr) {
+/// `sharps`: the buffers' sharps when the caller has read them already, one for each of `vs.buffers` in its order
+/// (a worker's PreparedStage::buffer_sharps: reading them a second time was ~70 ns of a twin draw's preparation).
+inline u64 MotionDrawIdentity(const Shader::Info& vs, u32& records, u64* addresses = nullptr,
+                              const AmdGpu::Buffer* sharps = nullptr) {
     u64 hash = 0x6a09e667f3bcc909ULL, where = 0xbb67ae8584caa73bULL;
     u64 last_region = ~0ull;
     records = 0;
-    for (const auto& resource : vs.buffers) {
+    for (size_t i = 0; i < vs.buffers.size(); ++i) {
+        const auto& resource = vs.buffers[i];
         if (resource.IsSpecial()) continue;
-        const auto buffer = resource.GetSharp(vs);
+        const auto buffer = sharps ? sharps[i] : resource.GetSharp(vs);
         if (!buffer.Valid()) continue;
         // (A multiply-mix, not XXH3: once per buffer of every G-buffer draw.)
         hash = (hash ^ (u64(buffer.num_records) << 32 | buffer.GetStride())) * 0x9e3779b97f4a7c15ULL;

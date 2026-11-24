@@ -144,8 +144,16 @@ struct PrepWorker {
         VAddr pgm_base;
         const std::vector<u32>* flat;
     };
+    /// The worker's copy of a program's Info, with the permutation its last draw of the program took: compared
+    /// first (as the GPU thread's Program::last_used). The motion twins' permutations stand behind the ordinary
+    /// ones in a program's list: found by walking it, a twin draw compared ~12 specializations for each of its
+    /// stage programs (~280 ns of a twin draw's preparation), an ordinary draw 2.
+    struct Info : Shader::Info {
+        explicit Info(const Shader::Info& info) : Shader::Info(info) {}
+        size_t last_perm = 0;
+    };
     // Node-based: stages keep pointers to these Infos while later stages are inserted.
-    std::unordered_map<const Program*, Shader::Info> infos;
+    std::unordered_map<const Program*, Info> infos;
     boost::container::static_vector<Stage, MaxShaderStages> stages;
     bool failed = false;
     bool compile = false; ///< may translate missing programs and build pipelines
