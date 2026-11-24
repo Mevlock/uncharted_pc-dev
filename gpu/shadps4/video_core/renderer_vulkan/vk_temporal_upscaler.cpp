@@ -2305,7 +2305,7 @@ float TemporalUpscaler::SceneMipBias() const {
     static const auto fsr_extra = [](const char* name) {
         const char* env = std::getenv(name);
         const bool fsr4 = std::strcmp(name, "BB_FSR4_MIP_BIAS") == 0;
-        const float v = env && env[0] ? static_cast<float>(std::atof(env)) : fsr4 ? 0.0f : -1.0f;
+        const float v = env && env[0] ? static_cast<float>(std::atof(env)) : 0.0f;
         std::printf("Upscaler: %s extra mip bias %.2f (%s)\n",
                     std::strcmp(name, "BB_FSR4_MIP_BIAS") == 0 ? "FSR 4" : "FSR 3.1", v, name);
         return std::clamp(v, -3.0f, 1.0f);
