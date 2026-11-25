@@ -1,9 +1,5 @@
 # Uncharted: The Nathan Drake Collection for Windows — Mevlock's fork
 
-> [!WARNING]
-> **Unofficial fork.** This is a hobby fork of [SuperMedo's uncharted_pc](https://github.com/Supermedo/uncharted_pc),
-> the official port. Please don't report problems with this fork to him; open an issue here instead.
-
 Uncharted 1, 2 and 3 from the PS4 collection, running natively on Windows 10 and 11. The original PS4 game
 code runs directly on your PC and the graphics are translated to Vulkan.
 
