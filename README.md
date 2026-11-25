@@ -7,8 +7,8 @@
 Uncharted 1, 2 and 3 from the PS4 collection, running natively on Windows 10 and 11. The original PS4 game
 code runs directly on your PC and the graphics are translated to Vulkan.
 
-**[⬇ Download 0.3.6.45](https://github.com/Mevlock/uncharted_pc-dev/releases/latest)** ·
-[What's new](docs/releases/v0.3.6.30.md) · [How much faster](docs/PERFORMANCE.md) · [Known issues](#known-issues) · [How the shader preparation works](docs/SHADER_PREPARATION.md)
+**[⬇ Download 0.3.6.68](https://github.com/Mevlock/uncharted_pc-dev/releases/latest)** ·
+[What's new](docs/releases/v0.3.6.68.md) · [How much faster](docs/PERFORMANCE.md) · [Known issues](#known-issues) · [How the shader preparation works](docs/SHADER_PREPARATION.md)
 
 > **No game files are included.** You need your own decrypted dump of the collection, version 1.02:
 > EU/UK (CUSA02343), US (CUSA02320), EU/Russian (CUSA02344) or Spanish (CUSA02826). The folder holds eboot.bin,
@@ -31,21 +31,70 @@ shader cache and art are never replaced. You can turn the check off in the launc
 
 ## What this fork adds
 
-### Smoother and faster
-- **Shader preparation:** each game's shaders are built before you play (from lists recorded by playing the
-  whole games), instead of the first time something appears on screen.
-- **Faster GPU translation:** the port's CPU-side work runs on three threads and skips most of its old waiting.
+### Smooth from the first minute
+- **Shader preparation:** every shader the games use is built once before you play, so there is **no shader-compile
+  stutter in play**. The first start of each game shows a short *Preparing shaders* page; later starts skip it.
+- **Frame pacing:** even frame times on fixed-refresh and VRR (G-SYNC / FreeSync) displays; the balanced mode costs
+  next to nothing.
+- **NVIDIA Reflex** low-latency modes, and a frame rate limit that counts generated frames.
+- **High frame rates:** 30 to 240 FPS, with gameplay speed unchanged at every rate.
+- **Faster GPU translation:** the port's CPU-side work runs on several threads and skips most of its old waiting.
   Busy scenes run up to about twice as fast as the original 0.3.6 at native resolution, more where the processor
-  is the limit (DLSS/FSR upscaling, high frame rates, older processors). *Measured on one PC (RTX 5080); your
-  numbers will differ, and little changes where the graphics card is the limit.* Step by step: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
-- **Idle game threads sleep** on processors with few cores, so the game's own work gets the CPU.
+  is the limit. *Measured on one PC (RTX 5080); your numbers will differ.* Step by step: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+- **Optimised builds:** profile-guided (PGO) builds tuned on real gameplay, and idle game threads that sleep on
+  processors with few cores.
+
+### Modern upscaling and anti-aliasing
+- **NVIDIA DLSS 4:** DLAA, Quality, Balanced and Performance, with the newest models (K, L, M) to choose from.
+- **AMD FSR 3.1 and FSR 4:** the game draws its 3D scene at the smaller size and FSR rebuilds it before the game's
+  own post-processing: a cleaner picture and a real saving on the graphics card at Quality, Balanced and Performance.
+- **Intel XeSS** and the games' own TAA.
+- **Frame generation:** DLSS (up to 4× on RTX 50, 2× on RTX 40) or FSR 3 (any GPU), with the HUD kept clean.
+- **Real motion vectors** from the games' velocity pass, with fixes for riders, vehicles and moving platforms;
+  optional **character motion vectors** give the upscaler the exact motion of every moving character and object.
+
+![FSR 3.1 at native and at Quality on the Uncharted 3 horse ride](docs/screenshots/fsr_ride.jpg)
+*Uncharted 3 at 3440×1440: FSR 3.1 at native (left) and at Quality (right), where the game draws its scene at 67%
+and FSR rebuilds it at full size.*
 
 ### Picture
 - **Render resolution:** your screen's resolution (up to 3440×1440; native 4K experimental), or below it with
   DLSS, FSR or XeSS rebuilding the full size.
-- **Ultrawide** (21:9, 32:9) with a field of view setting; menus and videos stay 16:9.
-- **DLSS, FSR 3.1, FSR 4, XeSS, TAA**; frame generation with DLSS (RTX 40/50) or FSR 3 (any GPU).
-- **Depth of field** and **bloom** options, texture filtering, a frame rate limit.
+- **Ultrawide** (21:9, 32:9) with a wider view in gameplay and a field of view setting; menus and videos stay 16:9.
+- **HDR**, with brightness settings for the game and the menus.
+- **Depth of field** and **bloom** options, texture filtering, full-resolution textures and sharper lamp shadows
+  (Uncharted 2 and 3).
+
+### Controls
+- **Mouse look** for aiming, cover and mounted guns; keyboard, mouse and controller together, all remappable.
+- **The mouse in the games' menus**, with the games' golden menu cursor.
+- **Button prompts follow what you play with:** keyboard and mouse, PlayStation or Xbox (two Xbox styles).
+
+### Saves and convenience
+- **Several save games per game**, like the PS4 save screen, each with its picture.
+- **Checkpoint select:** go to any checkpoint of the game you are playing.
+- **Skip the intro logos** and the friends' stats notice; **Quit** from the games' own main menus.
+- Trophies (in-game notice and a launcher page), Add to Steam, desktop shortcuts, crash-safe saves.
+- **Cheats and unlocks** (optional): infinite health and ammo, no reload, one-hit kills, grenades, all chapters,
+  all rewards.
+
+### Coming next: the in-game menu
+Every setting while you play, without the launcher (F1, or L3+R3 on a controller). Most options apply at once:
+anti-aliasing and upscaler, DLSS model, field of view, effects, frame rate limit, even the cheats. Three looks
+(Drake's journal, Uncharted, Classic), save and checkpoint pages, and a configurable performance display.
+*In testing; the pictures show test builds.*
+
+![The in-game menu in the Drake's journal style](docs/screenshots/menu_journal.jpg)
+*Drake's journal style: each option explained on the right, its values listed in place.*
+
+![The in-game menu in the Uncharted style](docs/screenshots/menu_uncharted.jpg)
+*Uncharted style, in the games' own font.*
+
+![The Saves page](docs/screenshots/menu_saves.jpg)
+*Saves: every game with its picture; load or delete without leaving the game.*
+
+![The performance display](docs/screenshots/perf_display.jpg)
+*The performance display: frame rate, 1% lows, frame-time graph, GPU, VRAM, CPU and the picture settings in use.*
 
 ### Game fixes
 - **Uncharted 2, chapter 21 (convoy):** Elena's truck no longer sinks into the snow after the enemy truck rams it.
@@ -71,8 +120,9 @@ shader cache and art are never replaced. You can turn the check off in the launc
 
 ## Known issues
 
-- The shader preparation has been tested on NVIDIA graphics; AMD and Intel reports are welcome.
-- The first start after updating rebuilds the shader cache once (its format changed in 0.3.6.30).
+- The shader preparation is tested on NVIDIA and AMD graphics; Intel Arc reports are welcome (Intel integrated
+  graphics is not supported).
+- The first start after updating to 0.3.6.68 rebuilds the shader cache once.
 - Frame rates above 120 are experimental.
 
 **Reporting a problem:** open an issue with the game, chapter, your graphics card, and `user\last_run.log`
